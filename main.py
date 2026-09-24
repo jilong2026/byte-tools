@@ -96,7 +96,7 @@ except ImportError:  # pragma: no cover
 # 全局常量与工具函数
 # ---------------------------------------------------------------------------
 APP_NAME = "字节-开发环境与工具自动安装"
-GITHUB_URL = "https://github.com/yourname/byte-tools"
+GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -3637,7 +3637,7 @@ class DonateDialog(QDialog):
     CHANNELS = [
         ("微信", "#07C160", "wechat.png"),
         ("支付宝", "#1677FF", "alipay.png"),
-        ("QQ", "#EB1923", "qq.png"),
+        # ("QQ", "#EB1923", "qq.png"),
     ]
 
     def __init__(self, parent=None) -> None:

@@ -1,7 +1,7 @@
-# 编程开发环境自动装配小工具 (byte-tools)
+# 字节-开发环境与工具自动安装 (byte-tools)
 
 <p align="center">
-  <img src="assets/byte-tools.png" alt="byte-tools 主界面截图" width="720"/>
+  <img src="assets/byte-tools-pt.png" alt="byte-tools 主界面截图" width="720"/>
 </p>
 
 <p align="center">
@@ -331,7 +331,7 @@ conda --version
 ## 📸 截图预览
 
 <p align="center">
-  <img src="assets/byte-tools.png" alt="主界面" width="800"/>
+  <img src="assets/byte-tools-pt.png" alt="主界面" width="800"/>
 </p>
 
 界面元素说明：
@@ -531,10 +531,6 @@ RabbitMQ 运行时依赖 Erlang，Windows 上必须先安装 Erlang 再装 Rabbi
     <td align="center">
       <img src="assets/alipay.png" alt="支付宝" width="200"/><br/>
       <b>支付宝</b>
-    </td>
-    <td align="center">
-      <img src="assets/qq.png" alt="QQ" width="200"/><br/>
-      <b>QQ</b>
     </td>
   </tr>
 </table>
