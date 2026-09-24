@@ -33,6 +33,11 @@ env:
   # 国内 pip 镜像（清华源），加速 PySide6 等大体积 wheel 下载
   # GitHub runner 在境外，但走清华源仍可加速国内 CN 区域的拉取
   PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+  # Gitee 仓库 owner（用户名或组织名），按你的 Gitee 实际账号修改
+  # Gitee 与 GitHub 账号名通常不同，此处必须改成 Gitee 上的真实 owner
+  GITEE_OWNER: jack_liujilong
+  # Gitee 仓库名，与 GitHub 仓库名一致时无需改动
+  GITEE_REPO: byte-tools
 
 jobs:
   build:
@@ -159,3 +164,93 @@ jobs:
           # 草稿模式：所有平台产物上传完成后人工核对再发布
           # 若需要全自动发布，可改为 false
           draft: true
+
+  # 同步任务：等 4 个平台产物全部上传到 GitHub Release 后，
+  # 一次性下载下来，创建 Gitee Release 并把所有产物上传到 Gitee。
+  # 依赖 GITEE_TOKEN Secret（在 Gitee 个人设置 → 私人令牌 生成后填到 GitHub Secrets）
+  sync-to-gitee:
+    name: 同步产物到 Gitee Release
+    needs: build  # 必须等所有平台构建完成，否则下载不到产物
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 检出代码（仅用于触发 Gitee 同步时拿到默认分支信息）
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2. 用 gh CLI 下载 GitHub Release 当前 tag 下的所有产物
+      #    gh 已预装在 GitHub runner，GITHUB_TOKEN 自动有 release 读取权限
+      #    注意：draft release 的产物 gh 也能下载，所以不必先 publish
+      - name: 下载 GitHub Release 所有产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          mkdir -p ./assets
+          echo "正在从 GitHub Release ${TAG_NAME} 下载产物..."
+          gh release download "${TAG_NAME}" --dir ./assets --clobber
+          echo "下载完成，产物列表："
+          ls -lh ./assets/
+
+      # 3. 调 Gitee OpenAPI 创建 Release（自动绑定 tag）
+      #    Gitee POST /v5/repos/{owner}/{repo}/releases 行为：
+      #    - 如果 tag 不存在，会自动创建一个 tag 指向 target_commitish
+      #    - 如果 tag 已存在，直接绑定现有 tag
+      - name: 创建 Gitee Release
+        id: create_gitee_release
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ env.GITEE_OWNER }}
+          GITEE_REPO: ${{ env.GITEE_REPO }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          echo "[1/2] 为 Gitee tag ${TAG_NAME} 创建 Release..."
+          RELEASE_RESP=$(curl -sS -X POST \
+            "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
+            -F "access_token=${GITEE_TOKEN}" \
+            -F "tag_name=${TAG_NAME}" \
+            -F "name=${TAG_NAME}" \
+            -F "body=跨平台构建产物（与 GitHub Release 同步生成）" \
+            -F "target_commitish=master")
+          # 解析响应，提取 release_id；如果失败打印完整响应便于排查
+          RELEASE_ID=$(echo "${RELEASE_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+          if [ -z "${RELEASE_ID}" ]; then
+            echo "错误：创建 Gitee Release 失败，原始响应："
+            echo "${RELEASE_RESP}"
+            exit 1
+          fi
+          echo "Gitee Release 创建成功，ID: ${RELEASE_ID}"
+          # 通过 GITHUB_OUTPUT 把 release_id 暴露给后续 step
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+
+      # 4. 遍历 ./assets/ 下所有产物，逐一上传到 Gitee Release
+      #    Gitee attach_files API：POST /v5/repos/{owner}/{repo}/releases/{release_id}/attach_files
+      #    单次请求大小限制 100MB，PySide6 打包产物一般 50-80MB，足够
+      - name: 上传所有产物到 Gitee Release
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: ${{ env.GITEE_OWNER }}
+          GITEE_REPO: ${{ env.GITEE_REPO }}
+          RELEASE_ID: ${{ steps.create_gitee_release.outputs.release_id }}
+        run: |
+          set -e
+          echo "[2/2] 上传产物到 Gitee Release ${RELEASE_ID}..."
+          for FILE in ./assets/*; do
+            [ -e "${FILE}" ] || continue
+            BASE_NAME=$(basename "${FILE}")
+            echo "  -> 上传 ${BASE_NAME}"
+            UPLOAD_RESP=$(curl -sS -X POST \
+              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${RELEASE_ID}/attach_files" \
+              -F "access_token=${GITEE_TOKEN}" \
+              -F "file=@${FILE}")
+            # Gitee 上传成功响应包含 attach_file_url 字段；失败时输出响应
+            ATTACH_URL=$(echo "${UPLOAD_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('attach_file_url','') or d.get('browser_download_url',''))" 2>/dev/null || echo "")
+            if [ -n "${ATTACH_URL}" ]; then
+              echo "     上传成功: ${ATTACH_URL}"
+            else
+              echo "     警告：响应未包含下载 URL，原始响应："
+              echo "${UPLOAD_RESP}"
+            fi
+          done
+          echo "Gitee Release 同步完成"
