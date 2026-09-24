@@ -1,0 +1,161 @@
+# -*- coding: utf-8 -*-
+# 跨平台发布工作流：监听 git tag（v*.*.*）推送，在 macOS / Linux / Windows
+# runner 上分别执行 PyInstaller 打包，并把产物上传到对应 GitHub Release。
+#
+# 触发方式（本地操作示例）：
+#     git tag v1.0.0
+#     git push origin v1.0.0
+#
+# 产物清单（与项目 README 文档一致）：
+#     byte-tools-macos-arm64.zip      macOS Apple Silicon 原生包
+#     byte-tools-macos.zip            macOS 通用包（Intel 构建，arm64 通过 Rosetta 兼容）
+#     byte-tools-linux-x64            Linux x64 单可执行文件
+#     byte-tools-windows-x64.zip       Windows x64 单可执行文件压缩包
+
+name: release
+
+on:
+  push:
+    # 仅 v 开头的版本号 tag 触发，避免任意分支推送误触发
+    tags:
+      - 'v*'
+
+# Release 资产上传需要 contents: write 权限
+permissions:
+  contents: write
+
+# 顶层常量集中管理，避免散落在各 step 中的硬编码与魔法字符串
+env:
+  # Python 版本：PySide6 6.6+ 要求 3.9+，3.12 LTS 稳定且 PyInstaller 6.x 完美支持
+  PYTHON_VERSION: '3.12'
+  # PyInstaller 最低版本：spec 中使用了 5.0+ 引入的 hooksconfig 参数
+  PYINSTALLER_MIN_VERSION: '6.0'
+  # 国内 pip 镜像（清华源），加速 PySide6 等大体积 wheel 下载
+  # GitHub runner 在境外，但走清华源仍可加速国内 CN 区域的拉取
+  PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.platform_name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # 任何一个平台失败不影响其他平台继续构建
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon 原生构建（M1/M2 runner）
+          - platform_name: macOS (Apple Silicon)
+            runner: macos-14
+            artifact_name: byte-tools-macos-arm64.zip
+            artifact_kind: macos
+          # macOS 通用版（Intel runner 构建，arm64 通过 Rosetta 兼容运行）
+          - platform_name: macOS (通用)
+            runner: macos-13
+            artifact_name: byte-tools-macos.zip
+            artifact_kind: macos
+          # Linux x64 单可执行文件
+          - platform_name: Linux (x64)
+            runner: ubuntu-latest
+            artifact_name: byte-tools-linux-x64
+            artifact_kind: linux
+          # Windows x64 单可执行文件压缩包
+          - platform_name: Windows (x64)
+            runner: windows-latest
+            artifact_name: byte-tools-windows-x64.zip
+            artifact_kind: windows
+
+    steps:
+      # 1. 检出仓库代码（默认浅克隆 fetch-depth=1 即可满足打包需求）
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2. 安装指定版本的 Python 解释器
+      - name: 设置 Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      # 3. Linux runner 需要预先安装 PySide6 运行时依赖的图形/字体库
+      #    否则即使打包成功，运行时也会因为缺失 libEGL / libxkbcommon 等库而崩溃
+      - name: 安装 Linux 系统依赖（仅 Linux）
+        if: matrix.artifact_kind == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 \
+            libgl1 \
+            libxkbcommon0 \
+            libdbus-1-3 \
+            libfontconfig1 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-xinerama0 \
+            libxcb-xkb1 \
+            libxkbcommon-x11-0
+
+      # 4. 升级 pip 并通过环境变量配置国内镜像源
+      #    使用 bash shell 保证跨平台行为一致（Windows runner 默认 shell 也切到 bash）
+      - name: 升级 pip 并配置国内镜像源
+        run: |
+          python -m pip install --upgrade pip
+          echo "已切换 pip 镜像到: ${{ env.PIP_INDEX_URL }}"
+        shell: bash
+
+      # 5. 安装项目运行时依赖与 PyInstaller
+      - name: 安装依赖（PySide6 / requests / PyInstaller）
+        run: |
+          pip install -r requirements.txt
+          pip install "pyinstaller>=${{ env.PYINSTALLER_MIN_VERSION }}"
+        shell: bash
+
+      # 6. 执行 PyInstaller 打包（spec 文件已声明跨平台逻辑，无需额外参数）
+      - name: 执行 PyInstaller 打包
+        run: pyinstaller --noconfirm byte-tools.spec
+        shell: bash
+
+      # 7. macOS 产物：ditto 保留 .app bundle 结构与权限，打成 zip
+      - name: 打包 macOS 产物（.app -> .zip）
+        if: matrix.artifact_kind == 'macos'
+        run: |
+          cd dist
+          # ditto 是 macOS 原生命令，能正确保留 .app 内部可执行权限与符号链接
+          ditto -c -k --keepParent byte-tools.app "../${{ matrix.artifact_name }}"
+          cd ..
+          echo "产物大小: $(du -sh ${{ matrix.artifact_name }} | cut -f1)"
+        shell: bash
+
+      # 8. Linux 产物：单可执行文件直接重命名为最终名称，保留可执行权限
+      - name: 重命名 Linux 产物
+        if: matrix.artifact_kind == 'linux'
+        run: |
+          mv dist/byte-tools "${{ matrix.artifact_name }}"
+          chmod +x "${{ matrix.artifact_name }}"
+          echo "产物大小: $(du -sh ${{ matrix.artifact_name }} | cut -f1)"
+        shell: bash
+
+      # 9. Windows 产物：PowerShell 的 Compress-Archive 打成 zip
+      - name: 打包 Windows 产物（.exe -> .zip）
+        if: matrix.artifact_kind == 'windows'
+        run: |
+          Compress-Archive -Path dist/byte-tools.exe -DestinationPath ${{ matrix.artifact_name }}
+          Write-Host "产物大小: $((Get-Item ${{ matrix.artifact_name }}).Length) bytes"
+        shell: pwsh
+
+      # 10. 上传构建产物到当前 tag 对应的 GitHub Release
+      #     softprops/action-gh-release 是社区主流的 release 上传 action，稳定且 API 友好
+      - name: 上传产物到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 通过 glob 自动匹配当前 job 产出的文件名
+          files: ${{ matrix.artifact_name }}
+          # 生成 Release Notes：自动汇总从上一个 tag 到当前 tag 的提交记录
+          generate_release_notes: true
+          # 草稿模式：所有平台产物上传完成后人工核对再发布
+          # 若需要全自动发布，可改为 false
+          draft: true
