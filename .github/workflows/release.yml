@@ -6,12 +6,15 @@
 #     git tag v1.0.0
 #     git push origin v1.0.0
 #
-# 产物清单（与项目 README 文档一致）：
+# 产物清单（与项目 README 文档一致，3 个平台共 4 个文件）：
+#     byte-tools.exe                  Windows x64 单可执行文件（双击运行）
+#     byte-tools-windows-x64.zip      Windows x64 产物压缩包（分发备份）
 #     byte-tools-macos-arm64.zip      macOS Apple Silicon 原生包
 #     byte-tools-linux-x64            Linux x64 单可执行文件
-#     byte-tools-windows-x64.zip       Windows x64 单可执行文件压缩包
 #
 # 变更记录（2026-09）：Intel 通用包 byte-tools-macos.zip 已停用，原因见 matrix 中的说明
+# 变更记录（2026-09）：Release 改为全自动发布 —— 矩阵各平台先传草稿暂存区，
+#                    sync-to-gitee 任务核对齐全后自动取消草稿，无需人工点 Publish
 
 name: release
 
@@ -44,6 +47,12 @@ jobs:
   build:
     name: 构建 ${{ matrix.platform_name }}
     runs-on: ${{ matrix.runner }}
+    # 兜底：单个平台 job 的最长运行时长，超时会被取消（默认 360 分钟太长，
+    # 一卡就是 6 小时，且会让 needs: build 的 Gitee 同步 job 一直等）。
+    # 正常构建各平台只需 2~3 分钟。注意：GitHub 文档对「排队中是否计时」表述不明确，
+    # 此配置主要防的是 job 已经开始跑之后卡死；若 runner 标签被下线而卡在 queued，
+    # 至少能在 job 超时后以失败告终，而不是无限等待。
+    timeout-minutes: 45
     strategy:
       # 任何一个平台失败不影响其他平台继续构建
       fail-fast: false
@@ -206,11 +215,13 @@ jobs:
           fail_on_unmatched_files: true
           # 生成 Release Notes：自动汇总从上一个 tag 到当前 tag 的提交记录
           generate_release_notes: true
-          # 草稿模式：所有平台产物上传完成后人工核对再发布
-          # 若需要全自动发布，可改为 false
+          # 草稿模式：矩阵各平台先上传到同一个草稿 Release 作为暂存区，
+          # 中途失败不会对外暴露半成品；等全部平台成功、Gitee 同步启动后，
+          # 由 sync-to-gitee 任务的「发布 GitHub Release」step 自动取消草稿完成发布。
+          # 即：全流程无人工步骤，draft 只是内部暂存状态，最终会变回正式 Release。
           draft: true
 
-  # 同步任务：等 4 个平台产物全部上传到 GitHub Release 后，
+  # 同步任务：等 3 个平台产物全部上传到 GitHub Release 后，
   # 一次性下载下来，创建 Gitee Release 并把所有产物上传到 Gitee。
   # 依赖 GITEE_TOKEN Secret（在 Gitee 个人设置 → 私人令牌 生成后填到 GitHub Secrets）
   sync-to-gitee:
@@ -237,7 +248,27 @@ jobs:
           echo "下载完成，产物列表："
           ls -lh ./assets/
 
-      # 3. 调 Gitee OpenAPI 创建 Release（自动绑定 tag）
+      # 3. 自动发布 GitHub Release（取消草稿）
+      #    能走到这里说明 3 个平台全部构建成功（sync 任务 needs: build），
+      #    因此自动取消草稿 = 全自动发布；构建失败时本任务根本不启动，草稿不会外泄。
+      #    放在 Gitee 步骤之前：若 Gitee 侧失败，Gitee 上不会留下半成品 release，
+      #    重跑本任务可从干净状态重来。
+      - name: 发布 GitHub Release（取消草稿）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          gh release edit "${TAG_NAME}" --draft=false
+          # 复核一次：确认确实已发布，避免命令静默无效（草稿不会进 releases/latest）
+          IS_DRAFT=$(gh release view "${TAG_NAME}" --json isDraft --jq '.isDraft')
+          if [ "${IS_DRAFT}" != "false" ]; then
+            echo "错误：GitHub Release ${TAG_NAME} 仍是草稿，取消草稿未生效"
+            exit 1
+          fi
+          echo "GitHub Release ${TAG_NAME} 已发布"
+
+      # 4. 调 Gitee OpenAPI 创建 Release（自动绑定 tag）
       #    Gitee POST /v5/repos/{owner}/{repo}/releases 行为：
       #    - 如果 tag 不存在，会自动创建一个 tag 指向 target_commitish
       #    - 如果 tag 已存在，直接绑定现有 tag
@@ -269,9 +300,11 @@ jobs:
           # 通过 GITHUB_OUTPUT 把 release_id 暴露给后续 step
           echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
 
-      # 4. 遍历 ./assets/ 下所有产物，逐一上传到 Gitee Release
+      # 5. 遍历 ./assets/ 下产物，逐一上传到 Gitee Release
       #    Gitee attach_files API：POST /v5/repos/{owner}/{repo}/releases/{release_id}/attach_files
       #    单次请求大小限制 100MB，PySide6 打包产物一般 50-80MB，足够
+      #    白名单：gh release download 会把 GitHub Release 上的全部附件都拉下来（含手动
+      #    附加的仓库图片等），而 Gitee 侧只应出现与 matrix 一致的构建产物，故非白名单文件跳过。
       - name: 上传所有产物到 Gitee Release
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -281,9 +314,22 @@ jobs:
         run: |
           set -e
           echo "[2/2] 上传产物到 Gitee Release ${RELEASE_ID}..."
+          # 白名单须与 build job matrix 的 artifact_name / artifact_extra 保持一致；
+          # 增删构建平台时必须同步维护，否则新产物会被跳过
+          UPLOADED=0
+          SKIPPED=0
           for FILE in ./assets/*; do
             [ -e "${FILE}" ] || continue
             BASE_NAME=$(basename "${FILE}")
+            case "${BASE_NAME}" in
+              byte-tools.exe|byte-tools-windows-x64.zip|byte-tools-macos-arm64.zip|byte-tools-linux-x64)
+                ;;
+              *)
+                echo "  -- 跳过非产物文件: ${BASE_NAME}"
+                SKIPPED=$((SKIPPED + 1))
+                continue
+                ;;
+            esac
             echo "  -> 上传 ${BASE_NAME}"
             UPLOAD_RESP=$(curl -sS -X POST \
               "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${RELEASE_ID}/attach_files" \
@@ -293,9 +339,17 @@ jobs:
             ATTACH_URL=$(echo "${UPLOAD_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('attach_file_url','') or d.get('browser_download_url',''))" 2>/dev/null || echo "")
             if [ -n "${ATTACH_URL}" ]; then
               echo "     上传成功: ${ATTACH_URL}"
+              UPLOADED=$((UPLOADED + 1))
             else
-              echo "     警告：响应未包含下载 URL，原始响应："
+              # 任一产物上传失败即整体失败，避免「少传了某个平台」被静默放过
+              echo "错误：${BASE_NAME} 上传失败，原始响应："
               echo "${UPLOAD_RESP}"
+              exit 1
             fi
           done
-          echo "Gitee Release 同步完成"
+          echo "Gitee Release 同步完成：上传 ${UPLOADED} 个产物，跳过 ${SKIPPED} 个非产物文件"
+          # 白名单一个都没匹配上（例如产物被改名）说明这次同步是空跑，直接失败避免静默漏传
+          if [ "${UPLOADED}" -eq 0 ]; then
+            echo "错误：没有任何产物被上传，请检查白名单与 GitHub Release 附件名是否一致"
+            exit 1
+          fi

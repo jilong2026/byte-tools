@@ -318,7 +318,7 @@ byte-tools/
 ├─ .gitignore            # Git ignore rules
 ├─ .github/
 │   └─ workflows/
-│       └─ build-and-release.yml  # three-platform auto build & release
+│       └─ release.yml            # three-platform auto build & release (+ Gitee sync)
 └─ assets/               # static resources (screenshots, donation QR codes, etc.)
 ```
 
