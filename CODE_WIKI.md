@@ -164,7 +164,8 @@ byte-tools/
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
 ├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/byte-tools.exe
-├── 同步Gitee产物.sh     # Gitee Release 同步脚本（网络重试 + 幂等 + 附件校验），由 release.yml 调用
+├── 同步Gitee产物.sh     # Gitee Release 同步脚本（Linux/macOS/CI；网络重试 + 幂等 + 附件校验），由 release.yml 调用
+├── 同步Gitee产物.bat    # 同上，Windows 版（双击可运行，功能等价；内容为纯 ASCII，避免 cmd 按 GBK 解析 UTF-8 出错）
 ├── README.md                # 中文说明（面向最终用户）
 ├── README_EN.md             # 英文说明
 ├── DEVELOPMENT.md           # 开发者文档（开发约定、R1 规则等，面向二次开发者）
@@ -991,6 +992,7 @@ git push origin v1.0.1
 - 同步依赖仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，需 projects 权限），owner / repo 由 workflow 顶层的 `GITEE_OWNER` / `GITEE_REPO` 环境变量指定
 - **Gitee 同步的三道保险**都在 `同步Gitee产物.sh` 里：① 网络重试（境外 runner 连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`，对每个请求做 10s/20s/40s 指数退避，默认 4 次）；② 幂等（Release 已存在复用 ID、同名附件跳过，失败后 Re-run 安全）；③ 上传后回查附件清单，白名单缺一个即失败
 - **补同步历史 tag**：workflow 支持 `workflow_dispatch`（输入 `tag_name`），在 GitHub → Actions → release → Run workflow 触发。它跳过三平台构建，直接从 GitHub Release 下载已有产物再传到 Gitee；因为 `workflow_dispatch` 读的是默认分支上的 workflow，改动合入 master 后即可对任意历史 tag 生效
+- **本机手动补同步**：Windows 跑 `同步Gitee产物.bat`（双击或传参），Linux/macOS 跑 `同步Gitee产物.sh`，两者与 CI 逻辑等价，同样幂等可重复运行
 - **全自动发布，无需人工操作**：矩阵各平台先上传到草稿 Release 作暂存区（构建中途失败不会对外暴露半成品），待全部平台成功、`sync-to-gitee` 启动后自动 `gh release edit --draft=false` 取消草稿；因此跑绿即等于 `releases/latest/download/...` 已指向新版本
 - 任一平台的构建/上传失败，或 Gitee 侧任一产物上传失败，都会让整个 run 直接变红（不会静默放过）
 

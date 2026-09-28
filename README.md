@@ -479,12 +479,21 @@ v1.0.2 这类「GitHub 成功、Gitee 失败」的情况不用重发包。两种
 
 **方式一（推荐，零本地依赖）**：GitHub 仓库页面 → Actions → 选择 `release` 工作流 → **Run workflow** → 填写 `tag_name`（如 `v1.0.2`）→ 运行。它只跑同步任务，直接从 GitHub Release v1.0.2 下载已有产物再传到 Gitee，不重新构建。
 
-**方式二（在本机执行）**：本机网络能直连 Gitee，自己准备产物目录后跑脚本：
+**方式二（在本机执行）**：本机网络能直连 Gitee，自己准备产物目录后跑脚本。Windows 用 `.bat`，Linux / macOS / Git Bash 用 `.sh`，两者功能等价（都带重试 + 幂等 + 校验）：
+
+```bat
+REM Windows（双击运行会提示输入 tag 与令牌；也可直接传参）
+gh release download v1.0.2 --dir assets --clobber
+同步Gitee产物.bat v1.0.2 <Gitee私人令牌> assets
+```
 
 ```bash
+# Linux / macOS / Git Bash
 gh release download v1.0.2 --dir ./assets --clobber
 GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 "./同步Gitee产物.sh"
 ```
+
+> 两个脚本都依赖 `curl`；`.bat` 还需要系统自带的 PowerShell 5.1+（Win10 起自带）。`.bat` 文件内容保持纯 ASCII，因为 cmd 会按 GBK 解析 UTF-8 批处理文件，中文会导致语法错乱。
 
 ---
 
@@ -503,7 +512,8 @@ byte-tools/
 ├── CODE_WIKI.md                        # 代码百科（类 / 模块 / 函数索引）
 ├── LICENSE                             # MIT 许可证
 ├── .gitignore                          # Git 忽略规则
-├── 同步Gitee产物.sh                # Gitee Release 同步脚本（重试 + 幂等 + 校验）
+├── 同步Gitee产物.sh                # Gitee Release 同步脚本（Linux/macOS/CI，重试 + 幂等 + 校验）
+├── 同步Gitee产物.bat               # 同上，Windows 版（双击可运行，功能等价）
 ├── .github/
 │   └── workflows/
 │       └── release.yml                 # 三平台自动构建 + 发布（含 Gitee 同步）
