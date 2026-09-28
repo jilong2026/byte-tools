@@ -473,6 +473,13 @@ git push origin v1.0.1
 - 上传完成后回查一次附件清单，白名单产物缺一个就报错，避免「少传了某个平台」被静默放过。
 - 万一重试后仍失败（runner 到 Gitee 链路不通）：GitHub Release 此时已发布成功，可以先把本 job 的 `runs-on` 改成 `self-hosted`（runner 部署在能直连 gitee.com 的国内机器），或在本机手动执行 `scripts/sync_gitee.sh`。
 
+手动补同步（适用于历史 tag，或 CI 同步失败后的补救；在本机执行，本机网络可直连 Gitee）：
+
+```bash
+gh release download v1.0.2 --dir ./assets --clobber
+GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 ./scripts/sync_gitee.sh
+```
+
 ---
 
 ## 📁 目录结构
