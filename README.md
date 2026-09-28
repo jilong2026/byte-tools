@@ -466,18 +466,24 @@ git push origin v1.0.1
 
 几分钟后到两边的 Releases 页面就能看到三个平台的产物（全自动发布，无需手动点 Publish）。
 
-**Gitee 同步的可靠性设计**（逻辑在 `scripts/sync_gitee.sh`）：
+**Gitee 同步的可靠性设计**（逻辑在 `scripts/同步Gitee产物.sh`）：
 
 - GitHub runner 在境外，连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`（TLS 握手被重置）。脚本对每个请求做指数退避重试（默认 4 次：10s / 20s / 40s），单次网络抖动不会判死整个 job。
 - 脚本幂等：Release 已存在就复用 ID、附件已存在就跳过上传，所以**同步失败后直接 Re-run 该 job 是安全的**，不会产生重复 Release 或重复附件。
 - 上传完成后回查一次附件清单，白名单产物缺一个就报错，避免「少传了某个平台」被静默放过。
-- 万一重试后仍失败（runner 到 Gitee 链路不通）：GitHub Release 此时已发布成功，可以先把本 job 的 `runs-on` 改成 `self-hosted`（runner 部署在能直连 gitee.com 的国内机器），或在本机手动执行 `scripts/sync_gitee.sh`。
+- 万一重试后仍失败（runner 到 Gitee 链路不通）：GitHub Release 此时已发布成功，可以先把本 job 的 `runs-on` 改成 `self-hosted`（runner 部署在能直连 gitee.com 的国内机器），或在 GitHub 上手动触发一次补同步（见下）。
 
-手动补同步（适用于历史 tag，或 CI 同步失败后的补救；在本机执行，本机网络可直连 Gitee）：
+### 补同步历史 tag（如 Gitee 侧漏了产物）
+
+v1.0.2 这类「GitHub 成功、Gitee 失败」的情况不用重发包。两种方式任选：
+
+**方式一（推荐，零本地依赖）**：GitHub 仓库页面 → Actions → 选择 `release` 工作流 → **Run workflow** → 填写 `tag_name`（如 `v1.0.2`）→ 运行。它只跑同步任务，直接从 GitHub Release v1.0.2 下载已有产物再传到 Gitee，不重新构建。
+
+**方式二（在本机执行）**：本机网络能直连 Gitee，自己准备产物目录后跑脚本：
 
 ```bash
 gh release download v1.0.2 --dir ./assets --clobber
-GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 ./scripts/sync_gitee.sh
+GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 "./scripts/同步Gitee产物.sh"
 ```
 
 ---
@@ -501,7 +507,7 @@ byte-tools/
 │   └── workflows/
 │       └── release.yml                 # 三平台自动构建 + 发布（含 Gitee 同步）
 ├── scripts/
-│   └── sync_gitee.sh                   # Gitee Release 同步脚本（重试 + 幂等 + 校验）
+│   └── 同步Gitee产物.sh                # Gitee Release 同步脚本（重试 + 幂等 + 校验）
 └── assets/                             # 静态资源
     ├── byte-tools-pt.png               # 主界面截图
     ├── byte-tools.png                  # 应用窗口图标

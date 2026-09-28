@@ -15,7 +15,7 @@
 # 变更记录（2026-09）：Intel 通用包 byte-tools-macos.zip 已停用，原因见 matrix 中的说明
 # 变更记录（2026-09）：Release 改为全自动发布 —— 矩阵各平台先传草稿暂存区，
 #                    sync-to-gitee 任务核对齐全后自动取消草稿，无需人工点 Publish
-# 变更记录（2026-09）：Gitee 同步逻辑抽到 scripts/sync_gitee.sh —— 加入网络重试
+# 变更记录（2026-09）：Gitee 同步逻辑抽到 scripts/同步Gitee产物.sh —— 加入网络重试
 #                    （境外 runner 连 gitee.com 会偶发 curl 35）、幂等复用
 #                    （Re-run 不产生重复 Release/附件）、上传后附件清单校验
 
@@ -26,6 +26,16 @@ on:
     # 仅 v 开头的版本号 tag 触发，避免任意分支推送误触发
     tags:
       - 'v*'
+  # 手动触发：用于补同步历史 tag —— 例如 Gitee 侧网络失败导致产物缺失，
+  # 而 GitHub Release 已经是好的。填写 tag_name 后只跑 Gitee 同步任务，
+  # 不重新构建，直接复用 GitHub Release 上已有的产物。
+  # 入口：GitHub 仓库 → Actions → release → Run workflow
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: '要同步到 Gitee 的 tag，例如 v1.0.2'
+        required: true
+        type: string
 
 # Release 资产上传需要 contents: write 权限
 permissions:
@@ -49,6 +59,8 @@ env:
 jobs:
   build:
     name: 构建 ${{ matrix.platform_name }}
+    # 手动补同步时不重新构建：产物已经在 GitHub Release 上了，重新打包纯属浪费
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     # 兜底：单个平台 job 的最长运行时长，超时会被取消（默认 360 分钟太长，
     # 一卡就是 6 小时，且会让 needs: build 的 Gitee 同步 job 一直等）。
@@ -230,6 +242,9 @@ jobs:
   sync-to-gitee:
     name: 同步产物到 Gitee Release
     needs: build  # 必须等所有平台构建完成，否则下载不到产物
+    # tag 推送：三平台构建成功后才跑；手动补同步：build 被跳过也要跑，
+    # 所以这里用 always() 兜住，再用 needs.build.result 过滤构建失败的情况
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || needs.build.result == 'success') }}
     # 默认用 GitHub 境外 runner。已知风险：境外连 gitee.com:443 会偶发
     # curl(35) SSL_ERROR_SYSCALL（TLS 握手被重置），脚本已做指数退避重试。
     # 若多次重试仍失败，把这一行改成 runs-on: self-hosted，
@@ -247,7 +262,8 @@ jobs:
       - name: 下载 GitHub Release 所有产物
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
+          # 手动补同步时用输入的 tag_name，tag 推送时用被推送的 tag
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
         run: |
           set -e
           mkdir -p ./assets
@@ -262,9 +278,12 @@ jobs:
       #    放在 Gitee 步骤之前：若 Gitee 侧失败，Gitee 上不会留下半成品 release，
       #    重跑本任务可从干净状态重来。
       - name: 发布 GitHub Release（取消草稿）
+        # 补同步场景：Release 早就发布了，这一步无意义；且历史 tag 可能已无草稿可改，跳过
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
+          # 手动补同步时用输入的 tag_name，tag 推送时用被推送的 tag
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
         run: |
           set -e
           gh release edit "${TAG_NAME}" --draft=false
@@ -277,7 +296,7 @@ jobs:
           echo "GitHub Release ${TAG_NAME} 已发布"
 
 
-      # 4. 同步产物到 Gitee Release（实际逻辑在 scripts/sync_gitee.sh）
+      # 4. 同步产物到 Gitee Release（实际逻辑在 scripts/同步Gitee产物.sh）
       #    为什么抽成脚本而不是在这里裸写 curl：
       #    - 境外 runner 连 gitee.com:443 会偶发 curl(35) SSL_ERROR_SYSCALL
       #      （TLS 握手被重置）。脚本对每个请求做指数退避重试，单次抖动不再判死 job。
@@ -289,20 +308,22 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_OWNER: ${{ env.GITEE_OWNER }}
           GITEE_REPO: ${{ env.GITEE_REPO }}
-          TAG_NAME: ${{ github.ref_name }}
+          # 手动补同步时用输入的 tag_name，tag 推送时用被推送的 tag
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
           ASSETS_DIR: ./assets
           TARGET_COMMITISH: master
           # 单次请求最多尝试 4 次（退避 10s / 20s / 40s），总耗时可控
           MAX_ATTEMPTS: '4'
         run: |
           set -e
-          chmod +x ./scripts/sync_gitee.sh
-          ./scripts/sync_gitee.sh
+          chmod +x "./scripts/同步Gitee产物.sh"
+          "./scripts/同步Gitee产物.sh"
 
       # 5. 收尾：把两边 Release 地址都打出来，方便一眼核对
       - name: 打印发布结果
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          # 手动补同步时用输入的 tag_name，tag 推送时用被推送的 tag
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
         run: |
           echo "GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG_NAME}"
           echo "Gitee  Release: https://gitee.com/${{ env.GITEE_OWNER }}/${{ env.GITEE_REPO }}/releases/${TAG_NAME}"
@@ -317,4 +338,4 @@ jobs:
           echo "  1) 直接 Re-run 本 job —— 脚本幂等，可安全重试；"
           echo "  2) 若重试仍失败，说明当前 runner 到 gitee.com 的链路不通："
           echo "     a. 把本 job 的 runs-on 改为 self-hosted，runner 部署在能直连 gitee.com 的国内机器上；"
-          echo "     b. 或在本机手动执行 scripts/sync_gitee.sh（需 GITEE_TOKEN 与已下载的产物目录）。"
+          echo "     b. 或在本机手动执行 scripts/同步Gitee产物.sh（需 GITEE_TOKEN 与已下载的产物目录）。"

@@ -25,8 +25,8 @@
 #   RELEASE_BODY       Release 说明，默认「跨平台构建产物（与 GitHub Release 同步生成）」
 #   ALLOWED_FILES      产物白名单（| 分隔），默认与 release.yml 的 matrix 一致
 #
-# 用法：
-#   GITEE_TOKEN=xxx GITEE_OWNER=me GITEE_REPO=repo TAG_NAME=v1.0.1 ./scripts/sync_gitee.sh
+# 用法（文件名含中文，命令行建议用引号或 tab 补全）：
+#   GITEE_TOKEN=xxx GITEE_OWNER=me GITEE_REPO=repo TAG_NAME=v1.0.1 "./scripts/同步Gitee产物.sh"
 
 set -euo pipefail
 
