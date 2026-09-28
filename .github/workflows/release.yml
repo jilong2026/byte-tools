@@ -15,7 +15,7 @@
 # 变更记录（2026-09）：Intel 通用包 byte-tools-macos.zip 已停用，原因见 matrix 中的说明
 # 变更记录（2026-09）：Release 改为全自动发布 —— 矩阵各平台先传草稿暂存区，
 #                    sync-to-gitee 任务核对齐全后自动取消草稿，无需人工点 Publish
-# 变更记录（2026-09）：Gitee 同步逻辑抽到 scripts/同步Gitee产物.sh —— 加入网络重试
+# 变更记录（2026-09）：Gitee 同步逻辑抽到 同步Gitee产物.sh —— 加入网络重试
 #                    （境外 runner 连 gitee.com 会偶发 curl 35）、幂等复用
 #                    （Re-run 不产生重复 Release/附件）、上传后附件清单校验
 
@@ -296,7 +296,7 @@ jobs:
           echo "GitHub Release ${TAG_NAME} 已发布"
 
 
-      # 4. 同步产物到 Gitee Release（实际逻辑在 scripts/同步Gitee产物.sh）
+      # 4. 同步产物到 Gitee Release（实际逻辑在 同步Gitee产物.sh）
       #    为什么抽成脚本而不是在这里裸写 curl：
       #    - 境外 runner 连 gitee.com:443 会偶发 curl(35) SSL_ERROR_SYSCALL
       #      （TLS 握手被重置）。脚本对每个请求做指数退避重试，单次抖动不再判死 job。
@@ -316,8 +316,8 @@ jobs:
           MAX_ATTEMPTS: '4'
         run: |
           set -e
-          chmod +x "./scripts/同步Gitee产物.sh"
-          "./scripts/同步Gitee产物.sh"
+          chmod +x "./同步Gitee产物.sh"
+          "./同步Gitee产物.sh"
 
       # 5. 收尾：把两边 Release 地址都打出来，方便一眼核对
       - name: 打印发布结果
@@ -338,4 +338,4 @@ jobs:
           echo "  1) 直接 Re-run 本 job —— 脚本幂等，可安全重试；"
           echo "  2) 若重试仍失败，说明当前 runner 到 gitee.com 的链路不通："
           echo "     a. 把本 job 的 runs-on 改为 self-hosted，runner 部署在能直连 gitee.com 的国内机器上；"
-          echo "     b. 或在本机手动执行 scripts/同步Gitee产物.sh（需 GITEE_TOKEN 与已下载的产物目录）。"
+          echo "     b. 或在本机手动执行 同步Gitee产物.sh（需 GITEE_TOKEN 与已下载的产物目录）。"

@@ -466,7 +466,7 @@ git push origin v1.0.1
 
 几分钟后到两边的 Releases 页面就能看到三个平台的产物（全自动发布，无需手动点 Publish）。
 
-**Gitee 同步的可靠性设计**（逻辑在 `scripts/同步Gitee产物.sh`）：
+**Gitee 同步的可靠性设计**（逻辑在 `同步Gitee产物.sh`）：
 
 - GitHub runner 在境外，连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`（TLS 握手被重置）。脚本对每个请求做指数退避重试（默认 4 次：10s / 20s / 40s），单次网络抖动不会判死整个 job。
 - 脚本幂等：Release 已存在就复用 ID、附件已存在就跳过上传，所以**同步失败后直接 Re-run 该 job 是安全的**，不会产生重复 Release 或重复附件。
@@ -483,7 +483,7 @@ v1.0.2 这类「GitHub 成功、Gitee 失败」的情况不用重发包。两种
 
 ```bash
 gh release download v1.0.2 --dir ./assets --clobber
-GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 "./scripts/同步Gitee产物.sh"
+GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 "./同步Gitee产物.sh"
 ```
 
 ---
@@ -503,11 +503,10 @@ byte-tools/
 ├── CODE_WIKI.md                        # 代码百科（类 / 模块 / 函数索引）
 ├── LICENSE                             # MIT 许可证
 ├── .gitignore                          # Git 忽略规则
+├── 同步Gitee产物.sh                # Gitee Release 同步脚本（重试 + 幂等 + 校验）
 ├── .github/
 │   └── workflows/
 │       └── release.yml                 # 三平台自动构建 + 发布（含 Gitee 同步）
-├── scripts/
-│   └── 同步Gitee产物.sh                # Gitee Release 同步脚本（重试 + 幂等 + 校验）
 └── assets/                             # 静态资源
     ├── byte-tools-pt.png               # 主界面截图
     ├── byte-tools.png                  # 应用窗口图标

@@ -164,6 +164,7 @@ byte-tools/
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
 ├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/byte-tools.exe
+├── 同步Gitee产物.sh     # Gitee Release 同步脚本（网络重试 + 幂等 + 附件校验），由 release.yml 调用
 ├── README.md                # 中文说明（面向最终用户）
 ├── README_EN.md             # 英文说明
 ├── DEVELOPMENT.md           # 开发者文档（开发约定、R1 规则等，面向二次开发者）
@@ -982,12 +983,14 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-推 tag 触发 `.github/workflows/release.yml`：Windows / macOS / Linux 三个 runner 分别打包并上传到 GitHub Release（先以草稿暂存），随后 `sync-to-gitee` job 自动取消草稿完成 GitHub 发布，并把所有产物同步到 Gitee Release。
+推 tag 触发 `.github/workflows/release.yml`：Windows / macOS / Linux 三个 runner 分别打包并上传到 GitHub Release（先以草稿暂存），随后 `sync-to-gitee` job 自动取消草稿完成 GitHub 发布，并调用根目录的 `同步Gitee产物.sh` 把所有产物同步到 Gitee Release。
 
 发布说明：
 - 构建产物共 3 个平台 4 个文件：`byte-tools.exe`、`byte-tools-windows-x64.zip`、`byte-tools-macos-arm64.zip`、`byte-tools-linux-x64`
-- Gitee 侧只接收上述白名单产物；白名单写在 `sync-to-gitee` job 的「上传所有产物到 Gitee Release」step，新增平台或改产物名时须与 build job 的 matrix 同步维护
+- Gitee 侧只接收上述白名单产物；白名单写在根目录 `同步Gitee产物.sh` 的 `ALLOWED_FILES` 与 case 分支，新增平台或改产物名时须与 build job 的 matrix 同步维护
 - 同步依赖仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，需 projects 权限），owner / repo 由 workflow 顶层的 `GITEE_OWNER` / `GITEE_REPO` 环境变量指定
+- **Gitee 同步的三道保险**都在 `同步Gitee产物.sh` 里：① 网络重试（境外 runner 连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`，对每个请求做 10s/20s/40s 指数退避，默认 4 次）；② 幂等（Release 已存在复用 ID、同名附件跳过，失败后 Re-run 安全）；③ 上传后回查附件清单，白名单缺一个即失败
+- **补同步历史 tag**：workflow 支持 `workflow_dispatch`（输入 `tag_name`），在 GitHub → Actions → release → Run workflow 触发。它跳过三平台构建，直接从 GitHub Release 下载已有产物再传到 Gitee；因为 `workflow_dispatch` 读的是默认分支上的 workflow，改动合入 master 后即可对任意历史 tag 生效
 - **全自动发布，无需人工操作**：矩阵各平台先上传到草稿 Release 作暂存区（构建中途失败不会对外暴露半成品），待全部平台成功、`sync-to-gitee` 启动后自动 `gh release edit --draft=false` 取消草稿；因此跑绿即等于 `releases/latest/download/...` 已指向新版本
 - 任一平台的构建/上传失败，或 Gitee 侧任一产物上传失败，都会让整个 run 直接变红（不会静默放过）
 
