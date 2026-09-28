@@ -15,7 +15,7 @@ RabbitMQ / Kafka / RocketMQ / Pulsar / ActiveMQ / Nacos / Seata / Elasticsearch�
 
 用法：
     python main.py            # 直接启动
-    start-windows.bat         # Windows 一键启动（自动建虚拟环境+装依赖）
+    一键启动项目.bat          # Windows 一键启动（自动建虚拟环境+装依赖）
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import traceback
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -175,6 +175,10 @@ class Component:
     path_subdir: str  # 需要加入 PATH 的子目录，一般为 "bin"（Windows 上也可能是 "Scripts"）
     exec_name: Optional[str] = None  # 用于探测的可执行文件名，不含扩展名
     version_args: List[str] = field(default_factory=lambda: ["--version"])  # 获取版本号的参数
+    # 是否允许在探测阶段真的执行该组件的命令来取版本号。
+    # 启动脚本型组件（Nacos / Seata / Kafka / RocketMQ / RabbitMQ）不认版本参数，
+    # 一执行就会把中间件服务拉起来（还会弹窗），必须置 False：只判定存在，不执行。
+    version_probe: bool = True
     versions: List[ComponentVersion] = field(default_factory=list)
     # 安装器模式：某些组件（如 Miniconda）下载的是安装器而非归档，需要静默执行安装器
     installer_mode: bool = False
@@ -193,19 +197,47 @@ class Component:
         """在给定 XXX_HOME 目录下查找可执行文件。"""
         if not self.exec_name:
             return None
-        exe = self.exec_name + (".exe" if CURRENT_OS == "Windows" else "")
+        # Windows 上很多组件只带脚本包装器（catalina.bat / mvn.cmd 等），
+        # 只找 .exe 会漏检，故按常见 PATHEXT 扩展名依次尝试。
+        suffixes = [".exe", ".bat", ".cmd", ".com", ""] if CURRENT_OS == "Windows" else [""]
         # 依次尝试 path_subdir、bin、Scripts、根目录
         candidates_dir = [self.path_subdir, "bin", "Scripts", "condabin", ""]
         for sub in candidates_dir:
-            cand = Path(home) / sub / exe if sub else Path(home) / exe
-            if cand.exists():
-                return cand
+            base = Path(home) / sub if sub else Path(home)
+            for suf in suffixes:
+                cand = base / (self.exec_name + suf)
+                if cand.exists():
+                    return cand
         return None
 
-    def detect(self) -> "DetectResult":
-        """探测该组件是否已在系统中可用。"""
-        if not self.exec_name:
+    def _detect_by_home_dir(self) -> "DetectResult":
+        """没有可执行文件可探测的组件（如 Jenkins：只有一个 war 包）的兜底探测。
+
+        这类组件的 exec_name 为 None，走不了常规的「XXX_HOME 里找可执行文件」，
+        也不能靠 PATH 找到命令；只要本工具写下的 XXX_HOME 指向自己的安装目录，
+        就认定「已配置」，否则界面永远显示未安装，与实际情况不符。
+        """
+        if not self.env_var:
             return DetectResult(False)
+        home = EnvManager.get(self.env_var)
+        if not home:
+            return DetectResult(False)
+        home_path = Path(os.path.expandvars(home))
+        component_root = CONFIG_DIR / self.key
+        if home_path.is_dir() and EnvManager._under_root(str(home_path), str(component_root)):
+            return DetectResult(True, source=self.env_var, home=str(home_path))
+        return DetectResult(False)
+
+    def detect(self, probe_version: bool = True) -> "DetectResult":
+        """探测该组件是否已在系统中可用。
+
+        入参 probe_version: bool  是否真的执行外部命令去取版本号。界面构建卡片时传
+        False（先只显示「已配置（来源）」，版本字符串随后异步回填），否则任何一个
+        卡住的外部命令都会把主窗口拖到打不开。
+        """
+        if not self.exec_name:
+            return self._detect_by_home_dir()
+        allow_probe = probe_version and self.version_probe
 
         # 1) 优先通过 XXX_HOME 环境变量判断
         if self.env_var:
@@ -218,55 +250,109 @@ class Component:
                         source=self.env_var,
                         home=home,
                         exe_path=str(exe),
-                        version_text=_probe_version(str(exe), self.version_args),
+                        version_text=_probe_version(str(exe), self.version_args) if allow_probe else "",
                     )
 
         # 2) 通过 PATH 中的可执行文件
-        exe_name_final = self.exec_name + (".exe" if CURRENT_OS == "Windows" else "")
+        # exec_name 自带扩展名时（Nacos 的 startup.cmd / startup.sh）不再补 .exe
+        need_exe = CURRENT_OS == "Windows" and not os.path.splitext(self.exec_name)[1]
+        exe_name_final = self.exec_name + (".exe" if need_exe else "")
         which = shutil.which(exe_name_final) or shutil.which(self.exec_name)
         if which:
             return DetectResult(
                 installed=True,
                 source="PATH",
                 exe_path=which,
-                version_text=_probe_version(which, self.version_args),
+                version_text=_probe_version(which, self.version_args) if allow_probe else "",
             )
 
         return DetectResult(False)
 
+    def installed_dirs(self) -> List[Path]:
+        """本组件在 CONFIG_DIR/<key> 下真实存在的安装目录（排除下载缓存与隐藏目录）。"""
+        root = CONFIG_DIR / self.key
+        if not root.is_dir():
+            return []
+        return sorted(
+            p
+            for p in root.iterdir()
+            if p.is_dir() and p.name != "downloads" and not p.name.startswith(".")
+        )
+
+    def resolve_uninstall_target(self, version: str) -> Tuple[Optional[Path], str]:
+        """把「下拉框选中的版本」校正为磁盘上真正装着的那个目录。
+
+        离线默认清单可能落后于实际安装的版本（在线版本抓取失败时尤其明显），
+        此时按选中版本去删会删一个不存在的目标，而目录、XXX_HOME、PATH 全都留着
+        —— 界面因此仍显示「已配置」。返回 (目标目录或 None, 给用户的中文说明)。
+        """
+        exact = self.install_dir(version)
+        if exact.is_dir():
+            return exact, ""
+
+        component_root = CONFIG_DIR / self.key
+        # XXX_HOME 指向本组件目录时以它为准（它是安装/配置那一步写下的）
+        if self.env_var:
+            home = EnvManager.get(self.env_var)
+            if home:
+                home_path = Path(os.path.expandvars(home))
+                if home_path.is_dir() and EnvManager._under_root(
+                    str(home_path), str(component_root)
+                ):
+                    return home_path, f"按 {self.env_var} 定位到实际安装目录 {home_path.name}"
+
+        dirs = self.installed_dirs()
+        if len(dirs) == 1:
+            return dirs[0], f"所选版本 {self.key}-{version} 未安装，改为卸载实际存在的 {dirs[0].name}"
+        if len(dirs) > 1:
+            names = "、".join(d.name for d in dirs)
+            return None, f"存在多个已安装版本（{names}），请先在下拉框中选择具体版本"
+        return None, f"未找到 {self.key}-{version} 的安装目录，也没有其他已安装版本"
+
     def uninstall(self, version: str) -> str:
         """
-        卸载指定版本：删除安装目录、移除 XXX_HOME 环境变量、从 PATH 移除 bin 目录。
+        卸载指定版本：删除安装目录、移除本工具写入的 XXX_HOME、清理属于本组件的 PATH 条目。
 
-        入参 version: str  要卸载的版本号字符串（与 install_dir 计算一致）
+        入参 version: str  下拉框选中的版本号；与实际安装版本不一致时会自动校正目标
         返回: str           卸载结果摘要（中文，多步骤用中文分号分隔）
 
         说明:
-          - 仅当 XXX_HOME 指向被卸载版本目录时才删除 XXX_HOME，避免误删用户其他配置；
-          - PATH 条目按 install_dir/path_subdir 精确匹配删除；
+          - XXX_HOME 只有落在本组件目录（CONFIG_DIR/<key>）内才删除，用户自己的安装不动它；
+          - PATH 按「本组件目录之内」整体清理，因此 path_subdir 为空的组件（如 bun）
+            以及目录已被手工删除的历史条目都能一并清掉；
           - 安装器模式（如 Miniconda）跳过目录删除，仅清理环境变量与 PATH。
         """
-        import shutil
         summary_parts: List[str] = []
-        install_path = self.install_dir(version)
+        install_path, note = self.resolve_uninstall_target(version)
+        if install_path is None and len(self.installed_dirs()) > 1:
+            # 装了多个版本又定位不到具体是哪一个：整个停手。
+            # 此时若继续按组件根清 PATH，会把用户没选中的那些版本的条目一起删掉。
+            return note
+        if note:
+            summary_parts.append(note)
+        component_root = CONFIG_DIR / self.key
 
         # 1. 删除安装目录（安装器模式跳过，由安装器自行管理位置）
         if self.installer_mode:
             summary_parts.append("安装器模式，跳过安装目录删除（如需彻底清理请用对应卸载工具）")
-        else:
-            if install_path.exists() and install_path.is_dir():
-                try:
-                    shutil.rmtree(install_path)
-                    summary_parts.append(f"已删除安装目录：{install_path}")
-                except Exception as exc:
-                    summary_parts.append(f"删除安装目录失败：{exc}")
-            else:
-                summary_parts.append(f"安装目录不存在：{install_path}")
+        elif install_path is not None:
+            try:
+                shutil.rmtree(install_path)
+                summary_parts.append(f"已删除安装目录：{install_path}")
+            except Exception as exc:
+                summary_parts.append(f"删除安装目录失败：{exc}")
 
-        # 2. 删除 XXX_HOME 环境变量（仅当它指向被卸载的目录，避免误删用户其他配置）
+        # 2. 删除 XXX_HOME 环境变量（仅当它落在本组件目录内，避免误删用户其他配置）
         if self.env_var:
             current_home = EnvManager.get(self.env_var)
-            if current_home and Path(current_home) == install_path:
+            points_at_component = bool(current_home) and (
+                (
+                    install_path is not None
+                    and EnvManager._same_path(current_home, str(install_path))
+                )
+                or EnvManager._under_root(current_home, str(component_root))
+            )
+            if points_at_component:
                 try:
                     if CURRENT_OS == "Windows":
                         EnvManager.remove_windows_user_env(self.env_var)
@@ -281,17 +367,18 @@ class Component:
                     f"环境变量 {self.env_var} 指向其他目录（{current_home}），未删除"
                 )
 
-        # 3. 从 PATH 中移除 bin 目录（按 install_dir/path_subdir 精确匹配）
-        if self.path_subdir:
-            bin_path = str(install_path / self.path_subdir)
-            try:
-                if CURRENT_OS == "Windows":
-                    EnvManager.remove_windows_path_entry(bin_path)
-                else:
-                    EnvManager.remove_unix_path_entry(bin_path)
-                summary_parts.append(f"已从 PATH 移除：{bin_path}")
-            except Exception as exc:
-                summary_parts.append(f"从 PATH 移除 {bin_path} 失败：{exc}")
+        # 3. 清理 PATH 中位于本组件目录内的条目（不再依赖 path_subdir 是否配置）
+        try:
+            if CURRENT_OS == "Windows":
+                removed = EnvManager.remove_windows_path_entries_under(str(component_root))
+            else:
+                removed = EnvManager.remove_unix_path_entries_under(str(component_root))
+            if removed:
+                summary_parts.append("已从 PATH 移除：" + "、".join(removed))
+            else:
+                summary_parts.append("PATH 中没有本组件的条目")
+        except Exception as exc:
+            summary_parts.append(f"清理 PATH 失败：{exc}")
 
         return "；".join(summary_parts) if summary_parts else "无需卸载"
 
@@ -307,21 +394,58 @@ class DetectResult:
     version_text: str = ""
 
 
+# 静默执行外部命令用的常量（提前取好，避免依赖 subprocess 属性被替换的场景）
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+STDIN_DEVNULL = getattr(subprocess, "DEVNULL", -3)
+
+
 def _probe_version(exe: str, args: List[str]) -> str:
-    """调用可执行文件抓取版本号；失败返回空串。"""
+    """调用可执行文件抓取版本号；失败返回空串。
+
+    只该给「确定是版本查询命令」的组件用：启动脚本（kafka-server-start、
+    seata-server、startup.cmd 等）不认版本参数，`args` 为空时更是会直接把服务
+    拉起来，所以空参数一律不执行。
+    Windows 上带 CREATE_NO_WINDOW + stdin=DEVNULL：不弹控制台窗口，也不让被
+    探测的程序因为等 stdin 而卡住调用方。
+    """
+    if not args:
+        return ""
     try:
+        kwargs: Dict[str, int] = {}
+        if CURRENT_OS == "Windows":
+            kwargs["creationflags"] = CREATE_NO_WINDOW
         proc = subprocess.run(
             [exe, *args],
             capture_output=True,
             text=True,
             timeout=4,
             check=False,
+            stdin=STDIN_DEVNULL,
+            **kwargs,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         line = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
         return line[:80]
     except Exception:
         return ""
+
+
+class VersionProbeWorker(QThread):
+    """在后台线程跑一次版本探测。
+
+    外部命令可能耗时甚至卡死（等输入、被杀毒拦截），放在 UI 线程里会让主窗口
+    打不开，所以卡片的版本号一律异步回填。
+    """
+
+    done = Signal(str)  # 版本号文本，取不到为空串
+
+    def __init__(self, exe: str, args: List[str], parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self.exe = exe
+        self.args = args
+
+    def run(self) -> None:
+        self.done.emit(_probe_version(self.exe, self.args))
 
 
 # ---------------------------------------------------------------------------
@@ -2495,6 +2619,8 @@ def build_components() -> List[Component]:
             path_subdir="sbin",
             exec_name="rabbitmq-server",  # Linux/Mac 上是 rabbitmq-server 启动脚本
             version_args=["--version"],
+            # rabbitmq-server 脚本会忽略参数直接启动 broker，探测阶段绝不执行
+            version_probe=False,
             # Windows 不支持自动下载（依赖 Erlang，且 RabbitMQ Windows 是安装器模式）
             unsupported_platform_hint=(
                 "RabbitMQ 在 Windows 上需先安装 Erlang/OTP 再用 RabbitMQ Windows 安装器，"
@@ -2509,14 +2635,17 @@ def build_components() -> List[Component]:
     # 按 R1 规则：URL 走国内镜像优先 + 末位 Apache 官网回退（共 4 镜像 + 1 官网）
     # Kafka 是 Scala 项目，跨平台 tgz/zip，需 JDK 运行
     # 解压后根目录为 kafka_2.13-<v>/，内部含 bin/ 子目录
+    # Windows 上的 .bat 包装器在 bin/windows/ 里，bin/ 下只有无扩展名的 shell 脚本
     components.append(
         Component(
             key="kafka",
             display_name="Apache Kafka",
             env_var="KAFKA_HOME",
-            path_subdir="bin",
+            path_subdir="bin/windows" if CURRENT_OS == "Windows" else "bin",
             exec_name="kafka-server-start",  # Kafka 启动脚本（Linux/Mac 带 .sh 后缀）
             version_args=[],
+            # 启动脚本：执行即拉起 broker，探测阶段只判定存在
+            version_probe=False,
             versions=[_kafka_cv(v) for v in ("3.8.1", "3.8.0", "3.7.2", "3.6.2")],
         )
     )
@@ -2533,6 +2662,8 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="mqnamesrv",  # RocketMQ NameServer 启动脚本
             version_args=[],
+            # 启动脚本：执行即拉起 NameServer，探测阶段只判定存在
+            version_probe=False,
             versions=[_rocketmq_cv(v) for v in ("5.3.1", "5.3.0", "5.2.0", "5.1.4")],
         )
     )
@@ -2573,15 +2704,18 @@ def build_components() -> List[Component]:
     # 按 R1 规则：URL 走国内 GitHub 加速优先 + 末位 GitHub releases 回退（共 2 加速 + 1 官网）
     # Nacos 是阿里开源服务发现组件，在 GitHub releases 发布，国内无官方镜像；
     # 解压后根目录为 nacos/，内部含 bin/ 子目录（startup.sh / startup.cmd）
-    # exec_name="startup"：Windows 下 startup.cmd、Linux 下 startup.sh 均能被 shutil.which 通过 PATHEXT 命中
+    # exec_name 带扩展名（startup.cmd / startup.sh）：不带扩展名时 Windows 上会被
+    # PATHEXT 匹配到同名异扩展的脚本，例如 Tomcat 的 startup.bat —— 探测就变成了启动 Tomcat。
     components.append(
         Component(
             key="nacos",
             display_name="Nacos",
             env_var="NACOS_HOME",
             path_subdir="bin",
-            exec_name="startup",  # Nacos 启动脚本（startup.sh / startup.cmd，无后缀写法以兼容 PATHEXT）
-            version_args=["--version"],  # Nacos 启动脚本不支持 --version，失败不影响 detect 判定已安装
+            exec_name="startup.cmd" if CURRENT_OS == "Windows" else "startup.sh",
+            version_args=["--version"],
+            # startup 脚本一执行就会拉起 Nacos 服务，探测阶段绝不执行
+            version_probe=False,
             versions=[_nacos_cv(v) for v in ("2.3.2", "2.3.0", "2.2.3", "2.1.2")],
         )
     )
@@ -2598,7 +2732,9 @@ def build_components() -> List[Component]:
             env_var="SEATA_HOME",
             path_subdir="bin",
             exec_name="seata-server",  # Seata 启动脚本（seata-server.sh / seata-server.bat）
-            version_args=["--version"],  # Seata 启动脚本不支持 --version，失败不影响 detect 判定已安装
+            version_args=["--version"],
+            # seata-server 脚本一执行就会拉起 Seata 服务，探测阶段绝不执行
+            version_probe=False,
             versions=[_seata_cv(v) for v in ("2.2.0", "2.1.0", "2.0.0", "1.8.0")],
         )
     )
@@ -2747,24 +2883,55 @@ class EnvManager:
         return exe.exists()
 
     @staticmethod
-    def set_windows_user_env(name: str, value: str) -> None:
-        """在 Windows 上使用 setx 永久写入用户环境变量。"""
-        # setx 会截断超过 1024 字符的 PATH，这里额外用 winreg 直接写注册表
-        try:
-            import winreg  # type: ignore
+    def _broadcast_env_change() -> None:
+        """异步广播 WM_SETTINGCHANGE("Environment")，让已运行的程序知道环境变了。
 
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
-            ) as key:
-                reg_type = winreg.REG_EXPAND_SZ if "%" in value else winreg.REG_SZ
-                winreg.SetValueEx(key, name, 0, reg_type, value)
-            # 通知系统刷新
-            subprocess.run(
-                ["setx", name, value],
-                check=False,
-                shell=False,
-                capture_output=True,
-            )
+        取代原先的 setx：setx 会把超过 1024 字符的 PATH 直接截断，而且它自身要靠
+        PATH 查找（PATH 一旦被写坏就彻底失效），而持久化本来就由写注册表完成。
+        这里用 PostMessageW（异步）而不是 SendMessageTimeoutW（同步）：同步广播要等
+        所有顶层窗口应答，只要有一个窗口不处理消息就会把调用方卡住。
+        """
+        if CURRENT_OS != "Windows":
+            return
+        try:
+            import ctypes
+
+            HWND_BROADCAST = 0xFFFF
+            WM_SETTINGCHANGE = 0x1A
+            user32 = ctypes.windll.user32
+            user32.PostMessageW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint,
+                ctypes.c_void_p,
+                ctypes.c_wchar_p,
+            ]
+            user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")
+        except Exception:
+            pass  # 广播失败只影响其他进程的即时刷新，注册表已经写入
+
+    @staticmethod
+    def _write_registry_env(name: str, value: str) -> None:
+        """写入 HKCU\\Environment 并广播，不改动当前进程的环境变量。"""
+        import winreg  # type: ignore
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
+        ) as key:
+            reg_type = winreg.REG_EXPAND_SZ if "%" in value else winreg.REG_SZ
+            winreg.SetValueEx(key, name, 0, reg_type, value)
+        EnvManager._broadcast_env_change()
+
+    @staticmethod
+    def set_windows_user_env(name: str, value: str) -> None:
+        """写入 Windows 用户环境变量，并同步当前进程（Path 例外，见下）。"""
+        try:
+            EnvManager._write_registry_env(name, value)
+            if name.lower() == "path":
+                # 进程 PATH 是「机器 PATH + 用户 PATH」在登录时合并的结果，
+                # 拿注册表里的用户段整体覆盖会丢掉 System32 等机器条目，
+                # 之后任何外部命令都找不到，界面却仍显示"已配置"。
+                # PATH 一律按单条目增删，见 append/remove_windows_path_entry。
+                return
             # 同步当前进程的环境变量，避免后续 detect() 读到旧值
             # （os.environ 不会自动跟随注册表刷新，必须手动更新）
             os.environ[name] = value
@@ -2772,8 +2939,28 @@ class EnvManager:
             raise RuntimeError(f"写入 Windows 环境变量失败：{exc}")
 
     @staticmethod
-    def append_windows_path(entry: str) -> None:
-        """把 entry 追加到 Windows 用户 PATH。"""
+    def _norm_path(raw: str) -> str:
+        """归一化 PATH 条目用于比较：展开 %VAR%、去尾部分隔符（Windows 还忽略大小写）。"""
+        expanded = os.path.expandvars(str(raw)).strip()
+        if not expanded:
+            return ""
+        normed = os.path.normpath(expanded).rstrip("\\/")
+        return normed.lower() if CURRENT_OS == "Windows" else normed
+
+    @staticmethod
+    def _same_path(a: str, b: str) -> bool:
+        na = EnvManager._norm_path(a)
+        return bool(na) and na == EnvManager._norm_path(b)
+
+    @staticmethod
+    def _under_root(entry: str, root: str) -> bool:
+        ne = EnvManager._norm_path(entry)
+        nr = EnvManager._norm_path(root)
+        return bool(ne) and bool(nr) and (ne == nr or ne.startswith(nr + os.sep.lower()))
+
+    @staticmethod
+    def _read_windows_user_path() -> List[str]:
+        """读取 HKCU 用户 PATH 的条目列表（原样保留，未展开变量）。"""
         import winreg  # type: ignore
 
         with winreg.OpenKey(
@@ -2783,11 +2970,51 @@ class EnvManager:
                 current, _ = winreg.QueryValueEx(key, "Path")
             except FileNotFoundError:
                 current = ""
-        parts = [p for p in current.split(";") if p]
-        if entry in parts:
-            return
-        parts.append(entry)
-        EnvManager.set_windows_user_env("Path", ";".join(parts))
+        return [p for p in str(current).split(";") if p]
+
+    @staticmethod
+    def _add_process_path_entry(entry: str) -> None:
+        """把条目补进当前进程 PATH（不动其他条目）。"""
+        parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        if not any(EnvManager._same_path(p, entry) for p in parts):
+            parts.append(entry)
+            os.environ["PATH"] = os.pathsep.join(parts)
+
+    @staticmethod
+    def _filter_path_entries(pred) -> List[str]:
+        """按谓词同时过滤注册表用户 PATH 与当前进程 PATH，返回被移除的条目。"""
+        parts = EnvManager._read_windows_user_path()
+        removed = [p for p in parts if pred(p)]
+        if removed:
+            EnvManager._write_registry_env(
+                "Path", ";".join(p for p in parts if not pred(p))
+            )
+        proc = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        kept = [p for p in proc if not pred(p)]
+        if len(kept) != len(proc):
+            os.environ["PATH"] = os.pathsep.join(kept)
+        return removed
+
+    @staticmethod
+    def append_windows_path(entry: str) -> None:
+        """把 entry 追加到 Windows 用户 PATH，并同步到当前进程 PATH。"""
+        parts = EnvManager._read_windows_user_path()
+        if not any(EnvManager._same_path(p, entry) for p in parts):
+            parts.append(entry)
+            EnvManager._write_registry_env("Path", ";".join(parts))
+        EnvManager._add_process_path_entry(entry)
+
+    @staticmethod
+    def remove_windows_path_entry(entry: str) -> None:
+        """从用户 PATH 与当前进程 PATH 移除指定条目（其他条目原样保留）。"""
+        EnvManager._filter_path_entries(lambda p: EnvManager._same_path(p, entry))
+
+    @staticmethod
+    def remove_windows_path_entries_under(root: str) -> List[str]:
+        """清理位于 root 目录内（含目录已不存在的历史残留）的 PATH 条目。"""
+        return EnvManager._filter_path_entries(
+            lambda p: EnvManager._under_root(p, root)
+        )
 
     @staticmethod
     def _shell_rc_file() -> Path:
@@ -2859,30 +3086,11 @@ class EnvManager:
                     winreg.DeleteValue(key, name)
                 except FileNotFoundError:
                     pass  # 本来就不存在，幂等
+            EnvManager._broadcast_env_change()
             # 同步删除当前进程的环境变量，避免后续 detect() 仍读到旧值
             os.environ.pop(name, None)
         except Exception as exc:
             raise RuntimeError(f"删除 Windows 环境变量 {name} 失败：{exc}")
-
-    @staticmethod
-    def remove_windows_path_entry(entry: str) -> None:
-        """
-        从 Windows 用户 PATH 中移除指定条目（保持其他条目不变）。
-
-        入参 entry: str  要移除的 PATH 条目（绝对路径字符串）
-        """
-        import winreg  # type: ignore
-
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
-        ) as key:
-            try:
-                current, _ = winreg.QueryValueEx(key, "Path")
-            except FileNotFoundError:
-                current = ""
-        # 按 ; 切分后过滤掉与 entry 相同的条目，保留其他
-        parts = [p for p in current.split(";") if p and p != entry]
-        EnvManager.set_windows_user_env("Path", ";".join(parts))
 
     @staticmethod
     def remove_unix_env(name: str) -> Path:
@@ -2936,6 +3144,108 @@ class EnvManager:
         path_parts = [p for p in os.environ.get("PATH", "").split(":") if p and p != entry]
         os.environ["PATH"] = ":".join(path_parts)
         return rc
+
+    @staticmethod
+    def remove_unix_path_entries_under(root: str) -> List[str]:
+        """
+        移除 shell 配置文件中指向 root 目录内的 PATH 条目块（含目录已不存在的历史残留）。
+
+        入参 root: str  组件安装根目录（如 ~/.env-tools/tomcat）
+        返回: List[str] 被移除的条目
+        """
+        rc = EnvManager._shell_rc_file()
+        removed: List[str] = []
+        if rc.exists():
+            text = rc.read_text(encoding="utf-8")
+            pattern = _re.compile(
+                r"# >>> byte-tools:PATH:(.*?) >>>.*?# <<< byte-tools:PATH:\1 <<<\n?",
+                _re.DOTALL,
+            )
+
+            def _drop(match):
+                entry = match.group(1)
+                if EnvManager._under_root(entry, root):
+                    removed.append(entry)
+                    return ""
+                return match.group(0)
+
+            new_text = pattern.sub(_drop, text)
+            if new_text != text:
+                rc.write_text(new_text, encoding="utf-8")
+        parts = [p for p in os.environ.get("PATH", "").split(":") if p]
+        kept = [p for p in parts if not EnvManager._under_root(p, root)]
+        if len(kept) != len(parts):
+            os.environ["PATH"] = ":".join(kept)
+        return removed
+
+
+def _dead_tool_path_predicate():
+    """返回「PATH 条目是否属于本工具且目录已不存在」的判定函数。"""
+    root = str(CONFIG_DIR)
+
+    def is_dead(entry: str) -> bool:
+        if not EnvManager._under_root(entry, root):
+            return False
+        return not os.path.isdir(os.path.expandvars(entry))
+
+    return is_dead
+
+
+def find_dead_tool_path_entries() -> List[str]:
+    """列出 PATH 里指向本工具安装目录、但目录已不存在的残留条目（不改动任何东西）。"""
+    is_dead = _dead_tool_path_predicate()
+    if CURRENT_OS == "Windows":
+        return [p for p in EnvManager._read_windows_user_path() if is_dead(p)]
+    rc = EnvManager._shell_rc_file()
+    if not rc.exists():
+        return []
+    text = rc.read_text(encoding="utf-8")
+    pattern = _re.compile(
+        r"# >>> byte-tools:PATH:(.*?) >>>.*?# <<< byte-tools:PATH:\1 <<<",
+        _re.DOTALL,
+    )
+    return [m.group(1) for m in pattern.finditer(text) if is_dead(m.group(1))]
+
+
+def cleanup_dead_tool_path_entries() -> List[str]:
+    """清理 PATH 中指向 CONFIG_DIR 之下、但目录已被删掉的残留条目。
+
+    卸载只清理当次组件自己的目录；手工删过安装目录、或换过版本目录命名，
+    都会留下既不存在、界面上又再也点不到的死条目（组件此时显示"未安装"，
+    卸载按钮是灰的）。这里按整棵 .env-tools 子树扫一遍，只删目录已不存在的条目，
+    有效条目与工具目录之外的一律不动。
+
+    返回: List[str] 被移除的 PATH 条目
+    """
+    is_dead = _dead_tool_path_predicate()
+    if CURRENT_OS == "Windows":
+        return EnvManager._filter_path_entries(is_dead)
+
+    removed: List[str] = []
+    rc = EnvManager._shell_rc_file()
+    if rc.exists():
+        text = rc.read_text(encoding="utf-8")
+        pattern = _re.compile(
+            r"# >>> byte-tools:PATH:(.*?) >>>.*?# <<< byte-tools:PATH:\1 <<<\n?",
+            _re.DOTALL,
+        )
+
+        def _drop(match):
+            entry = match.group(1)
+            if is_dead(entry):
+                removed.append(entry)
+                return ""
+            return match.group(0)
+
+        new_text = pattern.sub(_drop, text)
+        if new_text != text:
+            rc.write_text(new_text, encoding="utf-8")
+
+    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    kept = [p for p in parts if not is_dead(p)]
+    if len(kept) != len(parts):
+        os.environ["PATH"] = os.pathsep.join(kept)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -3155,6 +3465,11 @@ class ComponentCard(QFrame):
         self.log_cb = log_cb
         self.worker: Optional[DownloadWorker] = None
         self._extracted_path: Optional[Path] = None
+        # 「已配置」标签的异步版本号回填状态
+        self._status_where = ""
+        self._status_version = ""
+        self._status_shows_configured = False
+        self._version_worker: Optional["VersionProbeWorker"] = None
 
         self.setObjectName("card")
         self.setFrameShape(QFrame.NoFrame)
@@ -3257,6 +3572,45 @@ class ComponentCard(QFrame):
         self.log_cb(level, f"[{self.component.display_name}] {msg}")
 
     # ------------------------------------------------------------------
+    def _render_status_label(self) -> None:
+        text = f"✓ 已配置（{self._status_where}）"
+        if self._status_version:
+            text += f" · {self._status_version}"
+        elif self.component.version_probe:
+            text += " · 版本检测中…"
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(
+            "color:#2e7d32;font-weight:600;padding:2px 8px;"
+            "background:#e8f5e9;border-radius:10px;"
+        )
+
+    def _schedule_version_probe(self, exe_path: str) -> None:
+        """把「执行组件命令取版本号」推迟到事件循环空闲时，且放到后台线程。
+
+        version_probe=False 的启动脚本型组件（Nacos/Kafka/RocketMQ/Seata/RabbitMQ）
+        在这里直接跳过——一执行就会把中间件服务拉起来。
+        """
+        if not (exe_path and self.component.version_probe and self.component.version_args):
+            return
+        QTimer.singleShot(0, lambda: self._start_version_probe(exe_path))
+
+    def _start_version_probe(self, exe_path: str) -> None:
+        worker = VersionProbeWorker(exe_path, list(self.component.version_args), self)
+        worker.done.connect(lambda text, w=worker: self._on_version_probed(text, w))
+        worker.finished.connect(worker.deleteLater)
+        self._version_worker = worker
+        worker.start()
+
+    def _on_version_probed(self, text: str, worker: Optional["VersionProbeWorker"] = None) -> None:
+        # 回包可能晚到：状态已不「已配置」或已被更新一轮探测取代时丢弃
+        if not self._status_shows_configured:
+            return
+        if worker is not None and worker is not self._version_worker:
+            return
+        self._status_version = text or "未知版本"
+        self._render_status_label()
+
+    # ------------------------------------------------------------------
     def _detect_status(self) -> None:
         """检测该组件当前是否已安装、已配置。
 
@@ -3264,16 +3618,17 @@ class ComponentCard(QFrame):
           「仅配置环境变量」按钮，避免重复写入。
         - 若本地已解压但未配置，则允许点击「仅配置环境变量」。
         - 若未安装，两个按钮均可用。
+
+        本方法在窗口构建卡片时就会被调用，因此绝不同步执行组件命令：detect 只判定
+        存在（probe_version=False），版本号交给 VersionProbeWorker 异步回填。
         """
-        result = self.component.detect()
+        result = self.component.detect(probe_version=False)
+        self._status_shows_configured = bool(result.installed)
         if result.installed:
-            ver = result.version_text or "未知版本"
             where = result.source or "系统"
-            self.status_label.setText(f"✓ 已配置（{where}） · {ver}")
-            self.status_label.setStyleSheet(
-                "color:#2e7d32;font-weight:600;padding:2px 8px;"
-                "background:#e8f5e9;border-radius:10px;"
-            )
+            self._status_where = where
+            self._status_version = ""
+            self._render_status_label()
             # 已可用 —— 禁用「仅配置环境变量」按钮
             self.btn_configure.setEnabled(False)
             self.btn_configure.setToolTip(
@@ -3285,6 +3640,7 @@ class ComponentCard(QFrame):
             self.btn_uninstall.setToolTip(
                 "卸载将删除本地安装目录，并清理由本工具写入的环境变量"
             )
+            self._schedule_version_probe(result.exe_path)
             return
 
         # 尝试查找本地已解压目录
@@ -3564,7 +3920,8 @@ class ComponentCard(QFrame):
             f"将执行以下操作：\n"
             f"  · 删除安装目录\n"
             f"  · 清理环境变量 {self.component.env_var or '（无）'}\n"
-            f"  · 从 PATH 移除 bin 目录",
+            f"  · 清理 PATH 中属于本组件安装目录的条目\n\n"
+            f"（若所选版本与实际安装版本不一致，会以实际装着的目录为准）",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -3807,6 +4164,17 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setToolTip("重新从官网抓取所有组件的可用版本列表")
         self.btn_refresh.clicked.connect(self._start_fetch_versions)
         tb.addWidget(self.btn_refresh)
+
+        # 清理残留 PATH 按钮
+        self.btn_cleanup_path = QPushButton("🧹 清理残留 PATH")
+        self.btn_cleanup_path.setObjectName("iconBtn")
+        self.btn_cleanup_path.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_cleanup_path.setToolTip(
+            "删除 PATH 中指向本工具安装目录、但目录已经不存在的死条目\n"
+            "（手工删过安装目录时用到；其他程序的 PATH 条目不会改动）"
+        )
+        self.btn_cleanup_path.clicked.connect(self._on_cleanup_path_clicked)
+        tb.addWidget(self.btn_cleanup_path)
 
         # 捐赠图标（不在 README 中提及）
         self.btn_donate = QPushButton("♥")
@@ -4125,6 +4493,41 @@ class MainWindow(QMainWindow):
             self.btn_max.setText("❐")
 
     # ------------------------------------------------------------------
+    def _on_cleanup_path_clicked(self) -> None:
+        """扫描并清理 PATH 中指向本工具目录、但已不存在的残留条目。"""
+        dead = find_dead_tool_path_entries()
+        if not dead:
+            QMessageBox.information(
+                self,
+                "清理残留 PATH",
+                f"PATH 中没有发现本工具（{CONFIG_DIR}）留下的失效条目。",
+            )
+            return
+        detail = "\n".join(f"· {p}" for p in dead[:12])
+        if len(dead) > 12:
+            detail += f"\n… 等共 {len(dead)} 条"
+        reply = QMessageBox.question(
+            self,
+            "清理残留 PATH",
+            f"PATH 中有 {len(dead)} 条指向已不存在的目录：\n\n{detail}\n\n"
+            "只删除这些失效条目，其他程序的 PATH 不受影响。确认清理？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            self._append_log("info", "已取消清理残留 PATH。")
+            return
+        removed = cleanup_dead_tool_path_entries()
+        if removed:
+            self._append_log(
+                "ok", f"已清理 {len(removed)} 条残留 PATH：" + "、".join(removed)
+            )
+        else:
+            self._append_log("warn", "未删除任何条目（可能目录刚被重建）。")
+        for card in self.cards:
+            card._detect_status()
+
+    # ------------------------------------------------------------------
     def _start_fetch_versions(self) -> None:
         """从各官网并发拉取版本列表。可反复调用（刷新）。"""
         # 若有 worker 仍在运行，等它跑完再触发新一轮
@@ -4212,6 +4615,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
         self._save_settings()
+        # 版本探测线程还在跑就退出会触发 "QThread destroyed while running"，
+        # 探测本身有 4 秒超时，这里等它收尾再关窗。
+        for card in self.cards:
+            worker = card._version_worker
+            if worker is not None and worker.isRunning():
+                worker.wait(5000)
         super().closeEvent(event)
 
 

@@ -160,7 +160,8 @@ byte-tools/
 ├── main.py                  # 主程序（含 UI 与全部逻辑，约 2700 行）
 ├── requirements.txt         # Python 依赖清单（PySide6、requests）
 ├── byte-tools.spec      # PyInstaller 打包配置
-├── start-windows.bat        # Windows 一键启动脚本（检查 Python → 创建 .venv → 装依赖 → 启动 GUI）
+├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
+├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/byte-tools.exe
 ├── README.md                # 中文说明（面向最终用户）
 ├── README_EN.md             # 英文说明
 ├── DEVELOPMENT.md           # 开发者文档（开发约定、R1 规则等，面向二次开发者）
@@ -234,8 +235,10 @@ byte-tools/
 | `human_size(num)` | func | 字节数 → `"1.5 MB"` 可读字符串 |
 | `ensure_dir(path)` | func | 确保目录存在（`mkdir -p` 语义） |
 | `_get(url, timeout=10)` | func | 带自动重试 + SSL 降级的 HTTP GET（重试 3 次，指数退避） |
-| `_probe_version(exe, args)` | func | 调用可执行文件抓取版本号字符串，失败返回空串 |
+| `_probe_version(exe, args)` | func | 调用可执行文件抓取版本号字符串，失败返回空串；`args` 为空一律不执行（裸跑启动脚本 = 拉起服务），Windows 上带 `CREATE_NO_WINDOW` + `stdin=DEVNULL`，不弹控制台窗口也不被等输入的程序的卡住 |
 | `_get_first_working(urls, timeout=10)` | func | R1 公共辅助：按 urls 顺序依次 GET，第一个成功的返回 Response，全失败抛 RuntimeError |
+| `find_dead_tool_path_entries()` | func | 只读预览：列出 PATH 中指向 `CONFIG_DIR` 子树、但目录已不存在的残留条目（供确认弹窗展示） |
+| `cleanup_dead_tool_path_entries()` | func | 标题栏「清理残留 PATH」的后端：删掉上一行列出的死条目，工具目录之外的条目一律不动 |
 
 ### 4.2 数据模型层
 
@@ -268,9 +271,10 @@ byte-tools/
 | `key` | str | 内部标识，如 `"jdk"`（用作目录名、配置键、FETCHERS 查找键） |
 | `display_name` | str | UI 显示名 |
 | `env_var` | Optional[str] | 需要设置的 `XXX_HOME` 变量名；无则只更新 PATH（如 Python、Git） |
-| `path_subdir` | str | 需加入 PATH 的子目录，一般为 `"bin"`，Windows 上 Python 是 `"Scripts"` |
+| `path_subdir` | str | 需加入 PATH 的子目录，一般为 `"bin"`，Windows 上 Python 是 `"Scripts"`、Kafka 是 `"bin/windows"`（`.bat` 包装器只在 `bin\windows` 下，`bin` 里只有 shell 脚本） |
 | `exec_name` | Optional[str] | 用于探测的可执行文件名（不含扩展名）；jenkins.war 之类非命令行可执行文件设为 None |
-| `version_args` | List[str] | 探测版本号的命令行参数，默认 `["--version"]` |
+| `version_args` | List[str] | 探测版本号的命令行参数，默认 `["--version"]`；置为空列表表示不探测版本 |
+| `version_probe` | bool | 是否允许在探测阶段真的执行该组件命令取版本。启动脚本型组件（Nacos / Seata / Kafka / RocketMQ / RabbitMQ）必须置 `False`：它们的脚本不认版本参数，一执行就把中间件服务拉起来并弹出控制台窗口 |
 | `versions` | List[ComponentVersion] | 该组件的所有可用版本 |
 | `installer_mode` | bool | 是否安装器模式（如 Miniconda 走 `.exe` / `.sh` 静默安装） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
@@ -278,8 +282,12 @@ byte-tools/
 
 方法：
 - `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`
-- `exec_path_in_home(home)` → 在指定 `XXX_HOME` 下查找可执行文件，依次尝试 `path_subdir`/`bin`/`Scripts`/`condabin`/根目录
-- `detect()` → **核心探测逻辑**，返回 `DetectResult`
+- `exec_path_in_home(home)` → 在指定 `XXX_HOME` 下查找可执行文件，依次尝试 `path_subdir`/`bin`/`Scripts`/`condabin`/根目录；Windows 上按 `.exe`/`.bat`/`.cmd`/`.com`/无扩展名依次匹配（Tomcat 的 `catalina` 只有 `.bat`，只找 `.exe` 会漏检）
+- `installed_dirs()` → 列出 `CONFIG_DIR/<key>` 下真实存在的安装目录（排除 `downloads` 缓存）
+- `resolve_uninstall_target(version)` → 把下拉框选中的版本校正为磁盘上真正装着的目录，返回 `(目录, 中文说明)`
+- `uninstall(version)` → 删除安装目录、清理落在本组件目录内的 `XXX_HOME` 与 PATH 条目（不再依赖 `path_subdir` 是否配置）
+- `detect(probe_version=True)` → **核心探测逻辑**，返回 `DetectResult`；`exec_name` 为 None 的组件（如 Jenkins）走 `_detect_by_home_dir()` 兜底：只要 `XXX_HOME` 指向本工具安装目录即视为已配置。界面构建卡片时传 `probe_version=False`，只判定存在、不执行外部命令
+- `exec_name` 在 Windows 上还会被 `shutil.which` 用 PATHEXT 匹配同名异扩展文件，因此 Nacos 必须写成带扩展名的 `startup.cmd`/`startup.sh`——写 `startup` 会命中 Tomcat 的 `startup.bat`，探测就变成了启动 Tomcat
 
 #### `DetectResult`
 
@@ -410,6 +418,16 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
 
 `run()` 内捕获所有异常，失败时打印日志并发射 `done(key, None)`，让调用方降级到默认列表。
 
+#### `VersionProbeWorker(QThread)`
+
+后台执行一次 `_probe_version(exe, args)`，把「跑外部命令取版本号」从 UI 线程挪走：任何命令卡住（等 stdin、被安全软件拦截）都不会让主窗口打不开。
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `done` | `(str,)` | 版本号文本，取不到为空串 |
+
+`ComponentCard` 构建时只做 `detect(probe_version=False)`（不执行任何命令），随后用 `QTimer.singleShot(0, ...)` 延后启动本线程，回填后用 `_render_status_label()` 重写状态胶囊；若期间状态已被重新探测成「未安装」，晚到的结果会被丢弃，不会把标签刷回绿色。
+
 #### `DownloadWorker(QThread)`
 
 R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.4）。按 `urls` 列表顺序依次尝试下载，第一个成功的写入目标文件；单 URL 失败自动切换到下一个，所有源失败才判定为彻底失败。全程中文日志输出。
@@ -443,8 +461,14 @@ R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1
 |------|------|------|
 | `get(name)` | 全平台 | 从 `os.environ` 读取，返回 `Optional[str]` |
 | `is_valid_home(path, exec_name)` | 全平台 | 校验 `XXX_HOME/bin/<exec>` 是否存在 |
-| `set_windows_user_env(name, value)` | Windows | 用 `winreg` 写 `HKCU\Environment`（绕过 setx 1024 字符限制），同时 `setx` 通知系统刷新；含 `%` 用 `REG_EXPAND_SZ`，否则 `REG_SZ` |
-| `append_windows_path(entry)` | Windows | 读 `HKCU\Environment\Path`，按 `;` 分割去重追加 |
+| `set_windows_user_env(name, value)` | Windows | 写 `HKCU\Environment`（含 `%` 用 `REG_EXPAND_SZ`，否则 `REG_SZ`）后广播刷新；`name` 为 `Path` 时只写注册表并直接返回——进程 PATH 是「机器段 + 用户段」合并的结果，整体覆盖会丢掉 `System32` 等机器条目 |
+| `append_windows_path(entry)` | Windows | 读用户 PATH 去重追加（比较前展开 `%VAR%`、忽略大小写），并把该条目补进当前进程 PATH |
+| `_broadcast_env_change()` | Windows | `PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, "Environment")` 异步通知。不用 `setx`（会把超过 1024 字符的 PATH 截断，且它本身要靠 PATH 查找），也不用同步的 `SendMessageTimeout`（遇到不处理消息的顶层窗口会卡住调用方） |
+| `_write_registry_env(name, value)` | Windows | 只写注册表 + 广播，不动当前进程环境（PATH 条目增删的底层出口） |
+| `remove_windows_user_env(name)` / `remove_unix_env(name)` | 对应平台 | 卸载用：删注册表值 / 删 `export` 标记块，并同步从 `os.environ` 移除 |
+| `remove_windows_path_entry(entry)` / `remove_unix_path_entry(entry)` | 对应平台 | 卸载用：按单条目精确移除（注册表 + 当前进程 PATH 同步） |
+| `remove_windows_path_entries_under(root)` / `remove_unix_path_entries_under(root)` | 对应平台 | 卸载用：清掉所有落在组件安装目录内的 PATH 条目，包括目录已被手工删除的历史残留 |
+| `_norm_path` / `_same_path` / `_under_root` | 全平台 | PATH 条目比较工具：展开变量、归一化分隔符，Windows 下再忽略大小写 |
 | `_shell_rc_file()` | UNIX | 按 `SHELL` 环境变量挑选 `.zshrc` / `.bash_profile` / `.bashrc` / `.profile` |
 | `set_unix_env(name, value)` | UNIX | 用 `# >>> byte-tools:<name> >>>` / `# <<< ... <<<` 标记包裹 `export` 语句，幂等更新；返回被修改的文件路径 |
 | `append_unix_path(entry)` | UNIX | 同上，但用 `entry` 作 key 防止重复追加 |
@@ -488,12 +512,14 @@ UI 组成（自上而下）：
 2. **中部行**：版本下拉框 `SearchableComboBox` + "下载并安装" + "配置环境变量" + "取消"按钮
 3. **底部**：进度条 `QProgressBar`
 
-状态胶囊三态（`_detect_status` 设置）：
-- 🟢 `✓ 已配置（PATH）· <version>` — 系统已能找到，禁用"配置环境变量"按钮
+状态胶囊三态（`_detect_status` 设置，全程不执行外部命令）：
+- 🟢 `✓ 已配置（CATALINA_HOME / PATH）· <version>` — 系统已能找到，禁用"配置环境变量"按钮、启用"卸载"；版本号先显示 `版本检测中…`，由 `VersionProbeWorker` 异步回填，`version_probe=False` 的组件不显示版本
 - 🟠 `● 已下载，未配置` — 本地已解压但环境变量未设
 - 🔴 `○ 未安装` — 完全没有
 
 关键方法：
+- `_schedule_version_probe(exe_path)` / `_start_version_probe(exe_path)` — `QTimer.singleShot(0, …)` 延后到事件循环空闲，再起 `VersionProbeWorker` 后台跑 `_probe_version`；`version_probe=False` 或 `version_args` 为空直接跳过
+- `_on_version_probed(text)` — 回填版本并重绘胶囊；状态已不是"已配置"时丢弃结果，避免晚到的回包把卸载后的标签刷回绿色
 - `set_versions(versions)` — 接收抓取线程返回的新版本列表，替换 `component.versions` 并刷新下拉框；保留上次选中版本（按 version 字段匹配）
 - `on_install_clicked()` — 取出当前选中版本，决定下载文件后缀（安装器模式按 `archive_map` 取扩展名；普通模式按 `archive_for_current()` 决定 `.zip` / `.tar.gz` / `.war` / `""`单二进制），构造 `urls = cv.urls_for_current()` 启动 `DownloadWorker(urls, dest)`；下载→解压→自动配置环境变量→刷新状态一条龙流程
 - `_on_download_ok(path, cv)` — 下载成功回调：安装器模式走 `_run_installer`；普通模式走 `extract_archive` + `shutil.move`；**单二进制 / `.war` 重命名逻辑**（kubectl-1.28.4.exe → kubectl.exe / kubectl-1.28.4 → kubectl / jenkins-2.426.war → jenkins.war）；最后自动调用 `_configure_env`
@@ -516,7 +542,7 @@ UI 组成（自上而下）：
 
 UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
-2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
+2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
 3. **主体 QSplitter（垂直）**：
    - 上部 `QScrollArea` + 卡片列表 `ComponentCard`
    - 下部日志区 `QTextEdit`（深色主题、等宽字体）
@@ -528,6 +554,7 @@ UI 组成：
 - `mouseDoubleClickEvent` 双击标题栏切换最大化
 
 关键方法：
+- `_on_cleanup_path_clicked()` — "清理残留 PATH"入口：先用 `find_dead_tool_path_entries()` 只读预览并弹确认框，确认后 `cleanup_dead_tool_path_entries()` 删除死条目、写日志并逐卡片 `_detect_status()` 刷新
 - `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（24 个并发），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
 - `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`
@@ -593,7 +620,9 @@ Component
 | `DownloadWorker.finished_ok` | `ComponentCard._on_download_ok` (lambda 包裹 cv) | 下载成功 |
 | `DownloadWorker.finished_fail` | `ComponentCard._on_download_fail` | 下载失败或取消 |
 | `VersionFetchWorker.done` | `MainWindow._on_versions_fetched` | 抓取完成（含失败） |
+| `VersionProbeWorker.done` | `ComponentCard._on_version_probed` | 后台版本号探测完成（状态已变则丢弃） |
 | `MainWindow.btn_refresh.clicked` | `MainWindow._start_fetch_versions` | 用户点"刷新版本" |
+| `MainWindow.btn_cleanup_path.clicked` | `MainWindow._on_cleanup_path_clicked` | 用户点"清理残留 PATH" |
 | `MainWindow.btn_github.clicked` | `QDesktopServices.openUrl(GITHUB_URL)` | 用户点 GitHub |
 | `MainWindow.btn_donate.clicked` | `MainWindow._on_donate_clicked` | 用户点打赏 |
 | `ComponentCard.btn_install.clicked` | `ComponentCard.on_install_clicked` | 用户点"下载并安装" |
@@ -610,7 +639,9 @@ Component
 | `MIRROR_BASES` | ~326 | R1 国内镜像源基址常量清单（6 个镜像） |
 | `DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_TIMEOUT / DOWNLOAD_RETRY_PER_URL` | ~336 | R1 故障转移参数常量 |
 | `_get_first_working(urls, timeout=10)` | ~341 | R1 公共辅助：按 urls 顺序依次 GET，第一个成功的返回 |
-| `_probe_version(exe, args)` | ~221 | 调用可执行文件抓版本号 |
+| `_probe_version(exe, args)` | ~423 | 静默执行外部命令抓版本号：空 `args` 不执行；Windows 带 `CREATE_NO_WINDOW` + `stdin=DEVNULL`，4 秒超时 |
+| `VersionProbeWorker` | ~427 | 后台线程版 `_probe_version`，供卡片异步回填版本号 |
+| `find_dead_tool_path_entries()` / `cleanup_dead_tool_path_entries()` | ~3196 / ~3212 | 列出 / 删除 PATH 中指向 `CONFIG_DIR` 子树但目录已不存在的残留条目 |
 | `_get(url, timeout=10)` | ~343 | 带重试 + SSL 降级的 HTTP GET |
 | `_sort_semver_desc(vs)` | ~374 | 语义化版本倒序排序 |
 | `_fetch_github_releases_versions(repo, prefix)` | ~2043 | R1 公共辅助：抓取 GitHub Releases 版本列表（Nacos/Seata/RabbitMQ 等复用） |
@@ -733,7 +764,7 @@ _on_versions_fetched(key, versions)
 | `os` | 环境变量读取、文件权限（chmod） |
 | `platform` | 系统与 CPU 架构识别 |
 | `shutil` | `which` 探测、`rmtree`、`move` |
-| `subprocess` | 调用可执行文件抓版本号、运行安装器、`setx` |
+| `subprocess` | 调用可执行文件抓版本号、运行安装器 |
 | `sys` | `sys.argv`、退出码 |
 | `tarfile` | `.tar.gz` / `.tar.xz` 解压 |
 | `traceback` | 异常栈打印到日志 |
@@ -763,11 +794,34 @@ pyinstaller byte-tools.spec --noconfirm --clean
 
 打包配置关键点（见 [byte-tools.spec](./byte-tools.spec)）：
 - `datas`：把 `assets/` 目录打进包内（含窗口图标 byte-tools.png、收款码图等）
+- `icon`：**仅 Windows**（`sys.platform == "win32"` 且文件存在时）指向 `assets/byte-tools.ico`；macOS/Linux 传 `None`，保持原 CI 行为
 - `hidden_imports`：显式声明 PySide6 子模块和 requests 依赖链
 - `excludes`：排除 `tkinter` / `test` / `PySide6.QtNetwork` 等不需要的大模块，减小体积
 - `console=False`：GUI 应用，不显示控制台
 - `upx=False`：UPX 在 macOS 上会导致启动崩溃，统一禁用
 - macOS 走 `BUNDLE` 生成 `.app`，`bundle_identifier=com.rgh.byte-tools`
+
+#### 换 exe 图标（assets/byte-tools.ico 怎么来的）
+
+PyInstaller 在 Windows 只接受 `.ico`，直接喂 PNG 会报错，所以 `assets/byte-tools.png`（512×512）要先转成多尺寸 ICO。改了 logo 后重新生成一次（需要 Pillow，项目 `.venv` 里没有，用系统 python 跑即可，不必加进 `requirements.txt`）：
+
+```python
+from PIL import Image
+im = Image.open("assets/byte-tools.png").convert("RGBA")
+s = min(im.size); im = im.crop(((im.size[0]-s)//2, (im.size[1]-s)//2,
+                               (im.size[0]-s)//2+s, (im.size[1]-s)//2+s))  # ICO 必须正方形
+im.save("assets/byte-tools.ico", format="ICO",
+        sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+```
+
+验证图标是否真的进了 exe（别信"文件变小了/变大了"这类间接感觉，直接读 PE 资源）：
+
+```text
+RT_GROUP_ICON 里应列出 16/24/32/48/64/128/256 七档，且最大那条 RT_ICON 的字节与 .ico 最大图完全一致
+```
+
+> 注意两点：① 窗口/任务栏图标由 `main.py` 里 `setWindowIcon(QIcon("assets/byte-tools.png"))` 控制，与 exe 图标是两回事，换图要同时改；② 原地覆盖 `dist/byte-tools.exe` 后资源管理器可能仍显示旧图，那是 **图标缓存**，换个文件名或 `ie4uinit.exe -show` 即可看到新图标。
+
 
 ### 7.5 模块间依赖图
 
@@ -824,23 +878,30 @@ pyinstaller byte-tools.spec --noconfirm --clean
 - Windows：SmartScreen 弹窗点"更多信息 → 仍要运行"
 - Linux：双击无响应时改用终端 `chmod +x ... && ./...`
 
-### 8.2 Windows 一键启动（start-windows.bat）
+### 8.2 Windows 一键脚本（一键启动项目.bat / 一键打包exe.bat）
 
-仓库根目录提供 `start-windows.bat`，双击或在终端执行即可，**无需手动管理虚拟环境和依赖**：
+仓库根目录提供两个中文命名的自举脚本，双击即可，**无需手动管理虚拟环境和依赖**：
 
 ```bat
-start-windows.bat
+一键启动项目.bat        :: 装配环境后 python main.py
+一键打包exe.bat         :: 装配环境 + 装 PyInstaller 后按 spec 打包
+一键打包exe.bat nopause :: 供其它脚本调用（结束不等待按键）
 ```
 
-脚本流程（详见 [start-windows.bat](./start-windows.bat)）：
-1. 定位 Python 解释器（优先 `py launcher`，回退 `python.exe`）
-2. 校验 Python 版本 ≥ 3.9（PySide6 6.6+ 要求）
-3. 检查 / 创建项目根目录 `.venv`（已存在则跳过）
-4. 用清华 TUNA PyPI 镜像（`https://pypi.tuna.tsinghua.edu.cn/simple`）安装 `requirements.txt` 依赖（符合 R1 国内镜像优先原则）
-5. 失败时回退到阿里云 PyPI 镜像
-6. 用 `.venv` 内的 Python 启动 `main.py`
+两者共用同一套四步流程（打包脚本在 [3/4] 之后多一步 PyInstaller 检查）：
 
-> 参数化设计：脚本顶部 `PY_MIN_MAJOR` / `PY_MIN_MINOR` / `PIP_INDEX_URL` / `PIP_INDEX_URL_BACKUP` / `VENV_DIR` 为可配置参数，便于按需修改。
+| 步骤 | 行为 | 失败出口 |
+| --- | --- | --- |
+| `[1/4]` | 定位解释器：`where py` 命中则依次试 `py -3.12 / -3.13 / -3.11 / -3.10 / -3.9 / -3`，再退到 `python`；用 `-c "sys.exit(0 if version_info >= (3,9) else 1)"` 判定可用性 | 仅记 `BASE_PY` 为空，不中断（有可用 `.venv` 时不需要它） |
+| `[2/4]` | `.venv\Scripts\python.exe` 存在且能 `import sys` 就复用；损坏则 `venv --clear` 重建；缺失则新建 | `:err_no_python` / `:err_venv` |
+| `[3/4]` | `import PySide6, requests` 失败才 `pip install -r requirements.txt`；镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI** | `:err_deps` |
+| `[4/4]` | `python main.py`，或 `python -m PyInstaller --noconfirm byte-tools.spec` 并校验 `dist\byte-tools.exe` | `:err_main` / `:err_no_dist` |
+
+实现约束（改动时请保持）：
+- **编码**：UTF-8（无 BOM）+ CRLF，脚本第 2 行 `chcp 65001 >nul`。本机 `GetACP/GetOEMCP` 实测为 65001，GBK 版脚本双击必乱码；UTF-8 + 自带 `chcp` 在 65001 与强制 936 两种控制台下都验证过显示正常
+- **不用括号块读 errorlevel**：`if %errorlevel% ...` 一律配 `goto`，避免同一括号块内 `%errorlevel%` 在解析期展开导致读到旧值
+- **只在项目目录内动作**：不写注册表、不改系统 PATH、不改全局 Python
+- 中文文件名走 `CreateProcessW` 双击正常；用 Git Bash 以 UTF-8 argv 调用时会因编码转换失败，需用 Python `subprocess` 传绝对路径
 
 ### 8.3 开发者源码运行（跨平台）
 
@@ -1022,7 +1083,7 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 ### 10.2 环境变量写入
 
 - **Windows**：默认写 **用户级** 变量（`HKCU\Environment`），通常不需要管理员权限；若需写系统级需改 `winreg.HKEY_LOCAL_MACHINE`
-- **Windows PATH 长度**：`setx` 有 1024 字符限制，本项目用 `winreg` 直写注册表规避；但用户级 PATH 仍受系统限制
+- **Windows PATH 长度**：不再使用 `setx`（它会把超过 1024 字符的 PATH 截断），一律 `winreg` 直写注册表 + 异步广播 `WM_SETTINGCHANGE`；写用户 PATH 时只按单条目增删，绝不用注册表的用户段覆盖进程 PATH；用户级 PATH 仍受系统总长度限制
 - **UNIX 幂等**：用 marker 标记包裹的写入块可重复更新；但若用户手工编辑了 marker 之间的内容，会被覆盖
 - **UNIX shell 选择**：`_shell_rc_file()` 按 `SHELL` 环境变量选文件，若用户用了 fish / nushell 等非 POSIX shell，需自行扩展
 
@@ -1065,6 +1126,13 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 - 旧 `url_map` 字段仍保留向后兼容：极少数组件若未升级到 R1 多源模式，`urls_for_current()` 会把单 URL 包成单元素列表返回，下载逻辑一致
 - 单二进制组件（kubectl 无扩展名）在 Linux/Mac 下 `_on_download_ok` 会 `chmod +x`；Jenkins `.war` 单文件直接重命名落位，不解压
 
+### 10.10 探测阶段绝不执行启动脚本
+
+- **教训**：早期 Nacos 的 `exec_name="startup"`，Windows 上被 PATHEXT 匹配到 Tomcat 的 `startup.bat`，而 `startup.bat` 无条件 `call catalina.bat start` —— 打开界面就等于悄悄启动了一台 Tomcat，还要用户关掉那个窗口后主界面才出现
+- 现有三重防线：① `exec_name` 带扩展名（`startup.cmd` / `startup.sh`）避免同名异扩展命中；② `Component.version_probe=False`（Nacos / Seata / Kafka / RocketMQ / RabbitMQ）让探测只判定存在；③ `_probe_version` 遇到空 `version_args` 直接返回，不裸跑命令
+- 版本探测统一在 `VersionProbeWorker` 后台线程执行，且带 `CREATE_NO_WINDOW` + `stdin=DEVNULL` + 4 秒超时，既不弹控制台也不会卡 UI 线程
+- Kafka 在 Windows 上的可执行脚本位于 `bin/windows`（`bin` 下只有无扩展名的 shell 脚本），故其 `path_subdir` 按平台取 `bin/windows` / `bin`
+
 ---
 
 ## 附录：关键文件快速索引
@@ -1076,7 +1144,7 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 | 代码 Wiki（本文档） | [CODE_WIKI.md](./CODE_WIKI.md) |
 | 全部源码 | [main.py](./main.py) |
 | 依赖清单 | [requirements.txt](./requirements.txt) |
-| Windows 一键启动脚本 | [start-windows.bat](./start-windows.bat) |
+| Windows 一键脚本 | [一键启动项目.bat](./一键启动项目.bat) / [一键打包exe.bat](./一键打包exe.bat)（见 8.2） |
 | 打包配置 | [byte-tools.spec](./byte-tools.spec) |
 | 忽略规则 | [.gitignore](./.gitignore) |
 | MIT 许可证 | [LICENSE](./LICENSE) |

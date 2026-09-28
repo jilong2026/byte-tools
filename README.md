@@ -105,7 +105,8 @@
 | 🌐 **动态版本抓取** | 后台线程并发调用各组件官方 API / 索引，拉取最新可用版本，抓取失败自动降级到内置默认清单 |
 | 🔍 **智能检测** | 优先检查 `XXX_HOME` 环境变量，然后回退到 `PATH` 中的可执行文件；探测到即视为已配置 |
 | 🎯 **可搜索下拉框** | 版本多？直接键入关键字实时过滤，回车即可选中 |
-| 🛠️ **环境变量写入** | Windows：`winreg` + `setx`；macOS/Linux：写入带标记的 shell 配置块，幂等更新 |
+| 🛠️ **环境变量写入** | Windows：`winreg` 直写注册表 + 异步广播 `WM_SETTINGCHANGE`（不用 `setx`，避免 1024 字符截断）；macOS/Linux：写入带标记的 shell 配置块，幂等更新 |
+| 🧹 **卸载与残留清理** | 卸载以磁盘上真正装着的目录为准，同步清理 `XXX_HOME` 与该组件目录内的 PATH 条目；标题栏「清理残留 PATH」可一键删除指向本工具目录但已不存在的死条目 |
 | 🚀 **安装器模式** | 支持 `.exe` / `.sh` 静默安装（Miniconda），无弹窗交互 |
 | 📊 **实时反馈** | 进度条显示下载速度和大小，可随时取消；日志区彩色分级输出 |
 | 🎨 **现代化界面** | 圆角卡片 + 阴影、渐变进度条、状态胶囊标签、无边框自定义窗口、窗口图标（任务栏/Alt+Tab 可见）、底部状态栏显示"组件总数：24 个" |
@@ -216,18 +217,27 @@
 
 ### 0. Windows 用户一键启动（推荐）
 
-项目根目录下提供了一键启动脚本 [`start-windows.bat`](./start-windows.bat)，**双击即可运行**，无需任何命令行操作：
+项目根目录下提供两个中文一键脚本，**双击即可运行**，无需任何命令行操作：
 
-1. 检查 Python 版本（要求 ≥ 3.9，未满足会给出提示并退出）
-2. 自动创建 `.venv` 虚拟环境
-3. 使用 **清华 PyPI 镜像** 安装 `requirements.txt` 中的依赖（国内速度更快）
-4. 启动 `main.py`，弹出 GUI 窗口
+| 脚本 | 作用 |
+| --- | --- |
+| `一键启动项目.bat` | 准备环境后直接启动 GUI（源码方式，改完代码立刻生效） |
+| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/byte-tools.exe` |
+
+两者共用同一套自动装配流程：
+
+1. 查找可用的 Python（要求 ≥ 3.9；优先 `py -3.12/3.13/…`，找不到再退到 `python`）
+2. 复用已有的 `.venv`；缺失或损坏时自动创建 / 重建（`--clear`）
+3. 依赖缺失时安装 `requirements.txt`，镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI**；打包脚本额外安装 PyInstaller
+4. 启动 `main.py`，或按 `byte-tools.spec` 打包并在结束时显示产物大小与时间
 
 ```text
-双击 start-windows.bat  →  自动配置 + 启动 GUI
+双击 一键启动项目.bat  →  自动配置 + 启动 GUI
+双击 一键打包exe.bat   →  自动配置 + 生成 dist/byte-tools.exe
 ```
 
-> 💡 脚本会自动选择国内镜像源，避免 PyPI 官方源在境内的访问慢/超时问题。如需自定义依赖来源，请改用手动方式。
+> 💡 脚本只读写项目目录内的 `.venv`，不会修改系统 PATH，也不会动系统全局 Python。
+> 想脚本化调用可加参数 `nopause`（跑完不等待按键）。
 
 ### 手动方式（macOS / Linux 用户或想自定义者）
 
@@ -403,6 +413,9 @@ CONFIG_DIR = Path.home() / ".env-tools"
 
 ### 本地打包（单平台）
 
+Windows 用户直接双击根目录的 `一键打包exe.bat`（自动准备 `.venv` + PyInstaller）。
+手动方式：
+
 ```bash
 pip install pyinstaller
 pyinstaller byte-tools.spec --noconfirm --clean
@@ -412,6 +425,8 @@ pyinstaller byte-tools.spec --noconfirm --clean
 - Windows：`dist/byte-tools.exe`
 - macOS：`dist/byte-tools.app`
 - Linux：`dist/byte-tools`
+
+> 🎨 Windows 产物已带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出的 16~256 七档尺寸）。换 logo 后重新生成 ICO 的方法见 [CODE_WIKI.md](./CODE_WIKI.md) 7.4；若覆盖打包后资源管理器仍是旧图标，那是 Windows 图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
 
 ### 自动发布三平台版本（推荐）
 
@@ -431,7 +446,8 @@ git push origin v1.0.1
 ```
 byte-tools/
 ├── main.py                             # 主程序（含 UI 与全部逻辑）
-├── start-windows.bat                   # Windows 一键启动脚本（检查 Python → 创建 .venv → 清华镜像装依赖 → 启动 GUI）
+├── 一键启动项目.bat                # 一键脚本：自动装环境（.venv + 依赖）后启动 GUI
+├── 一键打包exe.bat                 # 一键脚本：自动装环境后用 PyInstaller 产出 exe
 ├── requirements.txt                    # Python 依赖清单
 ├── byte-tools.spec                 # PyInstaller 打包配置
 ├── README.md                           # 中文说明（本文件）
@@ -474,7 +490,7 @@ byte-tools/
 可以，程序内置了 `tarfile.open("r:xz")` 逻辑（用于 MySQL Linux 版）。
 
 **Q7. Windows 上 PATH 超过 1024 字符怎么办？**
-`setx` 有 1024 字符限制，工具会额外通过 `winreg` 直接写入注册表来规避该限制。
+工具不使用 `setx`（它有 1024 字符截断），一律用 `winreg` 直接写入 `HKCU\Environment`，再异步广播 `WM_SETTINGCHANGE` 通知其他进程；PATH 按单条目增删，不会用注册表的用户段覆盖当前进程的 PATH。
 
 **Q8. Miniconda 静默安装到哪里？**
 安装到 `~/.env-tools/conda/conda-<版本>/`，并把 `CONDA_HOME` 与 `bin/Scripts` 加入环境变量。
@@ -512,7 +528,7 @@ RabbitMQ 运行时依赖 Erlang，Windows 上必须先安装 Erlang 再装 Rabbi
 - **HTTP 客户端**：[requests](https://requests.readthedocs.io/)
 - **压缩包解压**：Python 标准库 `zipfile` + `tarfile`
 - **环境变量**：
-  - Windows：`winreg` 直写注册表 + `setx` 通知系统
+  - Windows：`winreg` 直写注册表 + 异步广播 `WM_SETTINGCHANGE`（不用 `setx`）
   - macOS/Linux：写入 shell 配置文件（`.zshrc` / `.bash_profile` / `.bashrc` / `.profile`）
 - **多线程**：`QThread` 后台下载与版本抓取，UI 不阻塞
 - **架构**：单文件应用，`main.py` 内含 UI、数据类、业务逻辑

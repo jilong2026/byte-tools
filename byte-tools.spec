@@ -16,6 +16,10 @@ from pathlib import Path
 APP_NAME = "byte-tools"
 SPEC_DIR = Path(SPECPATH).resolve() if 'SPECPATH' in globals() else Path.cwd()
 
+# Windows 的 exe 图标必须是 .ico（PyInstaller 不接受 PNG），由 assets/byte-tools.png 生成，
+# 重新生成方式见 CODE_WIKI.md 7.4。macOS/Linux 暂不设图标，保持原有 CI 行为。
+ICON_WIN = SPEC_DIR / "assets" / "byte-tools.ico"
+
 # 打进包里的静态资源（打赏二维码、应用截图等）
 datas = [
     (str(SPEC_DIR / "assets"), "assets"),
@@ -88,7 +92,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon=str(SPEC_DIR / "assets" / "icon.icns"),  # 有 icon 时可开启
+    icon=str(ICON_WIN) if sys.platform == "win32" and ICON_WIN.exists() else None,
 )
 
 # ---------------------------------------------------------------------------

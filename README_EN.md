@@ -16,7 +16,7 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 - 🇨🇳 **China mirror priority.** Since v2.0 every component ships with ≥2 China mirrors (Huawei Cloud / Tsinghua TUNA / Aliyun / USTC / NJU) plus one official source, with multi-source failover — the official site is only used after all China mirrors fail (404 / timeout). Full Chinese logs report which mirror failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration.
 - 🔍 **Smart detection.** Checks whether `JAVA_HOME` and friends already exist and are valid; missing/invalid entries are flagged for reconfiguration.
 - 🛠️ **Environment-variable management.**
-    - Windows: writes to `HKCU\Environment` via `winreg` and refreshes with `setx`.
+    - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
     - macOS / Linux: appends idempotent `export` blocks (with begin/end markers) to `.zshrc` / `.bash_profile` / `.bashrc` / `.profile`.
 - 📊 **Live feedback.** Progress bar with real-time byte counts, cancel support, colour-coded log output (info / ok / warn / error).
 - 🎨 **Modern UI.** Frameless custom title bar with a window icon (visible in the taskbar / Alt+Tab), rounded cards with drop shadows, gradient progress bars, hover/press animations, and a bottom status bar showing "Total components: 24".
@@ -145,18 +145,29 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 ### 0. One-click Start on Windows (Recommended)
 
-The project ships a one-click launcher [`start-windows.bat`](./start-windows.bat) in the root directory — **just double-click it**, no command-line work needed:
+Two Chinese-named one-click scripts live in the project root — **just double-click**, no command-line work needed:
 
-1. Checks the Python version (≥ 3.9 required; exits with a hint if not satisfied)
-2. Creates a `.venv` virtual environment automatically
-3. Installs dependencies from `requirements.txt` via the **Tsinghua PyPI mirror** (faster inside China)
-4. Launches `main.py` and brings up the GUI
+| Script | Purpose |
+| --- | --- |
+| `一键启动项目.bat` | Prepares the environment, then launches the GUI from source |
+| `一键打包exe.bat` | Prepares the environment, then runs PyInstaller to build `dist/byte-tools.exe` |
+
+Both share the same bootstrap flow:
+
+1. Locate a usable Python (≥ 3.9; prefers `py -3.12/3.13/…`, falls back to `python`)
+2. Reuse the existing `.venv`; create or rebuild (`--clear`) it when missing or broken
+3. Install `requirements.txt` when needed, mirroring **Tsinghua TUNA → Aliyun → official PyPI**; the build script additionally installs PyInstaller
+4. Launch `main.py`, or build with `byte-tools.spec` and report the produced file size and timestamp
 
 ```text
-double-click start-windows.bat  →  auto-configure + launch GUI
+double-click 一键启动项目.bat  →  auto-configure + launch GUI
+double-click 一键打包exe.bat   →  auto-configure + build dist/byte-tools.exe
 ```
 
-> 💡 The script uses the Tsinghua PyPI mirror to avoid the slow / timeout-prone access to the official PyPI source from inside China. If you need a custom dependency source, use the manual flow below.
+> 💡 The scripts only touch `.venv` inside the project directory — they never modify the system PATH or your global Python.
+> Pass `nopause` when invoking them from another script (skips the final "press any key").
+
+> 🎨 The Windows build carries the project icon (`assets/byte-tools.ico`, derived from `assets/byte-tools.png` at 16–256 px). See [CODE_WIKI.md](./CODE_WIKI.md) 7.4 to regenerate it after a logo change. If Explorer still shows the old icon after an in-place rebuild, that is the Windows icon cache — rename the file or run `ie4uinit.exe -show`.
 
 ### Manual setup (for macOS / Linux or customization)
 
@@ -277,8 +288,8 @@ Yes — the most recent installation wins. The new `bin` directory is appended t
 **Q4. `.tar.xz` archives?**
 Supported (MySQL Linux distribution uses it).
 
-**Q5. `setx` truncation on Windows?**
-The tool bypasses `setx`'s 1024-char limit by writing to the registry with `winreg`.
+**Q5. PATH longer than 1024 characters on Windows?**
+The tool never calls `setx` (it truncates at 1024 chars). It writes `HKCU\Environment` directly with `winreg` and broadcasts `WM_SETTINGCHANGE`; PATH is edited entry by entry so the process PATH is never overwritten with the user-only portion.
 
 **Q6. Why does Docker on Windows say "no download available"?**
 Docker Desktop must use its official installer (it involves WSL2 / Hyper-V integration, service registration and other system-level configuration) and cannot be handled by a simple "download zip → extract" flow. The tool does not auto-download Docker on Windows; it directs you to [docker.com](https://www.docker.com/products/docker-desktop/) to fetch the installer manually. macOS / Linux users get the normal download flow.
@@ -307,7 +318,8 @@ No. The "Download & Install" button is a **one-stop flow**: download → extract
 ```
 byte-tools/
 ├─ main.py              # entry point (UI + logic)
-├─ start-windows.bat    # Windows one-click launcher (checks Python → creates .venv → installs deps via Tsinghua PyPI mirror → launches GUI)
+├─ 一键启动项目.bat      # One-click launcher: auto-provisions .venv + deps, then starts the GUI
+├─ 一键打包exe.bat       # One-click builder: auto-provisions env + PyInstaller, then builds the exe
 ├─ requirements.txt     # dependency list
 ├─ byte-tools.spec  # PyInstaller build spec
 ├─ README.md             # Chinese documentation
