@@ -15,6 +15,9 @@
 # 变更记录（2026-09）：Intel 通用包 byte-tools-macos.zip 已停用，原因见 matrix 中的说明
 # 变更记录（2026-09）：Release 改为全自动发布 —— 矩阵各平台先传草稿暂存区，
 #                    sync-to-gitee 任务核对齐全后自动取消草稿，无需人工点 Publish
+# 变更记录（2026-09）：Gitee 同步逻辑抽到 scripts/sync_gitee.sh —— 加入网络重试
+#                    （境外 runner 连 gitee.com 会偶发 curl 35）、幂等复用
+#                    （Re-run 不产生重复 Release/附件）、上传后附件清单校验
 
 name: release
 
@@ -227,6 +230,11 @@ jobs:
   sync-to-gitee:
     name: 同步产物到 Gitee Release
     needs: build  # 必须等所有平台构建完成，否则下载不到产物
+    # 默认用 GitHub 境外 runner。已知风险：境外连 gitee.com:443 会偶发
+    # curl(35) SSL_ERROR_SYSCALL（TLS 握手被重置），脚本已做指数退避重试。
+    # 若多次重试仍失败，把这一行改成 runs-on: self-hosted，
+    # 并把 runner 部署在能直连 gitee.com 的国内机器上即可，脚本本身无需改动
+    # （self-hosted 机器需预装 gh CLI 与 curl，用于下载 GitHub Release 产物）。
     runs-on: ubuntu-latest
     steps:
       # 1. 检出代码（仅用于触发 Gitee 同步时拿到默认分支信息）
@@ -268,88 +276,45 @@ jobs:
           fi
           echo "GitHub Release ${TAG_NAME} 已发布"
 
-      # 4. 调 Gitee OpenAPI 创建 Release（自动绑定 tag）
-      #    Gitee POST /v5/repos/{owner}/{repo}/releases 行为：
-      #    - 如果 tag 不存在，会自动创建一个 tag 指向 target_commitish
-      #    - 如果 tag 已存在，直接绑定现有 tag
-      - name: 创建 Gitee Release
-        id: create_gitee_release
+
+      # 4. 同步产物到 Gitee Release（实际逻辑在 scripts/sync_gitee.sh）
+      #    为什么抽成脚本而不是在这里裸写 curl：
+      #    - 境外 runner 连 gitee.com:443 会偶发 curl(35) SSL_ERROR_SYSCALL
+      #      （TLS 握手被重置）。脚本对每个请求做指数退避重试，单次抖动不再判死 job。
+      #    - 脚本幂等：Release 已存在就复用 ID，附件已存在就跳过上传，
+      #      所以失败后直接 Re-run 本 job 是安全的，不会产生重复 Release 或重复附件。
+      #    - 上传完成后回查附件清单做校验，白名单产物缺一个就失败，不会静默少传。
+      - name: 同步产物到 Gitee Release
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_OWNER: ${{ env.GITEE_OWNER }}
           GITEE_REPO: ${{ env.GITEE_REPO }}
           TAG_NAME: ${{ github.ref_name }}
+          ASSETS_DIR: ./assets
+          TARGET_COMMITISH: master
+          # 单次请求最多尝试 4 次（退避 10s / 20s / 40s），总耗时可控
+          MAX_ATTEMPTS: '4'
         run: |
           set -e
-          echo "[1/2] 为 Gitee tag ${TAG_NAME} 创建 Release..."
-          RELEASE_RESP=$(curl -sS -X POST \
-            "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases" \
-            -F "access_token=${GITEE_TOKEN}" \
-            -F "tag_name=${TAG_NAME}" \
-            -F "name=${TAG_NAME}" \
-            -F "body=跨平台构建产物（与 GitHub Release 同步生成）" \
-            -F "target_commitish=master")
-          # 解析响应，提取 release_id；如果失败打印完整响应便于排查
-          RELEASE_ID=$(echo "${RELEASE_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
-          if [ -z "${RELEASE_ID}" ]; then
-            echo "错误：创建 Gitee Release 失败，原始响应："
-            echo "${RELEASE_RESP}"
-            exit 1
-          fi
-          echo "Gitee Release 创建成功，ID: ${RELEASE_ID}"
-          # 通过 GITHUB_OUTPUT 把 release_id 暴露给后续 step
-          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          chmod +x ./scripts/sync_gitee.sh
+          ./scripts/sync_gitee.sh
 
-      # 5. 遍历 ./assets/ 下产物，逐一上传到 Gitee Release
-      #    Gitee attach_files API：POST /v5/repos/{owner}/{repo}/releases/{release_id}/attach_files
-      #    单次请求大小限制 100MB，PySide6 打包产物一般 50-80MB，足够
-      #    白名单：gh release download 会把 GitHub Release 上的全部附件都拉下来（含手动
-      #    附加的仓库图片等），而 Gitee 侧只应出现与 matrix 一致的构建产物，故非白名单文件跳过。
-      - name: 上传所有产物到 Gitee Release
+      # 5. 收尾：把两边 Release 地址都打出来，方便一眼核对
+      - name: 打印发布结果
         env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          GITEE_OWNER: ${{ env.GITEE_OWNER }}
-          GITEE_REPO: ${{ env.GITEE_REPO }}
-          RELEASE_ID: ${{ steps.create_gitee_release.outputs.release_id }}
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          set -e
-          echo "[2/2] 上传产物到 Gitee Release ${RELEASE_ID}..."
-          # 白名单须与 build job matrix 的 artifact_name / artifact_extra 保持一致；
-          # 增删构建平台时必须同步维护，否则新产物会被跳过
-          UPLOADED=0
-          SKIPPED=0
-          for FILE in ./assets/*; do
-            [ -e "${FILE}" ] || continue
-            BASE_NAME=$(basename "${FILE}")
-            case "${BASE_NAME}" in
-              byte-tools.exe|byte-tools-windows-x64.zip|byte-tools-macos-arm64.zip|byte-tools-linux-x64)
-                ;;
-              *)
-                echo "  -- 跳过非产物文件: ${BASE_NAME}"
-                SKIPPED=$((SKIPPED + 1))
-                continue
-                ;;
-            esac
-            echo "  -> 上传 ${BASE_NAME}"
-            UPLOAD_RESP=$(curl -sS -X POST \
-              "https://gitee.com/api/v5/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${RELEASE_ID}/attach_files" \
-              -F "access_token=${GITEE_TOKEN}" \
-              -F "file=@${FILE}")
-            # Gitee 上传成功响应包含 attach_file_url 字段；失败时输出响应
-            ATTACH_URL=$(echo "${UPLOAD_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('attach_file_url','') or d.get('browser_download_url',''))" 2>/dev/null || echo "")
-            if [ -n "${ATTACH_URL}" ]; then
-              echo "     上传成功: ${ATTACH_URL}"
-              UPLOADED=$((UPLOADED + 1))
-            else
-              # 任一产物上传失败即整体失败，避免「少传了某个平台」被静默放过
-              echo "错误：${BASE_NAME} 上传失败，原始响应："
-              echo "${UPLOAD_RESP}"
-              exit 1
-            fi
-          done
-          echo "Gitee Release 同步完成：上传 ${UPLOADED} 个产物，跳过 ${SKIPPED} 个非产物文件"
-          # 白名单一个都没匹配上（例如产物被改名）说明这次同步是空跑，直接失败避免静默漏传
-          if [ "${UPLOADED}" -eq 0 ]; then
-            echo "错误：没有任何产物被上传，请检查白名单与 GitHub Release 附件名是否一致"
-            exit 1
-          fi
+          echo "GitHub Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG_NAME}"
+          echo "Gitee  Release: https://gitee.com/${{ env.GITEE_OWNER }}/${{ env.GITEE_REPO }}/releases/${TAG_NAME}"
+
+      # 6. 失败兜底指引：本 job 在「GitHub Release 已发布」之后执行，
+      #    所以走到这里说明 GitHub 侧产物是全的，只有 Gitee 侧需要补
+      - name: Gitee 同步失败处理指引
+        if: failure()
+        run: |
+          echo "::warning::Gitee 同步失败，但 GitHub Release 已发布成功，产物齐全。"
+          echo "处理方式："
+          echo "  1) 直接 Re-run 本 job —— 脚本幂等，可安全重试；"
+          echo "  2) 若重试仍失败，说明当前 runner 到 gitee.com 的链路不通："
+          echo "     a. 把本 job 的 runs-on 改为 self-hosted，runner 部署在能直连 gitee.com 的国内机器上；"
+          echo "     b. 或在本机手动执行 scripts/sync_gitee.sh（需 GITEE_TOKEN 与已下载的产物目录）。"

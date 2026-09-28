@@ -464,7 +464,14 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-几分钟后到 Releases 页面就能看到三个平台的产物（全自动发布，无需手动点 Publish）。
+几分钟后到两边的 Releases 页面就能看到三个平台的产物（全自动发布，无需手动点 Publish）。
+
+**Gitee 同步的可靠性设计**（逻辑在 `scripts/sync_gitee.sh`）：
+
+- GitHub runner 在境外，连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`（TLS 握手被重置）。脚本对每个请求做指数退避重试（默认 4 次：10s / 20s / 40s），单次网络抖动不会判死整个 job。
+- 脚本幂等：Release 已存在就复用 ID、附件已存在就跳过上传，所以**同步失败后直接 Re-run 该 job 是安全的**，不会产生重复 Release 或重复附件。
+- 上传完成后回查一次附件清单，白名单产物缺一个就报错，避免「少传了某个平台」被静默放过。
+- 万一重试后仍失败（runner 到 Gitee 链路不通）：GitHub Release 此时已发布成功，可以先把本 job 的 `runs-on` 改成 `self-hosted`（runner 部署在能直连 gitee.com 的国内机器），或在本机手动执行 `scripts/sync_gitee.sh`。
 
 ---
 
@@ -486,6 +493,8 @@ byte-tools/
 ├── .github/
 │   └── workflows/
 │       └── release.yml                 # 三平台自动构建 + 发布（含 Gitee 同步）
+├── scripts/
+│   └── sync_gitee.sh                   # Gitee Release 同步脚本（重试 + 幂等 + 校验）
 └── assets/                             # 静态资源
     ├── byte-tools-pt.png               # 主界面截图
     ├── byte-tools.png                  # 应用窗口图标
