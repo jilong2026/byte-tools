@@ -101,7 +101,8 @@
 |------|------|
 | 🖥️ **跨平台** | 一份代码同时支持 Windows / macOS / Linux；ARM64 分支自动切换（如 Apple Silicon 下 JDK 走 aarch64、Node 走 arm64） |
 | 📦 **一键装配** | 内置 **24 个** 常用开发组件，从下载 → 解压 → 环境变量配置全流程自动化 |
-| 🇨🇳 **国内镜像优先** | v2.0 起内置 R1 规则：每个组件 ≥2 个国内镜像（华为云 / 清华 TUNA / 阿里云 / 中科大 / 南大等）+ 1 个官网地址，多源故障转移，全部 404/超时后才回退官网，全程中文日志，**无需手动改 URL** |
+| 🇨🇳 **国内镜像优先** | v2.0 起内置 **11 家大陆镜像基址**（华为云 repo / 华为云 mirrors / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud files）+ **3 个 GitHub 加速器**（ghproxy.net / gh-proxy.com / ghfast.top），多源故障转移，全部失败后才回退官网，全程中文日志，**无需手动改 URL**。个别组件没有大陆源：mongodb、postgresql 官网单源；nacos、bun 与 git 的 macOS/Linux 源码包走 GitHub 加速器；kubectl 优先 DaoCloud 代理；seata 走 Apache 分发目录（八家大陆镜像）。详见「配置与自定义 → 更换下载镜像」 |
+| 🛡️ **下载可靠性** | 所有请求固定携带专用 User-Agent（部分高校镜像站会屏蔽默认 UA 返回 403）；下载完成后校验实际字节数，遇到镜像站"假 200 空文件"自动换下一个源，不会留下坏包 |
 | 🌐 **动态版本抓取** | 后台线程并发调用各组件官方 API / 索引，拉取最新可用版本，抓取失败自动降级到内置默认清单 |
 | 🔍 **智能检测** | 优先检查 `XXX_HOME` 环境变量，然后回退到 `PATH` 中的可执行文件；探测到即视为已配置 |
 | 🎯 **可搜索下拉框** | 版本多？直接键入关键字实时过滤，回车即可选中 |
@@ -119,14 +120,24 @@
 
 > v2.0 起组件数从 8 个扩展至 **24 个**，覆盖语言运行时 / 构建工具 / 应用服务器 / 数据库 / 容器与编排 / CI/CD / 消息队列 / 服务发现 / 搜索引擎 / 版本控制 / Python 发行版等常见开发场景。
 
+界面按 **三个 Tab 页**（顶部横向，标题自带组件数量）分组展示（下方小节仍按技术类别详述）：
+
+| Tab | 数量 | 归类标准 | 组件 |
+|-----|------|----------|------|
+| **开发环境** | 9 | 装完进 PATH，直接用来写 / 编译 / 打包代码 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle |
+| **开发软件** | 12 | 本地跑起来给项目当依赖的服务 | Tomcat、MySQL、MongoDB、PostgreSQL、Elasticsearch、Nacos、Seata、Kafka、RocketMQ、Pulsar、ActiveMQ、RabbitMQ |
+| **其它软件** | 3 | 不参与写代码的容器 / 编排 / CI 外围 | Docker、kubectl、Jenkins |
+
+> 想调整归类：只改 `main.py` 里的 `COMPONENT_CATEGORY_OF` 一行即可，界面自动跟着变。
+
 ### 语言运行时
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **JDK** | JDK (Temurin) | `JAVA_HOME` | `java -version` | 21 / 17 (LTS) / 11 / 8 |
+| **JDK** | JDK (Temurin) | `JAVA_HOME` | `java -version` | 21 / 17 (LTS) / 11 / 8（下载前先点"⟳ 刷新版本"，详见表格下方提示） |
 | **Python** | Python | — (走 PATH) | `python --version` | 3.12 / 3.11 / 3.10 / 3.9 |
 | **Node.js** | Node.js | `NODE_HOME` | `node --version` | 20 LTS / 18 LTS / 16 |
-| **Go** | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.22.x / 1.21.x |
+| **Go** | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | **Bun** | Bun | — (走 PATH) | `bun --version` | 1.x |
 
 ### 构建工具
@@ -146,16 +157,16 @@
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **MySQL** | MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x / 5.7.x |
-| **MongoDB** | MongoDB | — (走 PATH) | `mongod --version` | 7.x / 6.x（⚠️ macOS 不支持自动下载，请用 `brew install mongodb-community`） |
-| **PostgreSQL** | PostgreSQL | `PG_HOME` | `psql --version` | 16.x / 15.x（⚠️ macOS 不支持自动下载，请用 `brew install postgresql`） |
+| **MySQL** | MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x（阿里 / 华为云镜像 + 官网） |
+| **MongoDB** | MongoDB | — (走 PATH) | `mongod --version` | 8.0.x / 8.0.0（支持 Windows / Linux；⚠️ macOS 不支持自动下载，请用 `brew install mongodb-community`；实测无国内镜像，官网单源） |
+| **PostgreSQL** | PostgreSQL | `PG_HOME` | `psql --version` | 17.x / 16.x（⚠️ 仅 Windows 支持自动下载，Linux 请用发行版包管理器、macOS 请用 `brew install postgresql`；实测无国内镜像，官网单源） |
 
 ### 容器与编排
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **Docker** | Docker Desktop | — (走 PATH) | `docker --version` | latest（⚠️ Windows 不支持自动下载，须用安装器，请去 docker.com 手动下载） |
-| **kubectl** | Kubernetes CLI | — (走 PATH) | `kubectl version --client` | 1.29.x / 1.28.x |
+| **Docker** | Docker Desktop | — (走 PATH) | `docker --version` | 27.x / 26.x（⚠️ Windows 不支持自动下载，须用安装器，请去 docker.com 手动下载） |
+| **kubectl** | Kubernetes CLI | — (走 PATH) | `kubectl version --client` | 1.31.x / 1.30.x（三平台均支持；优先 DaoCloud 代理源；Linux/macOS 下载的是无扩展名单文件，需 `chmod +x` 后运行） |
 
 ### CI/CD
 
@@ -167,30 +178,30 @@
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **RabbitMQ** | RabbitMQ | `RABBITMQ_HOME` | `rabbitmqctl version` | 3.13.x / 3.12.x（⚠️ Windows 不支持自动下载，依赖 Erlang，请去 rabbitmq.com 手动下安装器） |
-| **Apache Kafka** | Apache Kafka | `KAFKA_HOME` | `kafka-server-start.sh --version` | 3.7.x / 3.6.x |
-| **Apache RocketMQ** | Apache RocketMQ | `ROCKETMQ_HOME` | `mqadmin version` | 5.x / 4.x |
+| **RabbitMQ** | RabbitMQ | `RABBITMQ_HOME` | `rabbitmqctl version` | 4.0.x / 3.13.x（⚠️ Windows 不支持自动下载，依赖 Erlang，请去 rabbitmq.com 手动下安装器） |
+| **Apache Kafka** | Apache Kafka | `KAFKA_HOME` | `kafka-server-start.sh --version` | 4.1.x / 3.9.x |
+| **Apache RocketMQ** | Apache RocketMQ | `ROCKETMQ_HOME` | `mqadmin version` | 5.x |
 | **Apache Pulsar** | Apache Pulsar | `PULSAR_HOME` | `pulsar version` | 3.x |
-| **ActiveMQ** | Apache ActiveMQ | `ACTIVEMQ_HOME` | `activemq --version` | 5.18.x / 5.17.x |
+| **ActiveMQ** | Apache ActiveMQ | `ACTIVEMQ_HOME` | `activemq --version` | 6.3.x / 5.18.x |
 
 ### 服务发现 / 事务
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **Nacos** | Nacos | `NACOS_HOME` | `sh startup.sh -m standalone` | 2.x / 1.x（国内无官方镜像，走 ghproxy / gh.idayer.com 加速 GitHub releases） |
-| **Seata** | Seata | `SEATA_HOME` | `sh seata-server.sh -h` | 2.x / 1.x（国内无官方镜像，走 ghproxy / gh.idayer.com 加速 GitHub releases） |
+| **Nacos** | Nacos | `NACOS_HOME` | `sh startup.sh -m standalone` | 2.x（发布在 GitHub Releases，无真镜像，走 ghproxy.net / gh-proxy.com / ghfast.top 加速） |
+| **Seata** | Seata | `SEATA_HOME` | `sh seata-server.sh -h` | 2.x（走 Apache 分发目录，华为云 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大等八家大陆镜像） |
 
 ### 搜索引擎
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **Elasticsearch** | Elasticsearch | `ES_HOME` | `elasticsearch --version` | 8.x / 7.x |
+| **Elasticsearch** | Elasticsearch | `ES_HOME` | `elasticsearch --version` | 9.x / 8.x（华为云镜像 + 官网；镜像只同步新版本，老版本由故障转移兜底） |
 
 ### 版本控制
 
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
-| **Git** | Git | — | `git --version` | MinGit for Windows / 系统自带 |
+| **Git** | Git | — | `git --version` | MinGit for Windows（华为云 / npmmirror 国内源优先）/ macOS、Linux 不提供自动下载（上游只有源码包，界面提示用 apt / dnf / yum / brew 安装） |
 
 ### Python 发行版
 
@@ -198,7 +209,7 @@
 |------|--------|----------|----------|----------|
 | **Miniconda** | Miniconda | `CONDA_HOME` | `conda --version` | py312 / py311 / py310 |
 
-> 💡 启动应用后，点 **"⟳ 刷新版本"** 按钮会从各组件官方源拉取最新版本列表。抓取失败会自动回退到硬编码的内置清单，保证程序在离线环境下也可用。
+> 💡 启动应用后，点 **"⟳ 刷新版本"** 按钮会从各组件官方源拉取最新版本列表。抓取失败会自动回退到硬编码的内置清单，保证程序在离线环境下也可用。JDK 请特别注意：清华 / 南大镜像上要带 build 号的确切文件名，只有"刷新版本"后才能解析出来——**先点刷新，再下载**。
 
 ---
 
@@ -305,7 +316,7 @@ python main.py
    - 或者输入关键字（如 `21`、`3.12`、`LTS`）实时过滤
 
 3. **点击"下载并安装"**（一条龙流程） → 工具会自动依次执行：
-   - ⬇️ 流式下载到 `~/.env-tools/<组件>/downloads/`（按 R1 规则优先国内镜像，可随时取消）
+   - ⬇️ 流式下载到 `~/.env-tools/<组件>/downloads/`（国内镜像优先、失败自动换源，可随时取消）
    - 📂 解压到 `~/.env-tools/<组件>/<组件>-<版本>/`（Miniconda 走静默安装器）
    - 🔧 自动写入 `XXX_HOME` 环境变量 + 把 `bin` 追加到 `PATH`
    - 🔄 自动刷新该卡片状态（无需再手动点"配置环境变量"）
@@ -385,17 +396,28 @@ components.append(
 
 ### 更换下载镜像
 
-> **v2.0 起内置 R1 国内镜像优先机制，普通用户无需手动改 URL。** 下面说明仅给想理解机制或做二次开发的用户参考。
+> **v2.0 起内置国内镜像优先 + 多源故障转移机制，普通用户无需手动改 URL。** 下面说明仅给想理解机制或做二次开发的用户参考。
 
-工具已为每个组件配置 ≥2 个国内镜像（华为云 / 清华 TUNA / 阿里云 / 中科大 / 南大）+ 1 个官网地址，下载流程遵循 **"国内镜像优先 + 多源故障转移 + 末位官网回退"** 规则：
+工具目前内置 **11 家大陆镜像基址**（华为云 repo / 华为云 mirrors / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud files），另有 **3 个 GitHub 加速器**（ghproxy.net / gh-proxy.com / ghfast.top；GitHub Releases 没有真镜像，只能走反向代理加速）。下载遵循 **"大陆源在前 → 多源故障转移 → 末位官网回退"** 规则：
 
-1. 按顺序尝试国内镜像地址，遇到 404 / 超时 / 连接失败立即切换到下一个
-2. 全部国内镜像失败后才回退到官网地址
-3. 全程输出中文日志（哪个镜像失败、切换到哪个、最终用了哪个源）
+1. 按顺序尝试各源，遇到 404 / 超时 / 连接失败立即切换到下一个
+2. 全部大陆源失败后才回退到官网地址
+3. 全程输出中文日志（哪个源失败、切换到哪个、最终用了哪个）
+4. 两条可靠性保障：所有请求固定带 `byte-tools` 自定义 User-Agent（部分高校镜像站会屏蔽默认 UA 返回 403）；下载完成后校验实际字节数，遇到镜像站"假 200 空文件"自动换下一个源，不会留下坏包
+
+少数组件的源策略不一样（2026-09-28 实测结论）：
+
+- **mongodb、postgresql**：实测没有任何大陆镜像，官网单源；
+- **nacos、bun 与 git 的 macOS/Linux 源码包**：无真镜像，走 3 个 GitHub 加速器，末位回退 GitHub 裸地址；
+- **kubectl**：首位是 DaoCloud `files.m.daocloud.io` 代理（`dl.k8s.io` 直连路径不可改写，必须走它的 files 代理），末位才是官方 `dl.k8s.io`；
+- **seata**：走 Apache 分发目录，华为云 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大等八家大陆镜像；
+- **jdk**：离线默认清单只有官网一条，清华 / 南大镜像的确切文件名要点"⟳ 刷新版本"后才解析——**先点刷新，再下载**。
 
 效果：**国内用户无需手动修改任何 URL** 即可享受国内镜像加速，相比旧版"手动改 URL 函数"的方式体验大幅提升。
 
-> 📖 想了解 R1 规则的完整技术实现（镜像清单配置、故障转移策略、Nacos/Seata 这类无国内镜像组件如何用 ghproxy / gh.idayer.com 加速 GitHub releases）？请查阅 [`DEVELOPMENT.md`](./DEVELOPMENT.md) 的 **R1 国内镜像优先规则** 章节。
+> 💡 下载失败时怎么办？先看底部日志里是哪个源失败、切到了哪个源；点"⟳ 刷新版本"可以让工具重新解析镜像上的最新版本与文件名，再重试下载。
+
+> 📖 想了解镜像机制的完整技术实现（镜像清单配置、故障转移策略、Nacos/Bun 这类无真镜像组件如何用 GitHub 加速器，以及版本索引页为什么直连官网）？请查阅 [`DEVELOPMENT.md`](./DEVELOPMENT.md) 的 **R1 国内镜像优先规则** 章节。
 
 ### 修改工作目录
 
@@ -471,10 +493,10 @@ byte-tools/
 ## ❓ 常见问题（FAQ）
 
 **Q1. 启动后下拉框显示"获取失败"？**
-可能是网络原因或访问受限（如 GitHub API 在部分地区不稳定）。工具会自动回退到内置默认版本列表，仍然可以下载安装 —— 只是版本可能不是最新。**默认版本完全可用**。也可以更换镜像见「配置与自定义」章节。
+可能是网络原因或访问受限（如 GitHub API 在部分地区不稳定）。工具会自动回退到内置默认版本列表，仍然可以下载安装 —— 只是版本可能不是最新。**默认版本完全可用**。各组件默认就按国内镜像优先下载，源策略见「配置与自定义 → 更换下载镜像」章节。
 
 **Q2. 下载卡在某个百分比不动？**
-可能是网络原因或镜像限速。点击 **「取消」** 后重试；或参考"配置与自定义"章节替换成国内镜像。
+可能是网络原因或镜像限速。点击 **「取消」** 后重试，工具会自动换下一个源；反复失败时先看底部日志里是哪个源失败、切到了哪个源，也可以点"⟳ 刷新版本"重新解析镜像后再试（无需手动改 URL）。
 
 **Q3. 提示环境变量写入失败？**
 - Windows：请以"管理员身份"重新启动本程序（默认写入的是**用户级**变量，通常不需要管理员权限）
@@ -508,16 +530,16 @@ Docker Desktop 必须使用其官方安装器（涉及 WSL2 / Hyper-V 集成、�
 RabbitMQ 运行时依赖 Erlang，Windows 上必须先安装 Erlang 再装 RabbitMQ 服务端，属于典型的"安装器+服务注册"场景，超出本工具"binary 下载 + 解压"的范围。工具会引导用户去 [rabbitmq.com](https://www.rabbitmq.com/download.html) 下载官方安装器。
 
 **Q13. 国内下载会很慢吗？**
-不会。v2.0 起已内置 R1 国内镜像优先规则：每个组件至少配置 2 个国内镜像（华为云 / 清华 TUNA / 阿里云 / 中科大 / 南大等）+ 1 个官网地址，下载时按顺序尝试，遇到 404 / 超时自动切换下一个源，全程输出中文日志（哪个镜像失败、切换到哪个、最终用了哪个）。普通用户无需任何手动配置。
+不会。v2.0 起内置国内镜像优先规则：**11 家大陆镜像基址**（华为云 / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud 等）+ **3 个 GitHub 加速器**，下载时按顺序尝试，遇到 404 / 超时自动切换下一个源，全程输出中文日志（哪个源失败、切换到哪个、最终用了哪个）。普通用户无需任何手动配置。少数组件没有大陆源：**mongodb、postgresql** 实测无任何大陆镜像，只能官网单源；**nacos、bun 与 git 的 macOS/Linux 源码包**走 GitHub 加速器。kubectl 以前是直连 `dl.k8s.io`，现已改为首选 DaoCloud `files.m.daocloud.io` 代理。下载失败时先看日志里哪个源失败，点"⟳ 刷新版本"可重新解析镜像。
 
 **Q14. 点击"下载并安装"后还需要手动配置环境变量吗？**
 不需要。"下载并安装"按钮是**一条龙流程**：下载 → 解压 → 自动写入 `XXX_HOME` / `PATH` 环境变量 → 刷新该卡片状态。整个流程跑完即视为安装完成，无需再点"配置环境变量"按钮。该按钮仅适合"已手动下载好压缩包、只想配置环境变量"的场景。
 
-**Q15. macOS 上 MongoDB / PostgreSQL 为什么不能自动下载？**
-这两个组件官方只为 macOS 提供源码或 Homebrew formula，没有现成的二进制 tar.gz 可直接解压。工具会提示用户用 `brew install mongodb-community` / `brew install postgresql` 完成安装，避免给用户一个无法正常工作的"自动下载"结果。
+**Q15. MongoDB / PostgreSQL 为什么在部分平台不能自动下载？**
+MongoDB 支持 Windows / Linux 自动下载；macOS 官方只提供源码或 Homebrew formula，没有可直接解压的二进制包，工具会提示用 `brew install mongodb-community` 安装。PostgreSQL 仅 Windows 支持自动下载（EnterpriseDB 二进制 zip 包），Linux 请用发行版自带包管理器（apt / yum / dnf）、macOS 用 `brew install postgresql`。另外这两个组件实测都没有大陆镜像，下载时只有官网一个源，国内速度偏慢属正常现象。
 
-**Q16. Nacos / Seata 国内没有官方镜像，下载会不会很慢？**
-这两个组件发布在 GitHub Releases 上，国内访问 GitHub 速度不稳定。工具通过 [ghproxy](https://ghproxy.com/) / [gh.idayer.com](https://gh.idayer.com/) 做 GitHub releases 加速代理，对用户透明，日志里会显示当前使用的代理源。
+**Q16. Nacos / Bun 没有国内镜像，下载会不会很慢？**
+这类组件发布在 GitHub Releases 上，国内访问 GitHub 速度不稳定。工具通过 [ghproxy.net](https://ghproxy.net/) / [gh-proxy.com](https://gh-proxy.com/) / [ghfast.top](https://ghfast.top/) 做 GitHub releases 加速代理，末位再回退 GitHub 裸地址，对用户透明，日志里会显示当前使用的代理源。git 的 macOS/Linux 源码包也走这条路线。（原先配的 `ghproxy.com` 与 `gh.idayer.com` 实测已停服，v2.0 起已替换。）注意 **Seata 已不走这条路线**：GitHub release 从 2.1.0 起不再带二进制附件，工具已改走 Apache 分发目录，由华为云 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大等八家大陆镜像加速。
 
 ---
 

@@ -133,12 +133,13 @@ class ComponentVersion:
     archive_map: Dict[str, str] = field(default_factory=dict)  # 归档类型：zip / tar.gz
     # 多源故障转移模式（R1）：按操作系统键映射的 URL 列表（镜像优先 + 末位官网）。
     # 与 url_map 二选一：若当前系统的 url_list_map 非空，则 urls_for_current() 返回该列表；
-    # 否则回退到 url_map 的单 URL 模式（向后兼容现有 8 个组件）。
+    # 否则回退到 url_map 的单 URL 模式（仅少数无国内镜像的组件，如 kubectl）。
     url_list_map: Dict[str, List[str]] = field(default_factory=dict)
 
     def url_for_current(self) -> Optional[str]:
-        """单 URL 模式：返回当前系统的下载 URL。"""
-        return self.url_map.get(CURRENT_OS)
+        """当前系统的首选下载地址：多源模式取列表首个（优先级最高的镜像），单源模式取该源。"""
+        urls = self.urls_for_current()
+        return urls[0] if urls else None
 
     def urls_for_current(self) -> List[str]:
         """
@@ -188,6 +189,9 @@ class Component:
     # 例：Docker 在 Windows 上无 static binary，需引导用户去 Docker Desktop 官网下载。
     # 不配置该字段时，回退到通用提示"当前系统 X 无可用下载地址"。
     unsupported_platform_hint: Optional[str] = None
+    # 界面 Tab 分组名，取值必须是 COMPONENT_CATEGORIES 之一。
+    # 由 build_components() 末尾按 COMPONENT_CATEGORY_OF 统一赋值，不要在构造处手写。
+    category: str = ""
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -452,13 +456,27 @@ class VersionProbeWorker(QThread):
 # R1 镜像源与故障转移参数（详见 DEVELOPMENT.md 规则 R1）
 # ---------------------------------------------------------------------------
 # 国内镜像源基址表（按稳定性与速度综合排序）：(标识, 基址)
+# 所有 URL 构造器必须通过 _mb(标识) 取基址，不要在本表以外硬编码镜像域名。
 MIRROR_BASES: List[tuple] = [
-    ("huaweicloud", "https://repo.huaweicloud.com"),
-    ("tuna",        "https://mirrors.tuna.tsinghua.edu.cn"),
-    ("aliyun",      "https://mirrors.aliyun.com"),
-    ("nju",         "https://mirrors.nju.edu.cn"),
-    ("ustc",        "https://mirrors.ustc.edu.cn"),
-    ("sjtug",       "https://mirrors.sjtug.org"),
+    ("huaweicloud",    "https://repo.huaweicloud.com"),
+    ("huaweicloud-py", "https://mirrors.huaweicloud.com"),   # Python 发行包在 mirrors 子域
+    ("tuna",           "https://mirrors.tuna.tsinghua.edu.cn"),
+    ("aliyun",         "https://mirrors.aliyun.com"),
+    ("nju",            "https://mirrors.nju.edu.cn"),
+    ("ustc",           "https://mirrors.ustc.edu.cn"),
+    ("bfsu",           "https://mirrors.bfsu.edu.cn"),
+    ("tencent",        "https://mirrors.cloud.tencent.com"),
+    ("sjtug",          "https://mirrors.sjtug.org"),
+    ("npmmirror",      "https://registry.npmmirror.com"),
+    ("daocloud-files", "https://files.m.daocloud.io"),       # 只对少数白名单域名反代
+]
+_MIRROR_BY_NAME = dict(MIRROR_BASES)
+
+# GitHub Release 加速器（2026-09 实测可用；ghproxy.com 已停服，不要再引入）
+GH_ACCELERATORS: List[str] = [
+    "https://ghproxy.net/",
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
 ]
 
 # 故障转移参数（避免魔法数字）
@@ -466,43 +484,35 @@ DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
 DOWNLOAD_TIMEOUT = 30         # 单 URL 下载连接超时（秒）
 DOWNLOAD_RETRY_PER_URL = 2    # 单 URL 内重试次数
 
+# 实测（2026-09-28）：清华/北外对 requests 默认 UA 与浏览器 UA 一律回 403，
+# 只对自定义 UA 放行；列目录（_get）已带，下载（_try_download）也必须带。
+HTTP_UA = {"User-Agent": "byte-tools"}
+# 实测（2026-09-28 GET + 本 UA）：华为云 anaconda 对任意不存在的路径都回
+# 「301 → 200 + 一小段软 404 HTML、无 Content-Length」，会把错误页当下载成功；
+# 本工具的归档包最小的也有几 MB，故按字节数判真假。
+DOWNLOAD_MIN_VALID_BYTES = 4096
 
-def _get_first_working(urls: List[str], timeout: int = 10) -> requests.Response:
+
+def _mb(*names: str) -> List[str]:
     """
-    按 urls 顺序依次尝试 GET，第一个成功的返回；全部失败抛异常。
+    按标识批量取镜像基址（去掉结尾斜杠），供各 URL 构造器拼接。
 
-    入参 urls: List[str]  待尝试的 URL 列表，按优先级排序（镜像在前，官网末位）
-    入参 timeout: int     单 URL 超时秒数
+    入参 names: str  MIRROR_BASES 里的标识，如 "tuna"、"huaweicloud"
+    返回: List[str]  与 names 同序的基址列表
     """
-    last_exc: Optional[Exception] = None
-    for idx, url in enumerate(urls, 1):
-        try:
-            return _get(url, timeout=timeout)
-        except Exception as exc:
-            last_exc = exc
-            continue
-    assert last_exc is not None
-    raise RuntimeError(
-        f"所有源均不可用，已尝试 {len(urls)} 个 URL"
-    ) from last_exc
+    return [_MIRROR_BY_NAME[n] for n in names]
 
 
-def _adoptium_jdk_url(version: str) -> Dict[str, str]:
+def _gh_accelerated(url: str) -> List[str]:
     """
-    Adoptium Temurin JDK 下载地址生成。
+    GitHub 裸地址 → 加速器在前、官方地址末位（GitHub 没有真镜像，只能走反向代理）。
 
-    注意：Adoptium 的实际最新构建 URL 会带 build 号，这里使用 latest release API 拼接的
-    通用镜像地址；如果链接失效可自行替换为其他镜像（如华为云、清华镜像）。
+    入参 url: str  形如 https://github.com/<owner>/<repo>/... 的原始地址
+    返回: List[str]  len(GH_ACCELERATORS) + 1 个 URL；url 为空时返回 []
     """
-    # 使用 Adoptium API 提供的“latest binary redirect”地址：一次性重定向到最新构建
-    base = "https://api.adoptium.net/v3/binary/latest"
-    # 参数：feature_version/release_type/os/arch/image_type/jvm_impl/heap_size/vendor
-    win = f"{base}/{version}/ga/windows/x64/jdk/hotspot/normal/eclipse"
-    mac_arch = "aarch64" if IS_ARM else "x64"
-    mac = f"{base}/{version}/ga/mac/{mac_arch}/jdk/hotspot/normal/eclipse"
-    linux_arch = "aarch64" if IS_ARM else "x64"
-    linux = f"{base}/{version}/ga/linux/{linux_arch}/jdk/hotspot/normal/eclipse"
-    return {"Windows": win, "Darwin": mac, "Linux": linux}
+    if not url:
+        return []
+    return [p + url for p in GH_ACCELERATORS] + [url]
 
 
 # ---------------------------------------------------------------------------
@@ -511,77 +521,301 @@ def _adoptium_jdk_url(version: str) -> Dict[str, str]:
 _STD_ARCHIVE: Dict[str, str] = {"Windows": "zip", "Darwin": "tar.gz", "Linux": "tar.gz"}
 
 
-def _cv(version: str, url_map: Dict[str, str]) -> ComponentVersion:
-    return ComponentVersion(version=version, url_map=url_map, archive_map=dict(_STD_ARCHIVE))
+def _cv(version: str, url_map: Dict, archive_map: Optional[Dict[str, str]] = None) -> ComponentVersion:
+    """
+    构造 ComponentVersion，按值类型自动选模式：值含列表 → R1 多源故障转移；值全是字符串 → 旧单源。
+
+    入参 version: str          版本号
+    入参 url_map: Dict[str, Union[str, List[str]]]  平台键 → 单 URL 或 URL 列表（镜像在前、官方末位）
+    入参 archive_map: Optional[Dict[str, str]]  覆盖默认归档表；包名不是 zip/tar.gz
+                 （如 MySQL、RabbitMQ 的 .tar.xz）时必须显式传，否则下载下来的文件
+                 后缀与内容不符，extract_archive 会走错分支。
+    """
+    archives = dict(_STD_ARCHIVE)
+    if archive_map:
+        archives.update(archive_map)
+    if any(isinstance(u, list) for u in url_map.values()):
+        listed = {k: (v if isinstance(v, list) else [v]) for k, v in url_map.items() if v}
+        return ComponentVersion(version=version, url_map={}, url_list_map=listed,
+                                archive_map=archives)
+    return ComponentVersion(version=version, url_map=url_map, archive_map=archives)
 
 
-def _maven_urls(v: str) -> Dict[str, str]:
-    base = f"https://archive.apache.org/dist/maven/maven-3/{v}/binaries/apache-maven-{v}-bin"
-    return {"Windows": f"{base}.zip", "Darwin": f"{base}.tar.gz", "Linux": f"{base}.tar.gz"}
+# --- Adoptium Temurin JDK ---------------------------------------------------
+# 官方 latest-binary 地址按 major 重定向到"当前最新构建"，而镜像站目录里只有带
+# build 号的确切文件名，所以必须先进目录挑文件，再拼成可直连的镜像地址。
+# 布局（2026-09 实测可用）：<镜像基址>/<子路径>/<major>/jdk/<arch>/<os-dir>/
+_ADOPTIUM_LAYOUTS: List[tuple] = [("tuna", "/Adoptium"), ("nju", "/adoptium")]
 
 
-def _tomcat_urls(v: str) -> Dict[str, str]:
+def _adoptium_dirs() -> Dict[str, tuple]:
+    """OS 键 → (镜像目录 arch, 镜像目录 os, 归档后缀)，对应 Adoptium 目录命名。"""
+    unix_arch = "aarch64" if IS_ARM else "x64"
+    return {
+        "Windows": ("x64", "windows", "zip"),
+        "Darwin":  (unix_arch, "mac", "tar.gz"),
+        "Linux":   (unix_arch, "linux", "tar.gz"),
+    }
+
+
+def _adoptium_pick(names: List[str], major: str, arch: str, os_dir: str, ext: str) -> Optional[str]:
+    """
+    从目录链接里挑出版本号最大的 JDK 归档文件名；没有匹配返回 None。
+
+    入参 names: List[str]  目录页 href 抓出来的文件名
+    返回: Optional[str]  形如 OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip
+
+    两种命名都要认：现代版本 21.0.12.1_1，JDK 8 仍是 8u492b09。
+    用数字序而不是字典序：21.0.9 按字典序会排到 21.0.10 后面。
+    严格 fullmatch 版本段，顺带排掉同名前缀的 .sbom.tar.gz / manifest 等附属文件。
+    """
+    pat = _re.compile(rf"^OpenJDK{major}U-jdk_{arch}_{os_dir}_hotspot_(\S+)\.{ext}$")
+    ver_pat = _re.compile(r"\d[\d.]*_\d+\Z|\d+u\d+b\d+\Z")
+    best: Optional[str] = None
+    best_key: tuple = ()
+    for raw in names:
+        name = raw.strip("/")
+        m = pat.match(name)
+        if not m or not ver_pat.match(m.group(1)):
+            continue
+        key = tuple(int(x) for x in _re.findall(r"\d+", m.group(1)))
+        if key > best_key:
+            best, best_key = name, key
+    return best
+
+
+def _adoptium_mirror_urls(major: str, dead: Optional[set] = None,
+                          avail: Optional[dict] = None) -> Dict[str, List[str]]:
+    """
+    在镜像站上解析 major 的确切 JDK 文件地址（R1 多源列表的前半段）。
+
+    入参 major: str           JDK 大版本，如 "21"
+    入参 dead: Optional[set]  本次刷新内已判定连不上的镜像基址（熔断，避免逐个版本重复试探）
+    入参 avail: Optional[dict] 基址 → 该镜像已同步的大版本集合，同一次刷新内复用
+    返回: OS 键 → 镜像文件 URL 列表；镜像缺该版本或目录不可读时对应项缺失
+
+    只解析当前系统的目录：下载地址最终由 urls_for_current() 取用，其它平台的条目在本机不会被读到。
+    先列根目录问"这个镜像同步了哪些 major"，再进具体目录：新 major 常常还没同步，
+    直接撞 404 会被 _get 重试三次，还可能把还能用的镜像误熔断。
+    """
+    arch, os_dir, ext = _adoptium_dirs()[CURRENT_OS]
+    found: List[str] = []
+    for base_name, sub in _ADOPTIUM_LAYOUTS:
+        base = f"{_mb(base_name)[0]}{sub}"
+        if dead is not None and base in dead:
+            continue
+        try:
+            majors = avail.get(base) if avail is not None else None
+            if majors is None:
+                majors = set(_re.findall(r'href="(\d+)/"',
+                                         _get(f"{base}/", timeout=DOWNLOAD_PROBE_TIMEOUT).text))
+                if avail is not None:
+                    avail[base] = majors
+            if major not in majors:
+                continue                       # 该镜像还没同步这个大版本，不是基址故障
+            dir_url = f"{base}/{major}/jdk/{arch}/{os_dir}/"
+            html = _get(dir_url, timeout=DOWNLOAD_PROBE_TIMEOUT).text
+        except requests.exceptions.HTTPError:
+            continue
+        except Exception:
+            if dead is not None:
+                dead.add(base)
+            continue
+        picked = _adoptium_pick(_re.findall(r'href="([^"?]+)"', html), major, arch, os_dir, ext)
+        if picked:
+            found.append(f"{dir_url}{picked}")
+    return {CURRENT_OS: found} if found else {}
+
+
+def _adoptium_jdk_url(version: str, dead: Optional[set] = None,
+                      avail: Optional[dict] = None,
+                      resolve_mirrors: bool = True) -> Dict[str, List[str]]:
+    """
+    Adoptium Temurin JDK 下载地址（R1 多源）：镜像站的确切文件在前，官方 latest-binary 末位兜底。
+
+    入参 version: str           JDK 大版本，如 "21"
+    入参 dead / avail           透传给 _adoptium_mirror_urls，一次刷新内共享镜像熔断与同步情况缓存
+    入参 resolve_mirrors: bool  False 时跳过镜像目录解析——离线默认清单不允许联网
+    """
+    api = "https://api.adoptium.net/v3/binary/latest"
+    mirrors = _adoptium_mirror_urls(version, dead, avail) if resolve_mirrors else {}
+    out: Dict[str, List[str]] = {}
+    for os_key, (arch, os_dir, _ext) in _adoptium_dirs().items():
+        official = f"{api}/{version}/ga/{os_dir}/{arch}/jdk/hotspot/normal/eclipse"
+        out[os_key] = mirrors.get(os_key, []) + [official]
+    return out
+
+
+def _maven_urls(v: str) -> Dict[str, List[str]]:
+    """
+    Maven 下载 URL 列表（R1 多源）：Apache 布局镜像在前，archive.apache.org 末位。
+
+    入参 v: str  版本号，如 "3.9.16"
+
+    实测（2026-09-28 GET + byte-tools UA）：镜像站的 apache/* 只保留当前版本，3.9.16 七家全通，
+    3.9.6 只剩华为云 + archive 两家；旧版本靠故障转移兜底，不裁源。
+    """
+    name = f"apache-maven-{v}-bin"
+    rel = f"/apache/maven/maven-3/{v}/binaries/{name}"
+    official = f"https://archive.apache.org/dist/maven/maven-3/{v}/binaries/{name}"
+    mirrors = _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")
+
+    def lst(ext: str) -> List[str]:
+        return [f"{b}{rel}.{ext}" for b in mirrors] + [f"{official}.{ext}"]
+
+    return {"Windows": lst("zip"), "Darwin": lst("tar.gz"), "Linux": lst("tar.gz")}
+
+
+def _tomcat_urls(v: str) -> Dict[str, List[str]]:
+    """Tomcat 下载 URL 列表（R1 多源）：与 Maven 同为 Apache 布局，官网 archive 末位。"""
     major = v.split(".", 1)[0]
-    base = f"https://archive.apache.org/dist/tomcat/tomcat-{major}/v{v}/bin/apache-tomcat-{v}"
-    return {"Windows": f"{base}.zip", "Darwin": f"{base}.tar.gz", "Linux": f"{base}.tar.gz"}
+    name = f"apache-tomcat-{v}"
+    rel = f"/apache/tomcat/tomcat-{major}/v{v}/bin/{name}"
+    official = f"https://archive.apache.org/dist/tomcat/tomcat-{major}/v{v}/bin/{name}"
+    # 实测（2026-09-28）：10.1.60 七家镜像全通；9.0.x 少腾讯云，8.5.x 只剩华为云 + archive
+    mirrors = _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")
+
+    def lst(ext: str) -> List[str]:
+        return [f"{b}{rel}.{ext}" for b in mirrors] + [f"{official}.{ext}"]
+
+    return {"Windows": lst("zip"), "Darwin": lst("tar.gz"), "Linux": lst("tar.gz")}
 
 
-def _mysql_urls(v: str) -> Dict[str, str]:
+def _mysql_urls(v: str) -> Dict[str, List[str]]:
+    """
+    MySQL 下载 URL 列表。
+
+    实测（2026-09）两条硬事实：
+      - dev.mysql.com 的 get 跳转入口对任何 UA 都回 403；官方直链只能用它的 CDN
+        cdn.mysql.com/Downloads/（并且只保留近期版本，8.0.28 已经 404）。
+      - 国内只有阿里云 /mysql/MySQL-<maj.min>/ 与华为云 /mysql/Downloads/MySQL-<maj.min>/
+        同步了安装包，且都只到 8.0.28/8.0.29 这一段。
+
+    实测（2026-09-28）Linux 命名：镜像站只有 glibc2.12 那一套（1.2 GB，200 可下），
+    glibc2.28 在阿里/华为都是 404；官方 CDN 反之只挂 glibc2.28，所以末位官方单独用
+    官方那套文件名。
+
+    实测（2026-09-28）macOS 命名：官方 CDN 只给最新版且用 macos14 段
+    （8.0.37-macos14-{x86_64,arm64} 200 / 173 MB、168 MB；8.0.28、8.0.29、8.0.33、
+    8.0.34、8.0.35、8.0.36 的 macos14 全 404），镜像站则留着老版本的当年命名
+    （阿里 8.0.27/8.0.28-macos11、华为 8.0.24~8.0.28-macos11 与 8.0.29-macos12，
+    两种架构都有）。所以 Darwin 按 macos11→12→14 三个候选名 × 三个基址展开，
+    靠故障转移选中真实存在的那个。
+    """
     major_minor = v.rsplit(".", 1)[0]
-    win = f"https://dev.mysql.com/get/Downloads/MySQL-{major_minor}/mysql-{v}-winx64.zip"
-    if IS_ARM and CURRENT_OS == "Darwin":
-        mac = f"https://dev.mysql.com/get/Downloads/MySQL-{major_minor}/mysql-{v}-macos14-arm64.tar.gz"
-    else:
-        mac = f"https://dev.mysql.com/get/Downloads/MySQL-{major_minor}/mysql-{v}-macos14-x86_64.tar.gz"
-    linux = f"https://dev.mysql.com/get/Downloads/MySQL-{major_minor}/mysql-{v}-linux-glibc2.28-x86_64.tar.xz"
-    return {"Windows": win, "Darwin": mac, "Linux": linux}
+    cdn_base = f"https://cdn.mysql.com/Downloads/MySQL-{major_minor}"
+    mac_arch = "arm64" if IS_ARM else "x86_64"
+    win_name = f"mysql-{v}-winx64.zip"
+    linux_mirror_name = f"mysql-{v}-linux-glibc2.12-x86_64.tar.xz"
+    linux_official_name = f"mysql-{v}-linux-glibc2.28-x86_64.tar.xz"
+    aliyun, huawei = _mb("aliyun", "huaweicloud")
+
+    # macOS 包：官方 CDN 只挂最新版（8.0.28/8.0.29 连 macos11、macos12 命名也 404），
+    # 镜像站则留着老版本当年命名的包，所以镜像侧试 macos11/macos12，官方只试 macos14。
+    mac_list: List[str] = []
+    for base in (f"{aliyun}/mysql/MySQL-{major_minor}",
+                 f"{huawei}/mysql/Downloads/MySQL-{major_minor}"):
+        mac_list += [f"{base}/mysql-{v}-{tag}-{mac_arch}.tar.gz" for tag in ("macos11", "macos12")]
+    mac_list.append(f"{cdn_base}/mysql-{v}-macos14-{mac_arch}.tar.gz")
+
+    return {
+        "Windows": [f"{aliyun}/mysql/MySQL-{major_minor}/{win_name}",
+                    f"{huawei}/mysql/Downloads/MySQL-{major_minor}/{win_name}",
+                    f"{cdn_base}/{win_name}"],
+        "Darwin":  mac_list,
+        "Linux":   [f"{aliyun}/mysql/MySQL-{major_minor}/{linux_mirror_name}",
+                    f"{huawei}/mysql/Downloads/MySQL-{major_minor}/{linux_mirror_name}",
+                    f"{cdn_base}/{linux_official_name}"],
+    }
 
 
-def _python_urls(v: str) -> Dict[str, str]:
-    win = f"https://www.python.org/ftp/python/{v}/python-{v}-embed-amd64.zip"
-    mac = f"https://www.python.org/ftp/python/{v}/Python-{v}.tgz"
-    linux = f"https://www.python.org/ftp/python/{v}/Python-{v}.tgz"
-    return {"Windows": win, "Darwin": mac, "Linux": linux}
+def _python_urls(v: str) -> Dict[str, List[str]]:
+    """
+    Python 下载 URL 列表：Windows 用 embed zip，其它平台用源码 tgz（与官方 ftp 同名）。
+
+    华为云的 Python 发行包在 mirrors 子域（不是 repo 子域），故用 huaweicloud-py 基址。
+    """
+    win_name = f"python-{v}-embed-amd64.zip"
+    src_name = f"Python-{v}.tgz"
+    hwpy = _mb("huaweicloud-py")[0]
+    npmm = _mb("npmmirror")[0]
+    official = "https://www.python.org/ftp/python"
+    return {
+        "Windows": [f"{hwpy}/python/{v}/{win_name}",
+                    f"{npmm}/-/binary/python/{v}/{win_name}",
+                    f"{official}/{v}/{win_name}"],
+        "Darwin":  [f"{npmm}/-/binary/python/{v}/{src_name}",
+                    f"{hwpy}/python/{v}/{src_name}",
+                    f"{official}/{v}/{src_name}"],
+        "Linux":   [f"{npmm}/-/binary/python/{v}/{src_name}",
+                    f"{hwpy}/python/{v}/{src_name}",
+                    f"{official}/{v}/{src_name}"],
+    }
 
 
-def _node_urls(v: str) -> Dict[str, str]:
-    base = f"https://nodejs.org/dist/v{v}/node-v{v}"
-    win = f"{base}-win-x64.zip"
+def _node_urls(v: str) -> Dict[str, List[str]]:
+    """Node.js 下载 URL 列表：nodejs-release 布局镜像在前，nodejs.org 末位。"""
     mac_arch = "arm64" if IS_ARM else "x64"
-    mac = f"{base}-darwin-{mac_arch}.tar.gz"
-    linux = f"{base}-linux-x64.tar.gz"
-    return {"Windows": win, "Darwin": mac, "Linux": linux}
+
+    def lst(name: str) -> List[str]:
+        mirrors = [f"{b}/nodejs-release/v{v}/{name}" for b in _mb("tuna", "nju", "bfsu")]
+        mirrors += [f"{_mb('huaweicloud')[0]}/nodejs/v{v}/{name}",
+                    f"{_mb('npmmirror')[0]}/-/binary/node/v{v}/{name}"]
+        return mirrors + [f"https://nodejs.org/dist/v{v}/{name}"]
+
+    return {
+        "Windows": lst(f"node-v{v}-win-x64.zip"),
+        "Darwin":  lst(f"node-v{v}-darwin-{mac_arch}.tar.gz"),
+        "Linux":   lst(f"node-v{v}-linux-x64.tar.gz"),
+    }
 
 
-def _git_urls(v: str) -> Dict[str, str]:
+def _git_urls(v: str) -> Dict[str, List[str]]:
     """
-    Git 下载：
-      - Windows: MinGit（便携版，解压即用）
-      - macOS/Linux: 通常系统自带 git，或用户自己 brew install / apt-get 安装。
-        这里提供源码 tar.gz 作为占位下载（不做编译，仅作展示）。
+    Git 下载：Windows 用 MinGit（便携版，解压即用）。
+
+    实测（2026-09-28）Windows 有真镜像：华为云 repo/mirrors 两个子域都同步了
+    git-for-windows，npmmirror 的 registry 布局也有同名目录；所以镜像在前、
+    GitHub 加速器居中、裸地址末位。
+
+    macOS/Linux **不给任何 URL**：GitHub 上只有 git/git 的源码 tar.gz，解压后
+    没有可执行的 git（要自己 configure + make），列出来只会让用户下一个用不了
+    的东西。这两个平台改由 Component.unsupported_platform_hint 引导用系统包管理器。
     """
-    win = (
-        f"https://github.com/git-for-windows/git/releases/download/"
-        f"v{v}.windows.1/MinGit-{v}-64-bit.zip"
-    )
-    src = f"https://github.com/git/git/archive/refs/tags/v{v}.tar.gz"
-    return {"Windows": win, "Darwin": src, "Linux": src}
+    hwm, hw = _mb("huaweicloud-py", "huaweicloud")
+    npmm = _mb("npmmirror")[0]
+    win_tag = f"v{v}.windows.1"
+    win_name = f"MinGit-{v}-64-bit.zip"
+    win = (f"https://github.com/git-for-windows/git/releases/download/"
+           f"{win_tag}/{win_name}")
+    win_list = [f"{hwm}/git-for-windows/{win_tag}/{win_name}",
+                f"{hw}/git-for-windows/{win_tag}/{win_name}",
+                f"{npmm}/-/binary/git-for-windows/{win_tag}/{win_name}"]
+    win_list += _gh_accelerated(win)
+    return {"Windows": win_list}
 
 
-def _conda_urls(v: str) -> Dict[str, str]:
+def _conda_urls(v: str) -> Dict[str, List[str]]:
     """
-    Miniconda 安装器：
+    Miniconda 安装器（与官方同名文件）：镜像在前，repo.anaconda.com 末位。
+
       - Windows: .exe
       - macOS:   .sh (根据架构挑 arm64 / x86_64)
       - Linux:   .sh
     版本号如 "py312_24.7.1-0"。
     """
-    base = "https://repo.anaconda.com/miniconda"
-    win = f"{base}/Miniconda3-{v}-Windows-x86_64.exe"
     mac_arch = "arm64" if IS_ARM else "x86_64"
-    mac = f"{base}/Miniconda3-{v}-MacOSX-{mac_arch}.sh"
-    linux = f"{base}/Miniconda3-{v}-Linux-x86_64.sh"
-    return {"Windows": win, "Darwin": mac, "Linux": linux}
+
+    def lst(name: str) -> List[str]:
+        mirrors = [f"{b}/anaconda/miniconda/{name}"
+                   for b in _mb("tuna", "nju", "bfsu", "ustc")]
+        return mirrors + [f"https://repo.anaconda.com/miniconda/{name}"]
+
+    return {
+        "Windows": lst(f"Miniconda3-{v}-Windows-x86_64.exe"),
+        "Darwin":  lst(f"Miniconda3-{v}-MacOSX-{mac_arch}.sh"),
+        "Linux":   lst(f"Miniconda3-{v}-Linux-x86_64.sh"),
+    }
 
 
 def _go_urls(v: str) -> Dict[str, List[str]]:
@@ -590,15 +824,16 @@ def _go_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Go 版本号字符串，如 "1.22.5"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（华为云→清华→阿里云→中科大），官网末位。
+          国内镜像在前（阿里云→南京大学），官网末位。
+
+    实测（2026-09-28 GET + byte-tools UA）纠正：Go 的二进制树只有少数镜像同步。
+    阿里云 /golang/ 与南大 /golang/ 是 200 且有完整 Content-Length；华为云 repo 与
+    mirrors 两个子域一律 401，清华没有 golang 目录（404），腾讯云同样 404，
+    中科大只是 302 跳回 dl.google.com（本机对 dl.google.com TLS 握手失败，
+    等于没有镜像）。所以这里只保留真正可用的两家。
     """
     # 国内镜像基址（按 R1.3 优先级），官网末位
-    mirror_bases = [
-        "https://repo.huaweicloud.com/golang",
-        "https://mirrors.tuna.tsinghua.edu.cn/golang",
-        "https://mirrors.aliyun.com/golang",
-        "https://mirrors.ustc.edu.cn/golang",
-    ]
+    mirror_bases = [f"{b}/golang" for b in _mb("aliyun", "nju")]
     official = "https://go.dev/dl"
 
     # 按 CPU 架构挑选文件名（Go 官方命名约定）
@@ -636,17 +871,16 @@ def _gradle_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Gradle 版本号字符串，如 "8.10"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（华为云→清华→阿里云→中科大），官网末位。
+          国内镜像在前（华为云 repo→华为云 mirrors→南京大学→腾讯云），官网末位。
     说明: Gradle 官方对三平台都发布同一 zip 包（gradle-<v>-bin.zip），
           解压后根目录为 gradle-<v>/，内部含 bin/gradle / bin/gradle.bat。
+
+    实测（2026-09-28 GET + byte-tools UA）：清华没有 gradle 目录（404），阿里云 404，
+    中科大同样 404；能真正下到 137 MB 的是华为云两个子域、南大与腾讯云。
     """
-    # 国内镜像基址（按 R1.3 优先级），末位为官网
-    mirror_bases = [
-        "https://repo.huaweicloud.com/gradle",
-        "https://mirrors.tuna.tsinghua.edu.cn/gradle",
-        "https://mirrors.aliyun.com/gradle",
-        "https://mirrors.ustc.edu.cn/gradle",
-    ]
+    # 国内镜像基址（按实测可用性排序），末位为官网
+    mirror_bases = [f"{b}/gradle" for b in
+                    _mb("huaweicloud", "huaweicloud-py", "nju", "tencent")]
     official = "https://services.gradle.org/distributions"
     # Gradle 对三平台发布同一个 -bin.zip 包
     filename = f"gradle-{v}-bin.zip"
@@ -675,18 +909,17 @@ def _bun_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Bun 版本号字符串，如 "1.1.0"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（npmmirror→ghproxy 加速 GitHub），末位为 GitHub releases 官网。
+          国内镜像在前（npmmirror→GitHub 加速器），末位为 GitHub releases 官网。
 
     说明:
       - Bun 官方发布在 GitHub Releases（oven-sh/bun 仓库），tag 名为 bun-v<version>；
       - 资源命名约定：bun-<platform>-<arch>.zip，平台标识为 windows / darwin / linux，
         架构标识为 x64 / arm64；
       - 国内最稳的镜像是淘宝 npmmirror（R1.3 表外特殊源），
-        ghproxy.com 用于加速 GitHub releases 直链。
+        GitHub 直链没有真镜像，只能再走 _gh_accelerated 的反向代理。
     """
     # 国内镜像基址（Bun 在国内仅此两源稳定）
     npmmirror_base = "https://registry.npmmirror.com/-/binary/bun"
-    ghproxy_base = "https://ghproxy.com/https://github.com/oven-sh/bun/releases/download"
     official_base = "https://github.com/oven-sh/bun/releases/download"
 
     # 按 CPU 架构挑选文件名（Bun 官方命名约定）
@@ -699,11 +932,8 @@ def _bun_urls(v: str) -> Dict[str, List[str]]:
     def build_list(platform: str, arch: str) -> List[str]:
         """构造镜像在前 + 官网末位的 URL 列表。"""
         filename = f"bun-{platform}-{arch}.zip"
-        return [
-            f"{npmmirror_base}/{tag}/{filename}",
-            f"{ghproxy_base}/{tag}/{filename}",
-            f"{official_base}/{tag}/{filename}",
-        ]
+        return [f"{npmmirror_base}/{tag}/{filename}"] + \
+               _gh_accelerated(f"{official_base}/{tag}/{filename}")
 
     return {
         "Windows": build_list("windows", "x64"),  # Bun 暂无 Windows arm64 包
@@ -732,7 +962,8 @@ def _docker_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Docker 版本号字符串，如 "27.3.1"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（清华→阿里云→中科大），官网末位。
+          国内镜像在前（华为云两个子域 + 清华 + 阿里 + 南大 + 北外 + 中科大 + 腾讯云
+          共 8 家，实测全部同步了 docker-ce 静态包），官网末位。
 
     说明:
       - Docker 官方在 download.docker.com 提供 static binaries（单 tgz 包），
@@ -742,18 +973,12 @@ def _docker_urls(v: str) -> Dict[str, List[str]]:
         ComponentCard 会显示"当前系统 Windows 无可用下载地址"。
       - tgz 解压后根目录为 docker/，内部含 docker / dockerd 等二进制（无 bin 子目录）。
     """
-    # 国内镜像基址（按 R1.3 优先级排序）
+    # 国内镜像基址（按实测可用性排序，2026-09-28 八家全部 200 + 75 MB Content-Length）
     # docker-ce 路径：linux/static/stable/<arch>/docker-<v>.tgz 或 mac/static/stable/<arch>/docker-<v>.tgz
-    mirror_bases_linux = [
-        "https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/static/stable",
-        "https://mirrors.aliyun.com/docker-ce/linux/static/stable",
-        "https://mirrors.ustc.edu.cn/docker-ce/linux/static/stable",
-    ]
-    mirror_bases_mac = [
-        "https://mirrors.tuna.tsinghua.edu.cn/docker-ce/mac/static/stable",
-        "https://mirrors.aliyun.com/docker-ce/mac/static/stable",
-        "https://mirrors.ustc.edu.cn/docker-ce/mac/static/stable",
-    ]
+    cn_bases = _mb("huaweicloud", "huaweicloud-py", "tuna", "aliyun", "nju",
+                   "bfsu", "ustc", "tencent")
+    mirror_bases_linux = [f"{b}/docker-ce/linux/static/stable" for b in cn_bases]
+    mirror_bases_mac = [f"{b}/docker-ce/mac/static/stable" for b in cn_bases]
     official_linux = "https://download.docker.com/linux/static/stable"
     official_mac = "https://download.docker.com/mac/static/stable"
 
@@ -794,45 +1019,36 @@ def _mongodb_urls(v: str) -> Dict[str, List[str]]:
     """
     MongoDB 下载 URL 列表构造（R1 多源故障转移模式）。
 
-    入参 v: str   MongoDB 版本号字符串，如 "8.0.0"
-    返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（华为云→清华→阿里云→中科大），官网末位。
+    入参 v: str   MongoDB 版本号字符串，如 "8.0.12"
+    返回: 按操作系统键映射的 URL 列表字典。
 
     说明:
       - MongoDB 官方在 fastdl.mongodb.org 提供 community 二进制包，
         Windows 是 zip，Linux 是 tgz；
-      - 官方命名约定：mongodb-<platform>-<arch>-<version>.<ext>
-        例：mongodb-windows-x86_64-8.0.0.zip、mongodb-linux-x86_64-8.0.0.tgz；
       - Mac 平台 MongoDB 官方不发布 community binary（用户应使用 brew），
         本函数不返回 Darwin 键；
       - 解压后根目录为 mongodb-<platform>-<arch>-<version>/，内部含 bin/ 子目录。
-    """
-    # 国内镜像基址（按 R1.3 优先级排序），fastdl.mongodb.org 的 URL 路径结构为 /<platform>/<filename>
-    mirror_bases = [
-        "https://repo.huaweicloud.com/mongodb",
-        "https://mirrors.tuna.tsinghua.edu.cn/mongodb",
-        "https://mirrors.aliyun.com/mongodb",
-        "https://mirrors.ustc.edu.cn/mongodb",
-    ]
-    official_base = "https://fastdl.mongodb.org"
 
-    # 按 CPU 架构挑选路径段（MongoDB 官方命名：x86_64 / arm64）
-    # 注意：MongoDB Linux 用 aarch64，Windows 没有 arm64 社区版
-    arch_linux = "aarch64" if IS_ARM else "x86_64"
+    实测（2026-09-28 GET + byte-tools UA）两条纠正，所以本组件按 R1.1 登记为
+    「无大陆镜像」例外：
+      - 华为云 /mongodb/ 只有 C++ 源码包，清华/阿里/中科大没有 fastdl 的二进制树
+        （目录与文件一律 404），四家全部不可用；
+      - Linux 包名必须带发行版段（ubuntu2204 等），裸 mongodb-linux-x86_64-<v>.tgz
+        是 403，这正是改造前恒失败的原因。
+    """
+    official_base = "https://fastdl.mongodb.org"
 
     # Windows：只有 x64，无 arm64 社区版
     win_filename = f"mongodb-windows-x86_64-{v}.zip"
-    win_urls = [f"{base}/windows/{win_filename}" for base in mirror_bases]
-    win_urls.append(f"{official_base}/windows/{win_filename}")
 
-    # Linux：区分 x86_64 / aarch64
-    linux_filename = f"mongodb-linux-{arch_linux}-{v}.tgz"
-    linux_urls = [f"{base}/linux/{linux_filename}" for base in mirror_bases]
-    linux_urls.append(f"{official_base}/linux/{linux_filename}")
+    # Linux：官方按 glibc/发行版分档，ubuntu2204 是当前 8.0.x 都能命中的那一档
+    arch_linux = "aarch64" if IS_ARM else "x86_64"
+    distro = "" if IS_ARM else "-ubuntu2204"
+    linux_filename = f"mongodb-linux-{arch_linux}{distro}-{v}.tgz"
 
     return {
-        "Windows": win_urls,
-        "Linux":   linux_urls,
+        "Windows": [f"{official_base}/windows/{win_filename}"],
+        "Linux":   [f"{official_base}/linux/{linux_filename}"],
         # Mac 不支持（用户用 brew install mongodb-community）
     }
 
@@ -856,37 +1072,30 @@ def _postgresql_urls(v: str) -> Dict[str, List[str]]:
     PostgreSQL 下载 URL 列表构造（R1 多源故障转移模式）。
 
     入参 v: str   PostgreSQL 版本号字符串，如 "16.4"
-    返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（清华→华为云，binaries 路径占位 fallback），官网末位。
+    返回: 按操作系统键映射的 URL 列表字典（Windows 只有官方一源，见下方说明）。
 
     说明:
       - PostgreSQL 官方 binaries 由 EnterpriseDB（EDB）发布在 get.enterprisedb.com；
-      - 国内镜像（清华 / 华为云等）只镜像源码不镜像 binaries，本函数仍按 binaries
-        路径占位写入，若镜像返回 404 会自动 fallback 到下一个源（符合 R1.7 改造指引）；
-      - Mac 平台 EDB 不发布 binaries，本函数不返回 Darwin 键，提示用户用 brew；
       - 解压后根目录为 pgsql/，内部含 bin/ 子目录。
+
+    实测（2026-09-28 GET + byte-tools UA）三条纠正，所以本组件按 R1.1 登记为
+    「无大陆镜像」例外：
+      - 清华没有 /postgresql/ 目录（404）；华为云/阿里/南大的 /postgresql/ 只有
+        `latest/`、`source/` 源码 tarball，`v17/`、`17.6/` 这类 binaries 树一律 404，
+        国内无人同步 EDB 的 windows-x64-binaries.zip。
+      - 早前记的「华为云 /postgresql/binaries/ 回 200 + 空响应体」是不带 UA 时的误判：
+        带 UA 后同一目录回 401/404。
+      - EDB 根本不发布 Linux 版 binaries（postgresql-<v>-1-linux-x64-binaries.tar.gz
+        恒 403），改造前那条 Linux 源是必然失败的，现在直接不给出该平台的键。
     """
-    # 国内镜像基址（按 R1.3 优先级排序），占位 binaries 路径（实际可能 404，自动 fallback）
-    # EDB 官网路径：postgresql/postgresql-<v>-1-<platform>-<arch>-binaries.<ext>
-    mirror_bases = [
-        "https://mirrors.tuna.tsinghua.edu.cn/postgresql/binaries",
-        "https://repo.huaweicloud.com/postgresql/binaries",
-    ]
     official_base = "https://get.enterprisedb.com/postgresql"
 
     # Windows：x64
     win_filename = f"postgresql-{v}-1-windows-x64-binaries.zip"
-    win_urls = [f"{base}/windows/{win_filename}" for base in mirror_bases]
-    win_urls.append(f"{official_base}/{win_filename}")
-
-    # Linux：x86_64（PostgreSQL EDB binaries 只发布 x86_64，无 aarch64 binaries）
-    linux_filename = f"postgresql-{v}-1-linux-x64-binaries.tar.gz"
-    linux_urls = [f"{base}/linux/{linux_filename}" for base in mirror_bases]
-    linux_urls.append(f"{official_base}/{linux_filename}")
 
     return {
-        "Windows": win_urls,
-        "Linux":   linux_urls,
+        "Windows": [f"{official_base}/{win_filename}"],
+        # Linux：EDB 无 binaries 发布，改用发行版包管理器（apt/yum/dnf）
         # Mac 不支持（用户用 brew install postgresql）
     }
 
@@ -901,7 +1110,7 @@ def _postgresql_cv(v: str) -> ComponentVersion:
         version=v,
         url_map={},
         url_list_map=_postgresql_urls(v),  # 走 R1 多源故障转移
-        archive_map={"Windows": "zip", "Linux": "tar.gz"},
+        archive_map={"Windows": "zip"},
     )
 
 
@@ -910,43 +1119,33 @@ def _kubectl_urls(v: str) -> Dict[str, List[str]]:
     kubectl 下载 URL 列表构造（R1 多源故障转移模式）。
 
     入参 v: str   kubectl 版本号字符串，如 "1.31.0"
-    返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（阿里云→清华→ghproxy 加速 GitHub），官网末位。
+    返回: 按操作系统键映射的 URL 列表字典（当前只有官方一个源，见下方说明）
 
     说明:
       - kubectl 是 Kubernetes 官方 CLI 单二进制，三平台都发布；
       - 官方下载 URL 形如 https://dl.k8s.io/release/v<v>/bin/<os>/<arch>/kubectl<.exe>；
       - Windows 是 .exe，Linux/Mac 无扩展名（需 chmod +x）；
-      - 阿里云镜像 kubernetes/ 路径结构与官网一致。
+      - 实测（2026-09）国内传统镜像站的 kubernetes/ 目录只 rsync 了 apt、yum 包仓库
+        （…/release/v…/bin/… 一律 404），GitHub Release 也不发这个二进制，所以通用
+        镜像站和 GitHub 加速器都用不上；
+      - 能用的是 DaoCloud 的 files.m.daocloud.io 反向代理（实测 windows/linux 都
+        200 + 完整 Content-Length），按 <代理前缀>/<原域名>/<原路径> 拼接；
+      - dl.k8s.io 本机也能直连，作为末位官方源。
     """
     # 按 CPU 架构挑选路径段
     arch = "arm64" if IS_ARM else "amd64"
-    # 国内镜像基址（按 R1.3 优先级排序）
-    mirror_bases = [
-        f"https://mirrors.aliyun.com/kubernetes-release/release/v{v}/bin",
-        f"https://mirrors.tuna.tsinghua.edu.cn/kubernetes-release/release/v{v}/bin",
-        f"https://ghproxy.com/https://dl.k8s.io/release/v{v}/bin",
-    ]
-    official_base = f"https://dl.k8s.io/release/v{v}/bin"
+    rel = f"dl.k8s.io/release/v{v}/bin"
+    dao = _mb("daocloud-files")[0]
+    official = "https://dl.k8s.io"
 
-    # Windows：.exe
-    win_filename = f"kubectl.exe"
-    win_urls = [f"{base}/windows/{arch}/{win_filename}" for base in mirror_bases]
-    win_urls.append(f"{official_base}/windows/{arch}/{win_filename}")
-
-    # Linux：无扩展名
-    linux_filename = "kubectl"
-    linux_urls = [f"{base}/linux/{arch}/{linux_filename}" for base in mirror_bases]
-    linux_urls.append(f"{official_base}/linux/{arch}/{linux_filename}")
-
-    # Mac：无扩展名（Mac arm64 用 arm64，x64 用 amd64）
-    mac_urls = [f"{base}/darwin/{arch}/{linux_filename}" for base in mirror_bases]
-    mac_urls.append(f"{official_base}/darwin/{arch}/{linux_filename}")
+    def lst(os_dir: str, name: str) -> List[str]:
+        return [f"{dao}/{rel}/{os_dir}/{arch}/{name}",
+                f"{official}/release/v{v}/bin/{os_dir}/{arch}/{name}"]
 
     return {
-        "Windows": win_urls,
-        "Linux":   linux_urls,
-        "Darwin":  mac_urls,
+        "Windows": lst("windows", "kubectl.exe"),
+        "Linux":   lst("linux", "kubectl"),
+        "Darwin":  lst("darwin", "kubectl"),
     }
 
 
@@ -969,21 +1168,20 @@ def _jenkins_urls(v: str) -> Dict[str, List[str]]:
     """
     Jenkins 下载 URL 列表构造（R1 多源故障转移模式）。
 
-    入参 v: str   Jenkins LTS 版本号字符串，如 "2.426.3"
+    入参 v: str   Jenkins LTS 版本号字符串，如 "2.568.3"
     返回: 三平台同 URL 列表（jenkins.war 跨平台），列表顺序即故障转移顺序：
-          国内镜像在前（华为云→清华→阿里云），官网末位。
+          国内镜像在前（华为云两个子域 + 清华 + 北外 + 南大 + 阿里 + 腾讯云），官网末位。
 
     说明:
       - Jenkins LTS war 包是跨平台单文件，下载后用 `java -jar jenkins.war` 启动；
       - 官方下载 URL 形如 https://get.jenkins.io/war-stable/<v>/jenkins.war；
-      - 国内镜像路径结构与官网一致。
+      - 国内镜像路径结构与官网一致，但 war-stable 只保留最近几条 LTS 线
+        （实测 2.568.3 八家全通，2.426.3 只剩华为云）。
     """
     filename = "jenkins.war"
-    mirror_bases = [
-        f"https://repo.huaweicloud.com/jenkins/war-stable/{v}",
-        f"https://mirrors.tuna.tsinghua.edu.cn/jenkins/war-stable/{v}",
-        f"https://mirrors.aliyun.com/jenkins/war-stable/{v}",
-    ]
+    mirror_bases = [f"{b}/jenkins/war-stable/{v}" for b in
+                    _mb("huaweicloud", "huaweicloud-py", "tuna", "bfsu", "nju",
+                        "aliyun", "tencent", "ustc")]
     official_base = f"https://get.jenkins.io/war-stable/{v}"
 
     urls = [f"{base}/{filename}" for base in mirror_bases]
@@ -1027,20 +1225,17 @@ def _rabbitmq_urls(v: str) -> Dict[str, List[str]]:
     """
     # 按 CPU 架构挑选路径段（RabbitMQ 用 aarch64 / x86_64）
     arch = "aarch64" if IS_ARM else "x86_64"
-    # 国内镜像基址
-    mirror_bases = [
-        "https://repo.huaweicloud.com/rabbitmq",
-        "https://mirrors.tuna.tsinghua.edu.cn/rabbitmq",
-        "https://mirrors.aliyun.com/rabbitmq",
-    ]
-    # GitHub releases 是末位官网
-    github_base = "https://github.com/rabbitmq/rabbitmq-server/releases/download/v{v}"
+    # 实测（2026-09-28）：华为云的目录是 /rabbitmq-server/v<ver>/，不是 /rabbitmq/；
+    # 清华与阿里根本没有 rabbitmq 的二进制镜像（404），所以大陆只有华为云两个子域。
+    mirror_bases = [f"{b}/rabbitmq-server/v{v}" for b in
+                    _mb("huaweicloud", "huaweicloud-py")]
+    # GitHub releases 是末位官网，中间夹一层加速器（GitHub 没有真镜像）
+    github = (f"https://github.com/rabbitmq/rabbitmq-server/releases/download/"
+              f"v{v}/rabbitmq-server-generic-unix-{v}.tar.xz")
 
-    # Linux / Mac：generic_<platform>_<arch>-<v>.tar.xz
-    # 实际 GitHub release 资产名形如 rabbitmq-server-generic-unix-<v>.tar.xz
-    filename = f"rabbitmq-server-generic-unix-{v}.tar.xz"
+    # generic-unix 包三平台（除 Windows）通用：rabbitmq-server-generic-unix-<v>.tar.xz
     urls = [f"{base}/rabbitmq-server-generic-unix-{v}.tar.xz" for base in mirror_bases]
-    urls.append(f"https://github.com/rabbitmq/rabbitmq-server/releases/download/v{v}/{filename}")
+    urls += _gh_accelerated(github)
 
     return {
         "Linux":   urls,
@@ -1059,8 +1254,8 @@ def _rabbitmq_cv(v: str) -> ComponentVersion:
         version=v,
         url_map={},
         url_list_map=_rabbitmq_urls(v),  # 走 R1 多源故障转移
-        # Linux/Mac 走 tar.xz（extract_archive 已支持）
-        archive_map={"Linux": "tar.gz", "Darwin": "tar.gz"},
+        # 包名是 .tar.xz，extract_archive 按后缀分派，这里必须写 tar.xz 而不是 tar.gz
+        archive_map={"Linux": "tar.xz", "Darwin": "tar.xz"},
     )
 
 
@@ -1068,36 +1263,35 @@ def _kafka_urls(v: str) -> Dict[str, List[str]]:
     """
     Apache Kafka 下载 URL 列表构造（R1 多源故障转移模式）。
 
-    入参 v: str   Kafka 版本号字符串，如 "3.8.1"
+    入参 v: str   Kafka 版本号字符串，如 "4.1.2"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序。
 
     说明:
-      - Kafka 是 Scala 项目，跨平台 tgz/zip，需 JDK 运行；
+      - Kafka 是 Scala 项目，跨平台单 tgz，需 JDK 运行；
       - 官方下载 URL 形如 https://archive.apache.org/dist/kafka/<v>/kafka_2.13-<v>.tgz；
       - Scala 版本固定 2.13（Kafka 3.x 起唯一支持版本）。
+
+    实测（2026-09-28 GET + byte-tools UA）两处纠正：
+      - Kafka 从来不发 .zip，原来的 Windows 分支拼 `kafka_2.13-<v>.zip` 六个源全部
+        404，改成与其它平台同一个 .tgz；
+      - 镜像站的 apache/kafka 只保留最新版（4.1.2 七家全通，3.9.1 只剩华为云 + archive）。
+        之前记录的「中科大在 apache/* 回 200 + 空响应体」是不带 UA 时的误判：带上
+        byte-tools UA 后 ustc 的 kafka 4.1.2 回 200 + gzip 魔数，不存在的版本回 404。
     """
     scala_version = "2.13"
-    linux_filename = f"kafka_{scala_version}-{v}.tgz"
-    win_filename = f"kafka_{scala_version}-{v}.zip"
+    filename = f"kafka_{scala_version}-{v}.tgz"
 
-    mirror_bases = [
-        "https://repo.huaweicloud.com/apache/kafka",
-        "https://mirrors.tuna.tsinghua.edu.cn/apache/kafka",
-        "https://mirrors.aliyun.com/apache/kafka",
-        "https://mirrors.ustc.edu.cn/apache/kafka",
-    ]
+    mirror_bases = [f"{b}/apache/kafka" for b in
+                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
     official_base = "https://archive.apache.org/dist/kafka"
 
-    linux_urls = [f"{base}/{v}/{linux_filename}" for base in mirror_bases]
-    linux_urls.append(f"{official_base}/{v}/{linux_filename}")
-
-    win_urls = [f"{base}/{v}/{win_filename}" for base in mirror_bases]
-    win_urls.append(f"{official_base}/{v}/{win_filename}")
+    urls = [f"{base}/{v}/{filename}" for base in mirror_bases]
+    urls.append(f"{official_base}/{v}/{filename}")
 
     return {
-        "Windows": win_urls,
-        "Linux":   linux_urls,
-        "Darwin":  linux_urls,  # Mac 用 Linux 的 tgz
+        "Windows": list(urls),
+        "Linux":   list(urls),
+        "Darwin":  list(urls),  # 三平台同一个 tgz
     }
 
 
@@ -1111,7 +1305,8 @@ def _kafka_cv(v: str) -> ComponentVersion:
         version=v,
         url_map={},
         url_list_map=_kafka_urls(v),
-        archive_map={"Windows": "zip", "Linux": "tar.gz", "Darwin": "tar.gz"},
+        # Kafka 三平台同一个 tgz，Windows 也是 tar.gz（原来写 zip 是恒 404 的根因）
+        archive_map={"Windows": "tar.gz", "Linux": "tar.gz", "Darwin": "tar.gz"},
     )
 
 
@@ -1128,12 +1323,10 @@ def _rocketmq_urls(v: str) -> Dict[str, List[str]]:
     """
     filename = f"rocketmq-all-{v}-bin-release.zip"
 
-    mirror_bases = [
-        "https://repo.huaweicloud.com/apache/rocketmq",
-        "https://mirrors.tuna.tsinghua.edu.cn/apache/rocketmq",
-        "https://mirrors.aliyun.com/apache/rocketmq",
-        "https://mirrors.ustc.edu.cn/apache/rocketmq",
-    ]
+    # 实测（2026-09-28 GET + byte-tools UA）：apache/rocketmq 七家镜像 + archive 全部
+    # 200（90 MB 真包，ustc 回 gzip 魔数）；不带 UA 时 ustc 会 403，曾被误判为假镜像。
+    mirror_bases = [f"{b}/apache/rocketmq" for b in
+                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
     official_base = "https://archive.apache.org/dist/rocketmq"
 
     urls = [f"{base}/{v}/{filename}" for base in mirror_bases]
@@ -1174,12 +1367,8 @@ def _pulsar_urls(v: str) -> Dict[str, List[str]]:
     """
     filename = f"apache-pulsar-{v}-bin.tar.gz"
 
-    mirror_bases = [
-        "https://repo.huaweicloud.com/apache/pulsar",
-        "https://mirrors.tuna.tsinghua.edu.cn/apache/pulsar",
-        "https://mirrors.aliyun.com/apache/pulsar",
-        "https://mirrors.ustc.edu.cn/apache/pulsar",
-    ]
+    mirror_bases = [f"{b}/apache/pulsar" for b in
+                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
     official_base = "https://archive.apache.org/dist/pulsar"
 
     urls = [f"{base}/pulsar-{v}/{filename}" for base in mirror_bases]
@@ -1210,29 +1399,21 @@ def _activemq_urls(v: str) -> Dict[str, List[str]]:
     """
     ActiveMQ 下载 URL 列表构造（R1 多源故障转移模式）。
 
-    入参 v: str   ActiveMQ 版本号字符串，如 "6.1.2"
+    入参 v: str   ActiveMQ 版本号字符串，如 "6.3.2"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序。
 
     说明:
-      - ActiveMQ 是 Java 项目，跨平台 tar.gz/zip，需 JDK 运行；
-      - 官方下载 URL 形如 https://archive.apache.org/dist/activemq/<v>/activemq-apache-<v>-bin.tar.gz；
-      - ActiveMQ 5.x 用 apache-activemq-<v>-bin.tar.gz，5.18+ 改名 activemq-apache-<v>-bin.tar.gz。
-    """
-    # ActiveMQ 5.x 和 6.x 文件名不同：5.x 是 apache-activemq-<v>-bin.tar.gz，6.x 是 activemq-apache-<v>-bin.tar.gz
-    major = int(v.split(".")[0]) if v else 5
-    if major >= 6:
-        linux_filename = f"activemq-apache-{v}-bin.tar.gz"
-        win_filename = f"activemq-apache-{v}-bin.zip"
-    else:
-        linux_filename = f"apache-activemq-{v}-bin.tar.gz"
-        win_filename = f"apache-activemq-{v}-bin.zip"
+      - ActiveMQ 是 Java 项目，跨平台 tar.gz/zip，需 JDK 运行。
 
-    mirror_bases = [
-        "https://repo.huaweicloud.com/apache/activemq",
-        "https://mirrors.tuna.tsinghua.edu.cn/apache/activemq",
-        "https://mirrors.aliyun.com/apache/activemq",
-        "https://mirrors.ustc.edu.cn/apache/activemq",
-    ]
+    实测（2026-09-28）纠正：包名从 5.x 到 6.x 都是 apache-activemq-<v>-bin.*，
+    原代码给 6.x 拼出的 activemq-apache-<v>-bin.* 六个源全部 404。
+    另外镜像站的 apache/activemq 只保留最新版：6.3.2 七家全通，5.18.4 只剩华为云 + archive。
+    """
+    linux_filename = f"apache-activemq-{v}-bin.tar.gz"
+    win_filename = f"apache-activemq-{v}-bin.zip"
+
+    mirror_bases = [f"{b}/apache/activemq" for b in
+                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
     official_base = "https://archive.apache.org/dist/activemq"
 
     linux_urls = [f"{base}/{v}/{linux_filename}" for base in mirror_bases]
@@ -1267,26 +1448,18 @@ def _nacos_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Nacos 版本号字符串，如 "2.3.2"
     返回: 三平台同 URL 列表（Nacos 跨平台通用 zip/tar.gz），列表顺序即故障转移顺序：
-          国内加速在前（ghproxy / gh.idayer.com），GitHub releases 末位。
+          国内 GitHub 加速器在前（GH_ACCELERATORS），GitHub releases 末位。
 
     说明:
       - Nacos 在 GitHub releases 发布，国内无官方镜像；
       - 文件名形如 nacos-server-<v>.zip（三平台通用，部分版本也发 .tar.gz）；
-      - 走 ghproxy 加速 GitHub downloads URL，gh.idayer.com 作为备用加速源。
+      - GitHub Release 没有真镜像，统一走 _gh_accelerated 加前缀（ghproxy.com 已停服，勿再引入）。
     """
     # Nacos 2.x 起 zip 是主发布格式（Linux 也能用 zip 解压即用）
     filename = f"nacos-server-{v}.zip"
 
-    # 国内 GitHub 加速基址（按 R1.3 优先级，Nacos 在国内仅 ghproxy 类源稳定）
-    accelerator_bases = [
-        "https://ghproxy.com/https://github.com/alibaba/nacos/releases/download",
-        "https://gh.idayer.com/https://github.com/alibaba/nacos/releases/download",
-    ]
-    # GitHub releases 末位官网
-    github_base = "https://github.com/alibaba/nacos/releases/download"
-
-    urls = [f"{base}/{v}/{filename}" for base in accelerator_bases]
-    urls.append(f"{github_base}/{v}/{filename}")
+    # GitHub releases 末位官网，前面是加速器前缀
+    urls = _gh_accelerated(f"https://github.com/alibaba/nacos/releases/download/{v}/{filename}")
 
     # Nacos zip 跨平台通用
     return {
@@ -1316,36 +1489,29 @@ def _seata_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Seata 版本号字符串，如 "2.2.0"
     返回: 三平台同 URL 列表（Seata 跨平台通用 zip），列表顺序即故障转移顺序：
-          国内加速在前（ghproxy / gh.idayer.com），GitHub releases 末位。
+          国内 GitHub 加速器在前（GH_ACCELERATORS），GitHub releases 末位。
 
     说明:
       - Seata 是 Apache 孵化项目（apache/incubator-seata），在 GitHub releases 发布；
       - 文件名形如 apache-seata-<v>-incubating-bin.zip（2.x）或 seata-server-<v>.zip（1.x）；
-      - 走 ghproxy 加速 GitHub downloads URL，gh.idayer.com 作为备用加速源。
+      - GitHub Release 没有真镜像，统一走 _gh_accelerated 加前缀（ghproxy.com 已停服，勿再引入）。
     """
-    # Seata 2.x 改名 apache-seata-<v>-incubating-bin.zip，1.x 是 seata-server-<v>.zip
-    major = int(v.split(".")[0]) if v else 2
-    if major >= 2:
-        filename = f"apache-seata-{v}-incubating-bin.zip"
-    else:
-        filename = f"seata-server-{v}.zip"
+    # 实测（2026-09-28）：GitHub 的 apache/incubator-seata release 从 v2.1.0 起资产数为 0
+    # （官网改版后二进制只发在 Apache dist），所以原来的 GitHub 直链与三个加速器全部 404。
+    # Apache dist 布局：<镜像>/apache/incubator/seata/<v>/apache-seata-<v>-incubating-bin.tar.gz
+    # 2.6.0 八家镜像 + archive 全通；2.2.0 只剩华为云两个子域 + archive。
+    filename = f"apache-seata-{v}-incubating-bin.tar.gz"
+    mirror_bases = [f"{b}/apache/incubator/seata/{v}" for b in
+                    _mb("huaweicloud", "huaweicloud-py", "tuna", "aliyun", "nju",
+                        "bfsu", "tencent", "ustc")]
+    urls = [f"{base}/{filename}" for base in mirror_bases]
+    urls.append(f"https://archive.apache.org/dist/incubator/seata/{v}/{filename}")
 
-    # 国内 GitHub 加速基址
-    accelerator_bases = [
-        "https://ghproxy.com/https://github.com/apache/incubator-seata/releases/download",
-        "https://gh.idayer.com/https://github.com/apache/incubator-seata/releases/download",
-    ]
-    # GitHub releases 末位官网
-    github_base = "https://github.com/apache/incubator-seata/releases/download"
-
-    urls = [f"{base}/v{v}/{filename}" for base in accelerator_bases]
-    urls.append(f"{github_base}/v{v}/{filename}")
-
-    # Seata zip 跨平台通用
+    # Seata 的 tar.gz 跨平台通用
     return {
-        "Windows": urls,
-        "Linux":   urls,
-        "Darwin":  urls,
+        "Windows": list(urls),
+        "Linux":   list(urls),
+        "Darwin":  list(urls),
     }
 
 
@@ -1359,7 +1525,7 @@ def _seata_cv(v: str) -> ComponentVersion:
         version=v,
         url_map={},
         url_list_map=_seata_urls(v),
-        archive_map={"Windows": "zip", "Linux": "zip", "Darwin": "zip"},
+        archive_map={"Windows": "tar.gz", "Linux": "tar.gz", "Darwin": "tar.gz"},
     )
 
 
@@ -1369,26 +1535,21 @@ def _elasticsearch_urls(v: str) -> Dict[str, List[str]]:
 
     入参 v: str   Elasticsearch 版本号字符串，如 "8.15.0"
     返回: 按操作系统键映射的 URL 列表字典，列表顺序即故障转移顺序：
-          国内镜像在前（清华→华为云→阿里云占位），elastic.co 官网末位。
+          国内镜像在前（华为云 repo→华为云 mirrors），elastic.co 官网末位。
 
     说明:
       - Elasticsearch 官方在 artifacts.elastic.co 发布跨平台归档包；
       - 版本 8.x 起 URL 含 -<platform>-<arch> 后缀（如 -linux-x86_64.tar.gz）；
-      - 国内镜像路径可能与官网不完全一致，部分版本 404 会自动 fallback 到官网
-        （符合 R1.7 改造指引"镜像返回 404 直接切下一个"）；
       - Windows 是 zip，Linux/Mac 是 tar.gz。
     """
     # 按 CPU 架构挑选路径段（Elasticsearch 用 x86_64 / aarch64）
     arch = "aarch64" if IS_ARM else "x86_64"
 
-    # 国内镜像基址（按 R1.3 优先级排序）
-    # 实际上国内镜像（清华/华为云/阿里云）对 Elasticsearch 同步情况不一，
-    # 这里按官网路径占位写入，404 会自动 fallback 到 elastic.co
-    mirror_bases = [
-        "https://mirrors.tuna.tsinghua.edu.cn/elasticsearch",
-        "https://repo.huaweicloud.com/elasticsearch",
-        "https://mirrors.aliyun.com/elasticsearch",
-    ]
+    # 实测（2026-09-28）：华为云的 ES 布局多一层版本目录 —— /elasticsearch/<v>/<file>，
+    # 原来的平铺拼接恒 404；清华只有 apt/yum 仓库、阿里云没有 elasticsearch 目录，
+    # 两家都不是二进制镜像，故大陆只保留华为云 repo 与 mirrors 两个子域。
+    # 同步深度也有限：9.2.3 / 8.9.2 全通，8.15.0 与 8.17.10 在华为云都是 404。
+    mirror_bases = [f"{b}/elasticsearch/{v}" for b in _mb("huaweicloud", "huaweicloud-py")]
     official_base = "https://artifacts.elastic.co/downloads/elasticsearch"
 
     # 文件名：elasticsearch-<v>-<platform>-<arch>.<ext>
@@ -1444,7 +1605,7 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
     - SSL 错误（企业代理 MITM / 系统证书缺失等）：最后一次尝试关闭 SSL 校验
     """
     import time as _time
-    headers = {"User-Agent": "byte-tools"}
+    headers = HTTP_UA
     last_exc: Optional[Exception] = None
     for attempt in range(3):
         try:
@@ -1478,19 +1639,17 @@ def _sort_semver_desc(vs) -> list:
 
 
 def fetch_jdk_versions() -> List[ComponentVersion]:
-    """Adoptium Temurin 官方 API。"""
+    """Adoptium Temurin 官方 API；每个版本再进镜像站目录解析确切文件名。"""
     data = _get("https://api.adoptium.net/v3/info/available_releases").json()
     releases = data.get("available_releases", [])
     lts = data.get("available_lts_releases", [])
     # releases 有时会遗漏最新 LTS —— 合并去重
     vs = sorted({int(v) for v in list(releases) + list(lts)}, reverse=True)
     result = []
+    dead: set = set()   # 本次刷新内连不上的镜像基址，避免逐版本重复试探
+    avail: dict = {}    # 基址 → 该镜像已同步的 JDK 大版本集合（只列一次根目录）
     for v in vs:
-        cv = ComponentVersion(
-            version=str(v),
-            url_map=_adoptium_jdk_url(str(v)),
-            archive_map={"Windows": "zip", "Darwin": "tar.gz", "Linux": "tar.gz"},
-        )
+        cv = _cv(str(v), _adoptium_jdk_url(str(v), dead, avail))
         if v in lts:
             cv.display_label = f"{v}  (LTS)"  # type: ignore[attr-defined]
         result.append(cv)
@@ -1616,13 +1775,10 @@ def fetch_conda_versions() -> List[ComponentVersion]:
         ]
 
     def make_cv(v: str) -> ComponentVersion:
+        cv = _cv(v, _conda_urls(v))
         # 安装器文件后缀：Windows .exe / mac & linux .sh
-        ext_map = {"Windows": "exe", "Darwin": "sh", "Linux": "sh"}
-        return ComponentVersion(
-            version=v,
-            url_map=_conda_urls(v),
-            archive_map=ext_map,  # 复用字段承载扩展名
-        )
+        cv.archive_map = {"Windows": "exe", "Darwin": "sh", "Linux": "sh"}
+        return cv
 
     return [make_cv(v) for v in versions[:12]]
 
@@ -2333,11 +2489,38 @@ class VersionFetchWorker(QThread):
             self.done.emit(self.key, None)
 
 
+# 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
+COMPONENT_CATEGORIES = ("开发环境", "开发软件", "其它软件")
+
+# 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
+# build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。
+#   开发环境：装完进 PATH、直接用来写 / 编译 / 打包代码
+#   开发软件：本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）
+#   其它软件：不参与写代码的容器、编排与 CI 外围
+COMPONENT_CATEGORY_OF = {
+    "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
+    "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
+    "maven": "开发环境", "gradle": "开发环境",
+    "tomcat": "开发软件", "mysql": "开发软件", "mongodb": "开发软件",
+    "postgresql": "开发软件", "elasticsearch": "开发软件", "nacos": "开发软件",
+    "seata": "开发软件", "kafka": "开发软件", "rocketmq": "开发软件",
+    "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
+    "docker": "其它软件", "kubectl": "其它软件", "jenkins": "其它软件",
+}
+
+
+def group_components(components: List[Component]) -> Dict[str, List[Component]]:
+    """按 COMPONENT_CATEGORIES 的顺序分组，供界面建 Tab。"""
+    grouped: Dict[str, List[Component]] = {name: [] for name in COMPONENT_CATEGORIES}
+    for comp in components:
+        grouped[comp.category].append(comp)   # 未登记的分类直接 KeyError
+    return grouped
+
+
 def build_components() -> List[Component]:
     """构造预置的组件与版本信息（作为抓取完成前的默认列表）。"""
 
     components: List[Component] = []
-
     # ------------------ JDK ------------------
     components.append(
         Component(
@@ -2348,11 +2531,7 @@ def build_components() -> List[Component]:
             exec_name="java",
             version_args=["-version"],
             versions=[
-                ComponentVersion(
-                    version=v,
-                    url_map=_adoptium_jdk_url(v),
-                    archive_map={"Windows": "zip", "Darwin": "tar.gz", "Linux": "tar.gz"},
-                )
+                _cv(v, _adoptium_jdk_url(v, resolve_mirrors=False))
                 for v in ("21", "17", "11", "8")
             ],
         )
@@ -2367,7 +2546,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="mvn",
             version_args=["-v"],
-            versions=[_cv(v, _maven_urls(v)) for v in ("3.9.6", "3.9.5", "3.8.8", "3.6.3")],
+            versions=[_cv(v, _maven_urls(v)) for v in ("3.9.16", "3.9.6", "3.8.8", "3.6.3")],
         )
     )
 
@@ -2380,7 +2559,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="catalina",
             version_args=["version"],
-            versions=[_cv(v, _tomcat_urls(v)) for v in ("10.1.24", "9.0.89", "8.5.100")],
+            versions=[_cv(v, _tomcat_urls(v)) for v in ("10.1.60", "9.0.122", "8.5.100")],
         )
     )
 
@@ -2393,7 +2572,8 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="mysql",
             version_args=["--version"],
-            versions=[_cv(v, _mysql_urls(v)) for v in ("8.0.37", "8.0.36", "5.7.44")],
+            versions=[_cv(v, _mysql_urls(v), {"Linux": "tar.xz"})
+                      for v in ("8.0.28", "8.0.29", "8.0.37")],
         )
     )
 
@@ -2406,7 +2586,7 @@ def build_components() -> List[Component]:
             path_subdir="Scripts" if CURRENT_OS == "Windows" else "bin",
             exec_name="python3" if CURRENT_OS != "Windows" else "python",
             version_args=["--version"],
-            versions=[_cv(v, _python_urls(v)) for v in ("3.12.4", "3.11.9", "3.10.14", "3.9.19")],
+            versions=[_cv(v, _python_urls(v)) for v in ("3.12.4", "3.11.9", "3.10.11", "3.9.13")],
         )
     )
 
@@ -2424,7 +2604,8 @@ def build_components() -> List[Component]:
     )
 
     # ------------------ Git ------------------
-    # macOS/Linux 一般依赖系统自带 git；Windows 用 MinGit 便携版
+    # Windows 用 MinGit 便携版；macOS/Linux 上游只有源码包（解压不能用），
+    # 所以不提供自动下载，改由 unsupported_platform_hint 引导用系统包管理器
     components.append(
         Component(
             key="git",
@@ -2433,7 +2614,14 @@ def build_components() -> List[Component]:
             path_subdir="cmd" if CURRENT_OS == "Windows" else "bin",
             exec_name="git",
             version_args=["--version"],
-            versions=[_cv(v, _git_urls(v)) for v in ("2.45.2", "2.44.0", "2.43.0")],
+            unsupported_platform_hint=(
+                "Git 在 Linux/macOS 上游只发布源码包（解压后没有可执行文件，需自行编译），"
+                "本工具不提供该平台的自动下载。请用系统包管理器安装："
+                "Debian/Ubuntu 执行 sudo apt install git；"
+                "RHEL/CentOS/Anolis 执行 sudo dnf install git 或 sudo yum install git；"
+                "macOS 执行 brew install git（或先装 Xcode Command Line Tools）。"
+            ),
+            versions=[_cv(v, _git_urls(v)) for v in ("2.47.1", "2.45.2", "2.44.0")],
         )
     )
 
@@ -2441,11 +2629,8 @@ def build_components() -> List[Component]:
     # 安装器模式：exe/sh 静默安装到 install_dir
     conda_versions = []
     for v in ("py312_24.7.1-0", "py311_24.7.1-0", "py310_24.5.0-0"):
-        cv = ComponentVersion(
-            version=v,
-            url_map=_conda_urls(v),
-            archive_map={"Windows": "exe", "Darwin": "sh", "Linux": "sh"},
-        )
+        cv = _cv(v, _conda_urls(v))
+        cv.archive_map = {"Windows": "exe", "Darwin": "sh", "Linux": "sh"}
         conda_versions.append(cv)
     components.append(
         Component(
@@ -2478,7 +2663,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="go",
             version_args=["version"],
-            versions=[_go_cv(v) for v in ("1.22.5", "1.22.4", "1.21.12", "1.21.11")],
+            versions=[_go_cv(v) for v in ("1.24.6", "1.22.5", "1.22.4", "1.21.12")],
         )
     )
 
@@ -2509,7 +2694,7 @@ def build_components() -> List[Component]:
             path_subdir="",  # Bun 二进制直接在 install_dir 根目录，无 bin 子目录
             exec_name="bun",
             version_args=["--version"],
-            versions=[_bun_cv(v) for v in ("1.1.0", "1.0.30", "1.0.29", "1.0.20")],
+            versions=[_bun_cv(v) for v in ("1.4.2", "1.3.14", "1.2.16", "1.1.0")],
         )
     )
 
@@ -2546,7 +2731,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="mongod",  # 用服务端二进制 mongod 检测版本（client shell 是 mongosh，社区版不含）
             version_args=["--version"],
-            versions=[_mongodb_cv(v) for v in ("8.0.0", "7.0.5", "6.0.20", "5.0.30")],
+            versions=[_mongodb_cv(v) for v in ("8.0.12", "8.0.0")],
         )
     )
 
@@ -2563,7 +2748,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="psql",
             version_args=["--version"],
-            versions=[_postgresql_cv(v) for v in ("16.4", "16.3", "15.8", "14.12")],
+            versions=[_postgresql_cv(v) for v in ("17.6", "16.4", "15.8", "14.12")],
         )
     )
 
@@ -2602,7 +2787,7 @@ def build_components() -> List[Component]:
                 "Jenkins 通过 jenkins.war 单文件分发，运行需要先安装 JDK（本工具已支持 JDK 自动装配）。"
                 "下载完成后请用 `java -jar jenkins.war` 启动 Jenkins。"
             ),
-            versions=[_jenkins_cv(v) for v in ("2.426.3", "2.426.2", "2.426.1", "2.425.1")],
+            versions=[_jenkins_cv(v) for v in ("2.568.3", "2.555.3", "2.541.3")],
         )
     )
 
@@ -2627,7 +2812,7 @@ def build_components() -> List[Component]:
                 "本工具暂不提供自动下载。请前往官网下载安装："
                 "https://www.rabbitmq.com/install-windows.html"
             ),
-            versions=[_rabbitmq_cv(v) for v in ("4.0.0", "3.13.7", "3.13.6", "3.12.14")],
+            versions=[_rabbitmq_cv(v) for v in ("4.0.9", "3.13.7")],
         )
     )
 
@@ -2646,7 +2831,7 @@ def build_components() -> List[Component]:
             version_args=[],
             # 启动脚本：执行即拉起 broker，探测阶段只判定存在
             version_probe=False,
-            versions=[_kafka_cv(v) for v in ("3.8.1", "3.8.0", "3.7.2", "3.6.2")],
+            versions=[_kafka_cv(v) for v in ("4.1.2", "3.9.1", "3.8.1")],
         )
     )
 
@@ -2680,7 +2865,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="pulsar",  # Pulsar 主命令（无 .sh 后缀）
             version_args=["--version"],
-            versions=[_pulsar_cv(v) for v in ("3.3.1", "3.3.0", "3.2.4", "3.1.3")],
+            versions=[_pulsar_cv(v) for v in ("3.3.9", "3.3.1")],
         )
     )
 
@@ -2696,7 +2881,7 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="activemq",  # ActiveMQ 主命令（无 .sh 后缀）
             version_args=["--version"],
-            versions=[_activemq_cv(v) for v in ("6.1.2", "6.1.1", "5.18.4", "5.17.6")],
+            versions=[_activemq_cv(v) for v in ("6.3.2", "5.18.4")],
         )
     )
 
@@ -2735,7 +2920,7 @@ def build_components() -> List[Component]:
             version_args=["--version"],
             # seata-server 脚本一执行就会拉起 Seata 服务，探测阶段绝不执行
             version_probe=False,
-            versions=[_seata_cv(v) for v in ("2.2.0", "2.1.0", "2.0.0", "1.8.0")],
+            versions=[_seata_cv(v) for v in ("2.6.0", "2.2.0")],
         )
     )
 
@@ -2752,10 +2937,12 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="elasticsearch",  # Elasticsearch 主命令（elasticsearch / elasticsearch.bat）
             version_args=["--version"],  # elasticsearch --version 输出版本信息
-            versions=[_elasticsearch_cv(v) for v in ("8.15.0", "8.14.3", "8.13.4", "7.17.18")],
+            versions=[_elasticsearch_cv(v) for v in ("9.2.3", "8.9.2", "8.15.0")],
         )
     )
 
+    for comp in components:
+        comp.category = COMPONENT_CATEGORY_OF[comp.key]
     return components
 
 
@@ -2827,13 +3014,14 @@ class DownloadWorker(QThread):
 
     def _try_download(self, url: str) -> bool:
         """
-        尝试从单个 URL 流式下载；成功返回 True，失败抛异常。
+        尝试从单个 URL 流式下载；下载完成且校验通过返回 True，否则 False 换下一个源。
 
         入参 url: str   待下载的 URL
-        返回: bool      是否成功
+        返回: bool      是否成功；响应体小于 DOWNLOAD_MIN_VALID_BYTES
+                        或短于声明的 Content-Length 时判定该源失败，换下一个源
         """
         with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT,
-                          allow_redirects=True) as r:
+                          allow_redirects=True, headers=HTTP_UA) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length", 0))
             downloaded = 0
@@ -2850,6 +3038,14 @@ class DownloadWorker(QThread):
                         f.write(chunk)
                         downloaded += len(chunk)
                         self.progress.emit(downloaded, total)
+            # 实测：镜像站会用「200 + 空体/软 404 页」冒充存在的文件，
+            # 这种 0 字节的"成功"必须退回故障转移，否则解压阶段才炸。
+            if downloaded < DOWNLOAD_MIN_VALID_BYTES or (total and downloaded < total):
+                self.log.emit("warn",
+                    f"第 {url} 只返回 {downloaded} 字节"
+                    f"（声明 {total}），判定该源无效，换下一个源。")
+                tmp.unlink(missing_ok=True)
+                return False
             tmp.replace(self.dest)
         self.log.emit("ok",
             f"下载完成：{self.dest} ({human_size(self.dest.stat().st_size)})，"
@@ -4209,24 +4405,30 @@ class MainWindow(QMainWindow):
         body = QSplitter(Qt.Vertical)
         body.setObjectName("bodySplitter")
 
-        # 卡片滚动区域
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setObjectName("cardsScroll")
-        cards_wrap = QWidget()
-        cards_wrap.setObjectName("cardsWrap")
-        cards_layout = QVBoxLayout(cards_wrap)
-        cards_layout.setContentsMargins(18, 18, 18, 18)
-        cards_layout.setSpacing(14)
-
+        # 卡片区域：按 COMPONENT_CATEGORIES 分三个 Tab，每个 Tab 一条独立滚动栏。
+        # self.cards 仍是全量平铺列表——刷新版本 / 存取配置 / 关窗等探测都靠它遍历。
         self.cards: List[ComponentCard] = []
-        for comp in self.components:
-            card = ComponentCard(comp, self._append_log)
-            cards_layout.addWidget(card)
-            self.cards.append(card)
-        cards_layout.addStretch(1)
-        scroll.setWidget(cards_wrap)
-        body.addWidget(scroll)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("compTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabPosition(QTabWidget.North)   # 顶部横向，跨平台显式锁定
+        for cat_name, comps in group_components(self.components).items():
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setObjectName("cardsScroll")
+            cards_wrap = QWidget()
+            cards_wrap.setObjectName("cardsWrap")
+            cards_layout = QVBoxLayout(cards_wrap)
+            cards_layout.setContentsMargins(18, 18, 18, 18)
+            cards_layout.setSpacing(14)
+            for comp in comps:
+                card = ComponentCard(comp, self._append_log)
+                cards_layout.addWidget(card)
+                self.cards.append(card)
+            cards_layout.addStretch(1)
+            scroll.setWidget(cards_wrap)
+            self.tabs.addTab(scroll, f"{cat_name}（{len(comps)}）")
+        body.addWidget(self.tabs)
 
         # 日志
         log_wrap = QWidget()
@@ -4285,6 +4487,21 @@ class MainWindow(QMainWindow):
             #donateBtn { color: #ff8181; font-size: 18px; }
             #closeBtn:hover { background: #e74c3c; }
 
+            #compTabs { background: transparent; border: none; }
+            #compTabs::pane { border: none; background: transparent; }
+            #compTabs > QTabBar::tab {
+                background: #cfd8e3;
+                color: #33465c;
+                padding: 7px 18px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: 600;
+            }
+            #compTabs > QTabBar::tab:selected {
+                background: #ffffff;
+                color: #17253b;
+            }
             #cardsScroll { border: none; background: transparent; }
             #cardsWrap { background: transparent; }
             #card {

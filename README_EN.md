@@ -13,7 +13,8 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 - 🖥️ **Cross-platform.** Detects Windows / macOS / Linux (and x64 / arm64) at runtime and picks the correct distribution.
 - 📦 **One-click provisioning.** Preloaded with **24 built-in developer components** — the whole pipeline (download → unpack → configure) is automated. See [Supported Components](#2-supported-components) below for the full list.
-- 🇨🇳 **China mirror priority.** Since v2.0 every component ships with ≥2 China mirrors (Huawei Cloud / Tsinghua TUNA / Aliyun / USTC / NJU) plus one official source, with multi-source failover — the official site is only used after all China mirrors fail (404 / timeout). Full Chinese logs report which mirror failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration.
+- 🇨🇳 **China mirror priority.** Since v2.0 the tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top). Downloads try China sources first with multi-source failover — the official site is only used after all China sources fail (404 / timeout). Full Chinese logs report which source failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration. Per-component exceptions measured on 2026-09-28: mongodb and postgresql have **no** China mirror (official site only); nacos, bun and the macOS/Linux source tarballs of git go through the GitHub accelerators (no true mirror exists); kubectl prefers the DaoCloud `files.m.daocloud.io` proxy; seata is served from the Apache distribution directory via eight China mirrors.
+- 🛡️ **Reliable downloads.** Every request carries a custom `byte-tools` User-Agent (several university mirrors return 403 for the default UA), and each finished download is checked against the declared byte count — a "fake 200" empty file from a mirror automatically triggers a switch to the next source instead of leaving a broken archive behind.
 - 🔍 **Smart detection.** Checks whether `JAVA_HOME` and friends already exist and are valid; missing/invalid entries are flagged for reconfiguration.
 - 🛠️ **Environment-variable management.**
     - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
@@ -29,14 +30,24 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 > Since v2.0 the component count has grown from 8 to **24**, covering language runtimes, build tools, app servers, databases, containers & orchestration, CI/CD, message queues, service discovery / transaction, search engines, version control and Python distributions.
 
+The UI groups them into **three tabs** along the top, each titled with its component count (the subsections below still describe them by technology category):
+
+| Tab | Count | Rule | Components |
+|-----|-------|------|------------|
+| **开发环境** (Dev environment) | 9 | Goes on PATH, used to write / compile / package code | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle |
+| **开发软件** (Dev services) | 12 | Runs locally as a project dependency | Tomcat, MySQL, MongoDB, PostgreSQL, Elasticsearch, Nacos, Seata, Kafka, RocketMQ, Pulsar, ActiveMQ, RabbitMQ |
+| **其它软件** (Other) | 3 | Container / orchestration / CI periphery, not part of coding | Docker, kubectl, Jenkins |
+
+> To re-assign a component, edit the single `COMPONENT_CATEGORY_OF` map in `main.py`; the tabs follow automatically.
+
 ### Language Runtimes
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **JDK** | JDK (Temurin) | `JAVA_HOME` | `java -version` | 21 / 17 (LTS) / 11 / 8 |
+| **JDK** | JDK (Temurin) | `JAVA_HOME` | `java -version` | 21 / 17 (LTS) / 11 / 8 (click "Refresh versions" before downloading — see note below the table) |
 | **Python** | Python | — (via PATH) | `python --version` | 3.12 / 3.11 / 3.10 / 3.9 |
 | **Node.js** | Node.js | `NODE_HOME` | `node --version` | 20 LTS / 18 LTS / 16 |
-| **Go** | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.22.x / 1.21.x |
+| **Go** | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | **Bun** | Bun | — (via PATH) | `bun --version` | 1.x |
 
 ### Build Tools
@@ -56,16 +67,16 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **MySQL** | MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x / 5.7.x |
-| **MongoDB** | MongoDB | — (via PATH) | `mongod --version` | 7.x / 6.x |
-| **PostgreSQL** | PostgreSQL | `PG_HOME` | `psql --version` | 16.x / 15.x |
+| **MySQL** | MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x (Aliyun / Huawei Cloud mirrors + official) |
+| **MongoDB** | MongoDB | — (via PATH) | `mongod --version` | 8.0.x / 8.0.0 (Windows / Linux; no China mirror — official site only) |
+| **PostgreSQL** | PostgreSQL | `PG_HOME` | `psql --version` | 17.x / 16.x (Windows only; no China mirror — official site only) |
 
 ### Container & Orchestration
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **Docker** | Docker Desktop | — (via PATH) | `docker --version` | latest |
-| **kubectl** | Kubernetes CLI | — (via PATH) | `kubectl version --client` | 1.29.x / 1.28.x |
+| **Docker** | Docker Desktop | — (via PATH) | `docker --version` | 27.x / 26.x |
+| **kubectl** | Kubernetes CLI | — (via PATH) | `kubectl version --client` | 1.31.x / 1.30.x (all three platforms; primary source is the DaoCloud proxy, official `dl.k8s.io` last; Linux/macOS binaries need `chmod +x`) |
 
 ### CI/CD
 
@@ -77,30 +88,30 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **RabbitMQ** | RabbitMQ | `RABBITMQ_HOME` | `rabbitmqctl version` | 3.13.x / 3.12.x |
-| **Apache Kafka** | Apache Kafka | `KAFKA_HOME` | `kafka-server-start.sh --version` | 3.7.x / 3.6.x |
-| **Apache RocketMQ** | Apache RocketMQ | `ROCKETMQ_HOME` | `mqadmin version` | 5.x / 4.x |
+| **RabbitMQ** | RabbitMQ | `RABBITMQ_HOME` | `rabbitmqctl version` | 4.0.x / 3.13.x |
+| **Apache Kafka** | Apache Kafka | `KAFKA_HOME` | `kafka-server-start.sh --version` | 4.1.x / 3.9.x |
+| **Apache RocketMQ** | Apache RocketMQ | `ROCKETMQ_HOME` | `mqadmin version` | 5.x |
 | **Apache Pulsar** | Apache Pulsar | `PULSAR_HOME` | `pulsar version` | 3.x |
-| **ActiveMQ** | Apache ActiveMQ | `ACTIVEMQ_HOME` | `activemq --version` | 5.18.x / 5.17.x |
+| **ActiveMQ** | Apache ActiveMQ | `ACTIVEMQ_HOME` | `activemq --version` | 6.3.x / 5.18.x |
 
 ### Service Discovery / Transaction
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **Nacos** | Nacos | `NACOS_HOME` | `sh startup.sh -m standalone` | 2.x / 1.x |
-| **Seata** | Seata | `SEATA_HOME` | `sh seata-server.sh -h` | 2.x / 1.x |
+| **Nacos** | Nacos | `NACOS_HOME` | `sh startup.sh -m standalone` | 2.x (GitHub accelerator route; no true mirror) |
+| **Seata** | Seata | `SEATA_HOME` | `sh seata-server.sh -h` | 2.x (Apache distribution directory, eight China mirrors) |
 
 ### Search Engine
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **Elasticsearch** | Elasticsearch | `ES_HOME` | `elasticsearch --version` | 8.x / 7.x |
+| **Elasticsearch** | Elasticsearch | `ES_HOME` | `elasticsearch --version` | 9.x / 8.x (Huawei Cloud mirrors + official; mirrors only sync recent releases, older ones fall through to the official site) |
 
 ### Version Control
 
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
-| **Git** | Git | — | `git --version` | MinGit for Windows / system-provided |
+| **Git** | Git | — | `git --version` | MinGit for Windows (Huawei Cloud / npmmirror China sources first) / no auto-download on macOS and Linux (upstream ships only a source tarball; the UI points you to apt / dnf / yum / brew) |
 
 ### Python Distribution
 
@@ -112,11 +123,13 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 - **Docker on Windows** — no auto-download. Docker Desktop requires its official installer (WSL2 / Hyper-V integration, service registration and other system-level configuration) and cannot be handled by a simple "download zip → extract" flow. The tool directs you to [docker.com](https://www.docker.com/products/docker-desktop/) to fetch the installer manually. macOS / Linux users get the normal download flow.
 - **RabbitMQ on Windows** — no auto-download. RabbitMQ depends on Erlang at runtime; on Windows you must install Erlang first and then the RabbitMQ server, a typical "installer + service registration" scenario that is beyond this tool's "binary download + extract" model. The tool directs you to [rabbitmq.com](https://www.rabbitmq.com/download.html) for the official installer.
-- **PostgreSQL on macOS** — no auto-download. The project only ships source / Homebrew formulae for macOS, with no ready-to-extract binary tarball. Use `brew install postgresql`.
-- **MongoDB on macOS** — no auto-download. Use `brew install mongodb-community`.
-- **Nacos / Seata** — no official China mirror. They are published on GitHub Releases; the tool accelerates them transparently via [ghproxy](https://ghproxy.com/) / [gh.idayer.com](https://gh.idayer.com/), and the active proxy source is shown in the log.
+- **PostgreSQL on Linux / macOS** — auto-download is Windows-only (EnterpriseDB binary zip). On Linux use your distribution's package manager (apt / yum / dnf); on macOS the project only ships source / Homebrew formulae, so use `brew install postgresql`. The tool shows a Chinese guidance message instead of a broken "auto download".
+- **MongoDB on macOS** — no auto-download; Windows and Linux are supported. On macOS use `brew install mongodb-community`.
+- **No China mirror for mongodb / postgresql** — measured 2026-09-28: no mainland mirror serves these two, so the official site is their only source and downloads may be slower in China.
+- **Nacos / Bun (and the Git source tarballs on macOS/Linux)** — no true China mirror: these are published on GitHub Releases, and the tool accelerates them transparently via [ghproxy.net](https://ghproxy.net/) / [gh-proxy.com](https://gh-proxy.com/) / [ghfast.top](https://ghfast.top/) and falls back to the bare GitHub URL last; the active proxy source is shown in the log. (The previously configured `ghproxy.com` and `gh.idayer.com` were measured dead and have been removed.) **Seata no longer uses this route**: GitHub releases stopped shipping binary assets since 2.1.0, so the tool now downloads it from the Apache distribution directory through eight mainland mirrors (Huawei Cloud ×2 / Tsinghua / Aliyun / NJU / BFSU / Tencent / USTC).
+- **kubectl** — supported on all three platforms. The primary download source is the DaoCloud `files.m.daocloud.io` proxy (the `dl.k8s.io` path cannot be rewritten, so it must go through this files proxy), with official `dl.k8s.io` last. On Linux/macOS the result is an extension-less single binary — run `chmod +x` on it before use.
 
-> 💡 After launching the app, click **"⟳ Refresh versions"** to pull the latest version list from each component's official source. If the fetch fails, the tool falls back to the built-in hardcoded list, so it still works offline.
+> 💡 After launching the app, click **"⟳ Refresh versions"** to pull the latest version list from each component's official source. If the fetch fails, the tool falls back to the built-in hardcoded list, so it still works offline. For **JDK** this matters: the offline default list only has the official Adoptium URL — the exact file names on the Tsinghua / NJU mirrors are resolved only after a refresh, so click "Refresh versions" first, then download.
 
 ---
 
@@ -206,7 +219,7 @@ The working directory `~/.env-tools/` is created automatically on first launch a
 1. Pick the card for the component you want.
 2. Choose a version from the drop-down.
 3. Click **"Download & Install"** — a one-stop flow that runs automatically:
-    - the archive is streamed to `~/.env-tools/<component>/downloads/` (China mirrors first per the R1 rule; cancelable at any time);
+    - the archive is streamed to `~/.env-tools/<component>/downloads/` (China mirrors first, automatic source failover; cancelable at any time);
     - it is extracted to `~/.env-tools/<component>/<component>-<version>/` (Miniconda runs its silent installer);
     - the corresponding `XXX_HOME` variable is written and the `bin` directory is appended to `PATH`;
     - the card status is refreshed automatically — no need to click "Configure" afterwards.
@@ -251,17 +264,28 @@ for v in ("22", "21", "17", "11", "8"):
 
 ### Change the download mirror
 
-> **Since v2.0 the R1 China-mirror-priority rule is built in, so ordinary users do not need to change URLs manually.** The notes below are for users who want to understand the mechanism or do secondary development.
+> **Since v2.0 the China-mirror-priority + multi-source failover mechanism is built in, so ordinary users do not need to change URLs manually.** The notes below are for users who want to understand the mechanism or do secondary development.
 
-Every component is configured with ≥2 China mirrors (Huawei Cloud / Tsinghua TUNA / Aliyun / USTC / NJU) plus one official source. The download flow follows the **"China mirrors first → multi-source failover → official site last"** rule:
+The tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top — GitHub Releases have no true mirror, only reverse-proxy acceleration). The download flow follows the **"China sources first → multi-source failover → official site last"** rule:
 
-1. Try the China mirrors in order; on 404 / timeout / connection failure, switch to the next one immediately.
-2. Only fall back to the official site after every China mirror has failed.
-3. The whole process is logged in Chinese (which mirror failed, which one it switched to, which source finally served the file).
+1. Try the sources in order; on 404 / timeout / connection failure, switch to the next one immediately.
+2. Only fall back to the official site after every China source has failed.
+3. The whole process is logged in Chinese (which source failed, which one it switched to, which source finally served the file).
+4. Two reliability guarantees: every request carries a custom `byte-tools` User-Agent (some university mirrors return 403 for the default UA), and each finished download is verified against the declared byte count — a "fake 200" empty file triggers an automatic switch to the next source rather than leaving a broken archive.
+
+Per-component differences (measured 2026-09-28):
+
+- **mongodb / postgresql** — no mainland mirror at all; the official site is the single source;
+- **nacos, bun, and the macOS/Linux source tarballs of git** — no true mirror; the three GitHub accelerators come first and the bare GitHub URL last;
+- **kubectl** — DaoCloud `files.m.daocloud.io` proxy first (the `dl.k8s.io` path cannot be rewritten, so it must go through this files proxy), official `dl.k8s.io` last;
+- **seata** — Apache distribution directory served by eight mainland mirrors (Huawei Cloud ×2 / Tsinghua / Aliyun / NJU / BFSU / Tencent / USTC);
+- **jdk** — the offline default list has only the official URL; the exact file names on the Tsinghua / NJU mirrors are resolved only after clicking "⟳ Refresh versions" — **refresh first, then download**.
 
 Net effect: **users inside China no longer need to edit any URL** to enjoy China-mirror acceleration — a big UX upgrade over the old "manually edit the URL function" approach.
 
-> 📖 For the full technical implementation of the R1 rule (mirror list configuration, failover strategy, and how Nacos / Seata — which have no China mirror — are accelerated via ghproxy / gh.idayer.com GitHub-release proxies), see the **R1 China Mirror Priority Rule** section in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+> 💡 If a download fails: read the log panel first — it shows which source failed and where it switched. Clicking **"⟳ Refresh versions"** makes the tool re-resolve the mirrors' latest files; then retry.
+
+> 📖 For the full technical implementation of the mirror mechanism (mirror list configuration, failover strategy, how components without a true mirror such as Nacos / Bun are accelerated via the GitHub proxies, and why version index pages still go straight to the official source), see the **R1 China Mirror Priority Rule** section in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 ### Change the working directory
 
@@ -276,7 +300,7 @@ CONFIG_DIR = Path.home() / ".env-tools"
 ## 7. FAQ
 
 **Q1. Download stuck at some percentage?**
-Likely a slow or failed mirror. Since v2.0 the tool auto-fails over between China mirrors and the official site, so just click **Cancel** and retry — it will try the next source automatically. See [Change the download mirror](#change-the-download-mirror) for the mechanism.
+Likely a slow or failed mirror. Since v2.0 the tool auto-fails over between China mirrors and the official site, so just click **Cancel** and retry — it will try the next source automatically. Check the log panel to see which source failed, and click **"Refresh versions"** to re-resolve the mirrors (no manual URL editing needed). See [Change the download mirror](#change-the-download-mirror) for the mechanism.
 
 **Q2. Env-variable write fails?**
 - Windows: relaunch as Administrator if you need system-scope variables. The tool defaults to **user scope**, which usually doesn't require elevation.
@@ -298,7 +322,7 @@ Docker Desktop must use its official installer (it involves WSL2 / Hyper-V integ
 RabbitMQ depends on Erlang at runtime. On Windows you must install Erlang first and then the RabbitMQ server — a typical "installer + service registration" scenario that is beyond the scope of this tool's "binary download + extract" model. The tool directs you to [rabbitmq.com](https://www.rabbitmq.com/download.html) for the official installer.
 
 **Q8. Are downloads slow inside China?**
-No. Since v2.0 the built-in R1 China-mirror-priority rule gives every component at least 2 China mirrors (Huawei Cloud / Tsinghua TUNA / Aliyun / USTC / NJU, etc.) plus one official source. Downloads try them in order and automatically switch to the next one on 404 / timeout, with full Chinese logs (which mirror failed, which one it switched to, which one finally served the file). Ordinary users do not need to configure anything manually.
+Mostly no. Since v2.0 the built-in China-mirror-priority rule provides **11 mainland mirror bases** (Huawei Cloud / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud, etc.) plus **3 GitHub accelerators**. Downloads try them in order and automatically switch to the next one on 404 / timeout, with full Chinese logs (which source failed, which one it switched to, which one finally served the file). Every request also carries a custom User-Agent (some university mirrors block the default one with 403), and finished downloads are byte-count verified so a "fake 200" empty file switches to the next source instead of leaving a broken archive. Ordinary users do not need to configure anything manually. The exceptions: **mongodb and postgresql have no mainland mirror at all** (official site only), and **nacos, bun and the macOS/Linux source tarballs of git** rely on the GitHub accelerators. kubectl, previously served only by the official `dl.k8s.io`, now uses the DaoCloud `files.m.daocloud.io` proxy as its first source.
 
 **Q9. After clicking "Download & Install", do I still need to configure env vars manually?**
 No. The "Download & Install" button is a **one-stop flow**: download → extract → auto-write `XXX_HOME` / `PATH` → refresh the card status. Once the flow finishes, the component is considered installed; you do not need to click "Configure Only" afterwards. That button is only for the case where you have already downloaded the archive manually and just want to write the environment variables.

@@ -10,12 +10,15 @@
 - **适用范围**：本仓库所有 Python 源码改动、新增组件、URL 与下载逻辑改造
 - **更新原则**：规则变化或新增规则必须先改本文档再改代码；代码与文档不一致时以本文档为准
 - **与 README 的关系**：README.md 面向最终用户，本文档面向开发者
+- **实测口径**：本文所有镜像路径都来自 2026-09-28 的在线 GET 实测（`User-Agent: byte-tools`，
+  流式取响应头，判定标准 = 状态码 200 且 `Content-Length` 是真实包体）。**未经实测的地址一律视为假镜像**。
 
 ---
 
 ## 规则索引
 
 - [规则 R1：国内镜像优先 + 多源故障转移](#规则-r1国内镜像优先--多源故障转移)
+- [规则 R2：组件三类分组与界面 Tab](#规则-r2组件三类分组与界面-tab)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -32,30 +35,66 @@
 3. **末位回退**：所有配置的国内镜像均失败后，才回退到组件官方下载地址
 
 每个新组件**必须**配置 **≥2 个**国内镜像地址，否则不予合入。
+确实凑不出 2 个源时，必须在 R1.5 表登记实测结论并保留官网单源，
+**不得**用猜测的镜像路径凑数——假镜像地址只会让每次下载先白撞两轮 404。
+
+**已登记的例外（2026-09-28 实测确认，不得再为其编造镜像）**：
+
+| 组件 | 例外形态 | 实测依据 |
+|------|----------|----------|
+| `mongodb` | 大陆源 0 个，只有 `fastdl.mongodb.org` 官网单源 | 带 UA 复测：`repo.huaweicloud.com/mongodb/` 对二进制包名一律 404（只有 `mongo-cxx-driver` 这类 C++ 源码包）、`mirrors.huaweicloud.com/mongodb.org/` 直接 401；清华 `/mongodb/` 是 apt/yum 仓库；阿里云只有 `mongodb-upstart/` |
+| `postgresql` | 大陆源 0 个，只有 `get.enterprisedb.com` 官网单源 | 清华没有 `/postgresql/` 目录（404）；华为云、阿里、南大的 `/postgresql/` 只有 `latest/`、`source/` 这类**源码 tarball**（`postgresql-18.2.tar.gz`），没有 EDB 的 `-windows-x64.exe` binaries 树（`v17/`、`17.6/` 一律 404）；`ftp.postgresql.org` 同样只有源码 |
+| `kubectl` | 大陆源 1 个（DaoCloud 文件代理 `files.m.daocloud.io/dl.k8s.io/…`），末位 `dl.k8s.io` | 阿里/清华/华为云的 `kubernetes/` 只同步 apt、yum 仓库，`…/release/v…/bin/…` 一律 404；GitHub Release 不发这个二进制，所以 `GH_ACCELERATORS` 对它无效 |
+| `jdk` | **离线默认清单**只有官网 `api.adoptium.net` 一条；点「刷新版本」后才会解析出清华 `/Adoptium/<major>/jdk/<arch>/<os>/` 与南大 `/adoptium/…` 的确切文件名并补成多源 | 镜像目录里只有带 build 号的确切文件名，而官方 `latest-binary` 是按月滚动的重定向，离线状态无法确定文件名 |
+| `git`（Linux/macOS） | **不给任何下载 URL**，改由 `unsupported_platform_hint` 引导用 apt / dnf / yum / brew | 官方与各镜像都不发布 Linux/macOS 可移植二进制，GitHub 上只有 `git/git` **源码 tar.gz**（解压后没有可执行文件，需自行 configure + make）；列出来只会让用户下一个用不了的东西。Windows 侧不受影响，仍有 3 家真镜像 |
 
 ### R1.2 适用范围
 
 - **全部 24 个组件**（语言运行时：jdk / python / node / go / bun；构建工具：maven / gradle；应用服务器：tomcat；数据库：mysql / mongodb / postgresql；容器与编排：docker / kubectl；CI/CD：jenkins；消息队列：rabbitmq / kafka / rocketmq / pulsar / activemq；服务发现与事务：nacos / seata；搜索引擎：elasticsearch；版本控制：git；Python 发行版：conda）
 - `build_components()` 的默认（离线）清单
-- `fetch_xxx_versions()` 版本列表抓取请求（含公共辅助函数 `_fetch_github_releases_versions` / `_fetch_apache_versions`）
 - `DownloadWorker` 的实际下载请求（按 `url_list_map` 顺序遍历，失败自动切换）
 - `ComponentVersion.url_list_map` 多源故障转移 URL 列表（向后兼容旧的 `url_map` 单 URL 模式）
-- 平台不支持场景的 `unsupported_platform_hint` 友好提示（如 Docker 在 Windows、PostgreSQL 在 macOS）
+- 平台不支持场景的 `unsupported_platform_hint` 友好提示（如 Docker 在 Windows、RabbitMQ 在 Windows、PostgreSQL 在 Linux/macOS、MongoDB 在 macOS、Git 在 Linux/macOS）
+
+> **不适用于版本索引页**：`fetch_xxx_versions()` 抓「有哪些版本可选」的索引页 / API 直连官方，理由见 R1.7 第 4 节的实测（镜像索引页版本数残缺，会把下拉框砍短）。
 
 ### R1.3 镜像源优先级表
 
-下表为推荐的国内镜像源，**按稳定性与速度综合排序**。新增组件的镜像清单必须从下表挑选，不得引入表中未列出的源（保证可维护性）。
+下表为可用的国内镜像源，**按稳定性与速度综合排序**。新增组件的镜像清单必须从下表挑选，不得引入表中未列出的源（保证可维护性）。集中维护在源码常量 `MIRROR_BASES`（11 项）。
 
-| 序号 | 镜像源 | 标识 | 域名 | 备注 |
-|------|--------|------|------|------|
-| M1 | 华为云 | `huaweicloud` | `repo.huaweicloud.com` | 覆盖最广，速度稳定，常作为第一优先级 |
-| M2 | 清华 TUNA | `tuna` | `mirrors.tuna.tsinghua.edu.cn` | 高校镜像，覆盖面广，维护活跃 |
-| M3 | 阿里云 | `aliyun` | `mirrors.aliyun.com` | 阿里云提供，国内速度快 |
-| M4 | 南京大学 | `nju` | `mirrors.nju.edu.cn` | 高校镜像，作为备用 |
-| M5 | 中科大 | `ustc` | `mirrors.ustc.edu.cn` | 高校镜像，作为备用 |
-| M6 | 上海交大 | `sjtug` | `mirrors.sjtug.org` | 高校镜像，作为备用 |
+| 序号 | 镜像源 | 标识 | 域名 | 备注（2026-09-28 实测） |
+|------|--------|------|------|--------------------------|
+| M1 | 华为云 | `huaweicloud` | `repo.huaweicloud.com` | 覆盖最广且**保留全量历史版本**，几乎都排第一优先级 |
+| M1b | 华为云（另一子域） | `huaweicloud-py` | `mirrors.huaweicloud.com` | Python 发行包、`git-for-windows`、docker-ce、jenkins、rabbitmq、seata 只在这个子域有 |
+| M2 | 清华 TUNA | `tuna` | `mirrors.tuna.tsinghua.edu.cn` | apache/*、nodejs-release、anaconda、docker-ce、jenkins、Adoptium 可用；**对默认 UA 回 403**（见 R1.4） |
+| M3 | 阿里云 | `aliyun` | `mirrors.aliyun.com` | apache/*、mysql、golang、docker-ce、jenkins 可用；无 gradle / mongodb / elasticsearch |
+| M4 | 南京大学 | `nju` | `mirrors.nju.edu.cn` | apache/*、nodejs-release、golang、gradle、anaconda、docker-ce、jenkins、adoptium 可用 |
+| M5 | 中科大 | `ustc` | `mirrors.ustc.edu.cn` | anaconda / docker-ce / apache/*（maven、tomcat、kafka、rocketmq、pulsar、activemq、incubator-seata）/ jenkins 实测 200 + 真包魔数；**同样屏蔽默认 UA（403）**，早前因此被误判为「假 200」。`golang/` 只是 302 跳回 `dl.google.com`（本机 TLS 失败，等于没有镜像），`gradle/`、`nodejs-release/`、`mysql/`、`mongodb/`、`elasticsearch/`、`Adoptium/` 一律 404 |
+| M6 | 北外 BFSU | `bfsu` | `mirrors.bfsu.edu.cn` | apache/*、nodejs-release、anaconda、docker-ce、jenkins、seata 可用；同样屏蔽默认 UA |
+| M7 | 腾讯云 | `tencent` | `mirrors.cloud.tencent.com` | 2026-09-28 新增：apache/*、gradle、docker-ce、jenkins 实测 200 |
+| M8 | 上海交大 | `sjtug` | `mirrors.sjtug.org` | 实测经代理不可达，**当前未使用**，仅保留在常量表备查 |
+| N1 | 淘宝 npmmirror | `npmmirror` | `registry.npmmirror.com` | 二进制聚合站，路径为 `/-/binary/<项目>/`；python / node / bun / git-for-windows 可用，gradle 404 |
+| D1 | DaoCloud 文件代理 | `daocloud-files` | `files.m.daocloud.io` | 2026-09-28 新增：把 `dl.k8s.io/…` 作为路径后缀代理，kubectl 唯一可用大陆源（实测 200/58 MB） |
 
-> 镜像源清单本身视为配置常量，集中维护在源码的 `MIRROR_SOURCES` 常量或外部配置文件中，**严禁**散落在各 URL 构造器函数里硬编码。
+GitHub Release 没有真镜像，只能用反向代理前缀加速，集中维护在 `GH_ACCELERATORS`
+（`ghproxy.net` / `gh-proxy.com` / `ghfast.top` + 裸地址末位），统一走 `_gh_accelerated()`。
+`ghproxy.com` 与 `gh.idayer.com` 实测已停服，不得再引入。
+**加速器只代理 GitHub**：`dl.k8s.io`、`artifact.elastic.co` 之类非 GitHub 地址加前缀无效，
+kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
+
+> 镜像源清单本身视为配置常量，集中维护在源码的 `MIRROR_BASES` 常量里，URL 构造器只能经
+> `_mb(标识)` 取基址，**严禁**散落在各 URL 构造器函数里硬编码域名（有仓库级测试把这条钉死）。
+
+> **已实测证伪、禁止再写入代码的地址**（历史上它们被当成镜像写进过 R1 表）：
+> `mirrors.ustc.edu.cn/golang/`（302 跳回 `dl.google.com`，不是镜像）、`mirrors.ustc.edu.cn/mongodb/`（404）、
+> `repo.huaweicloud.com/{anaconda,golang,mongodb}`、
+> `mirrors.tuna.tsinghua.edu.cn/{gradle,golang,mongodb,postgresql,elasticsearch}`、
+> `mirrors.aliyun.com/{mongodb,elasticsearch,gradle}`、`registry.npmmirror.com/-/binary/gradle/`。
+>
+> 反面教训：判定镜像可用性**必须带 `HTTP_UA` 且校验响应体魔数/字节数**。2026-09-28 首轮探测用默认
+> UA，把清华/北外/中科大的 403 当成「不存在」，又把 `ustc` 的 apache/* 误判成「200 + 空体」假源；
+> 带 UA 复测后这些路径全部回真包，`ustc` 已重新纳入 maven/tomcat/kafka/rocketmq/pulsar/activemq/
+> seata/jenkins 这八个构造器的列表末位（仍在官网之前）。
 
 ### R1.4 故障转移流程
 
@@ -72,19 +111,25 @@
         │ 取下一个 URL        │
         └──────────┬─────────┘
                    │
-            ┌──────▼──────┐
-            │ HEAD/GET 探测│
-            │ 超时=N 秒    │
-            └──────┬──────┘
+            ┌──────▼──────────┐
+            │ 带 HTTP_UA 直接 │
+            │ GET 流式下载    │
+            │（无独立探测请求）│
+            └──────┬──────────┘
                    │
         ┌──────────┴──────────┐
-        成功                   失败
+        收完                    失败
         │                       │
-        ▼                       ▼
-   ┌─────────┐         ┌─────────────────┐
-   │ 流式下载 │         │ 记录失败日志     │
-   │ 走该 URL │         │ 切到下一个 URL  │
-   └─────────┘         └─────────────────┘
+        ▼                       │
+┌───────────────────────┐       │
+│ 校验：实际字节 ≥ 4096 │       │
+│ 且不短于 Content-Length│      │
+└──────┬────────┬───────┘       │
+     通过      不通过（假 200）  │
+       │        │               │
+       ▼        ▼               ▼
+   replace   删 .part ──→ 记日志，切下一个 URL
+   为 dest
                             │
                             ▼
                   遍历完所有 URL 仍失败
@@ -96,68 +141,77 @@
                   └───────────────────┘
 ```
 
-**关键参数**（必须可配置，不得硬编码）：
+**关键参数**（集中定义在 `main.py` 的常量区，不得在调用点硬编码）：
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| 单 URL 探测超时 | 5 秒 | HEAD 请求超时阈值 |
-| 单 URL 下载超时 | 30 秒 | 流式下载连接超时阈值 |
-| 单 URL 重试次数 | 2 | 同一 URL 内重试（指数退避） |
+| 参数 | 默认值 | 实际用途 |
+|------|--------|----------|
+| `HTTP_UA` | `{"User-Agent": "byte-tools"}` | **所有出网请求**（`_get()` 与 `DownloadWorker._try_download()`）必须携带。实测：清华 TUNA 与 BFSU 对 requests 默认 UA 和浏览器 UA 一律 403，只放行自定义 UA |
+| `DOWNLOAD_MIN_VALID_BYTES` | 4096 | 下载结束后校验实际写入字节数。实测：`repo.huaweicloud.com/anaconda/<任意路径>` 会 301 到软 404 页并回「200 + 无 Content-Length + 一小段 HTML」，不校验就会留下 HTML 假包，直到解压阶段才炸 |
+| `DOWNLOAD_PROBE_TIMEOUT` | 5 秒 | **列目录 / 索引页探测**超时（如 JDK 镜像列目录、各组件版本索引页）。下载流程不做独立探测，直接按 `DOWNLOAD_TIMEOUT` 建连 |
+| `DOWNLOAD_TIMEOUT` | 30 秒 | 流式下载的连接/读超时 |
+| `DOWNLOAD_RETRY_PER_URL` | 2 | 同一 URL 的重试次数（指数退避）；404/403 等不可恢复错误**不重试**，直接切下一个源 |
 | 故障转移最大尝试数 | 镜像数 + 1 | 超过则判定为彻底失败 |
+
+**归档后缀必须与包体一致**：`extract_archive()` 按文件后缀分派，所以 `_STD_ARCHIVE`
+（`Windows=zip / Darwin=tar.gz / Linux=tar.gz`）不成立的组件必须用 `_cv(v, urls, archive_map=…)` 显式覆盖。
+当前有四处：MySQL Linux=`tar.xz`、RabbitMQ=`tar.xz`、Seata/Kafka=`tar.gz`（跨平台同一包）、PostgreSQL Windows=`zip`。
 
 ### R1.5 各组件镜像清单
 
-#### 基础 8 个组件（首批落地）
+下表 24 个组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
+"默认清单实测"一栏给的是默认版本行里**可用大陆源的数量 / 配置的候选数量**。
 
-| key | 组件 | 国内镜像（按优先级） | 末位官网 |
-|-----|------|----------------------|---------|
-| `jdk` | JDK (Temurin) | M1 `repo.huaweicloud.com/openjdk/`、M2 `mirrors.tuna.tsinghua.edu.cn/Adoptium/`、M3 `mirrors.aliyun.com/adoptium/` | `api.adoptium.net` |
-| `maven` | Apache Maven | M1 `repo.huaweicloud.com/apache/maven/maven-3/`、M2 `mirrors.tuna.tsinghua.edu.cn/apache/maven/maven-3/`、M3 `mirrors.aliyun.com/apache/maven/maven-3/` | `archive.apache.org/dist/maven/maven-3/` |
-| `tomcat` | Apache Tomcat | M1 `repo.huaweicloud.com/apache/tomcat/`、M2 `mirrors.tuna.tsinghua.edu.cn/apache/tomcat/`、M3 `mirrors.aliyun.com/apache/tomcat/` | `archive.apache.org/dist/tomcat/` |
-| `mysql` | MySQL Server | M2 `mirrors.tuna.tsinghua.edu.cn/mysql/Downloads/`、M3 `mirrors.aliyun.com/mysql/Downloads/`、M1 `repo.huaweicloud.com/mysql/Downloads/` | `dev.mysql.com/get/Downloads/` |
-| `python` | Python | M2 `mirrors.tuna.tsinghua.edu.cn/python/`、M3 `mirrors.aliyun.com/python/`、M1 `repo.huaweicloud.com/python/` | `www.python.org/ftp/python/` |
-| `node` | Node.js | M2 `mirrors.tuna.tsinghua.edu.cn/node/`、M3 `mirrors.aliyun.com/node/`、M1 `repo.huaweicloud.com/nodejs/` | `nodejs.org/dist/` |
-| `git` | Git for Windows | M1 `repo.huaweicloud.com/git-for-windows/`、M2 `mirrors.tuna.tsinghua.edu.cn/github-release/git-for-windows/git/`、M3 `mirrors.aliyun.com/github-release/git-for-windows/git/` | `github.com/git-for-windows/git/releases/download/` |
-| `conda` | Miniconda | M2 `mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/`、M3 `mirrors.aliyun.com/anaconda/miniconda/`、M1 `repo.huaweicloud.com/anaconda/miniconda/` | `repo.anaconda.com/miniconda/` |
+#### 首批 8 个组件（2026-09 由单源补齐为多源）
 
-> 注：部分镜像可能未同步最新版本，故障转移时若镜像返回 404，直接切到下一个，**不要**对该 URL 内部反复重试。
+| key | 组件 | 国内镜像（按优先级，实测可用性） | 末位官网 | 默认清单实测 |
+|-----|------|--------------------------------|---------|--------------|
+| `jdk` | JDK (Temurin) | 清华 `…/Adoptium/<major>/jdk/<arch>/<os>/`、南大 `…/adoptium/…`（两家目录大小写不同）。镜像里只有带 build 号的确切文件名，须先列目录挑最新版本，故有 `_adoptium_mirror_urls()`；镜像未同步的 major（如 22/23/24/26/27）自动只剩官网 | `api.adoptium.net/v3/binary/latest/<major>/ga/…` | 离线默认 0/0（见 R1.1 例外）；「刷新版本」后为 2 家镜像 + 官网。21/17/11 三档 × 三平台官网直连实测 200（190~207 MB） |
+| `maven` | Apache Maven | M1 `repo.huaweicloud.com/apache/maven/maven-3/`、M2 清华、M3 阿里、M4 南大、M6 北外、M7 腾讯、M5 中科大（高校站只留最新版本，旧版 404 由故障转移兜住） | `archive.apache.org/dist/maven/maven-3/` | 3.9.16：7/7 家 200（9 MB）；3.9.6 只剩华为云 + archive |
+| `tomcat` | Apache Tomcat | 同上七家 `apache/tomcat/tomcat-<major>/v<v>/bin/` | `archive.apache.org/dist/tomcat/` | 10.1.60：7/7 家 200（14~15 MB） |
+| `mysql` | MySQL Server | Windows/Linux：M3 `mirrors.aliyun.com/mysql/MySQL-<maj.min>/`、M1 `repo.huaweicloud.com/mysql/Downloads/MySQL-<maj.min>/`。macOS 也有这两家镜像，但文件名用**当年命名**：8.0.28→`macos11-<arch>.tar.gz`（阿里+华为都 200/177 MB）、8.0.29→`macos12-<arch>`（华为 200/176 MB） | `cdn.mysql.com/Downloads/`（**不是** `dev.mysql.com` 的 get 跳转入口，后者对任何 UA 都回 403）；macOS 用 `macos14-<arch>` | Windows 2/2、Linux 2/2、macOS 2/4（8.0.37 这一档镜像站还没同步，只有 CDN 200/173 MB） |
+| `python` | Python | M1b `mirrors.huaweicloud.com/python/`、N1 `registry.npmmirror.com/-/binary/python/` | `www.python.org/ftp/python/` | 2/2 家 200（Windows embed 11 MB、Unix 27 MB） |
+| `node` | Node.js | M2/M4/M6 `…/nodejs-release/v<v>/`、M1 `repo.huaweicloud.com/nodejs/v<v>/`、N1 `registry.npmmirror.com/-/binary/node/v<v>/` | `nodejs.org/dist/` | 5/5 家 200（29~47 MB） |
+| `git` | Git for Windows | **Windows 有真镜像**：M1b `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/MinGit-<v>-64-bit.zip`、M1 `repo.huaweicloud.com/…`、N1 `registry.npmmirror.com/-/binary/git-for-windows/…`（三家实测 200/47 MB），再补 `GH_ACCELERATORS` | `github.com/git-for-windows/git/releases/download/` | Windows 3 家镜像 + 3 加速器全 200；Linux/macOS **不再给 URL**，`_git_urls()` 只返回 `Windows` 键，由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
+| `conda` | Miniconda | M2 清华、M4 南大、M6 北外、M5 中科大 `…/anaconda/miniconda/`（文件名与官方一致）。华为 `repo.huaweicloud.com/anaconda/` 对任意路径都 301 到软 404 HTML 页（假成功），已删除 | `repo.anaconda.com/miniconda/` | 4/4 家 200（90~149 MB） |
 
-#### 新增组件镜像清单
+#### 新增 16 个组件镜像清单（2026-09-28 全部按实测重写）
 
-新增组件必须按下表登记其镜像配置，登记后再写代码：
+| key | 组件 | 国内镜像（按优先级） | 末位官网 | 默认清单实测 |
+|------|------|-----------------------|---------|--------------|
+| `go` | Go | M3 `mirrors.aliyun.com/golang/`、M4 `mirrors.nju.edu.cn/golang/`（华为、清华对 `go<ver>.linux-amd64.tar.gz` 这类包名恒 404，已删除；M5 中科大只是 302 跳回 `dl.google.com`，本机 TLS 握手失败，同样不算镜像） | `go.dev/dl/` | 2/2 家 200（79~87 MB） |
+| `gradle` | Gradle | M1 `repo.huaweicloud.com/gradle/`、M1b `mirrors.huaweicloud.com/gradle/`、M4 南大、M7 腾讯（清华/阿里/北外/npmmirror 无 gradle 目录，已删除） | `services.gradle.org/distributions/` | 4/4 家 200（137 MB） |
+| `bun` | Bun | N1 `registry.npmmirror.com/-/binary/bun/` + `GH_ACCELERATORS` 三个加速器 | `github.com/oven-sh/bun/releases` | 1 家真镜像 + 3 加速器全 200（28~40 MB） |
+| `docker` | Docker | Linux：M1/M1b/M2/M3/M4/M5/M6/M7 八家 `/docker-ce/linux/static/stable/<arch>/`；macOS：同八家 `/docker-ce/mac/static/stable/<arch>/` | `download.docker.com/{linux,mac}/static/` | 8/8 家 200（18~75 MB）；**Windows 不提供**，`unsupported_platform_hint` 引导装 Docker Desktop |
+| `mongodb` | MongoDB | **无**（见 R1.1 例外表） | `fastdl.mongodb.org`，Linux 包名必须带发行版段 `mongodb-linux-x86_64-ubuntu2204-<v>.tgz`，否则 403 | 0/0；Windows 785 MB、Linux 100 MB 官网 200；macOS 不提供 |
+| `postgresql` | PostgreSQL | **无**（清华 404；华为/阿里/南大只有 `latest/`、`source/` 源码 tarball，`ftp.postgresql.org/pub/source/` 同样只有源码，都没有 EDB 的 Windows binaries 树） | `get.enterprisedb.com/postgresql/postgresql-<v>-1-windows-x64-binaries.zip` | 0/0；四个版本 Windows 全 200（330~350 MB）；Linux/macOS 不提供 |
+| `kubectl` | kubectl | D1 `files.m.daocloud.io/dl.k8s.io/release/v<v>/bin/<os>/<arch>/kubectl`（实测 200/58 MB，真 Mach-O/PE/ELF） | `dl.k8s.io/release/…` | 1/1 家 200；**单源例外**已升级为「1 家大陆源 + 官网」 |
+| `jenkins` | Jenkins | M1、M1b、M2、M6、M4、M3、M7、M5 八家 `/jenkins/war-stable/<v>/jenkins.war`（镜像只保留最近几条 LTS 线） | `get.jenkins.io/war-stable/` | 8/8 家 200（101 MB）。单 war 文件，需 `java -jar jenkins.war` 启动，本工具只做下载 + 配环境变量 |
+| `rabbitmq` | RabbitMQ | M1、M1b `/rabbitmq-server/v<v>/rabbitmq-server-generic-unix-<v>.tar.xz`，再 `GH_ACCELERATORS` | `github.com/rabbitmq/rabbitmq-server/releases` | 2 家镜像 + 3 加速器全 200（16 MB），**归档类型是 tar.xz**；Windows 不提供（依赖 Erlang，引导官网安装器） |
+| `kafka` | Apache Kafka | 华为、清华、阿里、南大、北外、腾讯、中科大七家 `/apache/kafka/<v>/kafka_2.13-<v>.tgz`（Kafka 只发 `.tgz`，包名带 Scala 版本段 `2.13`，`-bin.zip` 实测 404） | `archive.apache.org/dist/kafka/` | 7/7 家 200（134 MB），tar.gz 跨平台 |
+| `rocketmq` | Apache RocketMQ | 七家 `/apache/rocketmq/<v>/rocketmq-all-<v>-bin-release.zip` | `archive.apache.org/dist/rocketmq/` | 7/7 家 200（90 MB） |
+| `pulsar` | Apache Pulsar | 七家 `/apache/pulsar/pulsar-<v>/apache-pulsar-<v>-bin.tar.gz` | `archive.apache.org/dist/pulsar/` | 7/7 家 200（219 MB） |
+| `activemq` | ActiveMQ | 七家 `/apache/activemq/<v>/apache-activemq-<v>-bin.<ext>`（目录段是**裸版本号**，不是 `activemq-<major>`；Windows zip、Unix tar.gz） | `archive.apache.org/dist/activemq/` | 7/7 家 200（57 MB） |
+| `nacos` | Nacos | 无真镜像，`GH_ACCELERATORS` 三个加速器（实测全 200） | `github.com/alibaba/nacos/releases/download/<v>/nacos-server-<v>.zip` | 3 加速器 + 裸地址全 200（154 MB） |
+| `seata` | Seata | **改走 Apache 分发目录**：M1、M1b、M2、M3、M4、M6、M7、M5 八家 `/apache/incubator/seata/<v>/apache-seata-<v>-incubating-bin.tar.gz`（GitHub release 里的 `seata-server-<v>.jar` 只是 thin jar，不能解压即用） | `archive.apache.org/dist/incubator/seata/` | 8/8 家 200（191 MB），tar.gz 跨平台。2.x 文件名带 `-incubating`，1.x 是 `seata-server-<v>.zip` |
+| `elasticsearch` | Elasticsearch | M1、M1b `/elasticsearch/<v>/elasticsearch-<v>-<os>-<arch>.<ext>`（清华/阿里无此制品；镜像只同步新版本，8.15.0 一类旧版本 404 由故障转移兜到官网） | `artifacts.elastic.co/downloads/elasticsearch/` | 9.2.3：2/2 家 200（471~687 MB）；8.15.0/8.9.2 只有官网 |
+| _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
 
-| key | 组件 | 国内镜像（按优先级） | 末位官网 | 登记日期 | 状态 |
-|------|------|-----------------------|---------|---------|------|
-| `go` | Go | M1 `repo.huaweicloud.com/golang/`、M2 `mirrors.tuna.tsinghua.edu.cn/golang/`、M3 `mirrors.aliyun.com/golang/`、M5 `mirrors.ustc.edu.cn/golang/` | `go.dev/dl/` | 2026-09-24 | 已落地 |
-| `gradle` | Gradle | M1 `repo.huaweicloud.com/gradle/`、M2 `mirrors.tuna.tsinghua.edu.cn/gradle/`、M3 `mirrors.aliyun.com/gradle/`、M5 `mirrors.ustc.edu.cn/gradle/` | `services.gradle.org/distributions/` | 2026-09-24 | 已落地 |
-| `bun` | Bun | N1 `registry.npmmirror.com/-/binary/bun/`（淘宝 NPM 镜像，Bun 在国内最稳）、N2 `ghproxy.com` 加速 GitHub releases | `github.com/oven-sh/bun/releases` | 2026-09-24 | 已落地（含 R1.3 表外特殊源，Bun 在国内仅此两源稳定） |
-| `docker` | Docker | M2 `mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/static/`、M3 `mirrors.aliyun.com/docker-ce/linux/static/`、M5 `mirrors.ustc.edu.cn/docker-ce/linux/static/` | `download.docker.com/linux/static/` | 2026-09-24 | 已落地（Linux/Mac static tgz 解压即用，Windows 不支持，提示用户用 Docker Desktop） |
-| `mongodb` | MongoDB | M1 `repo.huaweicloud.com/mongodb/`、M2 `mirrors.tuna.tsinghua.edu.cn/mongodb/`、M3 `mirrors.aliyun.com/mongodb/`、M5 `mirrors.ustc.edu.cn/mongodb/` | `fastdl.mongodb.org/` | 2026-09-24 | 已落地（Windows zip + Linux tgz 解压即用） |
-| `postgresql` | PostgreSQL | M2 `mirrors.tuna.tsinghua.edu.cn/postgresql/`（源码目录，binaries 路径占位 fallback）、M1 `repo.huaweicloud.com/postgresql/`（同上） | `get.enterprisedb.com/postgresql/` | 2026-09-24 | 已落地（国内镜像无 binaries，主走 EDB 官网；Mac 不支持，提示用 brew） |
-| `kubectl` | kubectl | M3 `mirrors.aliyun.com/kubernetes/`、M2 `mirrors.tuna.tsinghua.edu.cn/kubernetes/`（部分路径）、N2 `ghproxy.com` 加速 GitHub releases | `dl.k8s.io/release/` | 2026-09-24 | 已落地（单二进制跨平台，Linux/Mac 无扩展名需 chmod +x） |
-| `jenkins` | Jenkins | M1 `repo.huaweicloud.com/jenkins/`、M2 `mirrors.tuna.tsinghua.edu.cn/jenkins/`、M3 `mirrors.aliyun.com/jenkins/` | `get.jenkins.io/war-stable/` | 2026-09-24 | 已落地（单 war 文件，需用户用 `java -jar jenkins.war` 启动，本工具只做下载+配置环境变量） |
-| `rabbitmq` | RabbitMQ | M1 `repo.huaweicloud.com/rabbitmq/`、M2 `mirrors.tuna.tsinghua.edu.cn/rabbitmq/`、M3 `mirrors.aliyun.com/rabbitmq/` | `github.com/rabbitmq/rabbitmq-server/releases` | 2026-09-24 | 已落地（Linux/Mac generic binary tar.gz 解压即用；Windows 不支持自动下载，引导用户去官网下安装器，因依赖 Erlang） |
-| `kafka` | Apache Kafka | M1 `repo.huaweicloud.com/apache/kafka/`、M2 `mirrors.tuna.tsinghua.edu.cn/apache/kafka/`、M3 `mirrors.aliyun.com/apache/kafka/`、M5 `mirrors.ustc.edu.cn/apache/kafka/` | `archive.apache.org/dist/kafka/` | 2026-09-24 | 已落地（Scala 跨平台 tgz/zip 解压即用，需 JDK 运行） |
-| `rocketmq` | Apache RocketMQ | M1 `repo.huaweicloud.com/apache/rocketmq/`、M2 `mirrors.tuna.tsinghua.edu.cn/apache/rocketmq/`、M3 `mirrors.aliyun.com/apache/rocketmq/`、M5 `mirrors.ustc.edu.cn/apache/rocketmq/` | `archive.apache.org/dist/rocketmq/` | 2026-09-24 | 已落地（Java 跨平台 zip 解压即用，需 JDK 运行） |
-| `pulsar` | Apache Pulsar | M1 `repo.huaweicloud.com/apache/pulsar/`、M2 `mirrors.tuna.tsinghua.edu.cn/apache/pulsar/`、M3 `mirrors.aliyun.com/apache/pulsar/`、M5 `mirrors.ustc.edu.cn/apache/pulsar/` | `archive.apache.org/dist/pulsar/` | 2026-09-24 | 已落地（Java 跨平台 tar.gz 解压即用，需 JDK 运行） |
-| `activemq` | ActiveMQ | M1 `repo.huaweicloud.com/apache/activemq/`、M2 `mirrors.tuna.tsinghua.edu.cn/apache/activemq/`、M3 `mirrors.aliyun.com/apache/activemq/`、M5 `mirrors.ustc.edu.cn/apache/activemq/` | `archive.apache.org/dist/activemq/` | 2026-09-24 | 已落地（Java 跨平台 tar.gz/zip 解压即用，需 JDK 运行） |
-| `nacos` | Nacos | N2 `ghproxy.com` 加速 GitHub releases（Nacos 在国内无官方镜像，主走 ghproxy）、N3 `gh.idayer.com/` 加速 GitHub releases（备用） | `github.com/alibaba/nacos/releases` | 2026-09-24 | 已落地（Java 跨平台 zip/tgz 解压即用，需 JDK 运行） |
-| `seata` | Seata | N2 `ghproxy.com` 加速 GitHub releases（Seata 在国内无官方镜像，主走 ghproxy）、N3 `gh.idayer.com/` 加速 GitHub releases（备用） | `github.com/apache/incubator-seata/releases` | 2026-09-24 | 已落地（Java 跨平台 zip/tgz 解压即用，需 JDK 运行） |
-| `elasticsearch` | Elasticsearch | M2 `mirrors.tuna.tsinghua.edu.cn/elasticstack/`、M1 `repo.huaweicloud.com/elasticsearch/`（部分版本占位 fallback）、M3 `mirrors.aliyun.com/elasticsearch/`（同上） | `artifacts.elastic.co/downloads/elasticsearch/` | 2026-09-24 | 已落地（Java 跨平台 tar.gz/zip 解压即用，需 JDK 运行；版本 8.x 起 URL 含 -<platform>-<arch> 后缀） |
-| _待填_ | _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
+> 注：部分镜像只同步最新版本，故障转移时若镜像返回 404，直接切到下一个，**不要**对该 URL 内部反复重试。
 
 ### R1.6 新增组件的镜像配置 checklist
 
 新增一个组件 PR 之前，必须依次确认：
 
-- [ ] 已从 R1.3 镜像源优先级表中挑选 ≥2 个镜像源
-- [ ] 在 R1.5「新增组件镜像清单」表中登记该组件的镜像清单
-- [ ] URL 构造器函数签名改为返回**镜像 URL 列表 + 官网 URL**，而非单 URL
-- [ ] 版本抓取器 `fetch_xxx_versions()` 内部请求镜像索引页，失败回退官网索引页
-- [ ] `DownloadWorker` 改造为按列表顺序尝试下载，单个 URL 失败自动切换
-- [ ] 故障转移全程输出中文日志（哪个镜像失败、切换到哪个、最终用了哪个）
-- [ ] 默认（离线）清单 `build_components()` 内的 URL 也走镜像优先
-- [ ] 测试覆盖：模拟前 N 个镜像失败、验证能切到第 N+1 个；模拟全部失败、验证抛出中文异常
+- [ ] **先用 GET 实测**候选镜像的确切 URL（带 `User-Agent: byte-tools`，看状态码 + `Content-Length` + 首 4 字节的魔数），把结论写进 R1.5 表；**没有实测证据的地址一律不得写入代码**
+- [ ] 已从 R1.3 镜像源优先级表中挑选 ≥2 个镜像源；凑不出 2 个的，在 R1.1 例外表登记实测依据
+- [ ] 在 R1.5「各组件镜像清单」表中登记该组件的镜像清单与默认清单实测结果
+- [ ] URL 构造器返回 `Dict[str, List[str]]`（镜像在前、官网末位），且**官网必须是最后一项**
+- [ ] 包体后缀与 `_STD_ARCHIVE` 不一致时，用 `_cv(v, urls, archive_map=…)` 显式覆盖
+- [ ] 出网请求走 `_get()` / `DownloadWorker`，从而自动带上 `HTTP_UA` 并受 `DOWNLOAD_MIN_VALID_BYTES` 保护
+- [ ] 版本抓取器 `fetch_xxx_versions()` 直连官方索引页（见 R1.7 第 4 节，镜像索引会把版本列表砍短）
+- [ ] 故障转移全程输出中文日志（哪个镜像失败、原因、切换到哪个、最终用了哪个）
+- [ ] 平台不支持的组合（如 Docker 在 Windows）不给 URL，只写 `unsupported_platform_hint`
+- [ ] 测试覆盖：模拟前 N 个镜像失败、验证能切到第 N+1 个；模拟全部失败、验证抛出中文异常；模拟「200 + 空体」，验证不会当成成功
 
 ### R1.7 实施改造指引
 
@@ -181,35 +235,43 @@ def _maven_urls(v: str) -> Dict[str, List[str]]:
     返回按操作系统键映射的「镜像 URL 列表」。
     列表顺序即尝试顺序：国内镜像在前，官网末位。
     """
+    name = f"apache-maven-{v}-bin"
+    rel = f"/apache/maven/maven-3/{v}/binaries/{name}"
     return {
-        "Windows": [
-            "https://repo.huaweicloud.com/apache/maven/maven-3/<v>/binaries/apache-maven-<v>-bin.zip",
-            "https://mirrors.tuna.tsinghua.edu.cn/apache/maven/maven-3/<v>/binaries/apache-maven-<v>-bin.zip",
-            "https://mirrors.aliyun.com/apache/maven/maven-3/<v>/binaries/apache-maven-<v>-bin.zip",
-            "https://archive.apache.org/dist/maven/maven-3/<v>/binaries/apache-maven-<v>-bin.zip",  # 末位官网
-        ],
-        "Darwin":  [...同上 .tar.gz...],
-        "Linux":   [...同上 .tar.gz...],
+        "Windows": [f"{b}{rel}.zip" for b in _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent")]
+                   + [f"https://archive.apache.org/dist{rel}.zip"],   # 末位官网
+        "Darwin":  [...同 rel.tar.gz...],
+        "Linux":   [...同 rel.tar.gz...],
     }
 ```
 
 #### 2. 镜像源常量集中管理
 
 ```python
-# 镜像源基址（R1.3 表的常量化表达）
+# 镜像源基址（R1.3 表的常量化表达，共 11 项）
 MIRROR_BASES: List[Tuple[str, str]] = [
-    ("huaweicloud", "https://repo.huaweicloud.com"),
-    ("tuna",        "https://mirrors.tuna.tsinghua.edu.cn"),
-    ("aliyun",      "https://mirrors.aliyun.com"),
-    ("nju",         "https://mirrors.nju.edu.cn"),
-    ("ustc",        "https://mirrors.ustc.edu.cn"),
-    ("sjtug",       "https://mirrors.sjtug.org"),
+    ("huaweicloud",    "https://repo.huaweicloud.com"),
+    ("huaweicloud-py", "https://mirrors.huaweicloud.com"),
+    ("tuna",           "https://mirrors.tuna.tsinghua.edu.cn"),
+    ("aliyun",         "https://mirrors.aliyun.com"),
+    ("nju",            "https://mirrors.nju.edu.cn"),
+    ("ustc",           "https://mirrors.ustc.edu.cn"),
+    ("bfsu",           "https://mirrors.bfsu.edu.cn"),
+    ("tencent",        "https://mirrors.cloud.tencent.com"),
+    ("sjtug",          "https://mirrors.sjtug.org"),
+    ("npmmirror",      "https://registry.npmmirror.com"),
+    ("daocloud-files", "https://files.m.daocloud.io"),
 ]
 
-# 故障转移参数（R1.4 表的常量化表达）
-DOWNLOAD_PROBE_TIMEOUT = 5       # 单 URL 探测超时（秒）
-DOWNLOAD_TIMEOUT       = 30     # 单 URL 下载连接超时（秒）
-DOWNLOAD_RETRY_PER_URL = 2       # 单 URL 内重试次数
+# GitHub Release 反向加速器（无真镜像，只能代理）
+GH_ACCELERATORS = ["https://ghproxy.net/", "https://gh-proxy.com/", "https://ghfast.top/"]
+
+# 下载参数与出网身份
+HTTP_UA                   = {"User-Agent": "byte-tools"}   # 高校镜像会 403 默认 UA
+DOWNLOAD_MIN_VALID_BYTES  = 4096                           # 拒绝「200 + 空体」假成功
+DOWNLOAD_PROBE_TIMEOUT    = 5      # 列目录 / 索引页探测超时（秒）
+DOWNLOAD_TIMEOUT          = 30     # 流式下载连接/读超时（秒）
+DOWNLOAD_RETRY_PER_URL    = 2      # 单 URL 内重试次数（404/403 不重试）
 ```
 
 #### 3. DownloadWorker 改造
@@ -239,34 +301,100 @@ class DownloadWorker(QThread):
         self.finished_fail.emit("所有下载源均不可用")
 ```
 
-#### 4. 版本抓取器改造
-
-`fetch_xxx_versions()` 内部对索引页的请求也走镜像优先 + 末位官网回退，复用 `_get()` 但需扩展为接受 URL 列表：
+单个 URL 内部（`_try_download`）必须完成两件事，否则该源视为无效并继续故障转移：
 
 ```python
-def _get_first_working(urls: List[str], timeout: int = 10) -> requests.Response:
-    """
-    按 urls 顺序依次尝试 GET，第一个成功的返回；全部失败抛异常。
-
-    入参 urls: List[str]  待尝试的 URL 列表
-    入参 timeout: int      单 URL 超时秒数
-    """
-    last_exc: Optional[Exception] = None
-    for url in urls:
-        try:
-            return _get(url, timeout=timeout)
-        except Exception as exc:
-            last_exc = exc
-            continue
-    assert last_exc is not None
-    raise last_exc
+resp = requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT,
+                    verify=False, headers=HTTP_UA)        # 1) 带自定义 UA
+...逐块写 .part...
+total = int(resp.headers.get("Content-Length") or 0)
+if downloaded < DOWNLOAD_MIN_VALID_BYTES or (total and downloaded < total):
+    tmp.unlink(missing_ok=True)                           # 2) 空体/短体不是成功
+    return False
+tmp.replace(self.dest)
 ```
+
+#### 4. 版本抓取器（索引页）——实测结论：保持官网单源
+
+`fetch_xxx_versions()` 抓版本列表时请求的是**索引页 / API**，与下载压缩包不同，这里「镜像优先」反而有害：国内镜像普遍只同步最新几个版本，列表会残缺。2026-09-28 实测同一索引页的版本数量：
+
+| 索引页 | 官网 | 国内镜像 |
+|--------|------|----------|
+| Maven `maven-3/` | `archive.apache.org` **45** 个版本 | 华为云 37 个、清华 **1** 个（只有 3.9.16） |
+| Node.js | `nodejs.org/dist/` 868 个目录 | 清华 `nodejs-release/` 792 个 |
+| Python | `python.org/ftp/python/` 255 | 华为云 255（一致） |
+
+因此规则是：**下载 URL 走 R1 多源故障转移（镜像在前），版本索引页以官方为先**。首批 8 个组件的 `fetch_jdk/maven/tomcat/mysql/python/node/git/conda_versions()` 全部直连官方索引；曾为此准备的公共辅助 `_get_first_working()` 因没有合法调用点已删除。新增组件写索引抓取时同样**不要**把镜像排在官方之前——那只会让下拉框少一批可选版本。
+
+> 既有实现差异（非本次改造引入）：后加的 16 个组件里 `_fetch_apache_versions()` / `fetch_go_versions()` / `fetch_mongodb_versions()` 等共享辅助仍按「镜像索引 → 官网索引」顺序取第一个非空结果，镜像先返回时版本列表可能偏短（如清华 Apache 索引只给 1 个版本）。若要彻底统一，应改成「并集去重」或「取版本数最多的一家」，而不是按顺序取第一个非空。
 
 ### R1.8 镜像失效处理
 
 - 镜像源突然下线、目录结构变更属常态，故障转移机制保证最终能从官网拿到包
 - 若发现某个镜像源长期失效（连续 N 个版本都 404），应在 R1.3 表中标注并讨论是否替换
 - 严禁为绕过故障转移而直接把镜像 URL 改成官网——这违反 R1.1
+- **两类"看起来成功"的失效必须在下载层拦掉**（2026-09-28 实测的两起真实事故）：
+  1. **403 屏蔽 UA**：清华 TUNA、北外 BFSU 对 requests 默认 UA 与浏览器 UA 回 403，只放行自定义 UA。
+     所有出网请求因此固定携带 `HTTP_UA`；新增请求点时不得省略 `headers`。
+  2. **假 200 软 404**：`repo.huaweicloud.com/anaconda/<任意不存在的路径>` 301 跳到软 404 页，
+     回「200 + 无 `Content-Length` + 一小段 HTML」；`mirrors.huaweicloud.com/mongodb.org/<ver>/...`
+     对缺失文件同样回 0 字节 200。`DOWNLOAD_MIN_VALID_BYTES` + 声明长度比对负责把它们退回故障转移。
+     注意：**不带 UA 时的 403 与带 UA 后的空体是两回事**——2026-09-28 首轮探测把清华/北外/中科大的
+     UA 屏蔽误判成「假源」，复测证明 `ustc` 的 apache/*、jenkins、docker-ce 都是真包。
+- 判定"某镜像可用"的最低证据 = 状态码 200 **且** `Content-Length` 是真实包体大小 **且** 首块魔数与归档类型相符
+  （zip→`PK\x03\x04`，tar.gz→`\x1f\x8b`，tar.xz→`\xfd7zXZ`，exe→`MZ`）。只测状态码会把假 200 当成可用源。
+
+---
+
+## 规则 R2：组件三类分组与界面 Tab
+
+### R2.1 规则描述
+
+24 个组件在界面上归入且仅归入三个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+
+| 分类 | 判定标准 | 组件（9 / 12 / 3） |
+|------|----------|--------------------|
+| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle |
+| **开发软件** | 本地跑起来给项目当依赖的服务 | tomcat、mysql、mongodb、postgresql、elasticsearch、nacos、seata、kafka、rocketmq、pulsar、activemq、rabbitmq |
+| **其它软件** | 不参与写代码的容器 / 编排 / CI 外围 | docker、kubectl、jenkins |
+
+边界争议按此顺序裁决：**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件；都不是则其它软件。
+（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件。）
+
+### R2.2 适用范围
+
+- `Component.category` 字段与 `COMPONENT_CATEGORY_OF` 登记表
+- `group_components()` 与 `MainWindow._build_ui()` 的 Tab 构建
+- 新增 / 改名 / 删除组件时的分类登记
+
+### R2.3 实施指引
+
+分类**只有一个真源**：`COMPONENT_CATEGORY_OF`（`main.py`，`build_components()` 之前）。
+
+```python
+COMPONENT_CATEGORIES = ("开发环境", "开发软件", "其它软件")   # Tab 顺序即此顺序
+COMPONENT_CATEGORY_OF = {
+    ...
+    "foo": "开发软件",          # 新增组件在这里加一行
+}
+```
+
+`build_components()` 末尾统一执行 `comp.category = COMPONENT_CATEGORY_OF[comp.key]`——
+**不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
+漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
+
+`MainWindow.cards` 必须保持**全量平铺**（24 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+
+Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
+数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
+
+### R2.4 新增 / 调整组件分类 checklist
+
+- [ ] `COMPONENT_CATEGORY_OF` 里登记了该 key，且值取自 `COMPONENT_CATEGORIES`
+- [ ] 按 R2.1 的判定顺序核对归类理由，有争议的在 PR 说明里写清
+- [ ] `bt_component_category_tests.py` 通过（其中 `EXPECTED_MEMBERSHIP` 是分类基线，改归类要同步改它）
+- [ ] 未新增 `if category == ...` 之类的界面特判——分组渲染只走 `group_components()`
+- [ ] README / README_EN 的三 Tab 表格与 `CODE_WIKI.md` 的 `category` 字段说明同步
 
 ---
 
@@ -275,5 +403,4 @@ def _get_first_working(urls: List[str], timeout: int = 10) -> requests.Response:
 > 后续新增的开发规则以「规则 R2 / R3 / ...」形式追加到本文件，并在「规则索引」中登记。
 > 每条规则必须包含：规则描述、适用范围、实施指引、checklist 四节。
 
-- R2: _待定_
 - R3: _待定_

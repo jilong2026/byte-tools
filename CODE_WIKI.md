@@ -52,12 +52,12 @@
 | 消息队列 | Apache Pulsar | `pulsar` | `PULSAR_HOME` | Apache 归档目录页 |
 | 消息队列 | ActiveMQ | `activemq` | `ACTIVEMQ_HOME` | Apache 归档目录页 |
 | 服务发现/事务 | Nacos | `nacos` | `NACOS_HOME` | GitHub Releases（alibaba/nacos） |
-| 服务发现/事务 | Seata | `seata` | `SEATA_HOME` | GitHub Releases（apache/incubator-seata） |
+| 服务发现/事务 | Seata | `seata` | `SEATA_HOME` | Apache 分发目录（`/apache/incubator/seata/`；GitHub Releases 仅用于版本列表抓取） |
 | 搜索引擎 | Elasticsearch | `elasticsearch` | `ES_HOME` | elastic.co 归档索引 |
 | 版本控制 | Git | `git` | — | Git for Windows Releases API |
 | Python 发行版 | Miniconda | `conda` | `CONDA_HOME` | Anaconda Repo 索引（安装器模式） |
 
-> 平台支持差异：Docker / RabbitMQ 在 Windows 下不提供自动下载（需用 Docker Desktop / 手动安装 Erlang），macOS 下 PostgreSQL / MongoDB 不提供自动下载。详见各组件 `unsupported_platform_hint` 字段与「十、已知约束与注意事项」。
+> 平台支持差异（2026-09-28 实测）：Docker / RabbitMQ 在 Windows 下不提供自动下载（需用 Docker Desktop / 手动安装 Erlang）；PostgreSQL 仅 Windows 支持（Linux/Darwin 提示用发行版包管理器 / brew）；MongoDB 支持 Windows/Linux（macOS 不提供自动下载）；Git 仅 Windows 提供便携包（Linux/macOS 上游只有源码包，提示用 apt/dnf/yum/brew）。详见各组件 `unsupported_platform_hint` 字段与「十、已知约束与注意事项」。
 
 技术栈速览：
 
@@ -109,7 +109,7 @@
 │   R1 多源故障转移层（DownloadWorker 内部）                │
 │   构造镜像 URL 列表 → 遍历尝试 → 失败切换 → 末位官网回退  │
 │   MIRROR_BASES / DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_TIMEOUT│
-│   DOWNLOAD_RETRY_PER_URL / _get_first_working()            │
+│   DOWNLOAD_RETRY_PER_URL / _mb() / _gh_accelerated()       │
 └────────────┬──────────────────────────────────────────────┘
              │
 ┌────────────▼──────────────────────────────────────────────┐
@@ -138,7 +138,7 @@
 │              全局常量与工具函数                            │
 │  APP_NAME / GITHUB_URL / CONFIG_DIR / CURRENT_OS / IS_ARM │
 │  MIRROR_BASES / DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_TIMEOUT │
-│  DOWNLOAD_RETRY_PER_URL / _get_first_working()            │
+│  DOWNLOAD_RETRY_PER_URL / _mb() / _gh_accelerated()       │
 │  human_size() / ensure_dir() / _get() / _probe_version()  │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -157,7 +157,7 @@
 
 ```
 byte-tools/
-├── main.py                  # 主程序（含 UI 与全部逻辑，约 2700 行）
+├── main.py                  # 主程序（含 UI 与全部逻辑，约 4800 行）
 ├── requirements.txt         # Python 依赖清单（PySide6、requests）
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
@@ -200,8 +200,8 @@ byte-tools/
 ├── docker/                          # Linux/Mac only，Windows 走 Docker Desktop
 ├── kubectl/                         # 单二进制直接落在 install_dir 根
 ├── jenkins/                         # jenkins.war 落在根目录，java -jar 启动
-├── mongodb/                         # Linux/Mac only
-├── postgresql/                      # Linux/Mac only
+├── mongodb/                         # Windows/Linux only（macOS 不支持）
+├── postgresql/                      # 仅 Windows（Linux/Darwin 不支持）
 ├── kafka/
 ├── rocketmq/
 ├── pulsar/
@@ -228,15 +228,20 @@ byte-tools/
 | `CURRENT_OS` | str | `platform.system()` 结果：`'Windows'` / `'Darwin'` / `'Linux'` |
 | `MACHINE` | str | `platform.machine().lower()`，CPU 架构字符串 |
 | `IS_ARM` | bool | 是否 ARM 架构（用于挑选 aarch64/arm64 包） |
-| `MIRROR_BASES` | List[tuple] | R1 国内镜像源基址清单，按稳定性排序：huaweicloud / tuna / aliyun / nju / ustc / sjtug |
+| `MIRROR_BASES` | List[tuple] | R1 国内镜像源基址清单 `(标识, 基址)`，共 11 项：huaweicloud / huaweicloud-py / tuna / aliyun / nju / ustc / bfsu / tencent（`https://mirrors.cloud.tencent.com`）/ sjtug / npmmirror / daocloud-files（`https://files.m.daocloud.io`） |
+| `_MIRROR_BY_NAME` | Dict[str, str] | `MIRROR_BASES` 的标识 → 基址索引，供 `_mb()` 查表 |
+| `GH_ACCELERATORS` | List[str] | GitHub Release 反向加速器前缀清单（`ghproxy.net` / `gh-proxy.com` / `ghfast.top`；已停服的 `ghproxy.com`、`gh.idayer.com` 不得再引入） |
 | `DOWNLOAD_PROBE_TIMEOUT` | int | R1 参数：单 URL 探测超时 5 秒 |
 | `DOWNLOAD_TIMEOUT` | int | R1 参数：单 URL 下载连接超时 30 秒 |
 | `DOWNLOAD_RETRY_PER_URL` | int | R1 参数：单 URL 内重试次数 2 |
+| `HTTP_UA` | dict | `{"User-Agent": "byte-tools"}`，所有出网请求（`_get()` 与 `DownloadWorker._try_download()`）必须带。实测（2026-09-28）清华 TUNA / BFSU 对 requests 默认 UA 与浏览器 UA 一律回 403，只放行这个自定义 UA |
+| `DOWNLOAD_MIN_VALID_BYTES` | int | 4096：下载完成后校验实际字节数，0 字节或短于声明的 `Content-Length` 一律判该源无效并继续故障转移。起因（2026-09-28 实测）：`repo.huaweicloud.com/anaconda/<任意路径>` 301 到软 404 HTML 页、`mirrors.huaweicloud.com/mongodb.org/…` 对缺失文件回空体 200，不加校验会拿到假包、直到解压阶段才炸 |
 | `human_size(num)` | func | 字节数 → `"1.5 MB"` 可读字符串 |
 | `ensure_dir(path)` | func | 确保目录存在（`mkdir -p` 语义） |
-| `_get(url, timeout=10)` | func | 带自动重试 + SSL 降级的 HTTP GET（重试 3 次，指数退避） |
+| `_get(url, timeout=10)` | func | 带自动重试 + SSL 降级的 HTTP GET（重试 3 次，指数退避），请求头固定 `HTTP_UA` |
 | `_probe_version(exe, args)` | func | 调用可执行文件抓取版本号字符串，失败返回空串；`args` 为空一律不执行（裸跑启动脚本 = 拉起服务），Windows 上带 `CREATE_NO_WINDOW` + `stdin=DEVNULL`，不弹控制台窗口也不被等输入的程序的卡住 |
-| `_get_first_working(urls, timeout=10)` | func | R1 公共辅助：按 urls 顺序依次 GET，第一个成功的返回 Response，全失败抛 RuntimeError |
+| `_mb(*names)` | func | 按 `MIRROR_BASES` 标识批量取镜像基址（去尾斜杠），供各 URL 构造器拼接，禁止在表外硬编码镜像域名 |
+| `_gh_accelerated(url)` | func | GitHub 裸地址 → `GH_ACCELERATORS` 加速器前缀在前 + 裸地址末位（GitHub 无真镜像，只能走反向代理） |
 | `find_dead_tool_path_entries()` | func | 只读预览：列出 PATH 中指向 `CONFIG_DIR` 子树、但目录已不存在的残留条目（供确认弹窗展示） |
 | `cleanup_dead_tool_path_entries()` | func | 标题栏「清理残留 PATH」的后端：删掉上一行列出的死条目，工具目录之外的条目一律不动 |
 
@@ -279,6 +284,7 @@ byte-tools/
 | `installer_mode` | bool | 是否安装器模式（如 Miniconda 走 `.exe` / `.sh` 静默安装） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
+| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 其它软件）。**不在构造处手写**：`build_components()` 末尾统一按 `COMPONENT_CATEGORY_OF[comp.key]` 赋值，漏登记即 KeyError |
 
 方法：
 - `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`
@@ -307,38 +313,39 @@ byte-tools/
 
 | 函数 | 适用组件 | 关键逻辑 |
 |------|---------|---------|
-| `_adoptium_jdk_url(version)` | JDK | 拼接 Adoptium latest binary API，按 `IS_ARM` 切换 mac/linux 架构 |
-| `_maven_urls(v)` | Maven | Apache 归档目录多镜像故障转移 |
-| `_tomcat_urls(v)` | Tomcat | 按主版本号 `v.split(".", 1)[0]` 拼接 tomcat-<major> 路径 |
-| `_mysql_urls(v)` | MySQL | 区分 macOS ARM/x64；Linux 走 `.tar.xz` |
-| `_python_urls(v)` | Python | Windows 走 embed-amd64.zip；mac/Linux 走 .tgz |
-| `_node_urls(v)` | Node.js | 按 `IS_ARM` 选择 macOS arm64/x64 包 |
-| `_git_urls(v)` | Git | Windows 走 MinGit 便携版；mac/Linux 用源码 tar.gz 占位 |
-| `_conda_urls(v)` | Miniconda | 按 `IS_ARM` 选择 macOS arm64/x86_64 .sh |
-| `_go_urls(v)` | Go | go.dev/dl 多镜像，按 OS/arch 拼接 |
-| `_gradle_urls(v)` | Gradle | services.gradle.org 多镜像 |
-| `_bun_urls(v)` | Bun | GitHub Releases 多镜像 |
-| `_docker_urls(v)` | Docker | 仅 Linux/Mac 返回列表；Windows 返回空（unsupported_platform_hint 引导） |
-| `_mongodb_urls(v)` | MongoDB | 仅 Linux/Mac；macOS 无自动下载 |
-| `_postgresql_urls(v)` | PostgreSQL | 仅 Linux/Mac；macOS 无自动下载 |
-| `_kubectl_urls(v)` | kubectl | dl.k8s.io 多镜像；Windows .exe / Linux-Mac 无扩展名单二进制 |
-| `_jenkins_urls(v)` | Jenkins | get.jenkins.io 多镜像；三平台都是 jenkins.war 单文件 |
-| `_rabbitmq_urls(v)` | RabbitMQ | GitHub Releases；Windows 无（依赖 Erlang） |
-| `_kafka_urls(v)` | Kafka | Apache 归档目录多镜像 |
-| `_rocketmq_urls(v)` | RocketMQ | Apache 归档目录多镜像 |
-| `_pulsar_urls(v)` | Pulsar | Apache 归档目录多镜像 |
-| `_activemq_urls(v)` | ActiveMQ | Apache 归档目录多镜像 |
-| `_nacos_urls(v)` | Nacos | GitHub Releases 多镜像 |
-| `_seata_urls(v)` | Seata | GitHub Releases 多镜像 |
-| `_elasticsearch_urls(v)` | Elasticsearch | elastic.co 多镜像 |
+| `_adoptium_jdk_url(version, dead, avail)` | JDK | 离线默认清单无镜像，末位 `api.adoptium.net/v3/binary/latest/<major>/ga/…` 单源；点「刷新版本」后由 `_adoptium_mirror_urls()` 列清华 `/Adoptium/<major>/jdk/<arch>/<os>/`、南大 `/adoptium/…` 目录，挑带 build 号的确切文件名（镜像目录只暴露这种命名）；`dead`/`avail` 为本次刷新内的镜像熔断与目录缓存 |
+| `_maven_urls(v)` | Maven | 华为 repo / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 七家 `/apache/maven/maven-3/<v>/binaries/` + 末位 `archive.apache.org`（共 8 源） |
+| `_tomcat_urls(v)` | Tomcat | 按主版本号 `v.split(".", 1)[0]` 拼接 tomcat-<major> 路径；华为 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 七家镜像 `/apache/tomcat/tomcat-<major>/v<v>/bin/` + 末位归档官网（共 8 源） |
+| `_mysql_urls(v)` | MySQL | Windows/Linux/macOS 三平台都有阿里 `/mysql/MySQL-<maj.min>/` + 华为 `/mysql/Downloads/MySQL-<maj.min>/` 两家镜像，末位 `cdn.mysql.com`（`dev.mysql.com/get` 对任何 UA 都 403，不能用）；Windows `mysql-<v>-winx64.zip`，Linux 走 `.tar.xz`（镜像站文件名是 glibc2.12，官网新包是 glibc2.28），macOS 用 `macos11`/`macos12` 命名走镜像、`macos14` 走 CDN（老版本 CDN 恒 404），按 `IS_ARM` 选 arch |
+| `_python_urls(v)` | Python | 华为 `mirrors.huaweicloud.com/python/` + npmmirror `-/binary/python/` + 末位 `python.org/ftp`；Windows 走 embed-amd64.zip，mac/Linux 走 .tgz |
+| `_node_urls(v)` | Node.js | 清华 / 南大 / 北外 `/nodejs-release/v<v>/` + 华为 `/nodejs/v<v>/` + npmmirror `-/binary/node/v<v>/` + 末位 `nodejs.org/dist`（共 6 源）；按 `IS_ARM` 选择 macOS arm64/x64 包 |
+| `_git_urls(v)` | Git | **只返回 `Windows` 一个键**（共 7 源）：华为 `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/`、`repo.huaweicloud.com` 同路径 + npmmirror `-/binary/git-for-windows/…` 的 `MinGit-<v>-64-bit.zip`（三家实测 200），加速器只是补充（`_gh_accelerated()`），末位 `github.com/git-for-windows`；Linux/Darwin **不给 URL**——上游只有 `git/git` 源码 tar.gz（解压后无可执行文件，需自行编译），改由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew |
+| `_conda_urls(v)` | Miniconda | 清华 / 南大 / 北外 / 中科大 `/anaconda/miniconda/` + 末位 `repo.anaconda.com`（华为 `repo.huaweicloud.com/anaconda/` 对任意路径 301 到软 404 HTML 页，属假成功，已删除）；按 `IS_ARM` 选择 macOS arm64/x86_64 .sh |
+| `_go_urls(v)` | Go | 只剩阿里 `/golang/` + 南大 `/golang/` 两家镜像 + 末位 `go.dev/dl/`（华为/清华对 `go<ver>.linux-amd64.tar.gz` 这类包名恒 404；中科大只是 302 跳回 `dl.google.com`，本机 TLS 失败，同样不算镜像） |
+| `_gradle_urls(v)` | Gradle | 华为 repo / 华为 mirrors / 南大 / 腾讯 四家 `/gradle/<v>/gradle-<v>-bin.zip` + 末位 `services.gradle.org/distributions/`（清华/阿里/北外无 gradle 目录，实测 404 已删除） |
+| `_bun_urls(v)` | Bun | npmmirror `-/binary/bun/` 在前 + `_gh_accelerated()` 的三个 GitHub 加速器与裸地址末位 |
+| `_docker_urls(v)` | Docker | Linux 与 macOS 各八家 docker-ce 镜像（华为 repo / 华为 mirrors / 清华 / 阿里 / 南大 / 北外 / 中科大 / 腾讯）`/docker-ce/linux/static/stable/x86_64/`（或 aarch64）、`/docker-ce/mac/static/stable/<arch>/` + 末位 `download.docker.com`（各 9 源）；Windows 返回空（unsupported_platform_hint 引导装 Docker Desktop） |
+| `_mongodb_urls(v)` | MongoDB | 仅 Windows/Linux，macOS 不支持；实测无国内镜像（带 UA 后 `repo.huaweicloud.com/mongodb/` 对二进制包名 404、只有 C++ 源码包，`mirrors.huaweicloud.com/mongodb.org/` 401；清华 `/mongodb/` 是 apt/yum 仓库；阿里只有 `mongodb-upstart/`），官网 `fastdl.mongodb.org` 单源；Linux 文件名必须带发行版段 `mongodb-linux-x86_64-ubuntu2204-<v>.tgz` |
+| `_postgresql_urls(v)` | PostgreSQL | 仅 Windows；Linux/Darwin 不支持（提示用发行版包管理器 / brew）。实测无国内镜像（清华 404；华为/阿里/南大 `/postgresql/` 只有 `latest/`、`source/` 源码 tarball，`v17/`、`17.6/` binaries 树 404），官网 `get.enterprisedb.com/postgresql/postgresql-<v>-1-windows-x64-binaries.zip` 单源 |
+| `_kubectl_urls(v)` | kubectl | 首位 DaoCloud `files.m.daocloud.io/dl.k8s.io/release/v<v>/bin/<os>/<arch>/kubectl`（实测 200 真二进制；`dl.k8s` 不是可改写前缀，必须走 files 代理）+ 末位 `dl.k8s.io/release/…`（共 2 源，已不是单源例外）；Windows .exe / Linux-Mac 无扩展名单二进制 |
+| `_jenkins_urls(v)` | Jenkins | 华为 repo / 华为 mirrors / 清华 / 北外 / 南大 / 阿里 / 腾讯 / 中科大 八家 `/jenkins/war-stable/<v>/jenkins.war` + 末位 `get.jenkins.io`（共 9 源；镜像只保留最近几条 LTS 线）；三平台都是 jenkins.war 单文件 |
+| `_rabbitmq_urls(v)` | RabbitMQ | 仅 Linux/Darwin（tar.xz）：华为 repo / 华为 mirrors `/rabbitmq-server/v<v>/rabbitmq-server-generic-unix-<v>.tar.xz` + 三个加速器 + 末位 `github.com/rabbitmq/rabbitmq-server/releases`（共 6 源）；Windows 无（依赖 Erlang，unsupported_platform_hint 引导官网安装器） |
+| `_kafka_urls(v)` | Kafka | 华为 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 七家 `/apache/kafka/<v>/kafka_2.13-<v>.tgz` + 末位归档官网（共 8 源；Kafka 只发 .tgz，包名带 Scala 版本段 `kafka_2.13-<v>.tgz`，`-bin.zip` 实测 404） |
+| `_rocketmq_urls(v)` | RocketMQ | 七家镜像 `/apache/rocketmq/<v>/rocketmq-all-<v>-bin-release.zip` + 末位归档官网（共 8 源） |
+| `_pulsar_urls(v)` | Pulsar | 七家镜像 `/apache/pulsar/pulsar-<v>/apache-pulsar-<v>-bin.tar.gz` + 末位归档官网（共 8 源） |
+| `_activemq_urls(v)` | ActiveMQ | 七家镜像 + 末位归档官网（共 8 源）；Apache 目录段是裸版本号 `/apache/activemq/<v>/`（不是 `activemq-<major>`），文件名前缀 `apache-activemq-`；Windows zip、Unix tar.gz |
+| `_nacos_urls(v)` | Nacos | GitHub Release 无真镜像 → `_gh_accelerated()`（三加速器 + 裸地址末位，共 4 源） |
+| `_seata_urls(v)` | Seata | 走 Apache 分发目录：华为 repo / 华为 mirrors / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 八家 `/apache/incubator/seata/<v>/apache-seata-<v>-incubating-bin.tar.gz` + 末位 `archive.apache.org/dist/incubator/seata/`（共 9 源）；**不再**走 GitHub `_gh_accelerated()`——GitHub release 里的 `seata-server-<v>.jar` 只是 thin jar，不能解压即用；2.x 用 incubating 命名，1.x 用 `seata-server-<v>.zip` |
+| `_elasticsearch_urls(v)` | Elasticsearch | 华为 repo + 华为 mirrors 两家镜像 `/elasticsearch/<v>/elasticsearch-<v>-<os>-<arch>.<ext>` + 末位 `artifacts.elastic.co`（共 3 源；清华/阿里无此制品，镜像只同步新版本，老版本 404 由故障转移兜底） |
 
 辅助：
 - `_STD_ARCHIVE`：标准归档类型表 `{"Windows": "zip", "Darwin": "tar.gz", "Linux": "tar.gz"}`
-- `_cv(version, url_map)`：快速构造一个用标准归档类型的 `ComponentVersion`
+- `_cv(version, url_map, archive_map=None)`：快速构造 `ComponentVersion`，默认用 `_STD_ARCHIVE` 归档表；第三个参数**覆盖**默认表——包体真实后缀不是 zip/tar.gz 时必须显式传，目前 MySQL Linux=`tar.xz`、RabbitMQ=`tar.xz`、Seata/Kafka=`tar.gz`、PostgreSQL Windows=`zip` 都靠它；**按值类型自动选模式**——值里含列表就填 `url_list_map`（R1 多源），值全是字符串就填旧的单 URL `url_map`
+- `_adoptium_dirs()` / `_adoptium_pick()` / `_adoptium_mirror_urls()`：JDK 镜像目录列名与文件名挑选（镜像只暴露带 build 号的确切文件名）
 
 ### 4.4 版本抓取器（`FETCHERS` 字典）
 
-每个组件对应一个 `fetch_xxx_versions()` 函数，启动时由后台线程并发调用，向各官网 API / 归档索引拉取真实可用版本列表。**所有抓取请求同样走 R1 镜像优先**（先国内镜像索引页，失败切官网）。
+每个组件对应一个 `fetch_xxx_versions()` 函数，启动时由后台线程并发调用，向各官网 API / 归档索引拉取真实可用版本列表。**首批 8 个组件的索引页直连官方**：镜像索引页只同步最近几个版本（实测清华的 Apache Maven 索引只返回 1 个版本，官网返回 45 个），镜像优先会把下拉框砍短，详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.7 第 4 节。后加的 16 个组件里 `_fetch_apache_versions()` / `fetch_go_versions()` 等仍是「镜像索引 → 官网索引」取第一个非空，属已知偏差。下载 URL 与索引页是两件事：只有下载 URL 走 R1 多源。
 
 | 函数 | 数据源 | 抓取方式 |
 |------|--------|---------|
@@ -445,7 +452,8 @@ R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1
 
 关键行为：
 - `run()` 遍历 `self.urls`：`log.emit("info", f"开始下载（第 {idx}/{len(urls)} 个源）：{url}")`
-- `_try_download(url)` 单源下载：`requests.get(stream=True, timeout=DOWNLOAD_TIMEOUT)`，按 `_CHUNK_SIZE=64KB` 写 `.part` 临时文件，成功后 `replace` 为 `dest`
+- `_try_download(url)` 单源下载：`requests.get(stream=True, timeout=DOWNLOAD_TIMEOUT, headers=HTTP_UA)`，请求头固定 `HTTP_UA`（实测清华 TUNA / BFSU 对 requests 默认 UA 与浏览器 UA 回 403，只放行自定义 UA），按 `_CHUNK_SIZE=64KB` 写 `.part` 临时文件，成功后 `replace` 为 `dest`
+- 下载完成校验实际字节数：小于 `DOWNLOAD_MIN_VALID_BYTES`（4096）或短于声明的 `Content-Length` 判该源无效，删掉 `.part` 换下一个源（起因：华为 `repo.huaweicloud.com/anaconda/` 301 到软 404 HTML 页、`mirrors.huaweicloud.com/mongodb.org/…` 对缺失文件回空体 200，都是假成功）
 - 单源失败：`log.emit("warn", f"第 {idx} 个源下载失败：{exc}\n即将切换到下一个源：{urls[idx]}")`，继续下一个
 - 所有源失败：汇总失败原因 + `finished_fail.emit("所有下载源均不可用")`
 - `cancel()` 设置 `_cancel` 标志，`_try_download` 在每个 chunk 写入前检查并中断，清理 `.part` 临时文件
@@ -544,9 +552,14 @@ UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
 3. **主体 QSplitter（垂直）**：
-   - 上部 `QScrollArea` + 卡片列表 `ComponentCard`
+   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分三个 Tab，**标题带组件数量**：`开发环境（9）` / `开发软件（12）` / `其它软件（3）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
    - 下部日志区 `QTextEdit`（深色主题、等宽字体）
 4. **底部状态栏**：显示当前系统信息、工作目录与 `组件总数：N 个`（N=24，方便用户一眼掌握支持范围）
+
+> **不变量**：`MainWindow.cards` 仍是**全量平铺**列表（24 张卡片，跨 Tab 收集），
+> 刷新版本、读写配置、关窗前等探测线程都遍历它；分组只影响卡片的父布局，不影响这个列表。
+> 分类数据由 `COMPONENT_CATEGORY_OF` 单点登记 → `build_components()` 末尾写入 `Component.category`
+> → `group_components()` 按 `COMPONENT_CATEGORIES` 顺序出组；未登记的 key 会 KeyError，不会静默漏卡片。
 
 无边框窗口拖动：
 - `mousePressEvent` 在标题栏区域按下左键时记录 `_drag_pos`
@@ -632,24 +645,29 @@ Component
 
 ### 5.4 关键函数索引
 
+> 行号为 2026-09-28 对当前 `main.py` 实测的「约」值，后续改动会漂移，以函数名检索为准。
+
 | 函数 | 行号附近 | 职责 |
 |------|---------|------|
-| `human_size(num)` | ~105 | 字节数转可读字符串 |
-| `ensure_dir(path)` | ~114 | 确保目录存在 |
-| `MIRROR_BASES` | ~326 | R1 国内镜像源基址常量清单（6 个镜像） |
-| `DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_TIMEOUT / DOWNLOAD_RETRY_PER_URL` | ~336 | R1 故障转移参数常量 |
-| `_get_first_working(urls, timeout=10)` | ~341 | R1 公共辅助：按 urls 顺序依次 GET，第一个成功的返回 |
-| `_probe_version(exe, args)` | ~423 | 静默执行外部命令抓版本号：空 `args` 不执行；Windows 带 `CREATE_NO_WINDOW` + `stdin=DEVNULL`，4 秒超时 |
-| `VersionProbeWorker` | ~427 | 后台线程版 `_probe_version`，供卡片异步回填版本号 |
-| `find_dead_tool_path_entries()` / `cleanup_dead_tool_path_entries()` | ~3196 / ~3212 | 列出 / 删除 PATH 中指向 `CONFIG_DIR` 子树但目录已不存在的残留条目 |
-| `_get(url, timeout=10)` | ~343 | 带重试 + SSL 降级的 HTTP GET |
-| `_sort_semver_desc(vs)` | ~374 | 语义化版本倒序排序 |
-| `_fetch_github_releases_versions(repo, prefix)` | ~2043 | R1 公共辅助：抓取 GitHub Releases 版本列表（Nacos/Seata/RabbitMQ 等复用） |
-| `_fetch_apache_versions(key)` | ~1934 | R1 公共辅助：抓取 Apache 项目版本列表（Kafka/RocketMQ/Pulsar/ActiveMQ 复用） |
-| `build_components()` | ~2214 | 构造 24 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源 |
-| `extract_archive(archive, extract_to)` | ~860 | 解压 zip/tar.gz/tar.xz + 单二进制 + .war 单文件 |
-| `DownloadWorker(urls, dest)` | ~2624 | R1 多源故障转移下载线程 |
-| `main()` | ~末尾 | 程序入口 |
+| `human_size(num)` | ~110 | 字节数转可读字符串 |
+| `ensure_dir(path)` | ~119 | 确保目录存在 |
+| `MIRROR_BASES` / `_MIRROR_BY_NAME` | ~457 | R1 国内镜像源基址常量清单（11 个源，`(标识, 基址)` 形式） |
+| `GH_ACCELERATORS` | ~473 | GitHub Release 反向加速器前缀清单（3 个） |
+| `DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_TIMEOUT / DOWNLOAD_RETRY_PER_URL` | ~480 | R1 故障转移参数常量 |
+| `HTTP_UA` / `DOWNLOAD_MIN_VALID_BYTES` | ~486 / ~489 | 出网请求固定 UA / 下载体最小有效字节数校验 |
+| `_mb(*names)` / `_gh_accelerated(url)` | ~492 / ~502 | R1 公共辅助：按标识取镜像基址 / GitHub 加速器地址列表 |
+| `_cv(version, url_map, archive_map)` | ~520 | 构造 ComponentVersion，第三参覆盖默认归档表 `_STD_ARCHIVE` |
+| `_probe_version(exe, args)` | ~403 | 静默执行外部命令抓版本号：空 `args` 不执行；Windows 带 `CREATE_NO_WINDOW` + `stdin=DEVNULL`，4 秒超时 |
+| `VersionProbeWorker` | ~434 | 后台线程版 `_probe_version`，供卡片异步回填版本号 |
+| `find_dead_tool_path_entries()` / `cleanup_dead_tool_path_entries()` | ~3347 / ~3363 | 列出 / 删除 PATH 中指向 `CONFIG_DIR` 子树但目录已不存在的残留条目 |
+| `_get(url, timeout=10)` | ~1595 | 带重试 + SSL 降级的 HTTP GET，请求头固定 `HTTP_UA` |
+| `_sort_semver_desc(vs)` | ~1626 | 语义化版本倒序排序 |
+| `_fetch_github_releases_versions(repo, prefix)` | ~2322 | R1 公共辅助：抓取 GitHub Releases 版本列表（Nacos/Seata/RabbitMQ 等复用） |
+| `_fetch_apache_versions(key)` | ~2213 | R1 公共辅助：抓取 Apache 项目版本列表（Kafka/RocketMQ/Pulsar/ActiveMQ 复用） |
+| `build_components()` | ~2486 | 构造 24 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家） |
+| `extract_archive(archive, extract_to)` | ~3407 | 解压 zip/tar.gz/tar.xz + 单二进制 + .war 单文件 |
+| `DownloadWorker(urls, dest)` | ~2909 | R1 多源故障转移下载线程（带 `HTTP_UA` 请求头 + `DOWNLOAD_MIN_VALID_BYTES` 字节校验） |
+| `main()` | ~4783（末尾） | 程序入口 |
 
 ---
 
@@ -686,11 +704,13 @@ ComponentCard.on_install_clicked()
        ├─ for idx, url in enumerate(urls, 1):
        │    ├─ log.emit("info", f"开始下载（第 {idx}/{len(urls)} 个源）：{url}")
        │    ├─ _try_download(url)
-       │    │    ├─ requests.get(stream=True, timeout=DOWNLOAD_TIMEOUT)
+       │    │    ├─ requests.get(stream=True, timeout=DOWNLOAD_TIMEOUT, headers=HTTP_UA)
        │    │    ├─ 循环 r.iter_content(chunk_size=64KB)
        │    │    │    ├─ 检查 _cancel 标志
        │    │    │    ├─ 写入 .part 临时文件
        │    │    │    └─ progress.emit(downloaded, total)
+       │    │    ├─ 校验 downloaded ≥ DOWNLOAD_MIN_VALID_BYTES 且不短于 Content-Length
+       │    │    │    └─ 不合格 → 删 .part、判该源无效、换下一个源（假 200 空体防护）
        │    │    ├─ tmp.replace(dest)
        │    │    ├─ log.emit("ok", f"下载完成：{dest}，实际使用源：{url}")
        │    │    └─ finished_ok.emit(dest)   # 成功直接返回
@@ -779,7 +799,7 @@ _on_versions_fetched(key, versions)
 
 ### 7.3 运行时外部依赖
 
-- **网络**：需访问对应组件的官方下载源（Adoptium API、Apache 归档、python.org、nodejs.org、GitHub API、repo.anaconda.com、go.dev、services.gradle.org、dl.k8s.io、get.jenkins.io、elastic.co 等）。`_get` 自带 3 次重试 + 第 3 次关闭 SSL 校验，应对企业代理 MITM 场景；下载流程额外走 R1 国内镜像优先（MIRROR_BASES）
+- **网络**：需访问对应组件的官方下载源（Adoptium API、Apache 归档、python.org、nodejs.org、GitHub API、repo.anaconda.com、go.dev、services.gradle.org、dl.k8s.io、get.jenkins.io、elastic.co 等）。`_get` 自带 3 次重试 + 第 3 次关闭 SSL 校验，应对企业代理 MITM 场景；下载流程额外走 R1 国内镜像优先（MIRROR_BASES）；所有出网请求固定携带 `HTTP_UA`（清华 TUNA / BFSU 实测拒绝默认 UA）
 - **磁盘**：建议预留 3 GB 以上
 - **权限**：Windows 写用户级环境变量通常无需管理员；macOS/Linux 需对 `~/.zshrc` 等文件有写权限；macOS/Linux 上单二进制组件（kubectl 等）需 `chmod +x`
 
@@ -982,10 +1002,10 @@ components.append(
         versions=[
             ComponentVersion(
                 version=v,
-                url_list_map=_jdk_urls(v),  # ← R1：用 url_list_map 而非 url_map
+                url_list_map=_adoptium_jdk_url(v),  # ← R1：用 url_list_map 而非 url_map
                 archive_map={"Windows": "zip", "Darwin": "tar.gz", "Linux": "tar.gz"},
             )
-            for v in ("22", "21", "17", "11", "8")  # ← 在此增减版本
+            for v in ("21", "17", "11", "8")  # ← 在此增减版本
         ],
     )
 )
@@ -995,7 +1015,7 @@ components.append(
 
 ### 9.2 新增一个全新组件（R1 多源故障转移配置）
 
-新增组件**必须**遵守 [DEVELOPMENT.md](./DEVELOPMENT.md) R1 规则：每个组件**至少 2 个国内镜像 + 末位官网**。
+新增组件**必须**遵守 [DEVELOPMENT.md](./DEVELOPMENT.md) R1 规则：每个组件的**下载 URL** 至少 2 个国内镜像 + 末位官网（实测凑不出 2 个源时按 R1.1 登记例外，如 MongoDB / PostgreSQL——2026-09-28 实测无国内镜像，官网单源）。
 
 1. 写 URL 构造器，返回 `Dict[str, List[str]]`（按 OS 键映射的 URL 列表，镜像在前，官网末位）：
 
@@ -1007,11 +1027,11 @@ def _foo_urls(v: str) -> Dict[str, List[str]]:
     入参 v: str   版本号
     返回: Dict[str, List[str]]  按 OS 键映射的 URL 列表（国内镜像在前 + 末位官网）
     """
-    # 镜像基址从 MIRROR_BASES 取，不要硬编码
-    mirrors = MIRROR_BASES  # huaweicloud / tuna / aliyun / nju / ustc / sjtug
+    # 镜像基址用 _mb(标识) 从 MIRROR_BASES 取，不要硬编码域名
+    bases = _mb("huaweicloud", "tuna", "aliyun", "nju")
     file = f"foo-{v}-bin"
     win, mac, linux = [], [], []
-    for _, base in mirrors:
+    for base in bases:
         # 镜像路径根据实际镜像源拼接（不同镜像路径规则可能不同，按需调整）
         win.append(f"{base}/foo/{v}/{file}.zip")
         mac.append(f"{base}/foo/{v}/{file}.tar.gz")
@@ -1038,9 +1058,10 @@ def fetch_foo_versions() -> List[ComponentVersion]:
 3. 注册到 `FETCHERS`：`"foo": fetch_foo_versions`
 4. 在 `build_components()` 末尾 `components.append(Component(key="foo", ...))`
 5. 若该组件在特定平台不支持自动下载（如 Docker 在 Windows），设 `unsupported_platform_hint="Windows 下请安装 Docker Desktop"`，对应 OS 的 `url_list_map` 返回空列表
-6. UI 会自动出现一张新卡片，无需改动
+6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`开发环境` / `开发软件` / `其它软件`）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
+7. UI 会自动在对应 Tab 下出现一张新卡片，无需改动布局代码
 
-> **R1 硬性要求**（见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.1）：新增组件未配置 ≥2 个国内镜像地址，不予合入。
+> **R1 硬性要求**（见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.1）：新增组件的**下载 URL** 未配置 ≥2 个国内镜像地址，不予合入；确实凑不出 2 个源时（实测国内无该制品镜像，如 MongoDB / PostgreSQL 二进制包），必须在 R1.5 登记实测结论并保留官网单源，不得用猜测的镜像路径凑数。版本**索引页**不适用本要求（见 R1.7 第 4 节，镜像索引版本数残缺）。
 
 ### 9.3 更换 / 增减镜像源
 
@@ -1048,16 +1069,22 @@ def fetch_foo_versions() -> List[ComponentVersion]:
 
 ```python
 MIRROR_BASES: List[tuple] = [
-    ("huaweicloud", "https://repo.huaweicloud.com"),       # M1，覆盖最广
-    ("tuna",        "https://mirrors.tuna.tsinghua.edu.cn"),  # M2
-    ("aliyun",      "https://mirrors.aliyun.com"),        # M3
-    ("nju",         "https://mirrors.nju.edu.cn"),        # M4
-    ("ustc",        "https://mirrors.ustc.edu.cn"),      # M5
-    ("sjtug",       "https://mirrors.sjtug.org"),         # M6
+    ("huaweicloud",    "https://repo.huaweicloud.com"),          # M1，覆盖最广
+    ("huaweicloud-py", "https://mirrors.huaweicloud.com"),       # M1b，Python 发行包只在此子域
+    ("tuna",           "https://mirrors.tuna.tsinghua.edu.cn"),  # M2
+    ("aliyun",         "https://mirrors.aliyun.com"),            # M3
+    ("nju",            "https://mirrors.nju.edu.cn"),            # M4
+    ("ustc",           "https://mirrors.ustc.edu.cn"),           # M5
+    ("bfsu",           "https://mirrors.bfsu.edu.cn"),           # M5b
+    ("tencent",        "https://mirrors.cloud.tencent.com"),     # M5c
+    ("sjtug",          "https://mirrors.sjtug.org"),             # M6
+    ("npmmirror",      "https://registry.npmmirror.com"),        # N1，淘宝二进制镜像（python/bun/node 走 `/-/binary/…`）
+    ("daocloud-files", "https://files.m.daocloud.io"),           # N2，只对少数白名单域名反代（kubectl 走它）
 ]
 ```
 
-调整顺序 / 增删镜像源统一改这一处即可。故障转移参数同理集中在 `DOWNLOAD_PROBE_TIMEOUT` / `DOWNLOAD_TIMEOUT` / `DOWNLOAD_RETRY_PER_URL`。
+构造器里用 `_mb("tuna", "nju")` 按标识取基址，不要写死域名；GitHub Release 类组件用 `_gh_accelerated(url)`（加速器在前、裸地址末位）。
+调整顺序 / 增删镜像源统一改这一处即可，同时同步 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.3 表。故障转移参数同理集中在 `DOWNLOAD_PROBE_TIMEOUT` / `DOWNLOAD_TIMEOUT` / `DOWNLOAD_RETRY_PER_URL`，出网 UA 与下载校验阈值集中在 `HTTP_UA` / `DOWNLOAD_MIN_VALID_BYTES`。
 
 ### 9.4 修改工作目录
 
@@ -1077,8 +1104,9 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 - **平台不支持自动下载**（通过 `Component.unsupported_platform_hint` 给出友好提示，对应 OS 的 `url_list_map` 返回空列表）：
   - **Windows** 下 **Docker** 不支持自动下载（提示用户安装 Docker Desktop）
   - **Windows** 下 **RabbitMQ** 不支持自动下载（依赖 Erlang，提示用户手动安装）
-  - **macOS** 下 **PostgreSQL** 不支持自动下载（建议用 Homebrew 或 Postgres.app）
+  - **Linux / macOS** 下 **PostgreSQL** 不支持自动下载（提示用发行版包管理器 / Homebrew，仅 Windows 提供 zip 直连源）
   - **macOS** 下 **MongoDB** 不支持自动下载（建议用 Homebrew 或 Docker）
+  - **Linux / macOS** 下 **Git** 不支持自动下载（上游只有 `git/git` 源码 tar.gz，解压后无可执行文件；提示用 `apt` / `dnf` / `yum` / `brew` 安装）
 
 ### 10.2 环境变量写入
 
@@ -1116,7 +1144,7 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 ### 10.8 安全性
 
 - `_get` 第 3 次重试关闭 SSL 校验（`verify=False`），应对企业代理 MITM 场景；同时 `urllib3.disable_warnings` 抑制警告
-- 不做下载文件校验（无 checksum 验证），用户对下载内容自行负责
+- 不做 checksum 验证：只有 `DOWNLOAD_MIN_VALID_BYTES`（4096）字节数下限 + `Content-Length` 一致性校验，用于挡「200 + 空体」假源，其余下载内容由用户自行负责
 
 ### 10.9 R1 多源故障转移注意事项
 
