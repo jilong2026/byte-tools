@@ -28,7 +28,7 @@
 
 > 让"新机器 → 一套完整开发环境"这件事变成点几下鼠标就搞定。
 
-支持 **24 个组件**，按分类组织如下（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 R1 规则）：
+支持 **26 个组件**，按分类组织如下（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 R1 规则）：
 
 | 分类 | 组件 | 内部 key | 环境变量 | 默认版本来源 |
 |------|------|---------|---------|-------------|
@@ -37,9 +37,11 @@
 | 语言运行时 | Node.js | `node` | `NODE_HOME` | Node.js dist/index.json |
 | 语言运行时 | Go | `go` | `GOROOT` | go.dev/dl 索引 |
 | 语言运行时 | Bun | `bun` | —（走 PATH） | GitHub Releases |
+| 语言运行时 | PowerShell 7 | `powershell` | —（走 PATH） | GitHub Releases API（PowerShell/PowerShell） |
 | 构建工具 | Apache Maven | `maven` | `MAVEN_HOME` | Apache 归档目录页 |
 | 构建工具 | Gradle | `gradle` | `GRADLE_HOME` | services.gradle.org 索引 |
 | 应用服务器 | Apache Tomcat | `tomcat` | `CATALINA_HOME` | Apache 归档目录页 |
+| Web 服务 | Nginx | `nginx` | —（走 PATH） | 华为云镜像目录页（回退 nginx.org/download） |
 | 数据库 | MySQL Server | `mysql` | `MYSQL_HOME` | MySQL 归档索引（无公开 API，含保底清单） |
 | 数据库 | MongoDB | `mongodb` | `MONGODB_HOME` | MongoDB 下载中心索引 |
 | 数据库 | PostgreSQL | `postgresql` | `PG_HOME` | PostgreSQL 源码归档索引 |
@@ -316,11 +318,13 @@ byte-tools/
 | `_adoptium_jdk_url(version, dead, avail)` | JDK | 离线默认清单无镜像，末位 `api.adoptium.net/v3/binary/latest/<major>/ga/…` 单源；点「刷新版本」后由 `_adoptium_mirror_urls()` 列清华 `/Adoptium/<major>/jdk/<arch>/<os>/`、南大 `/adoptium/…` 目录，挑带 build 号的确切文件名（镜像目录只暴露这种命名）；`dead`/`avail` 为本次刷新内的镜像熔断与目录缓存 |
 | `_maven_urls(v)` | Maven | 华为 repo / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 七家 `/apache/maven/maven-3/<v>/binaries/` + 末位 `archive.apache.org`（共 8 源） |
 | `_tomcat_urls(v)` | Tomcat | 按主版本号 `v.split(".", 1)[0]` 拼接 tomcat-<major> 路径；华为 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 七家镜像 `/apache/tomcat/tomcat-<major>/v<v>/bin/` + 末位归档官网（共 8 源） |
+| `_nginx_urls(v)` | Nginx | **只返回 `Windows` 一个键**（共 3 源）：`mirrors.huaweicloud.com/nginx/nginx-<v>.zip` + `repo.huaweicloud.com/nginx/…` + 末位 `nginx.org/download/…`（实测 2026-09-28：清华 / 北外 / 南大 / 阿里 / 腾讯对同一文件名一律 404，它们的 `nginx/` 目录是 apt/yum 包仓库，没有 nginx.org 那套 zip）；Linux/Darwin **不给 URL**——上游只发源码 `.tar.gz`（要自己 configure + make），改由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew |
 | `_mysql_urls(v)` | MySQL | Windows/Linux/macOS 三平台都有阿里 `/mysql/MySQL-<maj.min>/` + 华为 `/mysql/Downloads/MySQL-<maj.min>/` 两家镜像，末位 `cdn.mysql.com`（`dev.mysql.com/get` 对任何 UA 都 403，不能用）；Windows `mysql-<v>-winx64.zip`，Linux 走 `.tar.xz`（镜像站文件名是 glibc2.12，官网新包是 glibc2.28），macOS 用 `macos11`/`macos12` 命名走镜像、`macos14` 走 CDN（老版本 CDN 恒 404），按 `IS_ARM` 选 arch |
 | `_python_urls(v)` | Python | 华为 `mirrors.huaweicloud.com/python/` + npmmirror `-/binary/python/` + 末位 `python.org/ftp`；Windows 走 embed-amd64.zip，mac/Linux 走 .tgz |
 | `_node_urls(v)` | Node.js | 清华 / 南大 / 北外 `/nodejs-release/v<v>/` + 华为 `/nodejs/v<v>/` + npmmirror `-/binary/node/v<v>/` + 末位 `nodejs.org/dist`（共 6 源）；按 `IS_ARM` 选择 macOS arm64/x64 包 |
 | `_git_urls(v)` | Git | **只返回 `Windows` 一个键**（共 7 源）：华为 `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/`、`repo.huaweicloud.com` 同路径 + npmmirror `-/binary/git-for-windows/…` 的 `MinGit-<v>-64-bit.zip`（三家实测 200），加速器只是补充（`_gh_accelerated()`），末位 `github.com/git-for-windows`；Linux/Darwin **不给 URL**——上游只有 `git/git` 源码 tar.gz（解压后无可执行文件，需自行编译），改由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew |
 | `_conda_urls(v)` | Miniconda | 清华 / 南大 / 北外 / 中科大 `/anaconda/miniconda/` + 末位 `repo.anaconda.com`（华为 `repo.huaweicloud.com/anaconda/` 对任意路径 301 到软 404 HTML 页，属假成功，已删除）；按 `IS_ARM` 选择 macOS arm64/x86_64 .sh |
+| `_pwsh_urls(v)` | PowerShell 7 | 三平台都有官方便携包，上游只在 GitHub Releases 发版、国内无真镜像（清华 / 南大 / npmmirror 的 `powershell` 目录一律 404），故与 RabbitMQ 同策：`_gh_accelerated()` 三个加速器在前、`github.com/PowerShell/PowerShell/releases/download/v<v>/` 末位（每平台 4 源）；资产名大小写不统一——Windows 是 `PowerShell-<v>-win-<arch>.zip`，Linux/macOS 是 `powershell-<v>-linux/osx-<arch>.tar.gz`，按 `IS_ARM` 选 x64/arm64 |
 | `_go_urls(v)` | Go | 只剩阿里 `/golang/` + 南大 `/golang/` 两家镜像 + 末位 `go.dev/dl/`（华为/清华对 `go<ver>.linux-amd64.tar.gz` 这类包名恒 404；中科大只是 302 跳回 `dl.google.com`，本机 TLS 失败，同样不算镜像） |
 | `_gradle_urls(v)` | Gradle | 华为 repo / 华为 mirrors / 南大 / 腾讯 四家 `/gradle/<v>/gradle-<v>-bin.zip` + 末位 `services.gradle.org/distributions/`（清华/阿里/北外无 gradle 目录，实测 404 已删除） |
 | `_bun_urls(v)` | Bun | npmmirror `-/binary/bun/` 在前 + `_gh_accelerated()` 的三个 GitHub 加速器与裸地址末位 |
@@ -352,6 +356,8 @@ byte-tools/
 | `fetch_jdk_versions()` | `api.adoptium.net/v3/info/available_releases` | JSON，合并 `available_releases` 与 `available_lts_releases`，给 LTS 版本打 `display_label` |
 | `fetch_maven_versions()` | `archive.apache.org/dist/maven/maven-3/` | HTML，正则 `href="(3\.\d+\.\d+)/"` |
 | `fetch_tomcat_versions()` | `archive.apache.org/dist/tomcat/tomcat-{11,10,9}/` | HTML，正则逐主版本扫描 |
+| `fetch_nginx_versions()` | 华为云 `mirrors.huaweicloud.com/nginx/` → `repo.huaweicloud.com/nginx/` → `nginx.org/download/` | HTML，正则 `nginx-(\d+\.\d+\.\d+)\.zip`（镜像目录页与官网同源同命名），取前 12 个版本；镜像优先只为「取版本号」这一步，实际下载仍按 `_nginx_urls()` 的链走 |
+| `fetch_powershell_versions()` | `api.github.com/repos/PowerShell/PowerShell/releases?per_page=60` | JSON，取 `tag_name` 去掉前缀 `v`，只留 `[7-9].x.y` 三段式正式版（自动排除 `-preview` / `-rc` / daily-build），取前 12 个 |
 | `fetch_python_versions()` | `python.org/ftp/python/` | HTML，只保留 3.6+ |
 | `fetch_node_versions()` | `nodejs.org/dist/index.json` | JSON，每个 minor 保留最新 patch，major 10+，标注 LTS |
 | `fetch_mysql_versions()` | `downloads.mysql.com/archives/community/` | HTML（无公开 API）；失败则用硬编码保底清单 |
@@ -385,6 +391,8 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "jdk": fetch_jdk_versions,
     "maven": fetch_maven_versions,
     "tomcat": fetch_tomcat_versions,
+    "nginx": fetch_nginx_versions,
+    "powershell": fetch_powershell_versions,
     "python": fetch_python_versions,
     "node": fetch_node_versions,
     "mysql": fetch_mysql_versions,
@@ -551,12 +559,13 @@ UI 组成（自上而下）：
 UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
-3. **主体 QSplitter（垂直）**：
-   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分三个 Tab，**标题带组件数量**：`开发环境（9）` / `开发软件（12）` / `其它软件（3）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
+3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：`QLineEdit`（`objectName="compSearch"`，带清除按钮）+ 右侧 `QLabel`（`objectName="searchHint"`）实时显示"匹配 N / 26 个组件"。`textChanged` → `MainWindow._apply_search()`；**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了
+4. **主体 QSplitter（垂直）**：   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分三个 Tab，**标题带组件数量**：`开发环境（10）` / `开发软件（13）` / `其它软件（3）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏，Tab 标题在搜索期间改成 `分类（匹配数/总数）`，清空后恢复 `分类（总数）`；当前 Tab 一条都没命中而别的 Tab 有命中时自动跳过去。过滤**只改可见性**，`MainWindow.cards` 平铺列表始终是全量 26 项
    - 下部日志区 `QTextEdit`（深色主题、等宽字体）
-4. **底部状态栏**：显示当前系统信息、工作目录与 `组件总数：N 个`（N=24，方便用户一眼掌握支持范围）
+5. **底部状态栏**：显示当前系统信息、工作目录与 `组件总数：N 个`（N=26，方便用户一眼掌握支持范围）
 
-> **不变量**：`MainWindow.cards` 仍是**全量平铺**列表（24 张卡片，跨 Tab 收集），
+> **不变量**：`MainWindow.cards` 仍是**全量平铺**列表（26 张卡片，跨 Tab 收集），
 > 刷新版本、读写配置、关窗前等探测线程都遍历它；分组只影响卡片的父布局，不影响这个列表。
 > 分类数据由 `COMPONENT_CATEGORY_OF` 单点登记 → `build_components()` 末尾写入 `Component.category`
 > → `group_components()` 按 `COMPONENT_CATEGORIES` 顺序出组；未登记的 key 会 KeyError，不会静默漏卡片。
@@ -568,7 +577,7 @@ UI 组成：
 
 关键方法：
 - `_on_cleanup_path_clicked()` — "清理残留 PATH"入口：先用 `find_dead_tool_path_entries()` 只读预览并弹确认框，确认后 `cleanup_dead_tool_path_entries()` 删除死条目、写日志并逐卡片 `_detect_status()` 刷新
-- `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（24 个并发），计数器 `_fetch_pending` 等所有完成后再恢复按钮
+- `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（26 个并发），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
 - `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`
 - `_load_settings()` / `_save_settings()` — 启动时从 `CONFIG_FILE` 加载上次选中版本；`closeEvent` 时保存
@@ -664,7 +673,7 @@ Component
 | `_sort_semver_desc(vs)` | ~1626 | 语义化版本倒序排序 |
 | `_fetch_github_releases_versions(repo, prefix)` | ~2322 | R1 公共辅助：抓取 GitHub Releases 版本列表（Nacos/Seata/RabbitMQ 等复用） |
 | `_fetch_apache_versions(key)` | ~2213 | R1 公共辅助：抓取 Apache 项目版本列表（Kafka/RocketMQ/Pulsar/ActiveMQ 复用） |
-| `build_components()` | ~2486 | 构造 24 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家） |
+| `build_components()` | ~2486 | 构造 26 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家；powershell 无真镜像走三个 GitHub 加速器；nginx 只有 Windows 有官方 zip，且大陆仅华为云两个子域同步） |
 | `extract_archive(archive, extract_to)` | ~3407 | 解压 zip/tar.gz/tar.xz + 单二进制 + .war 单文件 |
 | `DownloadWorker(urls, dest)` | ~2909 | R1 多源故障转移下载线程（带 `HTTP_UA` 请求头 + `DOWNLOAD_MIN_VALID_BYTES` 字节校验） |
 | `main()` | ~4783（末尾） | 程序入口 |
@@ -681,7 +690,7 @@ main()
   ├─ ensure_dir(CONFIG_DIR)
   └─ MainWindow()
        ├─ setWindowIcon(assets/byte-tools.png)
-       ├─ build_components()           # 构造 24 个组件的默认清单（全部用 url_list_map 走 R1 多源）
+       ├─ build_components()           # 构造 26 个组件的默认清单（全部用 url_list_map 走 R1 多源）
        ├─ _build_ui()                 # 构造标题栏 + 卡片 + 日志区 + 状态栏(组件总数=24)
        ├─ _apply_qss()                # 应用样式表
        ├─ _load_settings()             # 从 config.json 恢复上次选中版本
@@ -748,7 +757,7 @@ MainWindow._start_fetch_versions()
   ├─ 检查无 worker 运行中
   ├─ 清理旧 worker
   ├─ btn_refresh 禁用 + 文字 "抓取中…"
-  └─ for card in cards:                       # 24 张卡片
+  └─ for card in cards:                       # 26 张卡片
        if fetcher := FETCHERS[card.component.key]:
          w = VersionFetchWorker(key, fetcher)   # 内部 _fetch_xxx_versions 也走 R1 镜像优先
          w.done.connect(_on_versions_fetched)

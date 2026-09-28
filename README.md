@@ -100,17 +100,18 @@
 | 特性 | 说明 |
 |------|------|
 | 🖥️ **跨平台** | 一份代码同时支持 Windows / macOS / Linux；ARM64 分支自动切换（如 Apple Silicon 下 JDK 走 aarch64、Node 走 arm64） |
-| 📦 **一键装配** | 内置 **24 个** 常用开发组件，从下载 → 解压 → 环境变量配置全流程自动化 |
-| 🇨🇳 **国内镜像优先** | v2.0 起内置 **11 家大陆镜像基址**（华为云 repo / 华为云 mirrors / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud files）+ **3 个 GitHub 加速器**（ghproxy.net / gh-proxy.com / ghfast.top），多源故障转移，全部失败后才回退官网，全程中文日志，**无需手动改 URL**。个别组件没有大陆源：mongodb、postgresql 官网单源；nacos、bun 与 git 的 macOS/Linux 源码包走 GitHub 加速器；kubectl 优先 DaoCloud 代理；seata 走 Apache 分发目录（八家大陆镜像）。详见「配置与自定义 → 更换下载镜像」 |
+| 📦 **一键装配** | 内置 **26 个** 常用开发组件，从下载 → 解压 → 环境变量配置全流程自动化 |
+| 🇨🇳 **国内镜像优先** | v2.0 起内置 **11 家大陆镜像基址**（华为云 repo / 华为云 mirrors / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud files）+ **3 个 GitHub 加速器**（ghproxy.net / gh-proxy.com / ghfast.top），多源故障转移，全部失败后才回退官网，全程中文日志，**无需手动改 URL**。个别组件没有大陆源：mongodb、postgresql 官网单源；nacos、bun、powershell 与 git 的 macOS/Linux 源码包走 GitHub 加速器；nginx 的 Windows zip 实测只有华为云两个子域同步（清华 / 北外 / 南大 / 阿里 / 腾讯均 404）；kubectl 优先 DaoCloud 代理；seata 走 Apache 分发目录（八家大陆镜像）。详见「配置与自定义 → 更换下载镜像」 |
 | 🛡️ **下载可靠性** | 所有请求固定携带专用 User-Agent（部分高校镜像站会屏蔽默认 UA 返回 403）；下载完成后校验实际字节数，遇到镜像站"假 200 空文件"自动换下一个源，不会留下坏包 |
 | 🌐 **动态版本抓取** | 后台线程并发调用各组件官方 API / 索引，拉取最新可用版本，抓取失败自动降级到内置默认清单 |
 | 🔍 **智能检测** | 优先检查 `XXX_HOME` 环境变量，然后回退到 `PATH` 中的可执行文件；探测到即视为已配置 |
 | 🎯 **可搜索下拉框** | 版本多？直接键入关键字实时过滤，回车即可选中 |
+| 🔎 **组件搜索框** | 26 个组件不必逐页翻：Tab 上方的搜索框按名称 / 标识模糊过滤，三个 Tab 标题实时显示「匹配数/总数」，当前页没命中会自动跳到有结果的页，清空即恢复 |
 | 🛠️ **环境变量写入** | Windows：`winreg` 直写注册表 + 异步广播 `WM_SETTINGCHANGE`（不用 `setx`，避免 1024 字符截断）；macOS/Linux：写入带标记的 shell 配置块，幂等更新 |
 | 🧹 **卸载与残留清理** | 卸载以磁盘上真正装着的目录为准，同步清理 `XXX_HOME` 与该组件目录内的 PATH 条目；标题栏「清理残留 PATH」可一键删除指向本工具目录但已不存在的死条目 |
 | 🚀 **安装器模式** | 支持 `.exe` / `.sh` 静默安装（Miniconda），无弹窗交互 |
 | 📊 **实时反馈** | 进度条显示下载速度和大小，可随时取消；日志区彩色分级输出 |
-| 🎨 **现代化界面** | 圆角卡片 + 阴影、渐变进度条、状态胶囊标签、无边框自定义窗口、窗口图标（任务栏/Alt+Tab 可见）、底部状态栏显示"组件总数：24 个" |
+| 🎨 **现代化界面** | 圆角卡片 + 阴影、渐变进度条、状态胶囊标签、无边框自定义窗口、窗口图标（任务栏/Alt+Tab 可见）、底部状态栏显示"组件总数：26 个" |
 | 🧠 **偏好记忆** | 记住上一次每个组件选择的版本，下次启动自动恢复 |
 | 💰 **打赏支持** | 内置微信 / 支付宝 / QQ 二维码，一键支持作者 |
 
@@ -118,14 +119,14 @@
 
 ## 📦 支持的组件
 
-> v2.0 起组件数从 8 个扩展至 **24 个**，覆盖语言运行时 / 构建工具 / 应用服务器 / 数据库 / 容器与编排 / CI/CD / 消息队列 / 服务发现 / 搜索引擎 / 版本控制 / Python 发行版等常见开发场景。
+> 组件数 **26 个**，覆盖语言运行时 / Shell / 构建工具 / 应用服务器与 Web 服务 / 数据库 / 容器与编排 / CI/CD / 消息队列 / 服务发现 / 搜索引擎 / 版本控制 / Python 发行版等常见开发场景。
 
-界面按 **三个 Tab 页**（顶部横向，标题自带组件数量）分组展示（下方小节仍按技术类别详述）：
+界面按 **三个 Tab 页**（顶部横向，标题自带组件数量）分组展示（下方小节仍按技术类别详述），Tab 上方另有一条**搜索框**可按名称模糊过滤组件：
 
 | Tab | 数量 | 归类标准 | 组件 |
 |-----|------|----------|------|
-| **开发环境** | 9 | 装完进 PATH，直接用来写 / 编译 / 打包代码 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle |
-| **开发软件** | 12 | 本地跑起来给项目当依赖的服务 | Tomcat、MySQL、MongoDB、PostgreSQL、Elasticsearch、Nacos、Seata、Kafka、RocketMQ、Pulsar、ActiveMQ、RabbitMQ |
+| **开发环境** | 10 | 装完进 PATH，直接用来写 / 编译 / 打包代码 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7 |
+| **开发软件** | 13 | 本地跑起来给项目当依赖的服务 | Tomcat、Nginx、MySQL、MongoDB、PostgreSQL、Elasticsearch、Nacos、Seata、Kafka、RocketMQ、Pulsar、ActiveMQ、RabbitMQ |
 | **其它软件** | 3 | 不参与写代码的容器 / 编排 / CI 外围 | Docker、kubectl、Jenkins |
 
 > 想调整归类：只改 `main.py` 里的 `COMPONENT_CATEGORY_OF` 一行即可，界面自动跟着变。
@@ -139,6 +140,7 @@
 | **Node.js** | Node.js | `NODE_HOME` | `node --version` | 20 LTS / 18 LTS / 16 |
 | **Go** | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | **Bun** | Bun | — (走 PATH) | `bun --version` | 1.x |
+| **PowerShell 7** | PowerShell 7 | — (走 PATH) | `pwsh --version` | 7.6.x / 7.5.x / 7.4.x（三平台都有官方便携包：Windows zip、Linux / macOS tar.gz；上游只在 GitHub Releases 发版，实测无国内真镜像，走 GitHub 加速器） |
 
 ### 构建工具
 
@@ -152,6 +154,7 @@
 | 组件 | 显示名 | 环境变量 | 检测命令 | 默认版本 |
 |------|--------|----------|----------|----------|
 | **Tomcat** | Apache Tomcat | `CATALINA_HOME` | `catalina version` | 10.1 / 9.0 / 8.5 |
+| **Nginx** | Nginx | — (走 PATH) | `nginx -v` | 1.31.x / 1.30.x / 1.28.x（⚠️ 仅 Windows 支持自动下载：官方只给 Windows 发预编译 zip，Linux / macOS 上游是源码包，请用 `apt / dnf / yum install nginx` 或 `brew install nginx`；国内镜像实测只有华为云两个子域同步了 zip） |
 
 ### 数据库
 
@@ -358,10 +361,11 @@ conda --version
 
 界面元素说明：
 
-- **顶部**：自定义标题栏，含应用图标（任务栏/Alt+Tab 可见）、GitHub 链接、打赏按钮、窗口控制（最小化 / 最大化 / 关闭）
+- **顶部**：自定义标题栏，含应用图标（任务栏/Alt+Tab 可见）、GitHub 链接、刷新版本、清理残留 PATH、打赏按钮、窗口控制（最小化 / 最大化 / 关闭）
+- **标题栏下方**：组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 26 个组件"）+ 三个横向 Tab 页
 - **中部**：每个组件一张卡片，展示名称、状态标签、版本下拉框（可搜索）、操作按钮、进度条
 - **底部**：运行日志区，四色分级输出（info 灰、ok 绿、warn 橙、error 红），全程中文日志（含镜像切换/故障转移过程）
-- **状态栏**：显示当前系统信息、工作目录，以及 **"组件总数：24 个"**（一眼掌握支持范围）
+- **状态栏**：显示当前系统信息、工作目录，以及 **"组件总数：26 个"**（一眼掌握支持范围）
 
 ---
 
@@ -408,7 +412,8 @@ components.append(
 少数组件的源策略不一样（2026-09-28 实测结论）：
 
 - **mongodb、postgresql**：实测没有任何大陆镜像，官网单源；
-- **nacos、bun 与 git 的 macOS/Linux 源码包**：无真镜像，走 3 个 GitHub 加速器，末位回退 GitHub 裸地址；
+- **nacos、bun、powershell 与 git 的 macOS/Linux 源码包**：无真镜像，走 3 个 GitHub 加速器，末位回退 GitHub 裸地址；
+- **nginx**：只有 Windows 有官方预编译 zip，且实测只有华为云两个子域同步了它（清华 / 北外 / 南大 / 阿里 / 腾讯都 404），末位回退 `nginx.org`；Linux / macOS 上游只有源码包，不提供自动下载；
 - **kubectl**：首位是 DaoCloud `files.m.daocloud.io` 代理（`dl.k8s.io` 直连路径不可改写，必须走它的 files 代理），末位才是官方 `dl.k8s.io`；
 - **seata**：走 Apache 分发目录，华为云 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大等八家大陆镜像；
 - **jdk**：离线默认清单只有官网一条，清华 / 南大镜像的确切文件名要点"⟳ 刷新版本"后才解析——**先点刷新，再下载**。
@@ -530,7 +535,7 @@ Docker Desktop 必须使用其官方安装器（涉及 WSL2 / Hyper-V 集成、�
 RabbitMQ 运行时依赖 Erlang，Windows 上必须先安装 Erlang 再装 RabbitMQ 服务端，属于典型的"安装器+服务注册"场景，超出本工具"binary 下载 + 解压"的范围。工具会引导用户去 [rabbitmq.com](https://www.rabbitmq.com/download.html) 下载官方安装器。
 
 **Q13. 国内下载会很慢吗？**
-不会。v2.0 起内置国内镜像优先规则：**11 家大陆镜像基址**（华为云 / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud 等）+ **3 个 GitHub 加速器**，下载时按顺序尝试，遇到 404 / 超时自动切换下一个源，全程输出中文日志（哪个源失败、切换到哪个、最终用了哪个）。普通用户无需任何手动配置。少数组件没有大陆源：**mongodb、postgresql** 实测无任何大陆镜像，只能官网单源；**nacos、bun 与 git 的 macOS/Linux 源码包**走 GitHub 加速器。kubectl 以前是直连 `dl.k8s.io`，现已改为首选 DaoCloud `files.m.daocloud.io` 代理。下载失败时先看日志里哪个源失败，点"⟳ 刷新版本"可重新解析镜像。
+不会。v2.0 起内置国内镜像优先规则：**11 家大陆镜像基址**（华为云 / 清华 TUNA / 阿里云 / 南大 / 中科大 / 北外 / 腾讯云 / 上交 / npmmirror / DaoCloud 等）+ **3 个 GitHub 加速器**，下载时按顺序尝试，遇到 404 / 超时自动切换下一个源，全程输出中文日志（哪个源失败、切换到哪个、最终用了哪个）。普通用户无需任何手动配置。少数组件没有大陆源：**mongodb、postgresql** 实测无任何大陆镜像，只能官网单源；**nacos、bun、powershell 与 git 的 macOS/Linux 源码包**走 GitHub 加速器；**nginx** 只有 Windows 有官方 zip，且实测只有华为云两个子域同步。kubectl 以前是直连 `dl.k8s.io`，现已改为首选 DaoCloud `files.m.daocloud.io` 代理。下载失败时先看日志里哪个源失败，点"⟳ 刷新版本"可重新解析镜像。
 
 **Q14. 点击"下载并安装"后还需要手动配置环境变量吗？**
 不需要。"下载并安装"按钮是**一条龙流程**：下载 → 解压 → 自动写入 `XXX_HOME` / `PATH` 环境变量 → 刷新该卡片状态。整个流程跑完即视为安装完成，无需再点"配置环境变量"按钮。该按钮仅适合"已手动下载好压缩包、只想配置环境变量"的场景。

@@ -795,6 +795,155 @@ def _git_urls(v: str) -> Dict[str, List[str]]:
     return {"Windows": win_list}
 
 
+def _nginx_urls(v: str) -> Dict[str, List[str]]:
+    """
+    Nginx 下载 URL 列表（R1 多源故障转移模式）。
+
+    入参 v: str   Nginx 版本号字符串，如 "1.28.0"
+    返回: 只有 Windows 一个键的 URL 列表字典
+
+    说明（2026-09-28 实测）：
+      - Nginx 官方只对 Windows 发可直接运行的 zip（解压后根目录就是 nginx.exe），
+        Linux/macOS 的 .tar.gz 全是源码包，需要自己 ./configure && make，
+        解压后没有可执行文件，所以**不给这两个平台任何 URL**，
+        改由 Component.unsupported_platform_hint 引导用系统包管理器；
+      - 大陆镜像只有华为云两个子域真的同步了 zip 文件，
+        清华 / 北外 / 南大 / 阿里 / 腾讯 / 中科大 一律 404（它们的 nginx/ 目录
+        是给 apt/yum 用的包仓库，没有 nginx.org/download 那套 zip）；
+      - 华为云两个子域同源不同域名，故障转移仍值得都列上，末位是 nginx.org 官网。
+    """
+    hwm, hw = _mb("huaweicloud-py", "huaweicloud")
+    name = f"nginx-{v}.zip"
+    return {
+        "Windows": [f"{hwm}/nginx/{name}", f"{hw}/nginx/{name}",
+                    f"https://nginx.org/download/{name}"],
+    }
+
+
+def _nginx_cv(v: str) -> ComponentVersion:
+    """
+    构造 Nginx 的 ComponentVersion（Windows 走 R1 多源，其余平台无源）。
+
+    入参 v: str   Nginx 版本号字符串
+    """
+    return ComponentVersion(
+        version=v,
+        url_map={},
+        url_list_map=_nginx_urls(v),
+        archive_map={"Windows": "zip"},   # 只有 Windows 有包，其余平台不填
+    )
+
+
+def fetch_nginx_versions() -> List[ComponentVersion]:
+    """
+    抓取 Nginx 版本列表：先读华为云镜像目录，读不到再回退官网目录。
+
+    返回: ComponentVersion 列表，按版本号倒序，最多 12 个。
+
+    异常: 镜像与官网目录页都拿不到时抛 RuntimeError。
+
+    说明: 两处目录页都以 nginx-<版本>.zip 形式列出 Windows 包，版本号正则一致；
+          只取三段式版本（1.28.0 这种），跳过 1.27 之类的两段历史目录名。
+    """
+    rx = _re.compile(r'nginx-(\d+\.\d+\.\d+)\.zip')
+    hwm, hw = _mb("huaweicloud-py", "huaweicloud")
+    indexes = [
+        f"{hwm}/nginx/",
+        f"{hw}/nginx/",
+        "https://nginx.org/download/",
+    ]
+    versions: List[str] = []
+    for idx in indexes:
+        try:
+            found = set(rx.findall(_get(idx, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text))
+        except Exception:
+            continue
+        if found:
+            versions = found
+            break
+    if not versions:
+        raise RuntimeError("Nginx 版本列表抓取失败：华为云镜像与 nginx.org 均不可用")
+    return [_nginx_cv(v) for v in _sort_semver_desc(versions)[:12]]
+
+
+def _pwsh_urls(v: str) -> Dict[str, List[str]]:
+    """
+    PowerShell 7 下载 URL 列表（R1 多源故障转移模式）。
+
+    入参 v: str   PowerShell 版本号字符串，如 "7.5.4"
+    返回: 三平台 → URL 列表字典，加速器在前、GitHub 官方末位
+
+    说明（2026-09-28 实测）：
+      - PowerShell 只在 GitHub Releases 发版，国内没有真镜像
+        （清华 / 南大 / npmmirror 的 powershell 目录一律 404），
+        与 RabbitMQ 一样只能走 _gh_accelerated 的反向代理；
+      - 三平台都有可直接运行的便携包：Windows 是 zip，Linux/macOS 是 tar.gz；
+      - 资产命名有大小写差异：Windows 用 PowerShell-<v>-win-<arch>.zip（大写 P），
+        Linux/macOS 用 powershell-<v>-linux/osx-<arch>.tar.gz（小写 p）；
+      - win/linux/osx 的 x64 与 arm64 六种资产都验证过 200 + 真包魔数。
+    """
+    unix_arch = "arm64" if IS_ARM else "x64"
+    win_arch = "arm64" if IS_ARM else "x64"
+    base = "https://github.com/PowerShell/PowerShell/releases/download"
+
+    def lst(name: str) -> List[str]:
+        return _gh_accelerated(f"{base}/v{v}/{name}")
+
+    return {
+        "Windows": lst(f"PowerShell-{v}-win-{win_arch}.zip"),
+        "Darwin":  lst(f"powershell-{v}-osx-{unix_arch}.tar.gz"),
+        "Linux":   lst(f"powershell-{v}-linux-{unix_arch}.tar.gz"),
+    }
+
+
+def _pwsh_cv(v: str) -> ComponentVersion:
+    """
+    构造 PowerShell 的 ComponentVersion（使用 R1 多源故障转移模式）。
+
+    入参 v: str   PowerShell 版本号字符串
+    """
+    return ComponentVersion(
+        version=v,
+        url_map={},
+        url_list_map=_pwsh_urls(v),
+        # Windows 是 zip，Linux/macOS 是 tar.gz（与默认 _STD_ARCHIVE 一致）
+        archive_map=dict(_STD_ARCHIVE),
+    )
+
+
+def fetch_powershell_versions() -> List[ComponentVersion]:
+    """
+    抓取 PowerShell 7 版本列表：从 GitHub Releases API 取 tag。
+
+    返回: ComponentVersion 列表，按版本号倒序，最多 12 个。
+
+    异常: GitHub API 不可用时抛 RuntimeError。
+
+    说明: 只要三段式的正式 tag（v7.5.4），带 -preview / -rc / daily-build 的跳过；
+          6.x 已停止支持，因此要求主版本号 ≥7。
+    """
+    github_api = "https://api.github.com/repos/PowerShell/PowerShell/releases?per_page=60"
+    try:
+        data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"PowerShell 版本列表抓取失败：GitHub API 不可用：{exc}"
+        ) from exc
+
+    versions: List[str] = []
+    for rel in data:
+        tag = rel.get("tag_name", "")
+        if not tag.startswith("v"):
+            continue
+        v = tag[1:]
+        if _re.match(r"^[7-9]\.\d+\.\d+$", v):
+            versions.append(v)
+    stable = _sort_semver_desc(versions)
+    if not stable:
+        raise RuntimeError("PowerShell 版本列表为空（GitHub API 未返回 7.x 正式版）")
+    return [_pwsh_cv(v) for v in stable[:12]]
+
+
 def _conda_urls(v: str) -> Dict[str, List[str]]:
     """
     Miniconda 安装器（与官方同名文件）：镜像在前，repo.anaconda.com 末位。
@@ -2466,6 +2615,8 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "nacos": fetch_nacos_versions,
     "seata": fetch_seata_versions,
     "elasticsearch": fetch_elasticsearch_versions,
+    "powershell": fetch_powershell_versions,
+    "nginx": fetch_nginx_versions,
 }
 
 
@@ -2500,11 +2651,12 @@ COMPONENT_CATEGORIES = ("开发环境", "开发软件", "其它软件")
 COMPONENT_CATEGORY_OF = {
     "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
     "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
-    "maven": "开发环境", "gradle": "开发环境",
+    "maven": "开发环境", "gradle": "开发环境", "powershell": "开发环境",
     "tomcat": "开发软件", "mysql": "开发软件", "mongodb": "开发软件",
     "postgresql": "开发软件", "elasticsearch": "开发软件", "nacos": "开发软件",
     "seata": "开发软件", "kafka": "开发软件", "rocketmq": "开发软件",
     "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
+    "nginx": "开发软件",
     "docker": "其它软件", "kubectl": "其它软件", "jenkins": "其它软件",
 }
 
@@ -2515,6 +2667,24 @@ def group_components(components: List[Component]) -> Dict[str, List[Component]]:
     for comp in components:
         grouped[comp.category].append(comp)   # 未登记的分类直接 KeyError
     return grouped
+
+
+def component_matches(comp: Component, query: str) -> bool:
+    """
+    界面搜索框用的模糊匹配：查询词是否命中该组件。
+
+    入参 comp:  Component  待判定的组件
+    入参 query: str        用户输入的查询词
+    返回:      bool  空查询恒为 True（等于不过滤）；否则要求查询词是
+                     显示名或内部 key 的子串（忽略大小写与首尾空白）
+
+    说明: 只匹配「显示名 + key」这两个用户看得见的标识，不匹配分类名——
+          分类已经由 Tab 页表达，再混进来会让搜「开发」跳出全部卡片。
+    """
+    q = query.strip().lower()
+    if not q:
+        return True
+    return q in comp.display_name.lower() or q in comp.key.lower()
 
 
 def build_components() -> List[Component]:
@@ -2560,6 +2730,29 @@ def build_components() -> List[Component]:
             exec_name="catalina",
             version_args=["version"],
             versions=[_cv(v, _tomcat_urls(v)) for v in ("10.1.60", "9.0.122", "8.5.100")],
+        )
+    )
+
+    # ------------------ Nginx ------------------
+    # Windows 有官方预编译 zip（解压后根目录就是 nginx.exe）；
+    # Linux/macOS 上游只发源码 .tar.gz（要自己 configure + make），
+    # 与 Git 同理：不给这两个平台 URL，改由 unsupported_platform_hint 引导包管理器
+    components.append(
+        Component(
+            key="nginx",
+            display_name="Nginx",
+            env_var=None,        # nginx 没有 NGINX_HOME 概念，只进 PATH
+            path_subdir="",      # nginx.exe 直接在解压根目录
+            exec_name="nginx",
+            version_args=["-v"],  # nginx -v 只打印版本就退出，可以安全探测
+            unsupported_platform_hint=(
+                "Nginx 在 Linux/macOS 上游只发布源码包（解压后没有可执行文件，需自行编译），"
+                "本工具不提供该平台的自动下载。请用系统包管理器安装："
+                "Debian/Ubuntu 执行 sudo apt install nginx；"
+                "RHEL/CentOS/Anolis 执行 sudo dnf install nginx 或 sudo yum install nginx；"
+                "macOS 执行 brew install nginx。"
+            ),
+            versions=[_nginx_cv(v) for v in ("1.31.6", "1.28.0", "1.26.3")],
         )
     )
 
@@ -2622,6 +2815,21 @@ def build_components() -> List[Component]:
                 "macOS 执行 brew install git（或先装 Xcode Command Line Tools）。"
             ),
             versions=[_cv(v, _git_urls(v)) for v in ("2.47.1", "2.45.2", "2.44.0")],
+        )
+    )
+
+    # ------------------ PowerShell 7 ------------------
+    # 三平台都有官方便携包（Windows zip / Linux·macOS tar.gz），解压根目录就是 pwsh；
+    # 上游只在 GitHub Releases 发版、国内没有真镜像，按 R1 走 GitHub 加速器在前
+    components.append(
+        Component(
+            key="powershell",
+            display_name="PowerShell 7",
+            env_var=None,        # pwsh 没有 PS_HOME 概念，只进 PATH
+            path_subdir="",      # 可执行文件在解压根目录，无 bin 子目录
+            exec_name="pwsh",
+            version_args=["--version"],
+            versions=[_pwsh_cv(v) for v in ("7.6.6", "7.5.11", "7.4.20")],
         )
     )
 
@@ -4401,6 +4609,24 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self.title_bar)
 
+        # ------- 组件搜索条（在 Tab 之上，切 Tab 不会丢输入框） -------
+        search_bar = QFrame()
+        search_bar.setObjectName("searchBar")
+        sb = QHBoxLayout(search_bar)
+        sb.setContentsMargins(18, 10, 18, 0)
+        sb.setSpacing(8)
+        self.search_box = QLineEdit()
+        self.search_box.setObjectName("compSearch")
+        self.search_box.setPlaceholderText("搜索组件（按名称模糊匹配，留空显示全部）")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.textChanged.connect(self._apply_search)
+        sb.addWidget(self.search_box)
+        self.search_hint = QLabel("")
+        self.search_hint.setObjectName("searchHint")
+        sb.addWidget(self.search_hint)
+        sb.addStretch(1)
+        outer.addWidget(search_bar)
+
         # ------- 主体：卡片列表 + 日志区 -------
         body = QSplitter(Qt.Vertical)
         body.setObjectName("bodySplitter")
@@ -4408,6 +4634,7 @@ class MainWindow(QMainWindow):
         # 卡片区域：按 COMPONENT_CATEGORIES 分三个 Tab，每个 Tab 一条独立滚动栏。
         # self.cards 仍是全量平铺列表——刷新版本 / 存取配置 / 关窗等探测都靠它遍历。
         self.cards: List[ComponentCard] = []
+        self._tab_cards: List[List[ComponentCard]] = []
         self.tabs = QTabWidget()
         self.tabs.setObjectName("compTabs")
         self.tabs.setDocumentMode(True)
@@ -4421,13 +4648,16 @@ class MainWindow(QMainWindow):
             cards_layout = QVBoxLayout(cards_wrap)
             cards_layout.setContentsMargins(18, 18, 18, 18)
             cards_layout.setSpacing(14)
+            tab_cards: List[ComponentCard] = []
             for comp in comps:
                 card = ComponentCard(comp, self._append_log)
                 cards_layout.addWidget(card)
                 self.cards.append(card)
+                tab_cards.append(card)
             cards_layout.addStretch(1)
             scroll.setWidget(cards_wrap)
             self.tabs.addTab(scroll, f"{cat_name}（{len(comps)}）")
+            self._tab_cards.append(tab_cards)
         body.addWidget(self.tabs)
 
         # 日志
@@ -4458,6 +4688,44 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.status_bar)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def _apply_search(self, query: str) -> None:
+        """
+        按搜索词过滤卡片：命中的显示、其余隐藏，并把 Tab 标题改成「匹配数/总数」。
+
+        入参 query: str  搜索框当前内容；空串（或全空白）表示不过滤，恢复原状。
+
+        说明: 过滤只动卡片可见性，**不动 self.cards 平铺列表**——
+              刷新版本 / 存配置 / 关窗等探测逻辑都遍历那个列表，隐藏不能让它缺项。
+        """
+        q = query.strip()
+        matched: List[int] = []
+        for tab_cards in self._tab_cards:
+            hits = 0
+            for card in tab_cards:
+                show = component_matches(card.component, q)
+                card.setVisible(show)
+                if show:
+                    hits += 1
+            matched.append(hits)
+
+        for idx, cat_name in enumerate(COMPONENT_CATEGORIES):
+            total = len(self._tab_cards[idx])
+            self.tabs.setTabText(
+                idx, f"{cat_name}（{matched[idx]}/{total}）" if q else f"{cat_name}（{total}）"
+            )
+
+        self.search_hint.setText(
+            f"匹配 {sum(matched)} / {len(self.cards)} 个组件" if q else ""
+        )
+        # 当前 Tab 一条都没命中时，跳到第一个有命中的 Tab，免得用户看到空白页
+        if q and matched and self.tabs.currentIndex() < len(matched) \
+                and matched[self.tabs.currentIndex()] == 0:
+            for idx, hits in enumerate(matched):
+                if hits:
+                    self.tabs.setCurrentIndex(idx)
+                    break
+
     def _apply_qss(self) -> None:
         """应用 QSS 样式表。"""
         self.setStyleSheet(
@@ -4487,7 +4755,21 @@ class MainWindow(QMainWindow):
             #donateBtn { color: #ff8181; font-size: 18px; }
             #closeBtn:hover { background: #e74c3c; }
 
+            #searchBar { background: transparent; }
+            #compSearch {
+                background: #ffffff;
+                border: 1px solid #b9c6d6;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 13px;
+                color: #17253b;
+                max-width: 360px;
+            }
+            #compSearch:focus { border: 1px solid #4a7fd0; }
+            #searchHint { color: #55677d; font-size: 12px; }
+
             #compTabs { background: transparent; border: none; }
+
             #compTabs::pane { border: none; background: transparent; }
             #compTabs > QTabBar::tab {
                 background: #cfd8e3;

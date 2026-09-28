@@ -12,15 +12,15 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 ## 1. Features
 
 - 🖥️ **Cross-platform.** Detects Windows / macOS / Linux (and x64 / arm64) at runtime and picks the correct distribution.
-- 📦 **One-click provisioning.** Preloaded with **24 built-in developer components** — the whole pipeline (download → unpack → configure) is automated. See [Supported Components](#2-supported-components) below for the full list.
-- 🇨🇳 **China mirror priority.** Since v2.0 the tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top). Downloads try China sources first with multi-source failover — the official site is only used after all China sources fail (404 / timeout). Full Chinese logs report which source failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration. Per-component exceptions measured on 2026-09-28: mongodb and postgresql have **no** China mirror (official site only); nacos, bun and the macOS/Linux source tarballs of git go through the GitHub accelerators (no true mirror exists); kubectl prefers the DaoCloud `files.m.daocloud.io` proxy; seata is served from the Apache distribution directory via eight China mirrors.
+- 📦 **One-click provisioning.** Preloaded with **26 built-in developer components** — the whole pipeline (download → unpack → configure) is automated. See [Supported Components](#2-supported-components) below for the full list.
+- 🇨🇳 **China mirror priority.** Since v2.0 the tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top). Downloads try China sources first with multi-source failover — the official site is only used after all China sources fail (404 / timeout). Full Chinese logs report which source failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration. Per-component exceptions measured on 2026-09-28: mongodb and postgresql have **no** China mirror (official site only); nacos, bun, powershell and the macOS/Linux source tarballs of git go through the GitHub accelerators (no true mirror exists); nginx ships Windows-only binaries and only the two Huawei Cloud sub-domains carry them (Tsinghua / BFSU / NJU / Aliyun / Tencent all 404); kubectl prefers the DaoCloud `files.m.daocloud.io` proxy; seata is served from the Apache distribution directory via eight China mirrors.
 - 🛡️ **Reliable downloads.** Every request carries a custom `byte-tools` User-Agent (several university mirrors return 403 for the default UA), and each finished download is checked against the declared byte count — a "fake 200" empty file from a mirror automatically triggers a switch to the next source instead of leaving a broken archive behind.
 - 🔍 **Smart detection.** Checks whether `JAVA_HOME` and friends already exist and are valid; missing/invalid entries are flagged for reconfiguration.
 - 🛠️ **Environment-variable management.**
     - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
     - macOS / Linux: appends idempotent `export` blocks (with begin/end markers) to `.zshrc` / `.bash_profile` / `.bashrc` / `.profile`.
 - 📊 **Live feedback.** Progress bar with real-time byte counts, cancel support, colour-coded log output (info / ok / warn / error).
-- 🎨 **Modern UI.** Frameless custom title bar with a window icon (visible in the taskbar / Alt+Tab), rounded cards with drop shadows, gradient progress bars, hover/press animations, and a bottom status bar showing "Total components: 24".
+- 🎨 **Modern UI.** Frameless custom title bar with a window icon (visible in the taskbar / Alt+Tab), rounded cards with drop shadows, gradient progress bars, hover/press animations, a component search box above the tabs, and a bottom status bar showing "Total components: 26".
 - 🚀 **One-stop install.** The "Download & Install" button runs the whole flow in one shot — download → extract → auto-configure env vars → refresh card status — so you no longer need to click "Configure" afterwards.
 - 🧠 **Preferences memory.** Remembers the last selected version per component.
 
@@ -28,14 +28,14 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 ## 2. Supported Components
 
-> Since v2.0 the component count has grown from 8 to **24**, covering language runtimes, build tools, app servers, databases, containers & orchestration, CI/CD, message queues, service discovery / transaction, search engines, version control and Python distributions.
+> The component count is now **26**, covering language runtimes, shells, build tools, app servers / web servers, databases, containers & orchestration, CI/CD, message queues, service discovery / transaction, search engines, version control and Python distributions.
 
-The UI groups them into **three tabs** along the top, each titled with its component count (the subsections below still describe them by technology category):
+The UI groups them into **three tabs** along the top, each titled with its component count; a search box above the tabs filters cards by name across all three tabs (the subsections below still describe them by technology category):
 
 | Tab | Count | Rule | Components |
 |-----|-------|------|------------|
-| **开发环境** (Dev environment) | 9 | Goes on PATH, used to write / compile / package code | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle |
-| **开发软件** (Dev services) | 12 | Runs locally as a project dependency | Tomcat, MySQL, MongoDB, PostgreSQL, Elasticsearch, Nacos, Seata, Kafka, RocketMQ, Pulsar, ActiveMQ, RabbitMQ |
+| **开发环境** (Dev environment) | 10 | Goes on PATH, used to write / compile / package code | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7 |
+| **开发软件** (Dev services) | 13 | Runs locally as a project dependency | Tomcat, Nginx, MySQL, MongoDB, PostgreSQL, Elasticsearch, Nacos, Seata, Kafka, RocketMQ, Pulsar, ActiveMQ, RabbitMQ |
 | **其它软件** (Other) | 3 | Container / orchestration / CI periphery, not part of coding | Docker, kubectl, Jenkins |
 
 > To re-assign a component, edit the single `COMPONENT_CATEGORY_OF` map in `main.py`; the tabs follow automatically.
@@ -49,6 +49,7 @@ The UI groups them into **three tabs** along the top, each titled with its compo
 | **Node.js** | Node.js | `NODE_HOME` | `node --version` | 20 LTS / 18 LTS / 16 |
 | **Go** | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | **Bun** | Bun | — (via PATH) | `bun --version` | 1.x |
+| **PowerShell 7** | PowerShell 7 | — (via PATH) | `pwsh --version` | 7.6.x / 7.5.x / 7.4.x (portable packages for all three platforms: zip on Windows, tar.gz on Linux / macOS; upstream ships only on GitHub Releases, no true China mirror measured — served via the GitHub accelerators) |
 
 ### Build Tools
 
@@ -62,6 +63,7 @@ The UI groups them into **three tabs** along the top, each titled with its compo
 | Component | Display name | Env var | Detect command | Default versions |
 |-----------|--------------|---------|----------------|------------------|
 | **Tomcat** | Apache Tomcat | `CATALINA_HOME` | `catalina version` | 10.1 / 9.0 / 8.5 |
+| **Nginx** | Nginx | — (via PATH) | `nginx -v` | 1.31.x / 1.30.x / 1.28.x (⚠️ auto-download is Windows-only: upstream ships a prebuilt Windows zip but only source tarballs for Linux / macOS — use `apt / dnf / yum install nginx` or `brew install nginx` there; measured 2026-09-28: only the two Huawei Cloud sub-domains mirror the zip) |
 
 ### Databases
 
@@ -276,7 +278,8 @@ The tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cl
 Per-component differences (measured 2026-09-28):
 
 - **mongodb / postgresql** — no mainland mirror at all; the official site is the single source;
-- **nacos, bun, and the macOS/Linux source tarballs of git** — no true mirror; the three GitHub accelerators come first and the bare GitHub URL last;
+- **nacos, bun, powershell, and the macOS/Linux source tarballs of git** — no true mirror; the three GitHub accelerators come first and the bare GitHub URL last;
+- **nginx** — only Windows gets a prebuilt official zip, and only the two Huawei Cloud sub-domains mirror it (Tsinghua / BFSU / NJU / Aliyun / Tencent all return 404), with `nginx.org` last; Linux / macOS upstream ships source tarballs only, so those platforms are not auto-downloaded;
 - **kubectl** — DaoCloud `files.m.daocloud.io` proxy first (the `dl.k8s.io` path cannot be rewritten, so it must go through this files proxy), official `dl.k8s.io` last;
 - **seata** — Apache distribution directory served by eight mainland mirrors (Huawei Cloud ×2 / Tsinghua / Aliyun / NJU / BFSU / Tencent / USTC);
 - **jdk** — the offline default list has only the official URL; the exact file names on the Tsinghua / NJU mirrors are resolved only after clicking "⟳ Refresh versions" — **refresh first, then download**.
@@ -322,7 +325,7 @@ Docker Desktop must use its official installer (it involves WSL2 / Hyper-V integ
 RabbitMQ depends on Erlang at runtime. On Windows you must install Erlang first and then the RabbitMQ server — a typical "installer + service registration" scenario that is beyond the scope of this tool's "binary download + extract" model. The tool directs you to [rabbitmq.com](https://www.rabbitmq.com/download.html) for the official installer.
 
 **Q8. Are downloads slow inside China?**
-Mostly no. Since v2.0 the built-in China-mirror-priority rule provides **11 mainland mirror bases** (Huawei Cloud / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud, etc.) plus **3 GitHub accelerators**. Downloads try them in order and automatically switch to the next one on 404 / timeout, with full Chinese logs (which source failed, which one it switched to, which one finally served the file). Every request also carries a custom User-Agent (some university mirrors block the default one with 403), and finished downloads are byte-count verified so a "fake 200" empty file switches to the next source instead of leaving a broken archive. Ordinary users do not need to configure anything manually. The exceptions: **mongodb and postgresql have no mainland mirror at all** (official site only), and **nacos, bun and the macOS/Linux source tarballs of git** rely on the GitHub accelerators. kubectl, previously served only by the official `dl.k8s.io`, now uses the DaoCloud `files.m.daocloud.io` proxy as its first source.
+Mostly no. Since v2.0 the built-in China-mirror-priority rule provides **11 mainland mirror bases** (Huawei Cloud / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud, etc.) plus **3 GitHub accelerators**. Downloads try them in order and automatically switch to the next one on 404 / timeout, with full Chinese logs (which source failed, which one it switched to, which one finally served the file). Every request also carries a custom User-Agent (some university mirrors block the default one with 403), and finished downloads are byte-count verified so a "fake 200" empty file switches to the next source instead of leaving a broken archive. Ordinary users do not need to configure anything manually. The exceptions: **mongodb and postgresql have no mainland mirror at all** (official site only), and **nacos, bun, powershell and the macOS/Linux source tarballs of git** rely on the GitHub accelerators; **nginx** ships Windows-only zips mirrored solely by the two Huawei Cloud sub-domains. kubectl, previously served only by the official `dl.k8s.io`, now uses the DaoCloud `files.m.daocloud.io` proxy as its first source.
 
 **Q9. After clicking "Download & Install", do I still need to configure env vars manually?**
 No. The "Download & Install" button is a **one-stop flow**: download → extract → auto-write `XXX_HOME` / `PATH` → refresh the card status. Once the flow finishes, the component is considered installed; you do not need to click "Configure Only" afterwards. That button is only for the case where you have already downloaded the archive manually and just want to write the environment variables.

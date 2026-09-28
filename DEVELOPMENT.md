@@ -47,14 +47,16 @@
 | `kubectl` | 大陆源 1 个（DaoCloud 文件代理 `files.m.daocloud.io/dl.k8s.io/…`），末位 `dl.k8s.io` | 阿里/清华/华为云的 `kubernetes/` 只同步 apt、yum 仓库，`…/release/v…/bin/…` 一律 404；GitHub Release 不发这个二进制，所以 `GH_ACCELERATORS` 对它无效 |
 | `jdk` | **离线默认清单**只有官网 `api.adoptium.net` 一条；点「刷新版本」后才会解析出清华 `/Adoptium/<major>/jdk/<arch>/<os>/` 与南大 `/adoptium/…` 的确切文件名并补成多源 | 镜像目录里只有带 build 号的确切文件名，而官方 `latest-binary` 是按月滚动的重定向，离线状态无法确定文件名 |
 | `git`（Linux/macOS） | **不给任何下载 URL**，改由 `unsupported_platform_hint` 引导用 apt / dnf / yum / brew | 官方与各镜像都不发布 Linux/macOS 可移植二进制，GitHub 上只有 `git/git` **源码 tar.gz**（解压后没有可执行文件，需自行 configure + make）；列出来只会让用户下一个用不了的东西。Windows 侧不受影响，仍有 3 家真镜像 |
+| `nginx`（Linux/macOS） | **不给任何下载 URL**，改由 `unsupported_platform_hint` 引导用 apt / dnf / yum / brew | `nginx.org/download/` 对这两个平台只有 `nginx-<v>.tar.gz` **源码包**（要自己 configure + make），预编译 zip 只给 Windows；Windows 侧不受影响，有华为云两个子域 + 官网共 3 源 |
+| `powershell` | 大陆真镜像 0 个，三平台一律 `GH_ACCELERATORS` 三个加速器在前、GitHub 裸地址末位 | 清华 / 南大 / 阿里 / npmmirror 的 `powershell` 目录全 404；`mirrors.huaweicloud.com/powershell/` 返回 200 但那是镜像站自己的门户壳页（HTML 里只有导航链接，没有任何 pwsh 资产），属假可用 |
 
 ### R1.2 适用范围
 
-- **全部 24 个组件**（语言运行时：jdk / python / node / go / bun；构建工具：maven / gradle；应用服务器：tomcat；数据库：mysql / mongodb / postgresql；容器与编排：docker / kubectl；CI/CD：jenkins；消息队列：rabbitmq / kafka / rocketmq / pulsar / activemq；服务发现与事务：nacos / seata；搜索引擎：elasticsearch；版本控制：git；Python 发行版：conda）
+- **全部 26 个组件**（语言运行时：jdk / python / node / go / bun；Shell：powershell；构建工具：maven / gradle；应用服务器与 Web 服务：tomcat / nginx；数据库：mysql / mongodb / postgresql；容器与编排：docker / kubectl；CI/CD：jenkins；消息队列：rabbitmq / kafka / rocketmq / pulsar / activemq；服务发现与事务：nacos / seata；搜索引擎：elasticsearch；版本控制：git；Python 发行版：conda）
 - `build_components()` 的默认（离线）清单
 - `DownloadWorker` 的实际下载请求（按 `url_list_map` 顺序遍历，失败自动切换）
 - `ComponentVersion.url_list_map` 多源故障转移 URL 列表（向后兼容旧的 `url_map` 单 URL 模式）
-- 平台不支持场景的 `unsupported_platform_hint` 友好提示（如 Docker 在 Windows、RabbitMQ 在 Windows、PostgreSQL 在 Linux/macOS、MongoDB 在 macOS、Git 在 Linux/macOS）
+- 平台不支持场景的 `unsupported_platform_hint` 友好提示（如 Docker 在 Windows、RabbitMQ 在 Windows、PostgreSQL 在 Linux/macOS、MongoDB 在 macOS、Git 在 Linux/macOS、Nginx 在 Linux/macOS）
 
 > **不适用于版本索引页**：`fetch_xxx_versions()` 抓「有哪些版本可选」的索引页 / API 直连官方，理由见 R1.7 第 4 节的实测（镜像索引页版本数残缺，会把下拉框砍短）。
 
@@ -158,7 +160,7 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 
 ### R1.5 各组件镜像清单
 
-下表 24 个组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
+下表 26 个组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
 "默认清单实测"一栏给的是默认版本行里**可用大陆源的数量 / 配置的候选数量**。
 
 #### 首批 8 个组件（2026-09 由单源补齐为多源）
@@ -174,7 +176,7 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 | `git` | Git for Windows | **Windows 有真镜像**：M1b `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/MinGit-<v>-64-bit.zip`、M1 `repo.huaweicloud.com/…`、N1 `registry.npmmirror.com/-/binary/git-for-windows/…`（三家实测 200/47 MB），再补 `GH_ACCELERATORS` | `github.com/git-for-windows/git/releases/download/` | Windows 3 家镜像 + 3 加速器全 200；Linux/macOS **不再给 URL**，`_git_urls()` 只返回 `Windows` 键，由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
 | `conda` | Miniconda | M2 清华、M4 南大、M6 北外、M5 中科大 `…/anaconda/miniconda/`（文件名与官方一致）。华为 `repo.huaweicloud.com/anaconda/` 对任意路径都 301 到软 404 HTML 页（假成功），已删除 | `repo.anaconda.com/miniconda/` | 4/4 家 200（90~149 MB） |
 
-#### 新增 16 个组件镜像清单（2026-09-28 全部按实测重写）
+#### 新增 18 个组件镜像清单（2026-09-28 全部按实测重写）
 
 | key | 组件 | 国内镜像（按优先级） | 末位官网 | 默认清单实测 |
 |------|------|-----------------------|---------|--------------|
@@ -194,7 +196,8 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 | `nacos` | Nacos | 无真镜像，`GH_ACCELERATORS` 三个加速器（实测全 200） | `github.com/alibaba/nacos/releases/download/<v>/nacos-server-<v>.zip` | 3 加速器 + 裸地址全 200（154 MB） |
 | `seata` | Seata | **改走 Apache 分发目录**：M1、M1b、M2、M3、M4、M6、M7、M5 八家 `/apache/incubator/seata/<v>/apache-seata-<v>-incubating-bin.tar.gz`（GitHub release 里的 `seata-server-<v>.jar` 只是 thin jar，不能解压即用） | `archive.apache.org/dist/incubator/seata/` | 8/8 家 200（191 MB），tar.gz 跨平台。2.x 文件名带 `-incubating`，1.x 是 `seata-server-<v>.zip` |
 | `elasticsearch` | Elasticsearch | M1、M1b `/elasticsearch/<v>/elasticsearch-<v>-<os>-<arch>.<ext>`（清华/阿里无此制品；镜像只同步新版本，8.15.0 一类旧版本 404 由故障转移兜到官网） | `artifacts.elastic.co/downloads/elasticsearch/` | 9.2.3：2/2 家 200（471~687 MB）；8.15.0/8.9.2 只有官网 |
-| _待填_ | _待填_ | _待填_ | _待填_ | _待填_ |
+| `powershell` | PowerShell 7 | **无真镜像**（清华 / 南大 / 阿里 / npmmirror 的 `powershell` 目录一律 404；华为 `mirrors.huaweicloud.com/powershell/` 只是镜像站门户壳页），走 `GH_ACCELERATORS` 三个加速器 | `github.com/PowerShell/PowerShell/releases/download/v<v>/…`；资产名大小写不统一：Windows 是 `PowerShell-<v>-win-<arch>.zip`，Linux/macOS 是 `powershell-<v>-{linux,osx}-<arch>.tar.gz` | 12 版本 × 三平台 × 4 源全 200（zip / gzip 魔数已验）；`ghproxy.net` 偶发 503，重试即通且故障转移会自动换下一个加速器 |
+| `nginx` | Nginx | M1b `mirrors.huaweicloud.com/nginx/nginx-<v>.zip`、M1 `repo.huaweicloud.com/nginx/nginx-<v>.zip`（实测两家都同步了 zip；清华 / 北外 / 南大 / 阿里 / 腾讯对同一文件名一律 404——它们的 `nginx/` 目录是给 apt/yum 用的包仓库，没有 nginx.org 那套 Windows zip） | `nginx.org/download/nginx-<v>.zip` | Windows 3/3 全 200（约 2.1 MB，解压根目录即 `nginx.exe`）；Linux/macOS **不给 URL**——上游只发源码 `.tar.gz`（需自行 configure + make），由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
 
 > 注：部分镜像只同步最新版本，故障转移时若镜像返回 404，直接切到下一个，**不要**对该 URL 内部反复重试。
 
@@ -350,16 +353,16 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-24 个组件在界面上归入且仅归入三个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+26 个组件在界面上归入且仅归入三个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（9 / 12 / 3） |
+| 分类 | 判定标准 | 组件（10 / 13 / 3） |
 |------|----------|--------------------|
-| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle |
-| **开发软件** | 本地跑起来给项目当依赖的服务 | tomcat、mysql、mongodb、postgresql、elasticsearch、nacos、seata、kafka、rocketmq、pulsar、activemq、rabbitmq |
+| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
+| **开发软件** | 本地跑起来给项目当依赖的服务 | tomcat、nginx、mysql、mongodb、postgresql、elasticsearch、nacos、seata、kafka、rocketmq、pulsar、activemq、rabbitmq |
 | **其它软件** | 不参与写代码的容器 / 编排 / CI 外围 | docker、kubectl、jenkins |
 
 边界争议按此顺序裁决：**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件；都不是则其它软件。
-（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件。）
+（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；Nginx 与 Tomcat 同理，本地跑起来当 Web / 反向代理依赖，属开发软件。）
 
 ### R2.2 适用范围
 
@@ -383,7 +386,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（24 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（26 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -395,6 +398,21 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
 - [ ] `bt_component_category_tests.py` 通过（其中 `EXPECTED_MEMBERSHIP` 是分类基线，改归类要同步改它）
 - [ ] 未新增 `if category == ...` 之类的界面特判——分组渲染只走 `group_components()`
 - [ ] README / README_EN 的三 Tab 表格与 `CODE_WIKI.md` 的 `category` 字段说明同步
+
+### R2.5 组件搜索框
+
+组件数上到 26 个后逐页翻不现实，Tab 上方有一条搜索框做名称模糊过滤。约束：
+
+- **位置在标题栏之外**、Tab 之上（`#searchBar` 内的 `QLineEdit#compSearch`）。标题栏整条是窗口拖拽区
+  （`mousePressEvent` 里判 `title_bar.underMouse()` 就开始拖动），输入框塞进标题栏会点不动、一按就拖窗
+- 匹配内核是纯函数 `component_matches(comp, query)`：只比 `display_name` 与 `key`，忽略大小写与首尾空白，
+  空查询（或全空白）返回 `True` 表示不过滤。**不要**把分类名纳入匹配——分类已由 Tab 表达，
+  搜"开发"会命中全部卡片，等于没搜
+- 过滤**只改 `card.setVisible()`**，绝不从 `MainWindow.cards` 里摘项（原因见 R2.3 的全量平铺不变量）
+- Tab 标题在搜索期间显示 `分类（匹配数/总数）`，清空后回到 `分类（总数）`；右侧 `#searchHint`
+  显示"匹配 N / 26 个组件"。数字一律现算
+- 当前 Tab 一条都没命中而别的 Tab 有命中时，自动跳到第一个有命中的 Tab，避免用户对着空白页以为搜坏了
+- 新增组件**不需要**为搜索做任何登记：卡片建好就自动可搜。改匹配规则要同步 `bt_search_and_newcmp_tests.py`
 
 ---
 

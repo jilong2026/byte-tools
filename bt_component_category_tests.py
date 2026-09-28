@@ -28,9 +28,10 @@ if REPO_ROOT not in sys.path:
 import main  # noqa: E402
 
 EXPECTED_MEMBERSHIP = {
-    "开发环境": {"jdk", "python", "node", "go", "bun", "conda", "git", "maven", "gradle"},
+    "开发环境": {"jdk", "python", "node", "go", "bun", "conda", "git", "maven",
+               "gradle", "powershell"},
     "开发软件": {"tomcat", "mysql", "mongodb", "postgresql", "elasticsearch", "nacos",
-               "seata", "kafka", "rocketmq", "pulsar", "activemq", "rabbitmq"},
+               "seata", "kafka", "rocketmq", "pulsar", "activemq", "rabbitmq", "nginx"},
     "其它软件": {"docker", "kubectl", "jenkins"},
 }
 
@@ -55,7 +56,7 @@ class CategoryOnComponent(unittest.TestCase):
 
     def test_no_component_is_left_unclassified(self):
         self.assertEqual({c.key for c in self.components}, ALL_KEYS)
-        self.assertEqual(len(self.components), 24)
+        self.assertEqual(len(self.components), 26)
 
 
 class GroupComponentsHelper(unittest.TestCase):
@@ -63,7 +64,7 @@ class GroupComponentsHelper(unittest.TestCase):
         groups = main.group_components(main.build_components())
         self.assertEqual(list(groups), list(EXPECTED_MEMBERSHIP),
                          "Tab 顺序必须与 COMPONENT_CATEGORIES 一致")
-        self.assertEqual(sum(len(v) for v in groups.values()), 24)
+        self.assertEqual(sum(len(v) for v in groups.values()), 26)
         for name, keys in groups.items():
             self.assertEqual({c.key for c in keys}, EXPECTED_MEMBERSHIP[name], name)
 
@@ -122,7 +123,7 @@ class MainWindowUsesTabs(unittest.TestCase):
     def test_flat_card_list_is_still_complete(self):
         # 刷新版本 / 存配置 / 关窗等待都靠这个平铺列表，分组不能把它弄缺
         self.assertEqual({c.component.key for c in self.win.cards}, ALL_KEYS)
-        self.assertEqual(len(self.win.cards), 24)
+        self.assertEqual(len(self.win.cards), 26)
 
 
 if __name__ == "__main__":
