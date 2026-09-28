@@ -1,7 +1,7 @@
 # 字节-开发环境与工具自动安装 (byte-tools)
 
 <p align="center">
-   <img src="assets/byte-tools.png" alt="byte-tools 软件图标"/>
+   <img src="assets/byte-tools.png" alt="byte-tools 软件图标" height="150" width="150"/>
 </p>
 
 <p align="center">
