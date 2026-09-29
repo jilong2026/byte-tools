@@ -8,6 +8,7 @@ __pycache__/
 *.egg
 *.egg-info/
 .eggs/
+.workbuddy/
 dist/
 build/
 develop-eggs/
