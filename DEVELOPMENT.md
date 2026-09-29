@@ -413,6 +413,11 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
   显示"匹配 N / 26 个组件"。数字一律现算
 - 当前 Tab 一条都没命中而别的 Tab 有命中时，自动跳到第一个有命中的 Tab，避免用户对着空白页以为搜坏了
 - 新增组件**不需要**为搜索做任何登记：卡片建好就自动可搜。改匹配规则要同步 `bt_search_and_newcmp_tests.py`
+- 外观约定：输入框不直接描边，而是套一层胶囊外壳 `#searchShell`（放大镜 + 输入框同属一块白底圆角），
+  聚焦时**整条外壳**描蓝边 —— 为此 `MainWindow.eventFilter()` 监听输入框焦点、经 `_set_search_focus()`
+  改外壳的 `focused` 属性并 `unpolish/polish` 重刷样式（QSS 的 `:focus` 选不到父级控件）。
+  放大镜与清空按钮图标都用 `QPainter` 现画，不加图片资源；清空按钮用 `QLineEdit.TrailingPosition`
+  的 QAction 代替内置清除按钮，以保证跨平台观感一致、颜色可控
 
 ---
 

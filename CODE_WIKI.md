@@ -561,7 +561,7 @@ UI 组成（自上而下）：
 UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
-3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：`QLineEdit`（`objectName="compSearch"`，带清除按钮）+ 右侧 `QLabel`（`objectName="searchHint"`）实时显示"匹配 N / 26 个组件"。`textChanged` → `MainWindow._apply_search()`；**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了
+3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 26 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了
 4. **主体 QSplitter（垂直）**：   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分三个 Tab，**标题带组件数量**：`开发环境（10）` / `开发软件（13）` / `其它软件（3）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
    - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏，Tab 标题在搜索期间改成 `分类（匹配数/总数）`，清空后恢复 `分类（总数）`；当前 Tab 一条都没命中而别的 Tab 有命中时自动跳过去。过滤**只改可见性**，`MainWindow.cards` 平铺列表始终是全量 26 项
    - 下部日志区 `QTextEdit`（深色主题、等宽字体）

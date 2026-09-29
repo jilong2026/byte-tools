@@ -57,6 +57,8 @@ try:
         QFont,
         QIcon,
         QPainter,
+        QPalette,
+        QPen,
         QPixmap,
         QDesktopServices,
     )
@@ -4610,22 +4612,54 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.title_bar)
 
         # ------- 组件搜索条（在 Tab 之上，切 Tab 不会丢输入框） -------
-        search_bar = QFrame()
-        search_bar.setObjectName("searchBar")
-        sb = QHBoxLayout(search_bar)
-        sb.setContentsMargins(18, 10, 18, 0)
-        sb.setSpacing(8)
+        self.search_bar = QFrame()
+        self.search_bar.setObjectName("searchBar")
+        sb = QHBoxLayout(self.search_bar)
+        sb.setContentsMargins(18, 12, 18, 10)
+        sb.setSpacing(10)
+
+        # 胶囊外壳：放大镜与输入框同属一个白色圆角块，聚焦时整条高亮，
+        # 而不是只给输入框描一圈边（原先那种细边框小方框显得零碎）。
+        self.search_shell = QFrame()
+        self.search_shell.setObjectName("searchShell")
+        self.search_shell.setProperty("focused", "false")
+        shell = QHBoxLayout(self.search_shell)
+        shell.setContentsMargins(12, 0, 8, 0)
+        shell.setSpacing(8)
+
+        self.search_icon = QLabel()
+        self.search_icon.setObjectName("searchIcon")
+        self.search_icon.setPixmap(self._make_search_icon().pixmap(16, 16))
+        shell.addWidget(self.search_icon)
+
         self.search_box = QLineEdit()
         self.search_box.setObjectName("compSearch")
-        self.search_box.setPlaceholderText("搜索组件（按名称模糊匹配，留空显示全部）")
-        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setPlaceholderText("搜索组件名称…")
+        # 内置清空按钮在不同平台上图标差异大、颜色偏淡，这里自绘一个统一风格的 ×
+        self.search_box.setClearButtonEnabled(False)
+        self._clear_action = self.search_box.addAction(
+            self._make_clear_icon(), QLineEdit.TrailingPosition
+        )
+        self._clear_action.setToolTip("清空搜索")
+        self._clear_action.setVisible(False)
+        self._clear_action.triggered.connect(self.search_box.clear)
+        self.search_box.textChanged.connect(self._sync_clear_action)
         self.search_box.textChanged.connect(self._apply_search)
-        sb.addWidget(self.search_box)
+        # 焦点变化要联动外壳高亮，QSS 的 :focus 影响不到父级，用事件过滤器转发
+        self.search_box.installEventFilter(self)
+        # 占位文字默认偏深，调浅一点更接近现代输入框的观感
+        _pal = self.search_box.palette()
+        _pal.setColor(QPalette.PlaceholderText, QColor("#9aabbd"))
+        self.search_box.setPalette(_pal)
+        shell.addWidget(self.search_box, 1)
+
+        sb.addWidget(self.search_shell)
+
         self.search_hint = QLabel("")
         self.search_hint.setObjectName("searchHint")
         sb.addWidget(self.search_hint)
         sb.addStretch(1)
-        outer.addWidget(search_bar)
+        outer.addWidget(self.search_bar)
 
         # ------- 主体：卡片列表 + 日志区 -------
         body = QSplitter(Qt.Vertical)
@@ -4689,6 +4723,92 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
+    @staticmethod
+    def _make_search_icon(color: str = "#8ba0b6", size: int = 16) -> QIcon:
+        """
+        用 QPainter 现画一个放大镜图标，省得为一张 16px 小图额外引入资源文件。
+
+        入参 color: str   线条颜色，默认与占位文字同一灰蓝色系
+              size:  int  逻辑边长（像素）；内部按 2 倍分辨率绘制，高分屏不糊
+
+        返回: QIcon  可直接 pixmap() 给 QLabel，或 addAction() 给 QLineEdit
+        """
+        pm = QPixmap(size * 2, size * 2)
+        pm.setDevicePixelRatio(2.0)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawEllipse(2, 2, 9, 9)          # 镜片
+        painter.drawLine(11, 11, 14, 14)         # 手柄
+        painter.end()
+        return QIcon(pm)
+
+    @staticmethod
+    def _make_clear_icon(color: str = "#9aabbd", size: int = 16) -> QIcon:
+        """
+        用 QPainter 画一个统一风格的「×」，作为搜索框的清空按钮图标。
+
+        入参 color: str  线条颜色（默认与放大镜、占位文字同色系）
+              size:  int 逻辑边长（像素），同样按 2 倍分辨率绘制
+
+        返回: QIcon
+        """
+        pm = QPixmap(size * 2, size * 2)
+        pm.setDevicePixelRatio(2.0)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(5, 5, 11, 11)
+        painter.drawLine(11, 5, 5, 11)
+        painter.end()
+        return QIcon(pm)
+
+    def _sync_clear_action(self, text: str) -> None:
+        """有输入才显示清空按钮，空串时藏起来，免得占着位置显得多余。"""
+        action = getattr(self, "_clear_action", None)
+        if action is not None:
+            action.setVisible(bool(text))
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802  Qt 规定的驼峰签名
+        """
+        把搜索框的焦点变化转发给外壳，做出「整条胶囊一起高亮」的效果。
+
+        说明: QSS 的 :focus 只能命中聚焦控件自身，管不到父级 QFrame，
+              所以这里手动改外壳的 focused 属性并触发重新应用样式。
+        """
+        try:
+            if obj is getattr(self, "search_box", None):
+                if event.type() == QEvent.FocusIn:
+                    self._set_search_focus(True)
+                elif event.type() == QEvent.FocusOut:
+                    self._set_search_focus(False)
+        except RuntimeError:
+            # 关窗销毁阶段子控件的 C++ 对象可能已被回收，此时忽略即可
+            pass
+        return super().eventFilter(obj, event)
+
+    def _set_search_focus(self, focused: bool) -> None:
+        """设置搜索外壳的聚焦态样式（改属性后需 unpolish/polish 才会重绘）。"""
+        shell = getattr(self, "search_shell", None)
+        if shell is None:
+            return
+        shell.setProperty("focused", "true" if focused else "false")
+        shell.style().unpolish(shell)
+        shell.style().polish(shell)
+        # 放大镜跟着边框一起变色，聚焦反馈更完整
+        icon = getattr(self, "search_icon", None)
+        if icon is not None:
+            color = "#4a7fd0" if focused else "#8ba0b6"
+            icon.setPixmap(self._make_search_icon(color).pixmap(16, 16))
+
     def _apply_search(self, query: str) -> None:
         """
         按搜索词过滤卡片：命中的显示、其余隐藏，并把 Tab 标题改成「匹配数/总数」。
@@ -4715,9 +4835,14 @@ class MainWindow(QMainWindow):
                 idx, f"{cat_name}（{matched[idx]}/{total}）" if q else f"{cat_name}（{total}）"
             )
 
+        total_hit = sum(matched)
         self.search_hint.setText(
-            f"匹配 {sum(matched)} / {len(self.cards)} 个组件" if q else ""
+            f"匹配 {total_hit} / {len(self.cards)} 个组件" if q else ""
         )
+        # 一个都没命中时换个警示色，免得用户以为列表加载坏了
+        self.search_hint.setProperty("empty", "true" if (q and total_hit == 0) else "false")
+        self.search_hint.style().unpolish(self.search_hint)
+        self.search_hint.style().polish(self.search_hint)
         # 当前 Tab 一条都没命中时，跳到第一个有命中的 Tab，免得用户看到空白页
         if q and matched and self.tabs.currentIndex() < len(matched) \
                 and matched[self.tabs.currentIndex()] == 0:
@@ -4756,17 +4881,30 @@ class MainWindow(QMainWindow):
             #closeBtn:hover { background: #e74c3c; }
 
             #searchBar { background: transparent; }
-            #compSearch {
+
+            /* 搜索框：外壳统一承载放大镜与输入框，聚焦时整条胶囊高亮，
+               比原先「细边框小方框」更有整体感，也和卡片/下拉框的圆角语言一致 */
+            #searchShell {
                 background: #ffffff;
-                border: 1px solid #b9c6d6;
-                border-radius: 6px;
-                padding: 6px 10px;
+                border: 1px solid #d5dfea;
+                border-radius: 10px;
+                min-width: 340px;
+                max-width: 460px;
+            }
+            #searchShell:hover { border: 1px solid #b9c9dc; }
+            #searchShell[focused="true"] { border: 1px solid #4a7fd0; }
+            #searchIcon { background: transparent; border: none; }
+            #compSearch {
+                background: transparent;
+                border: none;
+                padding: 8px 0;
                 font-size: 13px;
                 color: #17253b;
-                max-width: 360px;
             }
-            #compSearch:focus { border: 1px solid #4a7fd0; }
-            #searchHint { color: #55677d; font-size: 12px; }
+            #compSearch:focus { border: none; }
+            #compSearch QToolButton { background: transparent; border: none; }
+            #searchHint { color: #66788c; font-size: 12px; padding-left: 2px; }
+            #searchHint[empty="true"] { color: #c0392b; }
 
             #compTabs { background: transparent; border: none; }
 
