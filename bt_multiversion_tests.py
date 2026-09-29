@@ -1066,6 +1066,141 @@ class UninstallDeadHomeCleanup(EnvSandbox):
         self.assertNotIn("已清理指向不存在目录的环境变量", summary)
 
 
+class UninstallActiveGuardFix2(EnvSandbox):
+    """Task 9 修复轮 2（评审 1 Blocker + 2 Important，裁决见 task-9-fix-2.md）。
+
+    B   ：第 4 步"全删光"分支没有 HOME 守卫，会把用户指到组件根之外的 XXX_HOME 一起删掉；
+    I-1 ：老配置没有 active 登记表，生效版本全靠 XXX_HOME 反推，而第 4 步排在第 2 步
+          删 HOME 之后 → 反推永远是 None → "自动重排"静默失效。修法是在任何破坏性
+          动作之前做 active_before 快照；
+    I-2 ：重排把 apply_active_version 的 steps 整个扔了（D6 的"已开着的终端/IDE 不受
+          影响"与 Oracle javapath 提醒丢失），且 save_active_version 裸调用，
+          OSError 会穿透 uninstall。
+
+    夹具沿用 UninstallScope 的形状：as_windows + jdk 21.0.4/17.0.12 + 两条版本
+    PATH 条目 + C:\\Windows\\system32 锚点。断言只看 win_env / win_path /
+    CONFIG_FILE / 摘要文本，绝不断言桩的调用次数。
+    """
+
+    def _seed_jdk_two_versions(self, active, home_on):
+        """造 UninstallScope 同款现场：装 21.0.4+17.0.12，各留一条 PATH 条目。
+
+        active=None 时不写登记表（模拟只有 selections 的老 config.json）。
+        """
+        self.as_windows()
+        comp = self.make_component("jdk", "21.0.4", "17.0.12")
+        self.win_path[:] = [str(comp.install_dir("21.0.4") / "bin"),
+                            str(comp.install_dir("17.0.12") / "bin"),
+                            r"C:\Windows\system32"]
+        self.win_env["JAVA_HOME"] = str(comp.install_dir(home_on))
+        if active:
+            main.save_active_version("jdk", active)
+        else:
+            # 老配置：文件存在但没有任何 active 登记条目
+            main.CONFIG_FILE.write_text(
+                json.dumps({"selections": {"jdk": "21.0.4"}}, ensure_ascii=False),
+                encoding="utf-8")
+        return comp
+
+    # ---- B：Blocker 的真实复现（多版本组件走得到第 4 步，非多版本走不到，见下两条） ----
+    def test_b_full_uninstall_keeps_out_of_root_home(self):
+        # jdk 只剩最后一个版本，JAVA_HOME 是用户自己指到组件根之外的 JDK。
+        # 现网第 4 步 `if not remaining:` 读到一个值就删，没有 _under_root 守卫。
+        # 红点：卸载后 JAVA_HOME 不在 win_env 里（用户自己的 JDK 入口被顺带删了）。
+        self.as_windows()
+        comp = self.make_component("jdk", "21.0.4")
+        foreign = r"C:\Program Files\Java\jdk1.8.0_202"
+        self.win_env["JAVA_HOME"] = foreign
+        self.win_path[:] = [str(comp.install_dir("21.0.4") / "bin"), r"C:\Windows\system32"]
+        main.save_active_version("jdk", "21.0.4")
+        summary = comp.uninstall("21.0.4")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), foreign,
+                         "用户指到组件目录之外的 JAVA_HOME 绝不许被卸载顺带删掉")
+        self.assertIn("指向组件目录之外", summary)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+    def test_b_non_mv_full_uninstall_keeps_out_of_root_home(self):
+        # brief 用例 1 的场景（非多版本 tomcat + 组件根外的 CATALINA_HOME）。
+        # 如实说明：现网第 4 步整体在 `if self.multi_version:` 之下，非多版本组件根本
+        # 走不到 Blocker 那段代码，且第 2 步的 _under_root 守卫改造前就有——所以这条
+        # 在修复前就是绿的（与 brief"这条现在必红"的预判不符，见报告）。
+        # 措辞只断言修复前后都不变的"未删除"：新句子"指向组件目录之外"仅由第 4 步
+        # （多版本）产出，为非多版本组件改第 2 步措辞超出本轮 scope。
+        self.as_windows()
+        comp = self.make_component("tomcat", "10.1.60")
+        foreign = r"C:\somewhere\apache-tomcat"
+        self.win_env["CATALINA_HOME"] = foreign
+        self.win_path[:] = [str(comp.install_dir("10.1.60") / "bin"), r"C:\Windows\system32"]
+        summary = comp.uninstall("10.1.60")
+        self.assertEqual(self.win_env.get("CATALINA_HOME"), foreign)
+        self.assertIn("CATALINA_HOME", summary)
+        self.assertIn("未删除", summary)
+
+    def test_b2_inside_root_home_cleared_with_last_version(self):
+        # brief 用例 2（B 的另一面，原有行为护栏）：JAVA_HOME 指着本组件目录内的
+        # 最后一个版本，卸完 HOME 必须被清。摘要句子按本轮改名后的措辞断言——
+        # 旧句"生效登记与环境变量均已清除"在外指 HOME 被保留时是假话。
+        self.as_windows()
+        comp = self.make_component("jdk", "21.0.4")
+        self.win_env["JAVA_HOME"] = str(comp.install_dir("21.0.4"))
+        self.win_path[:] = [str(comp.install_dir("21.0.4") / "bin"), r"C:\Windows\system32"]
+        main.save_active_version("jdk", "21.0.4")
+        summary = comp.uninstall("21.0.4")
+        self.assertNotIn("JAVA_HOME", self.win_env)
+        self.assertNotIn("jdk", main.load_active_map())
+        self.assertIn("已无安装版本，生效登记已清除", summary)
+
+    # ---- I-1：老配置（无 active 登记表）的自动重排 ----
+    def test_i1_old_config_repoints_after_uninstalling_inferred_active(self):
+        # 评审复现的 PROBE-B：登记表没有 jdk 条目，生效全靠 JAVA_HOME=21 反推；
+        # 现网第 4 步在第 2 步删掉那个 HOME 之后才读 → active=None → 不重排不提示。
+        # 红点：load_active_map() 里没有 jdk，JAVA_HOME 被清空而 17.0.12 明明还装着。
+        comp = self._seed_jdk_two_versions(active=None, home_on="21.0.4")
+        self.assertNotIn("jdk", main.load_active_map())      # 夹具自查：确无登记表
+        summary = comp.uninstall("21.0.4")
+        self.assertEqual(main.load_active_map().get("jdk"), "17.0.12")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), str(comp.install_dir("17.0.12")))
+        self.assertIn("生效版本已自动切到 17.0.12", summary)
+
+    def test_i1b_live_active_rebuilt_when_uninstalling_the_other_version(self):
+        # I-1 姊妹：登记表 active=17 且 17 还在装，但 JAVA_HOME 脏指 21 →
+        # 卸 21 把 HOME 一起删了（第 2 步）。修好后第 4 步必须按活着的 active 重建：
+        # HOME 指回 17、17 的 bin 在 PATH、21 的条目没了。
+        comp = self._seed_jdk_two_versions(active="17.0.12", home_on="21.0.4")
+        summary = comp.uninstall("21.0.4")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), str(comp.install_dir("17.0.12")))
+        self.assertIn(str(comp.install_dir("17.0.12") / "bin"), self.win_path)
+        self.assertNotIn(str(comp.install_dir("21.0.4") / "bin"), self.win_path)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+        self.assertIn("生效版本已自动切到 17.0.12", summary)
+
+    # ---- I-2：D6 提醒进摘要 + 登记表写失败如实报告 ----
+    def test_i2_repoint_summary_carries_d6_notice(self):
+        # D6 要求告知"已开着的终端/IDE 不受影响"与 Oracle javapath 抢先，
+        # 那句话是 apply_active_version steps 的末行（main.py:4000-4001）。
+        # 现网 `apply_active_version(self, nxt)` 把返回值整个扔了 → 红点：摘要没这两句。
+        comp = self._seed_jdk_two_versions(active="21.0.4", home_on="21.0.4")
+        summary = comp.uninstall("21.0.4")
+        self.assertIn("已开着的终端", summary)
+        self.assertIn("javapath", summary)
+
+    def test_i2b_active_map_write_failure_is_reported_as_partial_success(self):
+        # 登记表写失败（CONFIG_FILE.write_text 抛 OSError）不许把整个卸载炸成
+        # "卸载失败"——此刻环境已经真切到 17 了。测试侧打桩 main.save_active_version
+        # （产品里不加开关），addCleanup 还原。
+        # 现网红点：裸调用 main.py:445 的 OSError 直接穿透 comp.uninstall。
+        comp = self._seed_jdk_two_versions(active="21.0.4", home_on="21.0.4")
+        orig = main.save_active_version
+        main.save_active_version = lambda key, version: (_ for _ in ()).throw(
+            OSError("disk full"))
+        self.addCleanup(setattr, main, "save_active_version", orig)
+        summary = comp.uninstall("21.0.4")                    # 不应抛出
+        self.assertIn("登记表写入失败", summary)
+        self.assertIn("生效版本已自动切到 17.0.12", summary)
+        # 环境侧确已成功切到 17 —— 摘要必须如实说"环境切了、登记没写"
+        self.assertEqual(self.win_env.get("JAVA_HOME"), str(comp.install_dir("17.0.12")))
+
+
 class UninstallTargetResolve(EnvSandbox):
     """修正 1：resolve_uninstall_target 只做最小改动。
 

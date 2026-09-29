@@ -340,12 +340,16 @@ class Component:
     def uninstall(self, version: str) -> str:
         """
         卸载指定版本：删除安装目录、移除正指向被删目录的 XXX_HOME、只清理被删版本的
-        PATH 条目；多版本组件删掉生效版本时自动切到剩余里版本号最高的那个。
+        PATH 条目；多版本组件在任何破坏性动作之前先快照生效版本，删掉生效版本时自动
+        切到剩余里版本号最高的那个。
 
         入参 version: str  下拉框选中的版本号；与实际安装版本不一致时会自动校正目标
         返回: str           卸载结果摘要（中文，多步骤用中文分号分隔）
 
         说明:
+          - 生效版本快照（active_before）必须在删目录/删 HOME 之前取：老配置没有
+            active 登记表，生效版本靠 XXX_HOME 反推，而第 2 步可能正好把那个 HOME
+            删掉，事后再读永远是 None，"自动重排"会静默失效；
           - XXX_HOME 只有正指向本次被删目录才删除；指向同组件其他版本时保留，
             交给生效版本重排那一步处理；指向本组件根下已消失目录的残留 HOME
             （早年手工删目录留下的死配置）会被清掉；指向组件目录之外（用户自己的安装）绝不动；
@@ -364,6 +368,12 @@ class Component:
         if note:
             summary_parts.append(note)
         component_root = CONFIG_DIR / self.key
+
+        # 生效版本快照：必须在删目录/删 HOME 之前取。
+        # 老配置没有 active 登记表，生效版本靠 XXX_HOME 反推，而第 2 步可能正好把那个 HOME 删掉——
+        # 事后再读就永远是 None，"自动重排"会静默失效。多版本组件才算，非多版本白读一次配置。
+        active_before = (load_active_map().get(self.key) or infer_active_from_env(self)) \
+            if self.multi_version else None
 
         # 1. 删除安装目录（安装器模式跳过，由安装器自行管理位置）
         if self.installer_mode:
@@ -424,31 +434,67 @@ class Component:
         except Exception as exc:
             summary_parts.append(f"清理 PATH 失败：{exc}")
 
-        # 4. 多版本组件的生效登记收尾：删掉的正是生效版本时，自动切到剩余里版本号最高的；
-        #    全删光就清登记 + 清环境变量，避免界面显示"生效 17"而磁盘上已无 17。
+        # 4. 多版本组件的生效登记收尾。active 一律取开头的快照 active_before，不再事后
+        #    读登记表/反推：老配置的生效版本靠 XXX_HOME 反推，而第 2 步可能已把那个 HOME
+        #    删掉，事后再读永远是 None，"自动重排"会静默失效。
+        #    全删光：清登记；HOME 只在指向本组件目录时才清，用户指到别处的绝不动。
+        #    还有剩余：删掉的正是生效版本就切到剩余里版本号最高的；生效版本还活着但它的
+        #    HOME 被这次卸载带偏/删掉，就按它重建生效配置。
         if self.multi_version:
             remaining = installed_versions(self)
             removed_ver = version_from_install_dir(self, install_path) if install_path else None
-            active = load_active_map().get(self.key) or infer_active_from_env(self)
+            active = active_before
             if not remaining:
-                save_active_version(self.key, None)
-                if self.env_var and EnvManager.read_user_env(self.env_var):
+                try:
+                    save_active_version(self.key, None)
+                except Exception as exc:
+                    summary_parts.append(f"清除生效登记失败：{exc}")
+                home_now = EnvManager.read_user_env(self.env_var) if self.env_var else None
+                if home_now and EnvManager._under_root(str(home_now), str(component_root)):
                     try:
                         EnvManager.drop_user_env(self.env_var)
+                        summary_parts.append(f"已删除环境变量：{self.env_var}")
                     except Exception as exc:
                         summary_parts.append(f"删除 {self.env_var} 失败：{exc}")
-                summary_parts.append("已无安装版本，生效登记与环境变量均已清除")
-            elif active and removed_ver and active == removed_ver:
-                nxt = remaining[0][0]
-                try:
-                    apply_active_version(self, nxt)
-                    save_active_version(self.key, nxt)
-                    summary_parts.append(f"生效版本已自动切到 {nxt}")
-                except SwitchError as exc:
-                    save_active_version(self.key, None)
+                elif home_now:
                     summary_parts.append(
-                        f"自动切到 {nxt} 失败，生效登记已清空，请重新点一次"
-                        f"「仅配置环境变量」：{exc}")
+                        f"环境变量 {self.env_var} 指向组件目录之外（{home_now}），未删除")
+                summary_parts.append("已无安装版本，生效登记已清除")
+            else:
+                remaining_map = dict(remaining)
+                target = None
+                if active and active in remaining_map:
+                    # 生效版本还活着：若它的 HOME 被这次卸载带偏/删掉，就按它重建生效配置
+                    home_now = EnvManager.read_user_env(self.env_var) if self.env_var else None
+                    if not home_now or not EnvManager._same_path(
+                            str(home_now), str(remaining_map[active])):
+                        target = active
+                elif active and removed_ver == active:
+                    # 删掉的正是生效版本：切到剩余里版本号最高的（installed_versions 已降序）
+                    target = remaining[0][0]
+                # 登记表里那个版本本来就不在磁盘上、这次又没删到它 → 不猜，交给用户重点按钮
+                if target:
+                    try:
+                        steps = apply_active_version(self, target)
+                    except SwitchError as exc:
+                        try:
+                            save_active_version(self.key, None)
+                        except Exception as save_exc:
+                            summary_parts.append(f"清空生效登记也失败：{save_exc}")
+                        summary_parts.append(
+                            f"自动切到 {target} 失败，生效登记已清空，请重新点一次"
+                            f"「仅配置环境变量」：{exc}")
+                    else:
+                        summary_parts.append(f"生效版本已自动切到 {target}")
+                        # D6：切换步骤日志（含"已开着的终端/IDE 需重开"与 Oracle
+                        # javapath 抢先提醒）必须进摘要，与切换路径 _apply_active 同一套话。
+                        summary_parts.extend(steps)
+                        try:
+                            save_active_version(self.key, target)
+                        except Exception as exc:
+                            summary_parts.append(
+                                f"生效登记表写入失败：{exc}（环境变量已切到 {target}，"
+                                "重开界面可能显示旧生效版本，再点一次「仅配置环境变量」可修正）")
 
         return "；".join(summary_parts) if summary_parts else "无需卸载"
 
