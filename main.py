@@ -4279,6 +4279,36 @@ class SearchableComboBox(QComboBox):
 
 
 # ---------------------------------------------------------------------------
+# UI 图标：版本下拉框的"磁盘上已装"标记
+# ---------------------------------------------------------------------------
+def _installed_icon(color: str = "#2e7d32", size: int = 16) -> QIcon:
+    """现画一个绿色对勾，作为下拉框里"这个版本磁盘上已装"的标记。
+
+    入参 color: str  线色，默认与状态胶囊的成功绿同系
+          size:  int 逻辑边长（像素），按 2 倍分辨率绘制以免高分屏发虚
+    返回: QIcon
+
+    说明: 刻意用图标而不是在文本里加「✓」——下拉框的显示文本是版本反查的唯一键
+          （_current_version / repopulate(preferred=…)），改文本会连锁打错选版、
+          安装、卸载与配置保存。画法与 MainWindow._make_search_icon 保持一致。
+    """
+    pm = QPixmap(size * 2, size * 2)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(2.0)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.drawLine(3, 9, 6, 12)      # 短撇
+    painter.drawLine(6, 12, 13, 4)     # 长挑
+    painter.end()
+    return QIcon(pm)
+
+
+# ---------------------------------------------------------------------------
 # UI 组件：卡片
 # ---------------------------------------------------------------------------
 class ComponentCard(QFrame):
@@ -4503,8 +4533,27 @@ class ComponentCard(QFrame):
     def _display_label(self, cv: ComponentVersion) -> str:
         return getattr(cv, "display_label", None) or cv.version
 
+    def _refresh_installed_marks(self) -> None:
+        """给磁盘上已装的版本挂绿勾；只动 DecorationRole，不碰条目文本。
+
+        为什么不写成文本前缀：下拉框条目文本是版本反查的唯一键（_current_version /
+        repopulate(preferred=…) 都按 currentText 匹配），加「✓」会让选版、安装、
+        卸载与配置保存全部错位。图标是纯装饰数据，不参与任何反查。
+        非多版本组件（mysql/tomcat/…）没有"版本并存"的概念，一律不挂，
+        也不能顺手给它写 DecorationRole —— 保持"完全没挂过"的原始数据状态。
+        """
+        if not self.component.multi_version:
+            return
+        installed = {v for v, _p in installed_versions(self.component)}
+        icon = _installed_icon()
+        empty = QIcon()
+        for i, cv in enumerate(self.component.versions):
+            self.version_combo.setItemData(i, icon if cv.version in installed else empty,
+                                           Qt.DecorationRole)
+
+    # ------------------------------------------------------------------
     def _reload_combo_items(self, preferred: Optional[str] = None) -> None:
-        """把 self.component.versions 灌进下拉框。"""
+        """把 self.component.versions 灌进下拉框，并重挂"已装"图标。"""
         labels = [self._display_label(v) for v in self.component.versions]
         # 若首次调用（combo 里还没内容），走普通 addItems 路径
         if self.version_combo.count() == 0:
@@ -4513,8 +4562,12 @@ class ComponentCard(QFrame):
             self.version_combo.setCurrentIndex(0)
             self.version_combo.blockSignals(False)
             self.version_combo._committed_text = self.version_combo.currentText()
+            self._refresh_installed_marks()
             return
         self.version_combo.repopulate(labels, preferred=preferred)
+        # repopulate 内部 clear() 会连带销毁旧条目的 DecorationRole 数据，
+        # 所以装载出口的两条路径都得重挂一次，否则抓取线程回填版本后标记全丢。
+        self._refresh_installed_marks()
 
     def set_versions(self, versions: List[ComponentVersion]) -> None:
         """外部（抓取线程）用新版本列表替换现有列表。"""
@@ -4686,6 +4739,9 @@ class ComponentCard(QFrame):
         finally:
             self.btn_install.setEnabled(True)
             self.btn_configure.setEnabled(True)
+            # 装成功与否都会在磁盘上留下（或不留）目录，勾的有无正由磁盘决定，
+            # 这里统一刷新一次，省得在两个分支各写一遍。
+            self._refresh_installed_marks()
             # _detect_status 会根据探测结果再决定 btn_configure 是否禁用
             self._detect_status()
 
@@ -4760,6 +4816,8 @@ class ComponentCard(QFrame):
             # 调用 Component.uninstall 执行实际卸载，返回中文摘要
             summary = self.component.uninstall(cv.version)
             self._log("ok", f"卸载完成：{summary}")
+            # 磁盘上少了一个版本目录，下拉框里它的勾必须同时消失
+            self._refresh_installed_marks()
             # 卸载后重新检测状态，刷新状态胶囊与按钮启用状态
             self._detect_status()
         except Exception as exc:
@@ -4778,8 +4836,8 @@ class ComponentCard(QFrame):
 
         返回: bool  成功与否。失败原因已在日志里，界面不再处理异常。
 
-        注意: 本任务先不调用 _refresh_installed_marks()（它是 Task 7 才引入的方法），
-              那里会补上这一次刷新，避免任务之间出现前向依赖。
+        刷新已装勾是必要的：apply_active_version 中途失败会回滚磁盘/环境状态，
+        生效版本变了也可能连带影响状态探测读到的目录，图标得跟磁盘重新对齐。
         """
         try:
             steps = apply_active_version(self.component, version)
@@ -4789,6 +4847,7 @@ class ComponentCard(QFrame):
         for step in steps:
             self._log("error" if ("失败" in step) else "ok", step)
         save_active_version(self.component.key, version)
+        self._refresh_installed_marks()
         self._detect_status()
         return True
 

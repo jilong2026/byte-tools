@@ -28,6 +28,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import main  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402  断言里要用 Qt.DecorationRole
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 def _restored_env_keys():
@@ -635,6 +636,144 @@ class ConfigureUsesSelectedVersion(EnvSandbox):
                          str(comp.install_dir("10.1.60")))
         self.assertNotIn("tomcat", main.load_active_map(),
                          "非多版本组件不进 active 表")
+
+
+class InstalledCheckIcon(EnvSandbox):
+    """下拉框里的"这个版本磁盘上已装"绿勾。
+
+    规格核心：标记只能挂在 Qt.DecorationRole 上，条目文本一个字都不许动 ——
+    _current_version() 与 SearchableComboBox.repopulate(preferred=…) 都是按显示
+    文本反查版本对象的，往文本里塞「✓」会连锁打错选版、安装、卸载与配置保存。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    # jdk 的内置清单是大版本串 "21"/"17"/"11"/"8"（main.py:2842-2845），
+    # 目录名 jdk-21 与下拉框文本同源。夹具若写 "21.0.4"，findText 永远落空、
+    # 断言的分支一行都不会执行 —— Task 6 踩过的假绿灯，这里用 JDK_ALL 自查挡住。
+    JDK_ALL = ("21", "17", "11", "8")
+    JDK_INSTALLED = ("21", "17")
+    # mysql 取它清单里真实存在的三个版本当"已装目录"：一旦 multi_version 的提前返回
+    # 被删掉，这三个条目就会挂上图标，本用例立刻变红（回归护栏要有牙）。
+    MYSQL_ALL = ("8.0.28", "8.0.29", "8.0.37")
+
+    def _jdk_card(self):
+        comp = self.make_component("jdk", *self.JDK_INSTALLED)
+        return main.ComponentCard(comp, lambda lvl, msg: None)
+
+    @staticmethod
+    def _labels(combo):
+        return [combo.itemText(i) for i in range(combo.count())]
+
+    @staticmethod
+    def _mark(combo, index):
+        """该条目的 DecorationRole 状态：True=有图 / False=挂了空图 / None=压根没挂。"""
+        data = combo.itemData(index, Qt.DecorationRole)
+        if data is None:
+            return None
+        return not data.isNull()
+
+    def test_installed_items_get_icon_and_text_is_untouched(self):
+        card = self._jdk_card()
+        combo = card.version_combo
+        self.assertEqual(tuple(self._labels(combo)), self.JDK_ALL)
+        before = self._labels(combo)
+        idx_before = combo.currentIndex()
+        text_before = combo.currentText()
+        committed_before = combo._committed_text
+        signals = []
+        combo.currentTextChanged.connect(lambda t: signals.append(("currentTextChanged", t)))
+        combo.activated.connect(lambda i: signals.append(("activated", i)))
+
+        card._refresh_installed_marks()
+
+        after = self._labels(combo)
+        self.assertEqual(after, before,
+                         "条目文本必须逐字不变：_current_version() 按文本反查版本对象")
+        # 挂图标是纯数据写入，不许惊动选择相关的一切状态与信号
+        self.assertEqual(combo.currentIndex(), idx_before)
+        self.assertEqual(combo.currentText(), text_before)
+        self.assertEqual(combo._committed_text, committed_before)
+        self.assertEqual(signals, [], "刷新触发 currentTextChanged/activated 会连锁改选中项")
+        self.assertEqual(card._current_version().version, self.JDK_ALL[idx_before])
+
+        marked = [i for i, v in enumerate(card.component.versions)
+                  if v.version in self.JDK_INSTALLED]
+        unmarked = [i for i, v in enumerate(card.component.versions)
+                    if v.version not in self.JDK_INSTALLED]
+        self.assertTrue(marked and unmarked, "夹具必须同时覆盖已装与未装，否则本用例形同没跑")
+        for i in marked:
+            self.assertEqual(self._mark(combo, i), True, after[i])
+        for i in unmarked:
+            self.assertEqual(self._mark(combo, i), False, after[i])
+
+    def test_marks_are_already_there_right_after_the_card_is_built(self):
+        # 建卡走 _reload_combo_items 的 count()==0 分支，勾要在同一次装载里挂上，
+        # 不能等外部再补一次调用（否则首屏永远没有标记）。
+        card = self._jdk_card()
+        combo = card.version_combo
+        for label in self.JDK_INSTALLED:
+            self.assertEqual(self._mark(combo, combo.findText(label)), True, label)
+        for label in ("11", "8"):
+            self.assertEqual(self._mark(combo, combo.findText(label)), False, label)
+
+    def test_non_multi_version_component_gets_no_icons(self):
+        comp = self.make_component("mysql", *self.MYSQL_ALL)
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        combo = card.version_combo
+        self.assertEqual(combo.count(), len(self.MYSQL_ALL))
+        card._refresh_installed_marks()
+        for i in range(combo.count()):
+            # 是 None 而不是 False：非多版本组件走的是提前返回，压根不该写 DecorationRole
+            self.assertIsNone(self._mark(combo, i), combo.itemText(i))
+
+    def test_marks_refresh_after_reloading_versions(self):
+        # 抓取线程回填版本列表会 clear()+addItems() 重建条目，勾必须跟着重建
+        card = self._jdk_card()
+        combo = card.version_combo
+        combo.setCurrentIndex(combo.findText("17"))
+        fresh = [cv for cv in card.component.versions if cv.version in self.JDK_INSTALLED]
+        self.assertEqual(len(fresh), len(self.JDK_INSTALLED),
+                         "夹具版本必须在组件清单里，否则 set_versions 之后什么都测不到")
+
+        card.set_versions(fresh)
+
+        self.assertEqual(self._labels(combo), list(self.JDK_INSTALLED))
+        for label in self.JDK_INSTALLED:
+            self.assertEqual(self._mark(combo, combo.findText(label)), True, label)
+        # 重建条目不许把用户当前选中项换掉
+        self.assertEqual(combo.currentText(), "17")
+
+    def test_uninstalled_version_loses_its_mark(self):
+        card = self._jdk_card()
+        combo = card.version_combo
+        self.assertEqual(self._mark(combo, combo.findText("17")), True)
+        shutil.rmtree(card.component.install_dir("17"))   # 沙箱内的临时目录
+        card._refresh_installed_marks()
+        self.assertEqual(self._mark(combo, combo.findText("17")), False)
+        # 别的已装版本的勾不受影响
+        self.assertEqual(self._mark(combo, combo.findText("21")), True)
+
+    def test_apply_active_refreshes_the_marks(self):
+        # Task 6 刻意留白、本任务补上的接线：_apply_active 成功后要重挂一次勾。
+        # 切换生效版本不改动磁盘目录，图标状态前后一致、无从观察，所以这里只能记录
+        # 调用是否发生；断言"至少一次"而非"恰好一次"，实现里增删刷新点不该变红。
+        self.as_windows()
+        card = self._jdk_card()
+        calls = []
+        orig = main.ComponentCard._refresh_installed_marks
+        main.ComponentCard._refresh_installed_marks = lambda self: (
+            calls.append(1) or orig(self))
+        self.addCleanup(setattr, main.ComponentCard, "_refresh_installed_marks", orig)
+
+        self.assertTrue(card._apply_active("17"))
+
+        self.assertTrue(calls, "_apply_active 成功后未刷新已装标记")
+        # 记录器只是代理，刷新行为不能被它改掉
+        combo = card.version_combo
+        self.assertEqual(self._mark(combo, combo.findText("17")), True)
 
 
 if __name__ == "__main__":
