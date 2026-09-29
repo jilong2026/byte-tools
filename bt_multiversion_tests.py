@@ -83,11 +83,25 @@ class EnvSandbox(unittest.TestCase):
         def fake_read():
             return list(self.win_path)
 
+        # F10：_write_registry_env 的真实实现写完注册表值后会调
+        # EnvManager._broadcast_env_change()（PostMessageW 广播 WM_SETTINGCHANGE）。
+        # 把广播原语打桩成"记录请求"（产品码不动）：fake_write 沿用同一调用点
+        # 契约，remove_windows_user_env 那条**产品代码里的**直接调用也走这里。
+        # 断言广播被请求过 = 断言"持久层写确实发生"这一可观察副作用；广播本身
+        # 绝不真发给系统（不打扰用户桌面）。
+        self.broadcast_calls = []
+        self._orig_broadcast = main.EnvManager._broadcast_env_change
+        main.EnvManager._broadcast_env_change = staticmethod(
+            lambda: self.broadcast_calls.append("WM_SETTINGCHANGE"))
+        self.addCleanup(setattr, main.EnvManager, "_broadcast_env_change",
+                        self._orig_broadcast)
+
         def fake_write(name, value):
             if name.lower() == "path":
                 self.win_path[:] = [p for p in str(value).split(";") if p]
             else:
                 self.win_env[name] = value
+            main.EnvManager._broadcast_env_change()   # 镜像真实 _write_registry_env 的收尾
 
         def fake_get(name):
             # 规则（评审 controller 裁定）：持久化断言必须直读 self.win_env /
@@ -198,6 +212,14 @@ class SandboxSelfCheck(EnvSandbox):
         delete("KAFKA_HOME")
         self.assertNotIn("KAFKA_HOME", self.win_env)
 
+    def test_broadcast_primitive_is_stubbed(self):
+        # F10 沙箱自检：广播桩失联时，用例会把 WM_SETTINGCHANGE 真广播到用户
+        # 桌面，而所有 win_env/win_path 断言照样全绿——所以必须主动调一次，
+        # 确认调用被记录、而不是落向真实 PostMessageW。
+        before = len(self.broadcast_calls)
+        main.EnvManager._broadcast_env_change()
+        self.assertEqual(len(self.broadcast_calls), before + 1)
+
 
 # 与用户确认过的多版本组件白名单（固定 7 个，别自行扩大）
 EXPECTED_MULTI_VERSION = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
@@ -218,8 +240,18 @@ class MultiVersionFlag(EnvSandbox):
             self.assertFalse(self.components[key].multi_version, key)
 
     def test_every_component_has_the_attribute(self):
+        # F3：原来是 isinstance(comp.multi_version, bool)——dataclass 默认值保证了
+        # 类型，永远为真，近似同义反复。改成逐组件核对"标志 == 在白名单里"，
+        # 把 multi_version 与 MULTI_VERSION_KEYS 的对应关系真钉住。
         for key, comp in self.components.items():
-            self.assertIsInstance(comp.multi_version, bool, key)
+            self.assertEqual(comp.multi_version, key in EXPECTED_MULTI_VERSION, key)
+
+    def test_no_dead_keys_in_multi_version_whitelist(self):
+        # F3：MULTI_VERSION_KEYS 里打错一个字母（"jd k"/"python3"）在产品码里
+        # 静默无效果——白名单必须是组件 key 全集的子集，这条断言负责报错。
+        # 校验放测试侧而不是产品码：运行时检查拖慢启动，且线上不会有第三种人。
+        self.assertTrue(main.MULTI_VERSION_KEYS <= {c.key for c in main.build_components()},
+                        f"白名单存在死键：{main.MULTI_VERSION_KEYS - {c.key for c in main.build_components()}}")
 
 
 class InstalledVersions(EnvSandbox):
@@ -293,6 +325,45 @@ class EnvFacade(EnvSandbox):
         self.assertIn(r"C:\Windows\system32", self.win_path)
 
 
+class UnixEnvParsing(EnvSandbox):
+    """F6（最终加固轮）：Unix read_user_env 的 `export NAME="…"` 解析回归测试。
+
+    沙箱用 CURRENT_OS="Linux" + 临时 rc，绝不碰真实 ~/.zshrc。值里含引号的
+    场景在改造前会被非贪婪解析截断（/opt/jd"k → /opt/jd），读侧改成同行
+    贪婪取末引号后修复；含空格与"混有别的工具的相似块"是负向护栏。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.as_linux()
+
+    def test_value_with_spaces_roundtrips(self):
+        main.EnvManager.write_user_env("JAVA_HOME", "/opt/My JDK 21")
+        self.assertEqual(main.EnvManager.read_user_env("JAVA_HOME"), "/opt/My JDK 21")
+
+    def test_value_with_quote_roundtrips(self):
+        # 修复前红：`"([^"]*)"` 在值内部第一个引号处截断，返回 /opt/jd。
+        main.EnvManager.write_user_env("JAVA_HOME", '/opt/jd"k')
+        self.assertEqual(main.EnvManager.read_user_env("JAVA_HOME"), '/opt/jd"k')
+
+    def test_foreign_similar_blocks_are_not_parsed(self):
+        # rc 里混着别的工具写的相似块（marker 不同）与裸 export 行：
+        # ① 没有 byte-tools marker 时绝不把别人的 export 当我们的值；
+        # ② 我们写入后，只认自己 marker 块里的值。
+        self.rc.write_text(
+            '# other tool\n'
+            '# >>> other-tool:JAVA_HOME >>>\nexport JAVA_HOME="/opt/foreign"\n'
+            '# <<< other-tool <<<\n'
+            'export JAVA_HOME="/opt/bare"\n',
+            encoding="utf-8")
+        self.assertIsNone(main.EnvManager.read_user_env("JAVA_HOME"))
+        main.EnvManager.write_user_env("JAVA_HOME", "/opt/ours")
+        self.assertEqual(main.EnvManager.read_user_env("JAVA_HOME"), "/opt/ours")
+        # 别人的块原样还在（写入端只动自己的 marker 区间）
+        self.assertIn('export JAVA_HOME="/opt/foreign"',
+                      self.rc.read_text(encoding="utf-8"))
+
+
 class SwitchActive(EnvSandbox):
     def setUp(self):
         super().setUp()
@@ -310,8 +381,15 @@ class SwitchActive(EnvSandbox):
         self.assertEqual(len(jdk_entries), 1, self.win_path)
         self.assertIn("jdk-21.0.4", jdk_entries[0])
         self.assertIn(r"C:\Windows\system32", self.win_path)   # 别的条目不许动
-        self.assertTrue(any("已开" in s or "重开" in s for s in steps),
-                        "日志必须提示已开终端不受影响（决策 D6）")
+        # F8：D6 提示（"已开着的终端/IDE 需重开"）是成功路径的**末行**——
+        # apply_active_version 只在一切成功后才追加它。收紧到 steps[-1] 是对
+        # 这个顺序承诺的规格锁定，不是给实现上锁（产品码没为测试改过排序）。
+        self.assertTrue("已开" in steps[-1] or "重开" in steps[-1],
+                        f"决策 D6 的提示必须是末行，实际末行={steps[-1]!r}")
+        # F10：切换成功必须请求过"设置变更"广播（断言的是副作用是否发生，
+        # 由沙箱广播桩记录；真实的 WM_SETTINGCHANGE 绝不发给用户桌面）。
+        self.assertTrue(self.broadcast_calls,
+                        "切换成功时应当请求过一次环境变更广播")
 
     def test_linux_switch_writes_rc(self):
         self.as_linux()
@@ -520,6 +598,92 @@ class SwitchActive(EnvSandbox):
         self.assertEqual(self.win_env["JAVA_HOME"], old_home)
         self.assertNotIn("回滚未完全成功", str(ctx.exception))
 
+    # ---- F9（最终加固轮）：同版本重复切换必须幂等 ----
+    def test_windows_switch_same_version_twice_is_idempotent(self):
+        # 连续两次把生效版本设为 21.0.4：第二次跑完，持久层必须与第一次逐条目
+        # 相同——PATH 里该组件仍只有一条、JAVA_HOME 不变、登记表不多出一条。
+        # 不幂等（比如每次追加一条 PATH）就是真 bug，按最小改动修。
+        self.as_windows()
+        main.apply_active_version(self.comp, "21.0.4")
+        main.save_active_version("jdk", "21.0.4")
+        home1, path1 = self.win_env["JAVA_HOME"], list(self.win_path)
+        main.apply_active_version(self.comp, "21.0.4")
+        main.save_active_version("jdk", "21.0.4")
+        self.assertEqual(self.win_env["JAVA_HOME"], home1)
+        self.assertEqual(self.win_path, path1)
+        self.assertEqual(len([p for p in self.win_path if "jdk-" in p.lower()]), 1)
+        self.assertEqual(main.load_active_map(), {"jdk": "21.0.4"})
+
+    def test_linux_switch_same_version_twice_adds_no_extra_rc_block(self):
+        # Unix 侧幂等看 rc 文本：第二次切换不许追加第二个 PATH marker 块，
+        # 也不许多出一条 export JAVA_HOME（append_unix_path 命中已有 marker
+        # 会提前 return，这里把"重复切换不堆块"钉成可观察断言）。
+        self.as_linux()
+        main.apply_active_version(self.comp, "21.0.4")
+        first = self.rc.read_text(encoding="utf-8")
+        main.apply_active_version(self.comp, "21.0.4")
+        second = self.rc.read_text(encoding="utf-8")
+        self.assertEqual(second.count("# >>> byte-tools:PATH:"),
+                         first.count("# >>> byte-tools:PATH:"))
+        self.assertEqual(second.count("export JAVA_HOME"),
+                         first.count("export JAVA_HOME"))
+        jdk_bins = [p for p in main.EnvManager.read_user_path_entries()
+                    if "jdk-" in p]
+        self.assertEqual(len(jdk_bins), 1, main.EnvManager.read_user_path_entries())
+
+
+class RestoreProcessPathSync(EnvSandbox):
+    """F5（最终加固轮）：Unix 回滚后当前进程 PATH 必须与持久层同步。
+
+    旧 Unix 分支全靠 append_unix_path 顺带同步——命中 rc 里已有 marker 时它
+    提前 return，进程 PATH 就漏掉了；Windows 分支则对每条都补
+    _add_process_path_entry。断言落在第三处 os.environ["PATH"]（此前三条切换
+    失败用例只断言了持久层两处，漏了这一处）。EnvSandbox 结束会还原 PATH。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.comp = self.make_component("jdk", "21.0.4", "17.0.12")
+
+    def _stub_flaky_unix_append(self, fail_entry):
+        orig = main.EnvManager.append_unix_path
+
+        def flaky(entry):
+            if entry == fail_entry:
+                raise OSError("disk full")
+            return orig(entry)
+        main.EnvManager.append_unix_path = staticmethod(flaky)
+        self.addCleanup(setattr, main.EnvManager, "append_unix_path", orig)
+
+    def test_linux_rollback_after_failed_switch_syncs_process_path(self):
+        # 完整回滚现场：切 21 失败 → 17 的条目在 rc、read_user_path_entries、
+        # os.environ["PATH"] 三处都要同时在场才算"三处一致"（决策 D3 约束 2）。
+        self.as_linux()
+        old_bin = str(self.comp.install_dir("17.0.12") / "bin")
+        main.EnvManager.write_user_env("JAVA_HOME", str(self.comp.install_dir("17.0.12")))
+        main.EnvManager.add_path_entry(old_bin)
+        self._stub_flaky_unix_append(str(self.comp.install_dir("21.0.4") / "bin"))
+        with self.assertRaises(main.SwitchError):
+            main.apply_active_version(self.comp, "21.0.4")
+        self.assertIn(old_bin, main.EnvManager.read_user_path_entries())
+        self.assertIn(old_bin, os.environ.get("PATH", ""))
+
+    def test_restore_syncs_process_path_when_rc_marker_already_exists(self):
+        # 不对称本体：持久层已有该条目（marker 命中，append_unix_path 提前 return）
+        # 而当前进程 PATH 里没有 → restore_path_entries 仍必须把它补回进程 PATH。
+        # 修复前红：Unix 分支跟着提前 return 一起跳过了同步。
+        self.as_linux()
+        entry = str(self.comp.install_dir("21.0.4") / "bin")
+        base = os.environ.get("PATH", "")
+        main.EnvManager.add_path_entry(entry)          # rc 落下 marker 块
+        os.environ["PATH"] = base                      # 造"持久层有、进程没有"的分叉
+        self.assertNotIn(entry, os.environ["PATH"])    # 夹具自查
+        main.EnvManager.restore_path_entries([entry])
+        self.assertEqual(
+            main.EnvManager.read_user_path_entries().count(entry), 1,
+            "rc 里命中已有 marker 就不许再追加第二块（幂等）")
+        self.assertIn(entry, os.environ["PATH"])
+
 
 class ActiveConfig(EnvSandbox):
     def test_missing_file_gives_empty_map(self):
@@ -554,6 +718,41 @@ class ActiveConfig(EnvSandbox):
         main.save_active_version("node", "20.15.0")
         main.save_active_version("jdk", None)
         self.assertEqual(main.load_active_map(), {"node": "20.15.0"})
+
+    # ---- F2（最终加固轮）：原子写 + 空串语义 + 值类型校验 ----
+    def test_failed_replace_leaves_previous_file_intact(self):
+        # 写入走"临时文件 + os.replace"。桩 os.replace 抛错（模拟崩在写中途/
+        # 目标被占用）→ 旧文件必须原样可读、load_active_map() 仍返回旧表。
+        # 改造前是 CONFIG_FILE.write_text 直写：同样的中断会留下半截 JSON，
+        # 读侧回落成空表，所有生效登记静默消失。
+        main.save_active_version("jdk", "17.0.12")
+        before = main.CONFIG_FILE.read_text(encoding="utf-8")
+        orig_replace = os.replace
+        os.replace = lambda *a, **k: (_ for _ in ()).throw(OSError("disk died"))
+        self.addCleanup(setattr, os, "replace", orig_replace)
+        with self.assertRaises(OSError):
+            main.save_active_version("jdk", "21.0.4")
+        self.assertEqual(main.CONFIG_FILE.read_text(encoding="utf-8"), before)
+        self.assertEqual(main.load_active_map(), {"jdk": "17.0.12"})
+
+    def test_empty_string_version_is_rejected_not_treated_as_clear(self):
+        # 旧语义 `if version:` 把 "" 当"清除"；新语义清除只认 None，空串显式拒绝。
+        # 拒绝=不落盘：登记表与文件都保持原样。
+        main.save_active_version("jdk", "21.0.4")
+        with self.assertRaises(ValueError):
+            main.save_active_version("jdk", "")
+        self.assertEqual(main.load_active_map(), {"jdk": "21.0.4"})
+        # None 仍是唯一的清除语义（护栏：改坏成"None 也 raise"会红）
+        main.save_active_version("jdk", None)
+        self.assertEqual(main.load_active_map(), {})
+
+    def test_load_skips_non_string_and_empty_values(self):
+        # 磁盘上手改的脏值：非字符串/空串值逐键跳过，不整体抛、也不往下传。
+        main.CONFIG_FILE.write_text(json.dumps({"active": {
+            "jdk": 21, "node": "20.15.0", "go": {"v": 1},
+            "maven": "", "gradle": "8.10"}}), encoding="utf-8")
+        self.assertEqual(main.load_active_map(),
+                         {"node": "20.15.0", "gradle": "8.10"})
 
     def test_infer_active_from_env_reads_sandboxed_rc(self):
         self.as_linux()
@@ -755,6 +954,23 @@ class InstalledCheckIcon(EnvSandbox):
         self.assertEqual(self._mark(combo, combo.findText("17")), False)
         # 别的已装版本的勾不受影响
         self.assertEqual(self._mark(combo, combo.findText("21")), True)
+
+    def test_row_count_mismatch_skips_refresh_instead_of_miswriting(self):
+        # F4 护栏用例：手动把 combo 删成 2 行，与 component.versions（4 项）错位。
+        # 改造前按 enumerate 行号写：留下的 "11"/"8" 没装，却会收到清单前两项
+        # （21/17 已装）的勾——写歪；行号越界时还会 IndexError。
+        # 规格：行数不齐就整轮跳过——不抛异常、既有条目数据一个都不许被改写。
+        card = self._jdk_card()
+        combo = card.version_combo
+        self.assertEqual(combo.count(), len(self.JDK_ALL))     # 夹具自查：先要齐
+        combo.removeItem(combo.findText("21"))
+        combo.removeItem(combo.findText("17"))
+        self.assertEqual(tuple(self._labels(combo)), ("11", "8"))
+        self.assertNotEqual(combo.count(), len(card.component.versions))
+        before = [self._mark(combo, i) for i in range(combo.count())]
+        card._refresh_installed_marks()                        # 不应抛任何异常
+        self.assertEqual([self._mark(combo, i) for i in range(combo.count())], before,
+                         "行数不齐的一轮不许写歪任何图标（宁可这轮不刷勾）")
 
     def test_apply_active_refreshes_the_marks(self):
         # Task 6 刻意留白、本任务补上的接线：_apply_active 成功后要重挂一次勾。
@@ -1447,6 +1663,57 @@ class UninstallHomeGuardFix3(EnvSandbox):
         self.assertIsNone(card.active_version())
         self.assertIn("均未生效", card.status_label.text())
         self.assertNotIn("生效 11", card.status_label.text())
+
+
+class UninstallRepointHomeGuardF12(EnvSandbox):
+    """F12（最终加固轮，Important）：删掉的正是生效版本时，自动重排前先看 HOME 的位置。
+
+    现网第 4 步的 `elif active and removed_ver == active:` 一支没有 HOME 守卫：
+    JAVA_HOME 是组件根之外、用户自己的安装（IDE/系统装指过去）时，
+    apply_active_version 会把用户的入口无条件覆成我们的目录——违反绑定约束
+    「用户自己的条目一律不动」，也推翻第 2 步刚说过的"未删除"。
+    判据用 HOME 的**位置**（与修复轮 3 的重建分支一致，位置才解释得了"谁写的"）：
+      · 落在组件根内 / 已被第 2 步删掉 / 没设 → 这是我们写的（或老配置反推的），
+        照旧自动重排——修复轮 2 的 I-1 必须保住；
+      · 落在组件根外 → 用户自己的选择，只提示，不写回。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.comp = self.make_component("jdk", "21.0.4", "17.0.12")
+        self.win_path[:] = [str(self.comp.install_dir("21.0.4") / "bin"),
+                            r"C:\Windows\system32"]
+
+    def test_external_home_is_hinted_not_overwritten_when_active_removed(self):
+        # 评审给的 6 行真值表缺的那一行：登记表 active=21.0.4，JAVA_HOME 是根外的
+        # 用户 JDK。卸载生效的 21.0.4 → 修复前红：JAVA_HOME 被覆成我们的
+        # jdk-17.0.12 目录，摘要写"生效版本已自动切到 17.0.12"。
+        foreign = r"C:\Program Files\Java\jdk1.8.0_202"
+        self.win_env["JAVA_HOME"] = foreign
+        main.save_active_version("jdk", "21.0.4")
+        summary = self.comp.uninstall("21.0.4")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), foreign,
+                         "用户指到组件根外的 JAVA_HOME 不得被卸载的自动重排覆成我们的目录")
+        self.assertIn("仅配置环境变量", summary, "不出手可以，但要在摘要里提示用户怎么重设")
+        self.assertNotIn("已自动切到", summary)
+        self.assertEqual(main.load_active_map().get("jdk"), "21.0.4",
+                         "不重排就不写 active：留旧登记交给用户点按钮收尾")
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+    def test_in_root_legacy_home_still_repoints_when_active_removed(self):
+        # 反向用例（护 I-1，别把 F12 修成"老用户卸载生效版本后什么都不做"）：
+        # 登记表为空的旧配置，JAVA_HOME 落在我们根内、正指着被删的 21.0.4，
+        # 第 2 步把 HOME 删掉后第 4 步仍必须自动重排到剩余最高的 17.0.12。
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("21.0.4"))
+        main.CONFIG_FILE.write_text(
+            json.dumps({"selections": {"jdk": "21.0.4"}}, ensure_ascii=False),
+            encoding="utf-8")
+        self.assertNotIn("jdk", main.load_active_map())     # 夹具自查：登记表为空
+        summary = self.comp.uninstall("21.0.4")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), str(self.comp.install_dir("17.0.12")))
+        self.assertEqual(main.load_active_map().get("jdk"), "17.0.12")
+        self.assertIn("生效版本已自动切到 17.0.12", summary)
 
 
 class UninstallConfirmText(EnvSandbox):

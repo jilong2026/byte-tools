@@ -341,7 +341,8 @@ class Component:
         """
         卸载指定版本：删除安装目录、移除正指向被删目录的 XXX_HOME、只清理被删版本的
         PATH 条目；多版本组件在任何破坏性动作之前先快照生效版本，删掉生效版本时自动
-        切到剩余里版本号最高的那个。
+        切到剩余里版本号最高的那个（但 XXX_HOME 落在组件根外 = 用户自己的安装时，
+        只在摘要里提示、不自动改写，见 F12 守卫）。
 
         入参 version: str  下拉框选中的版本号；与实际安装版本不一致时会自动校正目标
         返回: str           卸载结果摘要（中文，多步骤用中文分号分隔）
@@ -438,8 +439,10 @@ class Component:
         #    读登记表/反推：老配置的生效版本靠 XXX_HOME 反推，而第 2 步可能已把那个 HOME
         #    删掉，事后再读永远是 None，"自动重排"会静默失效。
         #    全删光：清登记；HOME 只在指向本组件目录时才清，用户指到别处的绝不动。
-        #    还有剩余：删掉的正是生效版本就切到剩余里版本号最高的；只有"我们自己的
-        #    HOME"（落在组件根内）被这次卸载带偏/删掉，才按生效版本重建。
+        #    还有剩余：删掉的正是生效版本时，判据同样是 HOME 的位置（F12）——落在组件
+        #    根外（用户自己的安装）只提示不改写；落在根内或已被第 2 步删掉才切到剩余里
+        #    版本号最高的；只有"我们自己的 HOME"（落在组件根内）被这次卸载带偏/删掉，
+        #    才按生效版本重建。
         if self.multi_version:
             remaining = installed_versions(self)
             removed_ver = version_from_install_dir(self, install_path) if install_path else None
@@ -475,8 +478,22 @@ class Component:
                                     str(home_now), str(remaining_map[active])))):
                         target = active
                 elif active and removed_ver == active:
-                    # 删掉的正是生效版本：切到剩余里版本号最高的（installed_versions 已降序）
-                    target = remaining[0][0]
+                    # 删掉的正是生效版本：切到剩余里版本号最高的（installed_versions 已降序）。
+                    # F12：动手前先看当前 HOME 的**位置**——落在组件根外 = 用户自己的安装
+                    # （IDE 或系统装指过去的），绝不覆成我们的目录：本期只做"我们写过的
+                    # 东西自己收尾"，摘要里提示用户点按钮重设即可。落在根内、或已被第 2 步
+                    # 删掉、或压根没设 = 我们写的（含老配置从根内 HOME 反推的生效版本，
+                    # 修复轮 2 的 I-1），照旧自动重排。判据用位置而不是登记表有没有 key：
+                    # 与上面重建分支同源，也只有位置解释得了"谁写的"。
+                    home_now = EnvManager.read_user_env(self.env_var) if self.env_var else None
+                    if home_now and not EnvManager._under_root(
+                            str(home_now), str(component_root)):
+                        summary_parts.append(
+                            f"生效版本 {active} 已卸载，但 {self.env_var} 指向组件目录之外"
+                            f"（{home_now}，是你自己的选择），不自动改写；"
+                            f"如需由本工具接管，可选中剩余版本后点「仅配置环境变量」重设")
+                    else:
+                        target = remaining[0][0]
                 # 登记表里那个版本本来就不在磁盘上、这次又没删到它 → 不猜，交给用户重点按钮
                 if target:
                     try:
@@ -3896,7 +3913,10 @@ class EnvManager:
         if marker_begin not in text or marker_end not in text:
             return None
         block = text.split(marker_begin, 1)[1].split(marker_end, 1)[0]
-        m = _re.search(r'export\s+' + _re.escape(name) + r'="([^"]*)"', block)
+        # F6：值里含引号（如 /opt/jd"k）时非贪婪 [^"]* 会在第一个引号处截断。
+        # 贪婪 .* 配行末引号（. 不跨行）取同一行最后一个引号之前的全部内容，
+        # 与写入端 `export NAME="value"` 的"末引号收尾"约定对得上。
+        m = _re.search(r'export\s+' + _re.escape(name) + r'="(.*)"', block)
         return m.group(1) if m else None
 
     @staticmethod
@@ -3943,10 +3963,23 @@ class EnvManager:
         else:
             for e in entries:
                 EnvManager.append_unix_path(e)
+                # F5：append_unix_path 命中 rc 里已有 marker 时会提前 return，
+                # 连进程 PATH 的同步一起跳过 → 回滚后当前进程与持久层不一致
+                # （Windows 分支对每条都补 _add_process_path_entry，从不受影响）。
+                # 这里按同样的原语补一次：条目已在进程 PATH 里则是无害 no-op。
+                EnvManager._add_process_path_entry(e)
 
     @staticmethod
     def read_user_path_entries() -> List[str]:
-        """读持久层里的 PATH 条目。Unix 侧只能看到本工具用 marker 写过的那些。"""
+        """读持久层里的 PATH 条目。
+
+        ⚠ 跨平台调用者注意：两平台的语义范围**不同**——
+          · Windows 返回整段用户 PATH（含用户自己写的所有条目）；
+          · Unix 只返回本工具用 marker 写过的条目（rc 里用户/第三方工具的
+            export PATH 行看不见）。
+        想拿它做"全量备份→整表恢复"或"与进程 PATH 逐条对比"的调用方，
+        必须先想清楚这个差异，否则 Unix 侧会漏掉不属于本工具的那一大截。
+        """
         if CURRENT_OS == "Windows":
             return EnvManager._read_windows_user_path()
         rc = EnvManager._shell_rc_file()
@@ -3977,6 +4010,12 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
          「mvn -v 报 21、java -version 报 17」，比改造前更糟。
       3) 回滚依据是持久层快照（read_user_env + remove_path_entries_under 的返回值），
          不是 os.environ —— 后者已被本工具改脏，不能当"改动前"。
+
+    红线（F7，最终加固轮裁定）：**任何失败必须抛 SwitchError，不得以返回值表达失败**。
+    调用方（ComponentCard._apply_active 与卸载第 4 步重排）把"正常返回"当作"全部成功"
+    ——写 active 登记表、报 ok 日志。哪天有人让失败混进返回的 steps 而不抛，界面就会
+    既写登记表又报成功。现网不存在这种路径（try 内任何异常都会回滚后 raise），所以
+    不加运行时检查，契约以本 docstring 为准。
     """
     target = comp.install_dir(version)
     if not target.is_dir():
@@ -4059,10 +4098,27 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
     return steps
 
 
+def _atomic_write_config(data: Dict[str, object]) -> None:
+    """config.json 的唯一落盘出口：先写同目录临时文件，再 os.replace 原子覆盖。
+
+    直接对目标文件 write_text 崩在中途会留下半截 JSON，而读侧（load_active_map /
+    _save_settings）把损坏文件回落成空表——用户所有"生效版本"登记就静默消失了。
+    replace 在同目录内是原子覆盖：要么新内容完整就位，要么旧文件原样不动，
+    最坏只残留一个 .tmp，不影响读侧。
+    """
+    ensure_dir(CONFIG_FILE.parent)
+    tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, CONFIG_FILE)
+
+
 def load_active_map() -> Dict[str, str]:
     """读取"每个组件当前生效哪个版本"的登记表；文件缺失或损坏一律当空表。
 
     返回: Dict[str, str]  {组件 key: 生效版本号}
+
+    说明: 值只接受非空字符串——磁盘上手改成 {"jdk": 21} 或 {"jdk": {...}} 时
+          跳过该键（其余键照常返回，不整体抛），绝不把非字符串当版本号往下传。
     """
     if not CONFIG_FILE.exists():
         return {}
@@ -4071,7 +4127,10 @@ def load_active_map() -> Dict[str, str]:
     except Exception:
         return {}
     active = data.get("active") if isinstance(data, dict) else None
-    return dict(active) if isinstance(active, dict) else {}
+    if not isinstance(active, dict):
+        return {}
+    return {k: v for k, v in active.items()
+            if isinstance(k, str) and isinstance(v, str) and v}
 
 
 def save_active_version(comp_key: str, version: Optional[str]) -> None:
@@ -4082,7 +4141,12 @@ def save_active_version(comp_key: str, version: Optional[str]) -> None:
 
     说明: 必须**合并写**——先读原文件，只改 active 里那一项。整体覆盖会把
           selections（下拉框选中版本）一起抹掉，用户下次启动选中的版本全丢。
+          清除只认 None：空串不是"清除"而是脏值（写进登记表后会被读侧
+          的非空字符串校验静默丢掉），显式 raise ValueError 报出来。
     """
+    if version is not None and (not isinstance(version, str) or not version):
+        raise ValueError(
+            f"生效版本号必须是非空字符串或 None（None=清除），收到 {version!r}")
     data: Dict[str, object] = {}
     if CONFIG_FILE.exists():
         try:
@@ -4094,13 +4158,12 @@ def save_active_version(comp_key: str, version: Optional[str]) -> None:
     active = data.get("active")
     if not isinstance(active, dict):
         active = {}
-    if version:
-        active[comp_key] = version
-    else:
+    if version is None:
         active.pop(comp_key, None)
+    else:
+        active[comp_key] = version
     data["active"] = active
-    ensure_dir(CONFIG_FILE.parent)
-    CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_config(data)
 
 
 def infer_active_from_env(comp: Component) -> Optional[str]:
@@ -4748,6 +4811,12 @@ class ComponentCard(QFrame):
         """
         if not self.component.multi_version:
             return
+        # F4 护栏：下面的循环按 enumerate(versions) 的行号往 combo 写数据，前提是
+        # 行数与版本清单 1:1。哪天有调用点在改清单的同时没重灌 combo（搜索过滤、
+        # repopulate 时机变化），按位写会写歪或直接 IndexError——宁可这一轮不刷勾，
+        # 也不写歪：行数不齐就整轮跳过。
+        if self.version_combo.count() != len(self.component.versions):
+            return
         installed = {v for v, _p in installed_versions(self.component)}
         icon = _installed_icon()
         empty = QIcon()
@@ -5070,8 +5139,9 @@ class ComponentCard(QFrame):
         其他组件：沿用原有"取已装目录里语义版本最高的一个"的行为，不写 active 表。
 
         为什么必须按下拉框选中的版本生效，而不是照旧取"目录名字典序最后一个"：
-        jdk 装了 21.0.4 / 17.0.12 / 8 时，字符串排序会把 jdk-8 排到最后，
-        于是用户明明选的是 21.0.4，配出来的却是 8 —— 生效版本与所选版本必须一致。
+        jdk 的下拉清单是内置大版本串 21/17/11/8，装了 21、17、8 时，
+        字符串排序会把 jdk-8 排到最后，
+        于是用户明明选的是 21，配出来的却是 8 —— 生效版本与所选版本必须一致。
         """
         install_root = CONFIG_DIR / self.component.key
         if not install_root.exists():
@@ -6099,8 +6169,7 @@ class MainWindow(QMainWindow):
             }
             if not isinstance(data.get("active"), dict):
                 data["active"] = {}
-            CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False),
-                                   encoding="utf-8")
+            _atomic_write_config(data)
         except Exception:
             pass
 

@@ -11,9 +11,18 @@
 """
 
 import os
+import platform as _platform
 import sys
 import time
 import unittest
+
+# 本机 WMI 卡死会让 platform.system() 永久阻塞（直跑本文件就挂在这里，
+# 之前只有外部 runner 注入桩才跑得动），必须在 import main 之前 stub 掉。
+# 与 bt_multiversion_tests.py 同款；4 条用例都不依赖真实 WMI。
+_platform._wmi_query = lambda *a, **k: (_ for _ in ()).throw(
+    OSError("WMI disabled for test process"))
+if hasattr(_platform.uname, "cache_clear"):
+    _platform.uname.cache_clear()
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 REPO_ROOT = r"E:\file\test\byte-tools"
