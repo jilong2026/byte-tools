@@ -3621,20 +3621,30 @@ class EnvManager:
         入参 name: str  环境变量名，如 "JAVA_HOME"
         """
         try:
-            import winreg  # type: ignore
-
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
-            ) as key:
-                try:
-                    winreg.DeleteValue(key, name)
-                except FileNotFoundError:
-                    pass  # 本来就不存在，幂等
+            EnvManager._delete_windows_user_env(name)
             EnvManager._broadcast_env_change()
             # 同步删除当前进程的环境变量，避免后续 detect() 仍读到旧值
             os.environ.pop(name, None)
         except Exception as exc:
             raise RuntimeError(f"删除 Windows 环境变量 {name} 失败：{exc}")
+
+    @staticmethod
+    def _delete_windows_user_env(name: str) -> None:
+        """删除 HKCU\\Environment 里的单个值。
+
+        单独抽出只为给测试一个可打桩的写侧接缝（与读侧接缝
+        _read_windows_user_env 对称）：生效版本切换失败的回滚会经
+        drop_user_env 走到这里，不打桩的话测试会真删用户注册表里的值。
+        """
+        import winreg  # type: ignore
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
+        ) as key:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass  # 本来就不存在，幂等
 
     @staticmethod
     def remove_unix_env(name: str) -> Path:
@@ -3795,6 +3805,30 @@ class EnvManager:
         return EnvManager.remove_unix_path_entries_under(root)
 
     @staticmethod
+    def restore_path_entries(entries: List[str]) -> None:
+        """把一批条目补回持久层 PATH 与当前进程 PATH（切换失败回滚专用）。
+
+        为什么不循环调 add_path_entry：触发回滚的那一刻，add_path_entry 的
+        Windows 分支（append_windows_path）往往正是刚刚失败的那条路——磁盘满、
+        注册表不可写这类故障是系统性的，用同一条码路径去"补救"几乎必然再失败。
+        这里改用与 remove_path_entries_under 相同的整表写入：清表那一步刚成功，
+        证明这条写路径在当前故障下仍可用。
+        """
+        if not entries:
+            return
+        if CURRENT_OS == "Windows":
+            current = EnvManager._read_windows_user_path()
+            missing = [e for e in entries
+                       if not any(EnvManager._same_path(c, e) for c in current)]
+            if missing:
+                EnvManager._write_registry_env("Path", ";".join(current + missing))
+            for e in entries:
+                EnvManager._add_process_path_entry(e)
+        else:
+            for e in entries:
+                EnvManager.append_unix_path(e)
+
+    @staticmethod
     def read_user_path_entries() -> List[str]:
         """读持久层里的 PATH 条目。Unix 侧只能看到本工具用 marker 写过的那些。"""
         if CURRENT_OS == "Windows":
@@ -3806,6 +3840,84 @@ class EnvManager:
         pattern = _re.compile(
             r"# >>> byte-tools:PATH:(.*?) >>>.*?# <<< byte-tools:PATH:\1 <<<", _re.DOTALL)
         return [m.group(1) for m in pattern.finditer(text)]
+
+
+class SwitchError(RuntimeError):
+    """生效版本切换失败；抛出前已尽量回滚到切换前状态。"""
+
+
+def apply_active_version(comp: Component, version: str) -> List[str]:
+    """把 comp 的生效版本设为 version，并保证三处一致。
+
+    入参 comp:    Component   目标组件
+    入参 version: str         必须是磁盘上真实存在的版本（installed_versions 里的项）
+    返回: List[str] 中文步骤说明，界面逐行打日志
+    异常: SwitchError 目录不存在，或任一步失败（已改动的部分按快照回滚后再抛）
+
+    设计约束（2026-09-29 与用户确认，属规格而非实现细节，决策 D3）：
+      1) 同一组件在 PATH 里只允许存在"生效版本"这一条：先清掉本组件目录下的所有条目，
+         再写目标版本那一条。其他组件与用户自己的条目不动。
+      2) XXX_HOME、PATH、当前进程三处要么全成要么全回滚。只成一半会出现
+         「mvn -v 报 21、java -version 报 17」，比改造前更糟。
+      3) 回滚依据是持久层快照（read_user_env + remove_path_entries_under 的返回值），
+         不是 os.environ —— 后者已被本工具改脏，不能当"改动前"。
+    """
+    target = comp.install_dir(version)
+    if not target.is_dir():
+        raise SwitchError(f"版本目录不存在，无法设为生效：{target}")
+
+    steps: List[str] = []
+    # 读持久层而不是 os.environ：本进程可能早已被旧的切换改脏，
+    # 只有注册表 / shell rc 里的值才是"切换前"的真相（约束 3）。
+    prev_home = EnvManager.read_user_env(comp.env_var) if comp.env_var else None
+    added_entries: List[str] = []
+    removed_entries: List[str] = []
+
+    def _rollback() -> None:
+        # 逆序撤销：先撤 PATH 新增，再恢复被删条目，最后还原环境变量。
+        # 每步独立 try：一步补救失败不能拖累其余步——留下"半回滚"至少比
+        # 异常炸穿、后面几步完全没机会执行要好。
+        for entry in added_entries:
+            try:
+                EnvManager.drop_path_entry(entry)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[rollback] 移除 PATH 条目失败 {entry}: {exc}")
+        if removed_entries:
+            try:
+                EnvManager.restore_path_entries(removed_entries)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[rollback] 恢复 PATH 条目失败 {removed_entries}: {exc}")
+        if comp.env_var:
+            try:
+                if prev_home is None:
+                    # 切换前本就没有这个变量：回滚的正确形态是删掉，
+                    # 而不是写个空值——空值会让 detect() 误判"已配置"。
+                    EnvManager.drop_user_env(comp.env_var)
+                else:
+                    EnvManager.write_user_env(comp.env_var, prev_home)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[rollback] 恢复 {comp.env_var} 失败: {exc}")
+
+    try:
+        if comp.env_var:
+            EnvManager.write_user_env(comp.env_var, str(target))
+            steps.append(f"已设置 {comp.env_var}={target}")
+        removed_entries = EnvManager.remove_path_entries_under(str(CONFIG_DIR / comp.key))
+        bin_dir = str(target / comp.path_subdir) if comp.path_subdir else str(target)
+        EnvManager.add_path_entry(bin_dir)
+        added_entries.append(bin_dir)
+        steps.append(f"PATH 已收敛为生效版本这一条：{bin_dir}")
+        if removed_entries:
+            steps.append("已移除同组件其他版本的条目：" + "、".join(removed_entries))
+    except Exception as exc:
+        _rollback()
+        steps.append(f"切换失败，已回滚到切换前状态（原 {comp.env_var or '环境变量'}="
+                     f"{prev_home if prev_home is not None else '未设置'}）：{exc}")
+        raise SwitchError("；".join(steps)) from exc
+
+    steps.append("当前进程已同步；已开着的终端与 IDE 需重开才会读到新值"
+                 "（Windows 若装了 Oracle javapath，个别命令仍可能被它抢先）")
+    return steps
 
 
 def _dead_tool_path_predicate():

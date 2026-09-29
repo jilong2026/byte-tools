@@ -74,6 +74,9 @@ class EnvSandbox(unittest.TestCase):
         self._orig_write = main.EnvManager._write_registry_env
         self._orig_get = main.EnvManager.get
         self._orig_read_env = getattr(main.EnvManager, "_read_windows_user_env", None)
+        # Task 4 写侧接缝（_delete_windows_user_env）：回滚路径经 drop_user_env
+        # 走到真实 winreg.DeleteValue，不打桩就是用例在真删用户 HKCU 的值。
+        self._orig_delete_env = getattr(main.EnvManager, "_delete_windows_user_env", None)
 
         def fake_read():
             return list(self.win_path)
@@ -96,6 +99,9 @@ class EnvSandbox(unittest.TestCase):
         if self._orig_read_env is not None:      # Task 3 落地后生效：不碰真实 HKCU
             main.EnvManager._read_windows_user_env = staticmethod(
                 lambda name: self.win_env.get(name))
+        if self._orig_delete_env is not None:    # Task 4 落地后生效：不真删 HKCU 值
+            main.EnvManager._delete_windows_user_env = staticmethod(
+                lambda name: self.win_env.pop(name, None))
 
         def restore_win():
             main.EnvManager._read_windows_user_path = self._orig_read
@@ -103,6 +109,8 @@ class EnvSandbox(unittest.TestCase):
             main.EnvManager.get = self._orig_get
             if self._orig_read_env is not None:
                 main.EnvManager._read_windows_user_env = self._orig_read_env
+            if self._orig_delete_env is not None:
+                main.EnvManager._delete_windows_user_env = self._orig_delete_env
         self.addCleanup(restore_win)
 
         # 卡片构造会跑状态探测，这里统一停掉并在结束后还原
@@ -177,6 +185,16 @@ class SandboxSelfCheck(EnvSandbox):
         self.assertEqual(main.EnvManager._read_windows_user_path(), [])
         main.EnvManager._write_registry_env("Path", r"C:\a;C:\b")
         self.assertEqual(self.win_path, [r"C:\a", r"C:\b"])
+
+    def test_windows_delete_env_seam_is_stubbed(self):
+        # 写侧接缝自检（Task 4 裁定 R1）：回滚会从 drop_user_env 走到
+        # _delete_windows_user_env；桩一旦失联，用例就会真删用户注册表值，
+        # 而 win_env 断言仍可能"绿"——所以这里必须主动调用并验证落点。
+        delete = getattr(main.EnvManager, "_delete_windows_user_env", None)
+        self.assertIsNotNone(delete, "EnvManager 缺少 _delete_windows_user_env 接缝")
+        self.win_env["KAFKA_HOME"] = r"C:\should\be\popped"
+        delete("KAFKA_HOME")
+        self.assertNotIn("KAFKA_HOME", self.win_env)
 
 
 # 与用户确认过的多版本组件白名单（固定 7 个，别自行扩大）
@@ -271,6 +289,77 @@ class EnvFacade(EnvSandbox):
         self.assertEqual([p.lower() for p in removed], [r"c:\x\jdk\jdk-17.0.12\bin"])
         self.assertIn(r"C:\x\jdk\jdk-21.0.4\bin", self.win_path)
         self.assertIn(r"C:\Windows\system32", self.win_path)
+
+
+class SwitchActive(EnvSandbox):
+    def setUp(self):
+        super().setUp()
+        self.comp = self.make_component("jdk", "21.0.4", "17.0.12")
+
+    def test_windows_switch_sets_home_and_collapses_path_to_one_entry(self):
+        self.as_windows()
+        # 先制造旧状态：两个版本各留一条 PATH（就是现在那个病）
+        self.win_path[:] = [str(self.comp.install_dir("17.0.12") / "bin"),
+                            str(self.comp.install_dir("21.0.4") / "bin"),
+                            r"C:\Windows\system32"]
+        steps = main.apply_active_version(self.comp, "21.0.4")
+        self.assertEqual(self.win_env["JAVA_HOME"], str(self.comp.install_dir("21.0.4")))
+        jdk_entries = [p for p in self.win_path if "jdk-" in p.lower()]
+        self.assertEqual(len(jdk_entries), 1, self.win_path)
+        self.assertIn("jdk-21.0.4", jdk_entries[0])
+        self.assertIn(r"C:\Windows\system32", self.win_path)   # 别的条目不许动
+        self.assertTrue(any("已开" in s or "重开" in s for s in steps),
+                        "日志必须提示已开终端不受影响（决策 D6）")
+
+    def test_linux_switch_writes_rc(self):
+        self.as_linux()
+        main.apply_active_version(self.comp, "17.0.12")
+        rc_text = self.rc.read_text(encoding="utf-8")
+        self.assertIn(str(self.comp.install_dir("17.0.12")), rc_text)
+        self.assertNotIn("jdk-21.0.4", rc_text)
+
+    def test_failure_after_env_write_rolls_back_env_and_path(self):
+        self.as_windows()
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("17.0.12"))
+        self.win_path[:] = [str(self.comp.install_dir("17.0.12") / "bin")]
+        orig = main.EnvManager.append_windows_path
+        main.EnvManager.append_windows_path = staticmethod(
+            lambda entry: (_ for _ in ()).throw(OSError("disk full")))
+        self.addCleanup(setattr, main.EnvManager, "append_windows_path", orig)
+
+        with self.assertRaises(main.SwitchError):
+            main.apply_active_version(self.comp, "21.0.4")
+        # 回滚：JAVA_HOME 回到改动前，被清掉的旧条目回来了，新条目没留下
+        self.assertEqual(self.win_env["JAVA_HOME"], str(self.comp.install_dir("17.0.12")))
+        self.assertIn(str(self.comp.install_dir("17.0.12") / "bin"), self.win_path)
+        self.assertNotIn(str(self.comp.install_dir("21.0.4") / "bin"), self.win_path)
+
+    def test_windows_rollback_drops_env_when_it_did_not_exist(self):
+        # 回滚的另一条分支：切换前 XXX_HOME 本不存在，失败后必须把它删掉，
+        # 不能留下"半路写上"的新值。这条路径经 drop_user_env →
+        # _delete_windows_user_env 写侧接缝（裁定 R1）——桩失联时本用例会
+        # 去真删 HKCU 而 win_env 里仍残留 JAVA_HOME，从而变红而不是假绿。
+        self.as_windows()
+        self.win_path[:] = [r"C:\Windows\system32"]
+        orig = main.EnvManager.append_windows_path
+        main.EnvManager.append_windows_path = staticmethod(
+            lambda entry: (_ for _ in ()).throw(OSError("disk full")))
+        self.addCleanup(setattr, main.EnvManager, "append_windows_path", orig)
+        with self.assertRaises(main.SwitchError):
+            main.apply_active_version(self.comp, "21.0.4")
+        self.assertNotIn("JAVA_HOME", self.win_env)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+    def test_missing_version_dir_raises_without_touching_anything(self):
+        self.as_windows()
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("17.0.12"))
+        self.win_path[:] = [str(self.comp.install_dir("17.0.12") / "bin")]
+        before_env, before_path = dict(self.win_env), list(self.win_path)
+        with self.assertRaises(main.SwitchError) as ctx:
+            main.apply_active_version(self.comp, "99.9.9")
+        self.assertIn("版本目录不存在", str(ctx.exception))
+        self.assertEqual(self.win_env, before_env)
+        self.assertEqual(self.win_path, before_path)
 
 
 if __name__ == "__main__":
