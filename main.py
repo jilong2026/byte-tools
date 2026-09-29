@@ -3873,20 +3873,28 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
     added_entries: List[str] = []
     removed_entries: List[str] = []
 
-    def _rollback() -> None:
-        # 逆序撤销：先撤 PATH 新增，再恢复被删条目，最后还原环境变量。
-        # 每步独立 try：一步补救失败不能拖累其余步——留下"半回滚"至少比
-        # 异常炸穿、后面几步完全没机会执行要好。
+    def _rollback() -> List[str]:
+        """按快照逆序撤销已落盘的改动，返回"撤不掉"的明细清单（空=回滚干净）。
+
+        每步独立 try：一步补救失败不能拖累其余步——留下"半回滚"至少比
+        异常炸穿、后面几步完全没机会执行要好。
+        但失败绝不能再只 print：打包成 pythonw 跑时 stdout 被丢弃，界面上一个字
+        都看不见，而日志紧接着就写"已回滚"——那是谎报。半回滚（JAVA_HOME 指 21、
+        PATH 指 17）恰恰是计划红线里要求显式暴露给用户的情形，宁可吵也不能沉默，
+        所以明细交回调用方拼进 SwitchError，让 UI 日志如实显示。
+        """
+        problems: List[str] = []
         for entry in added_entries:
             try:
                 EnvManager.drop_path_entry(entry)
             except Exception as exc:  # noqa: BLE001
-                print(f"[rollback] 移除 PATH 条目失败 {entry}: {exc}")
+                problems.append(f"PATH 新增条目没能撤掉：{entry}（{exc}）")
         if removed_entries:
             try:
                 EnvManager.restore_path_entries(removed_entries)
             except Exception as exc:  # noqa: BLE001
-                print(f"[rollback] 恢复 PATH 条目失败 {removed_entries}: {exc}")
+                problems.append("切换前的 PATH 条目没能补回去："
+                                + "、".join(removed_entries) + f"（{exc}）")
         if comp.env_var:
             try:
                 if prev_home is None:
@@ -3896,7 +3904,10 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
                 else:
                     EnvManager.write_user_env(comp.env_var, prev_home)
             except Exception as exc:  # noqa: BLE001
-                print(f"[rollback] 恢复 {comp.env_var} 失败: {exc}")
+                problems.append(
+                    f"{comp.env_var} 没能恢复为切换前的值"
+                    f"（应为 {prev_home if prev_home is not None else '未设置'}）：{exc}")
+        return problems
 
     try:
         if comp.env_var:
@@ -3904,15 +3915,27 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
             steps.append(f"已设置 {comp.env_var}={target}")
         removed_entries = EnvManager.remove_path_entries_under(str(CONFIG_DIR / comp.key))
         bin_dir = str(target / comp.path_subdir) if comp.path_subdir else str(target)
-        EnvManager.add_path_entry(bin_dir)
+        # 先记账、再落盘：add_path_entry 可能"已经写进持久层、随后才抛错"
+        # （注册表写成功但进程同步/广播失败，或 rc 只写了一半）。这种条目若没进
+        # added_entries，回滚就只把旧条目补回来、却漏删它 → 本组件在 PATH 里留下
+        # 两条同时生效的条目，比改造前更糟。反过来先记后写没有代价：
+        # drop_path_entry 是幂等的，最坏是多一次无害的 no-op。
         added_entries.append(bin_dir)
+        EnvManager.add_path_entry(bin_dir)
         steps.append(f"PATH 已收敛为生效版本这一条：{bin_dir}")
         if removed_entries:
             steps.append("已移除同组件其他版本的条目：" + "、".join(removed_entries))
     except Exception as exc:
-        _rollback()
-        steps.append(f"切换失败，已回滚到切换前状态（原 {comp.env_var or '环境变量'}="
+        problems = _rollback()
+        # 回滚全成时措辞与原来完全一致；只要有一步没撤干净，就不能再说"已回滚"，
+        # 并紧跟一行明细告诉用户该手动检查什么（放在成功日志末行之前）。
+        state = ("已回滚到切换前状态" if not problems
+                 else "已按切换前快照尝试回滚，但未完全成功")
+        steps.append(f"切换失败，{state}（原 {comp.env_var or '环境变量'}="
                      f"{prev_home if prev_home is not None else '未设置'}）：{exc}")
+        if problems:
+            steps.append("注意：回滚未完全成功，请手动检查 "
+                         f"{comp.env_var or '环境变量'} 与 PATH：" + "；".join(problems))
         raise SwitchError("；".join(steps)) from exc
 
     steps.append("当前进程已同步；已开着的终端与 IDE 需重开才会读到新值"

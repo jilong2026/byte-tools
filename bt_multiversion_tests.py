@@ -361,6 +361,163 @@ class SwitchActive(EnvSandbox):
         self.assertEqual(self.win_env, before_env)
         self.assertEqual(self.win_path, before_path)
 
+    # ---- 回滚分支补测（评审 I2）：Unix 回滚、env 先失败、清表中途失败、记账顺序 ----
+    # 共同原则：断言只看"持久层里到底剩下什么"——Unix 读 rc 文本，Windows 读
+    # self.win_env / self.win_path。绝不断言 EnvManager.get（它会 os.environ 兜底，
+    # 本进程被自己改脏时照样"看着对"），也绝不断言桩的调用次数（改实现不改行为
+    # 时次数会变，那是给实现上锁而不是给规格上锁）。
+
+    def _seed_linux_jdk_17(self):
+        """在 Unix 沙箱里造出"生效版本是 17"的持久层状态，返回 (home, bin, 无关条目)。"""
+        self.as_linux()
+        old_home = str(self.comp.install_dir("17.0.12"))
+        old_bin = str(self.comp.install_dir("17.0.12") / "bin")
+        main.EnvManager.write_user_env("JAVA_HOME", old_home)
+        main.EnvManager.add_path_entry(old_bin)
+        # 别人（非本组件根目录）的条目：清表与回滚都不许碰它
+        main.EnvManager.add_path_entry("/opt/unrelated/bin")
+        return old_home, old_bin
+
+    def _stub_append_unix_path(self, fn):
+        orig = main.EnvManager.append_unix_path
+        main.EnvManager.append_unix_path = staticmethod(fn)
+        self.addCleanup(setattr, main.EnvManager, "append_unix_path", orig)
+
+    def test_linux_failure_rolls_back_rc_from_persistence(self):
+        # Unix 回滚分支：restore_path_entries 的非 Windows 路径（~main.py:3827-3829）。
+        # 此前所有失败用例都是 as_windows，这条码路一行都没跑过。
+        old_home, old_bin = self._seed_linux_jdk_17()
+        new_bin = str(self.comp.install_dir("21.0.4") / "bin")
+        orig_append = main.EnvManager.append_unix_path
+
+        def flaky(entry):
+            # 只有"写目标版本那一条"失败（磁盘满/权限），旧条目的恢复仍走得通
+            if entry == new_bin:
+                raise OSError("disk full")
+            return orig_append(entry)
+
+        self._stub_append_unix_path(flaky)
+        with self.assertRaises(main.SwitchError) as ctx:
+            main.apply_active_version(self.comp, "21.0.4")
+
+        text = self.rc.read_text(encoding="utf-8")
+        # rc 回到切换前：JAVA_HOME 指 17，17 的 PATH 条目被补回来了
+        self.assertIn(f'export JAVA_HOME="{old_home}"', text)
+        self.assertIn(old_bin, text)
+        self.assertIn("/opt/unrelated/bin", text)
+        self.assertNotIn("jdk-21.0.4", text)
+        entries = main.EnvManager.read_user_path_entries()
+        self.assertIn(old_bin, entries)
+        self.assertNotIn(new_bin, entries)
+        # 回滚干净时措辞维持原样，不许出现"未完全成功"
+        msg = str(ctx.exception)
+        self.assertIn("切换失败，已回滚到切换前状态（原 JAVA_HOME=", msg)
+        self.assertNotIn("回滚未完全成功", msg)
+
+    def test_linux_rollback_failure_is_reported_not_swallowed(self):
+        # 评审 I1：补救失败只 print 等于没说——pythonw 下 stdout 直接丢弃，
+        # 日志却写着"已回滚"。这条造出真实的半回滚（PATH 补不回来、HOME 回来了），
+        # 然后要求 SwitchError 文本如实承认，并点名失败的那一条。
+        old_home, old_bin = self._seed_linux_jdk_17()
+        self._stub_append_unix_path(
+            lambda entry: (_ for _ in ()).throw(OSError("disk full")))
+
+        with self.assertRaises(main.SwitchError) as ctx:
+            main.apply_active_version(self.comp, "21.0.4")
+
+        text = self.rc.read_text(encoding="utf-8")
+        # 半回滚确凿发生（不是测试假设，是被断言的事实）：HOME 回到 17，旧 PATH 没回来
+        self.assertIn(f'export JAVA_HOME="{old_home}"', text)
+        self.assertNotIn(old_bin, text)
+        msg = str(ctx.exception)
+        self.assertIn("回滚未完全成功", msg)
+        self.assertIn(old_bin, msg)                     # 明细要点名没补回来的条目
+        self.assertNotIn("已回滚到切换前状态", msg)       # 不许再谎称已回滚
+
+    def test_windows_env_write_fails_first_and_changes_nothing(self):
+        # 顺序即规格：HOME 写入排在最前，它失败时 PATH 一次都没被动过。
+        self.as_windows()
+        old_home = str(self.comp.install_dir("17.0.12"))
+        old_bin = str(self.comp.install_dir("17.0.12") / "bin")
+        self.win_env["JAVA_HOME"] = old_home
+        self.win_path[:] = [old_bin, r"C:\Windows\system32"]
+        before_env, before_path = dict(self.win_env), list(self.win_path)
+        target_home = str(self.comp.install_dir("21.0.4"))
+
+        orig_write = main.EnvManager._write_registry_env
+
+        def locked(name, value):
+            if value == target_home:
+                raise OSError("registry locked")
+            return orig_write(name, value)
+
+        main.EnvManager._write_registry_env = staticmethod(locked)
+        self.addCleanup(setattr, main.EnvManager, "_write_registry_env", orig_write)
+
+        with self.assertRaises(main.SwitchError) as ctx:
+            main.apply_active_version(self.comp, "21.0.4")
+
+        self.assertEqual(self.win_env, before_env)
+        self.assertEqual(self.win_path, before_path)    # PATH 一个条目都没少
+        msg = str(ctx.exception)
+        self.assertIn("切换失败，已回滚到切换前状态", msg)
+        self.assertNotIn("回滚未完全成功", msg)
+
+    def test_windows_remove_path_entries_fails_midway_rolls_back_home(self):
+        # 清表中途失败：注册表那次写炸了 → removed_entries 仍是空（赋值没完成），
+        # PATH 保持原样，但 HOME 已经写进去了，必须靠回滚还原。
+        self.as_windows()
+        old_home = str(self.comp.install_dir("17.0.12"))
+        old_bin = str(self.comp.install_dir("17.0.12") / "bin")
+        self.win_env["JAVA_HOME"] = old_home
+        self.win_path[:] = [old_bin, r"C:\Windows\system32"]
+        before_path = list(self.win_path)
+
+        orig_write = main.EnvManager._write_registry_env
+
+        def path_write_locked(name, value):
+            if name.lower() == "path":
+                raise OSError("registry locked")
+            return orig_write(name, value)
+
+        main.EnvManager._write_registry_env = staticmethod(path_write_locked)
+        self.addCleanup(setattr, main.EnvManager, "_write_registry_env", orig_write)
+
+        with self.assertRaises(main.SwitchError) as ctx:
+            main.apply_active_version(self.comp, "21.0.4")
+
+        self.assertEqual(self.win_env["JAVA_HOME"], old_home)
+        self.assertEqual(self.win_path, before_path)
+        self.assertNotIn(str(self.comp.install_dir("21.0.4") / "bin"), self.win_path)
+        self.assertNotIn("回滚未完全成功", str(ctx.exception))
+
+    def test_windows_new_entry_persisted_then_raises_still_dropped_on_rollback(self):
+        # 评审 I3：primitive"先落盘、后抛错"（进程同步/广播失败）时，新条目必须
+        # 已被记账，否则回滚只补旧条目、漏删新条目 → 同组件两条 PATH 同时生效。
+        self.as_windows()
+        old_home = str(self.comp.install_dir("17.0.12"))
+        old_bin = str(self.comp.install_dir("17.0.12") / "bin")
+        new_bin = str(self.comp.install_dir("21.0.4") / "bin")
+        self.win_env["JAVA_HOME"] = old_home
+        self.win_path[:] = [old_bin]
+
+        orig_append = main.EnvManager.append_windows_path
+
+        def persist_then_raise(entry):
+            orig_append(entry)                    # 真的写进持久层
+            raise OSError("process sync failed")  # 再炸在写入之后
+
+        main.EnvManager.append_windows_path = staticmethod(persist_then_raise)
+        self.addCleanup(setattr, main.EnvManager, "append_windows_path", orig_append)
+
+        with self.assertRaises(main.SwitchError) as ctx:
+            main.apply_active_version(self.comp, "21.0.4")
+
+        self.assertNotIn(new_bin, self.win_path)
+        self.assertEqual(self.win_path, [old_bin])
+        self.assertEqual(self.win_env["JAVA_HOME"], old_home)
+        self.assertNotIn("回滚未完全成功", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
