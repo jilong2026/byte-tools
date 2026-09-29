@@ -179,5 +179,28 @@ class SandboxSelfCheck(EnvSandbox):
         self.assertEqual(self.win_path, [r"C:\a", r"C:\b"])
 
 
+# 与用户确认过的多版本组件白名单（固定 7 个，别自行扩大）
+EXPECTED_MULTI_VERSION = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
+
+
+class MultiVersionFlag(EnvSandbox):
+    def setUp(self):
+        super().setUp()
+        self.components = {c.key: c for c in main.build_components()}
+
+    def test_only_the_seven_agreed_components_are_multi_version(self):
+        got = {k for k, c in self.components.items() if c.multi_version}
+        self.assertEqual(got, EXPECTED_MULTI_VERSION)
+
+    def test_service_and_installer_mode_components_are_off(self):
+        for key in ("conda", "mysql", "tomcat", "nacos", "elasticsearch",
+                    "docker", "powershell", "nginx", "kubectl"):
+            self.assertFalse(self.components[key].multi_version, key)
+
+    def test_every_component_has_the_attribute(self):
+        for key, comp in self.components.items():
+            self.assertIsInstance(comp.multi_version, bool, key)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

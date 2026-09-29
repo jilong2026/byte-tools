@@ -186,6 +186,10 @@ class Component:
     versions: List[ComponentVersion] = field(default_factory=list)
     # 安装器模式：某些组件（如 Miniconda）下载的是安装器而非归档，需要静默执行安装器
     installer_mode: bool = False
+    # 是否允许并存多个安装版本，并在界面切换"当前生效版本"。
+    # 判据：归档解压安装（非 installer_mode）+ 靠 XXX_HOME / PATH 生效的 PATH 型组件。
+    # 由 build_components() 末尾按 MULTI_VERSION_KEYS 统一赋值，不要在构造处手写。
+    multi_version: bool = False
     # 安装器静默安装参数：按 CURRENT_OS 键取。执行时会附加安装目标目录参数
     installer_args: Dict[str, List[str]] = field(default_factory=dict)
     # 当某平台不支持自动下载时，输出给用户的友好提示文本。
@@ -2756,6 +2760,11 @@ COMPONENT_CATEGORY_OF = {
     "docker": "其它软件", "kubectl": "其它软件", "jenkins": "其它软件",
 }
 
+# 允许并存多版本、可切换生效版本的组件（2026-09-29 与用户确认，固定 7 个，别自行扩大）。
+# 排除 conda：installer_mode 组件装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立。
+# 排除服务型组件（mysql/tomcat/nacos/es/…）：多版本的真矛盾是端口与数据目录，不是环境变量。
+MULTI_VERSION_KEYS = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
+
 
 def group_components(components: List[Component]) -> Dict[str, List[Component]]:
     """按 COMPONENT_CATEGORIES 的顺序分组，供界面建 Tab。"""
@@ -3246,7 +3255,8 @@ def build_components() -> List[Component]:
     )
 
     for comp in components:
-        comp.category = COMPONENT_CATEGORY_OF[comp.key]
+        comp.category = COMPONENT_CATEGORY_OF[comp.key]        # 已有：漏登记直接 KeyError
+        comp.multi_version = comp.key in MULTI_VERSION_KEYS    # 新增：不在白名单就是 False
     return components
 
 
