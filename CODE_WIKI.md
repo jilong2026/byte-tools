@@ -164,8 +164,8 @@ byte-tools/
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
 ├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/byte-tools.exe
-├── 同步Gitee产物.sh     # Gitee Release 同步脚本（Linux/macOS/CI；网络重试 + 幂等 + 附件校验），由 release.yml 调用
-├── 同步Gitee产物.bat    # 同上，Windows 版（双击可运行，功能等价；内容为纯 ASCII，避免 cmd 按 GBK 解析 UTF-8 出错）
+├── 同步Gitee产物.sh     # Gitee Release 同步（Linux/macOS/CI；默认只在正文写 GitHub 直链，可观测快速失败 + 幂等 + 收尾校验），由 release.yml 调用
+├── 同步Gitee产物.bat    # 本机 Windows 版（双击可运行；它会真的把产物传上 Gitee，国内链路快，与 CI 策略有意不同；内容为纯 ASCII，避免 cmd 按 GBK 解析 UTF-8 出错）
 ├── README.md                # 中文说明（面向最终用户）
 ├── README_EN.md             # 英文说明
 ├── DEVELOPMENT.md           # 开发者文档（开发约定、R1 规则等，面向二次开发者）
@@ -984,17 +984,22 @@ git tag v1.0.1
 git push origin v1.0.1
 ```
 
-推 tag 触发 `.github/workflows/release.yml`：Windows / macOS / Linux 三个 runner 分别打包并上传到 GitHub Release（先以草稿暂存），随后 `sync-to-gitee` job 自动取消草稿完成 GitHub 发布，并调用根目录的 `同步Gitee产物.sh` 把所有产物同步到 Gitee Release。
+推 tag 触发 `.github/workflows/release.yml`：Windows / macOS / Linux 三个 runner 分别打包并上传到 GitHub Release（先以草稿暂存），随后 `sync-to-gitee` job 自动取消草稿完成 GitHub 发布，并调用根目录的 `同步Gitee产物.sh` 在 Gitee 建 Release、写入各平台产物的 GitHub 直链。
 
 发布说明：
 - 构建产物共 3 个平台 4 个文件：`byte-tools.exe`、`byte-tools-windows-x64.zip`、`byte-tools-macos-arm64.zip`、`byte-tools-linux-x64`
-- Gitee 侧只接收上述白名单产物；白名单写在根目录 `同步Gitee产物.sh` 的 `ALLOWED_FILES` 与 case 分支，新增平台或改产物名时须与 build job 的 matrix 同步维护
-- 同步依赖仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，需 projects 权限），owner / repo 由 workflow 顶层的 `GITEE_OWNER` / `GITEE_REPO` 环境变量指定
-- **Gitee 同步的三道保险**都在 `同步Gitee产物.sh` 里：① 网络重试（境外 runner 连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`，对每个请求做 10s/20s/40s 指数退避，默认 4 次）；② 幂等（Release 已存在复用 ID、同名附件跳过，失败后 Re-run 安全）；③ 上传后回查附件清单，白名单缺一个即失败
-- **补同步历史 tag**：workflow 支持 `workflow_dispatch`（输入 `tag_name`），在 GitHub → Actions → release → Run workflow 触发。它跳过三平台构建，直接从 GitHub Release 下载已有产物再传到 Gitee；因为 `workflow_dispatch` 读的是默认分支上的 workflow，改动合入 master 后即可对任意历史 tag 生效
-- **本机手动补同步**：Windows 跑 `同步Gitee产物.bat`（双击或传参），Linux/macOS 跑 `同步Gitee产物.sh`，两者与 CI 逻辑等价，同样幂等可重复运行
+- **2026-09-29 起 Gitee 侧默认不接收大二进制**：`sync-to-gitee` 只在 Gitee Release 正文写一张「文件 / 大小 / GitHub 直链」表格。原因见 `同步Gitee产物.sh` 顶部——境外 runner 往 gitee.com 推 84MB 会长时间挂死且服务端不落地（v1.0.3 实测挂 70 分钟、零附件、零日志）
+- 产物名单只有一个维护点：workflow step 的 `RELEASE_ARTIFACTS`（脚本内同名环境变量），它同时决定正文表格、上传资格与收尾校验；`UPLOAD_ARTIFACTS`（默认空）是要真正推给 Gitee 的子集，需要站内直下时填小包并把 job 改成国内 `self-hosted` runner
+- 脚本只在**创建** Release 时写正文：Gitee「更新 Release」接口的方法/路径未能在官方文档核实（swagger 是 JS 页），所以不猜。补同步老 tag 时若正文缺直链，脚本会硬失败并打印「网页端粘正文 / 删 Release 重建」两条路子
+- **三道保险**（`同步Gitee产物.sh`）：① 可观测的快速失败——每次请求打 HTTP 码、耗时、已传字节与均速，4xx 立即判死、网络类错误按 `MAX_ATTEMPTS`（默认 3：5s/10s）退避，且 curl 不再叠 `--retry` 以免与脚本重试相乘；② 幂等（Release 已存在复用 ID、同名附件跳过，失败后 Re-run 安全）；③ 收尾回查正文直链与 `UPLOAD_ARTIFACTS` 的附件清单，缺一项即失败
+- `sync-to-gitee` job 带 `timeout-minutes: 25`（此前无上限、走 GitHub 默认 360 分钟，是「卡住没人知道」的根子）
+- 令牌只走 curl 表单字段，不拼 URL、不用 `curl -v`，避免进日志
+- 同步依赖仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，需 projects 权限），owner / repo 由 workflow 顶层的 `GITEE_OWNER` / `GITEE_REPO` 指定，GitHub 侧仓库标识由 `GITHUB_REPO_SLUG` 传入以生成直链
+- **补同步历史 tag**：workflow 支持 `workflow_dispatch`（输入 `tag_name`），在 GitHub → Actions → release → Run workflow 触发，跳过三平台构建。因为 `workflow_dispatch` 读的是默认分支上的 workflow，改动合入 master 后即可对任意历史 tag 生效
+- **本机手动补同步**：Windows 跑 `同步Gitee产物.bat`（双击或传参；它会真的把产物传上 Gitee，国内链路快，与 CI 的「只写直链」策略有意不同），Linux/macOS/Git Bash 跑 `同步Gitee产物.sh`（默认只写直链，设 `UPLOAD_ARTIFACTS` 才上传）。两个脚本都**先预检产物目录再请求 Gitee**：目录里没有 `byte-tools.exe` 等四个文件时立刻报错并打印取产物的 curl 命令，不会白跑一趟。`.bat` 的默认产物目录是 `release-assets/`（已 gitignore），**不是仓库自带的 `assets/`**——后者是图标目录（`byte-tools.png`/`.ico`/`alipay.png`/`wechat.png`），指过去就会「一个产物都没有」。脚本对 JSON 解释器做握手测试，避开 Windows 上 `python3` 是 Microsoft Store 占位别名的坑
+- 同步脚本的离线回归测试：[bt_gitee_sync_tests.py](./bt_gitee_sync_tests.py)（本地 mock Gitee + 产物名一致性守卫，15 个用例，绝不碰真实站点）；覆盖「不传二进制只写直链 / 幂等复用 / 已存在但缺直链→硬失败并给出补救 / 上传子集跳过与补传 / 接口回成功但附件没落地→硬失败 / 5xx 有界重试且可见 / 4xx 不浪费重试 / 产物目录指错时在请求 Gitee 之前就拦下 / Gitee 用 200+null 表示『该 tag 没有 Release』/ 4 处产物名清单一致」
 - **全自动发布，无需人工操作**：矩阵各平台先上传到草稿 Release 作暂存区（构建中途失败不会对外暴露半成品），待全部平台成功、`sync-to-gitee` 启动后自动 `gh release edit --draft=false` 取消草稿；因此跑绿即等于 `releases/latest/download/...` 已指向新版本
-- 任一平台的构建/上传失败，或 Gitee 侧任一产物上传失败，都会让整个 run 直接变红（不会静默放过）
+- 任一平台的构建/上传失败，或 Gitee 侧任一步校验不通过，都会让整个 run 直接变红（不会静默放过）
 
 ---
 

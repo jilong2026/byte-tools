@@ -2,22 +2,32 @@
 chcp 65001 >nul
 title byte-tools sync to Gitee
 REM ==========================================================================
-REM byte-tools: sync release artifacts to Gitee (Windows version)
+REM byte-tools: sync release artifacts to Gitee (Windows LOCAL version)
 REM --------------------------------------------------------------------------
 REM Windows counterpart of the sync-gitee .sh script (that one runs in CI on Linux).
+REM
+REM NOTE (2026-09-29): the two are NO LONGER equivalent on purpose.
+REM   - CI (.sh)  : overseas runner -> writes only the GitHub download links into the
+REM                 Gitee Release body, and does NOT push big binaries any more
+REM                 (an 84MB POST from abroad hung 70+ minutes and never landed).
+REM   - local (.bat): runs on YOUR machine in mainland China, where uploading the real
+REM                 binaries to Gitee is fast. Use this when you want in-site downloads.
+REM
 REM Same three guarantees:
-REM   retry on network errors (curl --retry) - overseas runners sometimes hit
-REM     curl(35) SSL_ERROR_SYSCALL when calling gitee.com:443
+REM   retry on network errors (curl --retry) - gitee.com can hit
+REM     curl(35) SSL_ERROR_SYSCALL
 REM   idempotent - reuse an existing Release, skip already uploaded attachments
 REM   verify after upload - fail if any whitelisted artifact is missing
 REM
 REM Usage (command line):
 REM   this-script.bat v1.0.2 <GiteeToken> [assets_dir] [nopause]
 REM Usage (double click):
-REM   prompts for tag and token; assets dir defaults to assets
+REM   prompts for tag and token; assets dir defaults to release-assets
 REM
-REM Prepare the artifacts first, e.g.:
-REM   gh release download v1.0.2 --dir assets --clobber
+REM Prepare the artifacts first - gh is optional, plain curl works:
+REM   mkdir release-assets
+REM   curl -L -o release-assets\byte-tools.exe https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe
+REM   (same for byte-tools-windows-x64.zip / byte-tools-macos-arm64.zip / byte-tools-linux-x64)
 REM
 REM Requires: curl.exe (bundled with Windows 10 1803+) and PowerShell 5.1+
 REM Note: this file is intentionally ASCII-only. UTF-8 batch files are parsed
@@ -31,13 +41,18 @@ set "GITEE_OWNER=jack_liujilong"
 set "GITEE_REPO=byte-tools"
 set "API_BASE=https://gitee.com/api/v5/repos/%GITEE_OWNER%/%GITEE_REPO%"
 set "RELEASE_PAGE=https://gitee.com/%GITEE_OWNER%/%GITEE_REPO%/releases"
+REM GitHub side, used only to tell you how to fetch the artifacts
+set "GH_REPO_SLUG=jilong2026/byte-tools"
 
 set "TOKEN_ENV=%GITEE_TOKEN%"
 set "TAG_NAME=%~1"
 set "GITEE_TOKEN=%~2"
 set "ASSETS_DIR=%~3"
 
-if not defined ASSETS_DIR set "ASSETS_DIR=assets"
+REM Default is deliberately NOT "assets": in this repo that is the icon folder
+REM (byte-tools.png / .ico / alipay.png / wechat.png), which silently yields
+REM "0 artifacts found" and wastes a whole Gitee round trip before failing.
+if not defined ASSETS_DIR set "ASSETS_DIR=release-assets"
 if not defined GITEE_TOKEN set "GITEE_TOKEN=%TOKEN_ENV%"
 
 REM Pass nopause as the 4th arg (or set NO_PAUSE=1) to skip the final pause
@@ -66,12 +81,50 @@ where curl.exe >nul 2>nul
 if errorlevel 1 goto :err_curl
 
 REM ---- curl retry flags: --retry-all-errors only exists on newer builds ----
-set "RETRY_OPT=--retry 3 --retry-delay 5"
+REM keep the retry count small: curl retries silently, so --retry 3 with a long
+REM --max-time means tens of minutes of dead air before anything is printed
+set "RETRY_OPT=--retry 1 --retry-delay 5"
 curl.exe --help all 2>nul | findstr /i "retry-all-errors" >nul
 if not errorlevel 1 set "RETRY_OPT=%RETRY_OPT% --retry-all-errors"
 
 REM ---- assets dir check ----
 if not exist "%ASSETS_DIR%\" goto :err_dir
+
+REM ---- preflight: the dir must actually hold build artifacts ----
+REM Without this, pointing the script at the repo's own assets/ folder (icons:
+REM byte-tools.png, .ico, alipay.png, wechat.png) still walks the whole flow,
+REM uploads nothing, and only fails at [3/3] with a message that hides the real
+REM mistake. Check it here, before spending a round trip to Gitee.
+set /a FOUND_ART=0
+for %%F in ("%ASSETS_DIR%\*") do (
+  set "CHK=%%~nxF"
+  if /i "!CHK!"=="byte-tools.exe" set /a FOUND_ART+=1
+  if /i "!CHK!"=="byte-tools-windows-x64.zip" set /a FOUND_ART+=1
+  if /i "!CHK!"=="byte-tools-macos-arm64.zip" set /a FOUND_ART+=1
+  if /i "!CHK!"=="byte-tools-linux-x64" set /a FOUND_ART+=1
+)
+if !FOUND_ART! NEQ 0 goto :pre_ok
+echo.
+echo error: no build artifact found in "%ASSETS_DIR%".
+echo   What is in there:
+dir /b "%ASSETS_DIR%"
+echo.
+echo   This script wants the release files, named exactly:
+echo     byte-tools.exe
+echo     byte-tools-windows-x64.zip
+echo     byte-tools-macos-arm64.zip
+echo     byte-tools-linux-x64
+echo   Note .\assets in this repo is the ICON folder, not the artifact folder.
+echo.
+echo   Fetch the artifacts first - no gh CLI needed:
+echo     mkdir "%ASSETS_DIR%"echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
+goto :fail_nopause
+
+:pre_ok
+echo   preflight ok: found !FOUND_ART! artifact file(s) in "%ASSETS_DIR%"
 
 REM ==========================================================================
 REM [1/3] get-or-create Gitee Release (idempotent: reuse if exists)
@@ -141,7 +194,8 @@ for %%F in ("%ASSETS_DIR%\*") do (
         goto :fail
       )
       echo   -^> uploading !NAME! ...
-      curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 1800 -X POST "%API_BASE%/releases/%RELEASE_ID%/attach_files" -F "access_token=%GITEE_TOKEN%" -F "file=@%%F" -o "%TMPDIR%\upload.json"
+      REM -w prints http/time/bytes so a stall is obvious instead of looking dead
+      curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 600 -X POST "%API_BASE%/releases/%RELEASE_ID%/attach_files" -F "access_token=%GITEE_TOKEN%" -F "file=@%%F" -o "%TMPDIR%\upload.json" -w "     curl: http=%%{http_code} time=%%{time_total}s uploaded=%%{size_upload}B speed=%%{speed_upload}B/s\n"
       if errorlevel 1 goto :err_net
 
       powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\upload.json' | ConvertFrom-Json; if ($j.browser_download_url) { $j.browser_download_url | Out-File -Encoding ascii '%TMPDIR%\url.txt' } elseif ($j.attach_file_url) { $j.attach_file_url | Out-File -Encoding ascii '%TMPDIR%\url.txt' } } catch {}"
@@ -168,7 +222,7 @@ echo [3/3] verify attachments ...
 curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 "%API_BASE%/releases/%RELEASE_ID%" -o "%TMPDIR%\rel3.json"
 if errorlevel 1 goto :err_net
 
-powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel3.json' | ConvertFrom-Json; $have = @(); if ($j.assets) { $have = @($j.assets | ForEach-Object { $_.name }) }; $want = @('byte-tools.exe','byte-tools-windows-x64.zip','byte-tools-macos-arm64.zip','byte-tools-linux-x64'); $miss = @($want | Where-Object { $have -notcontains $_ }); if ($miss.Count -eq 0) { 'OK' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } else { ('MISSING:' + ($miss -join ',')) | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } } catch { 'UNKNOWN' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' }"
+powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel3.json' | ConvertFrom-Json; $have = @(); if ($j.assets) { $have = @($j.assets | ForEach-Object { $_.name }) }; $want = @('byte-tools.exe','byte-tools-windows-x64.zip','byte-tools-macos-arm64.zip','byte-tools-linux-x64'); $miss = @($want | Where-Object { $have -notcontains $_ }); if ($miss.Count -eq 0) { 'OK' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } else { ($miss -join ', ') | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } } catch { 'UNKNOWN' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' }"
 
 set "CHK="
 if exist "%TMPDIR%\chk.txt" set /p CHK=<"%TMPDIR%\chk.txt"
@@ -178,7 +232,7 @@ if "%CHK%"=="OK" (
 ) else if "%CHK%"=="UNKNOWN" (
   echo   warning: cannot parse asset list, check %RELEASE_PAGE%/%TAG_NAME% manually
 ) else (
-  echo   error: missing %CHK%
+  echo   error: Gitee attachment list does not contain: %CHK%
   goto :fail
 )
 
@@ -200,7 +254,12 @@ goto :fail_nopause
 
 :err_dir
 echo error: assets dir not found: %ASSETS_DIR%
-echo run first: gh release download %TAG_NAME% --dir %ASSETS_DIR% --clobber
+echo   create it and fetch the release files into it, no gh CLI needed:
+echo     mkdir "%ASSETS_DIR%"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
 goto :fail_nopause
 
 :err_net

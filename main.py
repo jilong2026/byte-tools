@@ -486,6 +486,9 @@ GH_ACCELERATORS: List[str] = [
 DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
 DOWNLOAD_TIMEOUT = 30         # 单 URL 下载连接超时（秒）
 DOWNLOAD_RETRY_PER_URL = 2    # 单 URL 内重试次数
+# 关窗时等抓取线程收尾的总预算（秒）。抓取线程最长按一个在途请求的超时返回
+# （DOWNLOAD_PROBE_TIMEOUT * 2 = 10s），这里留 2s 余量。
+FETCH_EXIT_WAIT = 12
 
 # 实测（2026-09-28）：清华/北外对 requests 默认 UA 与浏览器 UA 一律回 403，
 # 只对自定义 UA 放行；列目录（_get）已带，下载（_try_download）也必须带。
@@ -927,7 +930,7 @@ def fetch_powershell_versions() -> List[ComponentVersion]:
     """
     github_api = "https://api.github.com/repos/PowerShell/PowerShell/releases?per_page=60"
     try:
-        data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+        data = _github_api_json(github_api)
     except Exception as exc:
         raise RuntimeError(
             f"PowerShell 版本列表抓取失败：GitHub API 不可用：{exc}"
@@ -1748,6 +1751,21 @@ def _elasticsearch_cv(v: str) -> ComponentVersion:
 # 抓取失败会抛异常，调用方需要回退到硬编码默认列表。
 # ---------------------------------------------------------------------------
 import re as _re
+import threading as _threading
+
+
+class FetchAborted(RuntimeError):
+    """应用正在退出，版本抓取被协作式取消。
+
+    与「官网抓不到」区分开：这是主动收尾，不该打印失败日志、也不该走降级提示。
+    """
+
+
+# 版本抓取的协作式取消标志，由 MainWindow.closeEvent 置位。
+# 抓取线程大多阻塞在 requests 里，Qt 侧没有「安全杀线程」的接口——QThread 在运行时被
+# 析构会直接 abort 进程（Windows 上表现为退出码 0xC0000409），所以只能让线程自己尽快返回：
+# 每个重试边界查一次标志，退避等待改用 Event.wait（置位即醒）。
+FETCH_ABORT = _threading.Event()
 
 
 def _get(url: str, timeout: int = 10) -> requests.Response:
@@ -1755,11 +1773,13 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
 
     - 网络抖动/临时错误：最多重试 3 次，指数退避（1s, 2s）
     - SSL 错误（企业代理 MITM / 系统证书缺失等）：最后一次尝试关闭 SSL 校验
+    - 关窗取消：FETCH_ABORT 置位后在下一次尝试或退避处抛 FetchAborted
     """
-    import time as _time
     headers = HTTP_UA
     last_exc: Optional[Exception] = None
     for attempt in range(3):
+        if FETCH_ABORT.is_set():
+            raise FetchAborted("应用正在退出，已取消版本抓取")
         try:
             if attempt < 2:
                 r = requests.get(url, timeout=timeout, headers=headers)
@@ -1776,7 +1796,59 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
         except Exception as e:
             last_exc = e
         if attempt < 2:
-            _time.sleep(1 << attempt)  # 1s, 2s
+            if FETCH_ABORT.wait(1 << attempt):  # 原本睡 1s、2s；取消时立刻醒
+                raise FetchAborted("应用正在退出，已取消版本抓取")
+    assert last_exc is not None
+    raise last_exc
+
+
+def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
+    """从 api.github.com 取 JSON，带 token 与限流感知重试。
+
+    设计定位：作为各组件版本抓取器的「末位官网」兜底来源。
+
+    - 若环境变量 GITHUB_TOKEN / GH_TOKEN 存在，则带 ``Authorization`` 头，
+      未认证限额（60 次/小时/IP）提升到 5000 次/小时，能显著降低限流失败。
+    - 命中 403 限流（X-RateLimit-Remaining=0）或网络抖动时，按 5s / 10s 退避重试 3 次，
+      尽量自愈；仍失败则向上抛，由 VersionFetchWorker 捕获后降级到内置默认清单。
+
+    入参 url:    完整 GitHub API 地址
+    入参 timeout: 单请求超时（秒），缺省取 DOWNLOAD_PROBE_TIMEOUT * 2
+    返回:       解析后的 JSON（dict / list）
+    异常:       所有重试均失败则抛出最后一个异常；关窗取消则抛 FetchAborted
+    """
+    import os as _os
+
+    headers = dict(HTTP_UA)
+    headers["Accept"] = "application/vnd.github+json"
+    token = _os.environ.get("GITHUB_TOKEN") or _os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    timeout = timeout or (DOWNLOAD_PROBE_TIMEOUT * 2)
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        if FETCH_ABORT.is_set():
+            raise FetchAborted("应用正在退出，已取消版本抓取")
+        try:
+            r = requests.get(url, timeout=timeout, headers=headers)
+            # 限流：GitHub 在 remaining=0 时返回 403，此时立即重试无意义，
+            # 但短退避可覆盖「突发被临时拒绝」场景，长期限流仍靠 token / 错峰缓解。
+            if r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0":
+                wait = 5 * (attempt + 1)
+                if FETCH_ABORT.wait(wait):
+                    raise FetchAborted("应用正在退出，已取消版本抓取")
+                last_exc = RuntimeError(
+                    f"GitHub API 触发限流（remaining=0），已退避 {wait}s 后重试"
+                )
+                continue
+            r.raise_for_status()
+            return r.json()
+        except FetchAborted:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            if attempt < 2 and FETCH_ABORT.wait(5 * (attempt + 1)):
+                raise FetchAborted("应用正在退出，已取消版本抓取")
     assert last_exc is not None
     raise last_exc
 
@@ -1896,7 +1968,7 @@ def fetch_mysql_versions() -> List[ComponentVersion]:
 
 def fetch_git_versions() -> List[ComponentVersion]:
     """Git for Windows Releases API。"""
-    data = _get("https://api.github.com/repos/git-for-windows/git/releases?per_page=20").json()
+    data = _github_api_json("https://api.github.com/repos/git-for-windows/git/releases?per_page=20")
     versions: List[str] = []
     for rel in data:
         tag = rel.get("tag_name", "")
@@ -2074,7 +2146,7 @@ def fetch_bun_versions() -> List[ComponentVersion]:
     # 第二阶段：镜像失败 → 回退 GitHub Releases API（JSON）
     if not versions:
         try:
-            data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+            data = _github_api_json(github_api)
             for rel in data:
                 tag = rel.get("tag_name", "")
                 # Bun tag 格式为 bun-v<version>；canary 版本含 -canary 后缀，剔除
@@ -2178,7 +2250,7 @@ def fetch_mongodb_versions() -> List[ComponentVersion]:
     if not versions:
         try:
             # GitHub tags API：tag_name 形如 r8.0.0 / r7.0.5
-            data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+            data = _github_api_json(github_api)
             for tag in data:
                 name = tag.get("name", "")
                 # MongoDB 的 tag 是 r<version> 格式
@@ -2234,7 +2306,7 @@ def fetch_postgresql_versions() -> List[ComponentVersion]:
 
     if not versions:
         try:
-            data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+            data = _github_api_json(github_api)
             for tag in data:
                 name = tag.get("name", "")
                 # PostgreSQL 的 tag 是 REL_<X>_<Y>_<Z> 格式
@@ -2280,7 +2352,7 @@ def fetch_kubectl_versions() -> List[ComponentVersion]:
 
     if not versions:
         try:
-            data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+            data = _github_api_json(github_api)
             for tag in data:
                 name = tag.get("name", "")
                 if name.startswith("v"):
@@ -2347,7 +2419,7 @@ def fetch_rabbitmq_versions() -> List[ComponentVersion]:
     github_api = "https://api.github.com/repos/rabbitmq/rabbitmq-server/releases?per_page=50"
 
     try:
-        data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+        data = _github_api_json(github_api)
     except Exception as exc:
         raise RuntimeError(
             f"RabbitMQ 版本列表抓取失败：GitHub API 不可用：{exc}"
@@ -2494,7 +2566,7 @@ def _fetch_github_releases_versions(repo: str, prefix: str = "v") -> List[str]:
     api = f"https://api.github.com/repos/{repo}/releases?per_page=50"
 
     try:
-        data = _get(api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+        data = _github_api_json(api)
     except Exception as exc:
         raise RuntimeError(
             f"GitHub releases 抓取失败（{repo}）：{exc}"
@@ -2529,14 +2601,29 @@ def fetch_nacos_versions() -> List[ComponentVersion]:
 
 def fetch_seata_versions() -> List[ComponentVersion]:
     """
-    从 GitHub releases API 抓取 Seata 版本列表（Seata 在国内无镜像索引页，主走 GitHub API）。
+    抓取 Seata 版本列表：Seata 已毕业为 Apache 项目，优先走国内 Apache 镜像目录
+    （华为云/清华/阿里云/USTC + archive.apache.org），镜像全失败再回退 GitHub API。
 
     返回: ComponentVersion 列表，按版本号倒序，最多 20 个。
+
+    异常: 镜像与 GitHub API 均不可用时抛 RuntimeError，由 VersionFetchWorker 降级到内置清单。
     """
+    # 第一阶段：国内 Apache 镜像目录优先（不触碰 api.github.com）
+    try:
+        vs = _fetch_apache_versions("seata")
+        stable = [
+            v for v in _sort_semver_desc(vs)
+            if not any(x in v for x in ("incubating", "beta", "rc"))
+        ]
+        if stable:
+            return [_seata_cv(v) for v in stable[:20]]
+    except Exception:
+        pass
+    # 第二阶段：镜像都失败 → 回退 GitHub API（末位官网）
     versions = _fetch_github_releases_versions("apache/incubator-seata", prefix="v")
     stable = _sort_semver_desc(versions)
     if not stable:
-        raise RuntimeError("Seata 版本列表为空（GitHub API 未返回有效版本）")
+        raise RuntimeError("Seata 版本列表为空（镜像与 GitHub API 均未返回有效版本）")
     return [_seata_cv(v) for v in stable[:20]]
 
 
@@ -2570,7 +2657,7 @@ def fetch_elasticsearch_versions() -> List[ComponentVersion]:
 
     if not versions:
         try:
-            data = _get(github_api, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).json()
+            data = _github_api_json(github_api)
             for tag in data:
                 name = tag.get("name", "")
                 if name.startswith("v"):
@@ -2637,10 +2724,16 @@ class VersionFetchWorker(QThread):
     def run(self) -> None:  # noqa: D401
         try:
             vs = self.fetcher()
-            self.done.emit(self.key, vs)
+        except FetchAborted:
+            self.done.emit(self.key, None)  # 关窗取消：静默收尾，不打失败日志
         except Exception as exc:  # pragma: no cover
-            print(f"[fetch:{self.key}] {exc}")
+            # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
+            # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
+            if not FETCH_ABORT.is_set():
+                print(f"[fetch:{self.key}] {exc}")
             self.done.emit(self.key, None)
+        else:
+            self.done.emit(self.key, vs)
 
 
 # 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
@@ -4524,6 +4617,8 @@ class MainWindow(QMainWindow):
         self._drag_pos: Optional[QPoint] = None
         self._fetch_workers: List[VersionFetchWorker] = []
         self._fetch_pending: int = 0
+        # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面
+        self._closing: bool = False
 
         self._build_ui()
         self._apply_qss()
@@ -5254,10 +5349,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _start_fetch_versions(self) -> None:
         """从各官网并发拉取版本列表。可反复调用（刷新）。"""
-        # 若有 worker 仍在运行，等它跑完再触发新一轮
-        alive = [w for w in self._fetch_workers if w.isRunning()]
-        if alive:
-            self._append_log("warn", f"仍有 {len(alive)} 个抓取任务在进行，请稍候…")
+        if self._closing:
+            return
+        # 若有 worker 仍在运行、或已排期但尚未启动（错峰未触发），等它跑完再触发新一轮。
+        # 注意：错峰未启动的线程 isRunning()=False 但 isFinished()=False，必须用 isFinished() 判定，
+        # 否则会被下面 cleanup 提前 deleteLater 导致定时器回调访问已释放对象。
+        busy = [w for w in self._fetch_workers if w.isRunning() or not w.isFinished()]
+        if busy:
+            self._append_log("warn", f"仍有 {len(busy)} 个抓取任务在进行，请稍候…")
             return
         # 清理已完成的 worker
         for w in self._fetch_workers:
@@ -5269,7 +5368,7 @@ class MainWindow(QMainWindow):
             self.btn_refresh.setText("⟳ 抓取中…")
         self._fetch_pending = 0
         self._append_log("info", "正在从各官网获取最新版本列表…")
-        for card in self.cards:
+        for i, card in enumerate(self.cards):
             fetcher = FETCHERS.get(card.component.key)
             if not fetcher:
                 continue
@@ -5277,9 +5376,21 @@ class MainWindow(QMainWindow):
             w.done.connect(self._on_versions_fetched)
             self._fetch_workers.append(w)
             self._fetch_pending += 1
-            w.start()
+            # 错峰启动：避免 26 路线程同时打 api.github.com 触发未认证限额（60 次/小时/IP）。
+            # 间隔 150ms，最晚一个约在 3.9s 后启动；单发失败由 _github_api_json 退避重试兜底。
+            # 走 _launch_fetch_worker 而不是裸 w.start：关窗后残留的定时器不能再起新线程，
+            # 否则线程会在窗口析构时还在跑，直接把进程 abort 掉。
+            QTimer.singleShot(i * 150, lambda w=w: self._launch_fetch_worker(w))
+
+    def _launch_fetch_worker(self, worker: VersionFetchWorker) -> None:
+        """错峰定时器到点后的启动入口；关窗途中则放弃启动。"""
+        if self._closing or worker.isRunning() or worker.isFinished():
+            return
+        worker.start()
 
     def _on_versions_fetched(self, key: str, versions) -> None:
+        if self._closing:
+            return
         card = next((c for c in self.cards if c.component.key == key), None)
         if card:
             if versions is None:
@@ -5338,6 +5449,11 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     def closeEvent(self, event) -> None:
+        # 先立旗：不再派发抓取、不再回写界面，并让在跑的抓取线程尽快从重试边界返回。
+        # QThread 在运行时被析构会直接 abort 进程（Windows 退出码 0xC0000409），
+        # 而版本抓取是启动即触发的，所以关窗必须等这些线程收尾。
+        self._closing = True
+        FETCH_ABORT.set()
         self._save_settings()
         # 版本探测线程还在跑就退出会触发 "QThread destroyed while running"，
         # 探测本身有 4 秒超时，这里等它收尾再关窗。
@@ -5345,6 +5461,15 @@ class MainWindow(QMainWindow):
             worker = card._version_worker
             if worker is not None and worker.isRunning():
                 worker.wait(5000)
+        # 抓取线程：_get / _github_api_json 已能协作取消，剩下的是一个在途请求的超时
+        # （最长 DOWNLOAD_PROBE_TIMEOUT*2 = 10s），给 FETCH_EXIT_WAIT 秒总预算，逐个等剩余时间。
+        import time as _time
+        deadline = _time.monotonic() + FETCH_EXIT_WAIT
+        for w in self._fetch_workers:
+            if not w.isRunning():
+                continue
+            remain = max(0.0, deadline - _time.monotonic())
+            w.wait(int(remain * 1000))
         super().closeEvent(event)
 
 

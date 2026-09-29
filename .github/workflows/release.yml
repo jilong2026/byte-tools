@@ -18,6 +18,10 @@
 # 变更记录（2026-09）：Gitee 同步逻辑抽到 同步Gitee产物.sh —— 加入网络重试
 #                    （境外 runner 连 gitee.com 会偶发 curl 35）、幂等复用
 #                    （Re-run 不产生重复 Release/附件）、上传后附件清单校验
+# 变更记录（2026-09-29）：Gitee 侧不再跨海推大二进制 —— 默认 UPLOAD_ARTIFACTS 为空，
+#                    脚本只在 Gitee Release 正文写 GitHub 直链；同时给 sync-to-gitee
+#                    加 timeout-minutes，并把脚本的静默长超时改成「每次请求都打耗时/字节/
+#                    状态码 + 4xx 立即判死」（v1.0.3 曾因此静默挂死 70 分钟以上）
 
 name: release
 
@@ -237,7 +241,9 @@ jobs:
           draft: true
 
   # 同步任务：等 3 个平台产物全部上传到 GitHub Release 后，
-  # 一次性下载下来，创建 Gitee Release 并把所有产物上传到 Gitee。
+  # 创建 Gitee Release 并在正文里写清各平台产物的 GitHub 直链。
+  # 默认不再把大二进制跨境推到 Gitee（2026-09-29 起，详见 同步Gitee产物.sh 顶部说明）；
+  # 需要站内直下时改 UPLOAD_ARTIFACTS 并把 runs-on 换成国内 self-hosted runner。
   # 依赖 GITEE_TOKEN Secret（在 Gitee 个人设置 → 私人令牌 生成后填到 GitHub Secrets）
   sync-to-gitee:
     name: 同步产物到 Gitee Release
@@ -245,11 +251,15 @@ jobs:
     # tag 推送：三平台构建成功后才跑；手动补同步：build 被跳过也要跑，
     # 所以这里用 always() 兜住，再用 needs.build.result 过滤构建失败的情况
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || needs.build.result == 'success') }}
+    # 【2026-09-29 卡死教训】这段 job 之前没有 timeout-minutes，走 GitHub 默认 360 分钟：
+    # 一个 84MB 的境外上传就能把它挂满 6 小时（v1.0.3 实测挂 70 分钟零落地、零日志）。
+    # 现在策略改成「Gitee 只写正文直链、不跨海推大二进制」，正常用量是秒级；
+    # 25 分钟 = 4 个接口调用 × 3 次重试 × API 上限 60s 的余量，足够宽，又能保证卡死会红。
+    timeout-minutes: 25
     # 默认用 GitHub 境外 runner。已知风险：境外连 gitee.com:443 会偶发
     # curl(35) SSL_ERROR_SYSCALL（TLS 握手被重置），脚本已做指数退避重试。
-    # 若多次重试仍失败，把这一行改成 runs-on: self-hosted，
-    # 并把 runner 部署在能直连 gitee.com 的国内机器上即可，脚本本身无需改动
-    # （self-hosted 机器需预装 gh CLI 与 curl，用于下载 GitHub Release 产物）。
+    # 若要把产物真正传进 Gitee（改 UPLOAD_ARTIFACTS），建议把这一行换成 runs-on: self-hosted，
+    # runner 部署在能直连 gitee.com 的国内机器上（需预装 gh CLI 与 curl），脚本本身无需改动
     runs-on: ubuntu-latest
     steps:
       # 1. 检出代码（仅用于触发 Gitee 同步时拿到默认分支信息）
@@ -296,13 +306,18 @@ jobs:
           echo "GitHub Release ${TAG_NAME} 已发布"
 
 
-      # 4. 同步产物到 Gitee Release（实际逻辑在 同步Gitee产物.sh）
+      # 4. 同步产物信息到 Gitee Release（实际逻辑在 同步Gitee产物.sh）
+      #    【2026-09-29 策略变更】默认 UPLOAD_ARTIFACTS 为空：Gitee 侧不再挂大二进制产物，
+      #    脚本只在 Gitee Release 正文里写好各平台产物的 GitHub 直链。原因：境外 runner
+      #    往 gitee.com 推 84MB 会长时间挂死且服务端根本不落地（v1.0.3 实测挂 70 分钟、
+      #    旧脚本 -sS + curl 内部 --retry + --max-time 1800 ×4 轮 → 单文件最坏静默 6 小时）。
       #    为什么抽成脚本而不是在这里裸写 curl：
       #    - 境外 runner 连 gitee.com:443 会偶发 curl(35) SSL_ERROR_SYSCALL
-      #      （TLS 握手被重置）。脚本对每个请求做指数退避重试，单次抖动不再判死 job。
+      #      （TLS 握手被重置）。脚本对每次请求做指数退避重试，单次抖动不再判死 job。
       #    - 脚本幂等：Release 已存在就复用 ID，附件已存在就跳过上传，
       #      所以失败后直接 Re-run 本 job 是安全的，不会产生重复 Release 或重复附件。
-      #    - 上传完成后回查附件清单做校验，白名单产物缺一个就失败，不会静默少传。
+      #    - 收尾强校验：正文直链必须回读到位；UPLOAD_ARTIFACTS 指定的附件必须全部出现，
+      #      缺一个就失败，不会静默「同步成功」。
       - name: 同步产物到 Gitee Release
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -312,8 +327,19 @@ jobs:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
           ASSETS_DIR: ./assets
           TARGET_COMMITISH: master
-          # 单次请求最多尝试 4 次（退避 10s / 20s / 40s），总耗时可控
-          MAX_ATTEMPTS: '4'
+          # 生成正文里的 GitHub 产物直链（Gitee 用户据此下载）
+          GITHUB_REPO_SLUG: ${{ github.repository }}
+          # 产物清单：正文表格、上传资格、收尾校验都以这一处为准。
+          # 与上面 build job 的 matrix 产物名同步维护 —— 这是唯一维护点
+          RELEASE_ARTIFACTS: 'byte-tools.exe|byte-tools-windows-x64.zip|byte-tools-macos-arm64.zip|byte-tools-linux-x64'
+          # 要真正上传到 Gitee 的子集；留空 = 一个都不传（2026-09-29 起的默认策略）。
+          # 确有「Gitee 站内直下」需求时，只把小包填进来（例如 windows zip），
+          # 并把本 job 的 runs-on 换成国内 self-hosted runner，否则又是跨境硬推
+          UPLOAD_ARTIFACTS: ''
+          # 单次请求最多尝试 3 次（退避 5s / 10s）；curl 自身不再叠 --retry
+          MAX_ATTEMPTS: '3'
+          API_MAX_TIME: '60'          # JSON 接口单请求上限（秒）
+          UPLOAD_MAX_TIME: '300'      # 附件上传单请求上限（秒）
         run: |
           set -e
           chmod +x "./同步Gitee产物.sh"

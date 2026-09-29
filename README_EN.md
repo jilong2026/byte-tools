@@ -349,8 +349,8 @@ byte-tools/
 ├─ 一键打包exe.bat       # One-click builder: auto-provisions env + PyInstaller, then builds the exe
 ├─ requirements.txt     # dependency list
 ├─ byte-tools.spec  # PyInstaller build spec
-├─ 同步Gitee产物.sh       # Gitee Release sync script (Linux/macOS/CI; retry + idempotent + asset check), called by release.yml
-├─ 同步Gitee产物.bat      # same, Windows edition (double-click friendly)
+├─ 同步Gitee产物.sh       # Gitee Release sync (Linux/macOS/CI; writes GitHub links only, no cross-ocean binary push; fast-fail + idempotent + verify), called by release.yml
+├─ 同步Gitee产物.bat      # Windows LOCAL edition (double-click friendly) - it does upload the real artifacts, fine from mainland China
 ├─ README.md             # Chinese documentation
 ├─ README_EN.md          # English documentation (this file)
 ├─ DEVELOPMENT.md        # developer docs (incl. the R1 China-mirror-priority rule)

@@ -457,43 +457,63 @@ pyinstaller byte-tools.spec --noconfirm --clean
 
 ### 自动发布三平台版本（推荐）
 
-推一个 tag 到 GitHub，`.github/workflows/release.yml` 会在 Windows / macOS / Linux 三个 runner 上分别打包，自动上传到对应 GitHub Release，并同步产物到 Gitee Release：
+推一个 tag 到 GitHub，`.github/workflows/release.yml` 会在 Windows / macOS / Linux 三个 runner 上分别打包，自动上传到对应 GitHub Release，并在 Gitee Release 写好产物直链：
 
 ```bash
 git tag v1.0.1
 git push origin v1.0.1
 ```
 
-几分钟后到两边的 Releases 页面就能看到三个平台的产物（全自动发布，无需手动点 Publish）。
+几分钟后 GitHub Release 是完整的正式版本；Gitee 侧会有一个 Release，正文用表格列出三个平台产物的 GitHub 直链（**2026-09-29 起 Gitee 不再挂大二进制**，原因见下）。全自动发布，无需手动点 Publish。
 
 **Gitee 同步的可靠性设计**（逻辑在 `同步Gitee产物.sh`）：
 
-- GitHub runner 在境外，连 `gitee.com:443` 会偶发 `curl(35) SSL_ERROR_SYSCALL`（TLS 握手被重置）。脚本对每个请求做指数退避重试（默认 4 次：10s / 20s / 40s），单次网络抖动不会判死整个 job。
-- 脚本幂等：Release 已存在就复用 ID、附件已存在就跳过上传，所以**同步失败后直接 Re-run 该 job 是安全的**，不会产生重复 Release 或重复附件。
-- 上传完成后回查一次附件清单，白名单产物缺一个就报错，避免「少传了某个平台」被静默放过。
-- 万一重试后仍失败（runner 到 Gitee 链路不通）：GitHub Release 此时已发布成功，可以先把本 job 的 `runs-on` 改成 `self-hosted`（runner 部署在能直连 gitee.com 的国内机器），或在 GitHub 上手动触发一次补同步（见下）。
+- **Gitee 侧默认不接收大二进制**。境外 runner 往 `gitee.com` 推 84MB 会长时间挂死且服务端根本不落地——v1.0.3 实测一次 POST 挂了 70 分钟，Gitee 附件清单里一个产物都没有。改成正文写 GitHub 直链后，这段 job 只剩几个几 KB 的 API 调用。
+- 确实要 Gitee 站内直下时：把 workflow 里的 `UPLOAD_ARTIFACTS` 填上要传的文件名（建议只挑小包），并把该 job 的 `runs-on` 换成部署在国内的 `self-hosted` runner；或直接用本机的 `同步Gitee产物.bat`（国内链路快）。
+- **每次请求都打可见输出**：HTTP 状态码、耗时、已传字节与均速。4xx 立即判死不做无谓重试，网络类错误按 `MAX_ATTEMPTS`（默认 3 次：5s / 10s）退避。旧写法把 curl 的 `--retry` 与脚本重试相乘、单请求允许 30 分钟，最坏能静默吃掉 6 小时不吐一行日志。
+- `sync-to-gitee` job 加了 `timeout-minutes: 25`（此前走 GitHub 默认 360 分钟，是「卡住没人知道」的根子）。
+- 脚本幂等：Release 已存在就复用 ID、附件已存在就跳过上传，所以**同步失败后直接 Re-run 该 job 是安全的**。
+- 收尾强校验：正文里的 GitHub 直链必须回读到位；`UPLOAD_ARTIFACTS` 指定的附件必须全部出现。缺一项就报错，不会静默「同步成功」。
+- 令牌只作为 curl 表单字段传递，绝不拼进 URL，脚本也刻意不用 `curl -v`（那会把令牌打进日志）。
 
 ### 补同步历史 tag（如 Gitee 侧漏了产物）
 
-v1.0.2 这类「GitHub 成功、Gitee 失败」的情况不用重发包。两种方式任选：
+v1.0.2 这类「GitHub 成功、Gitee 没同步好」的情况不用重发包。两种方式任选：
 
-**方式一（推荐，零本地依赖）**：GitHub 仓库页面 → Actions → 选择 `release` 工作流 → **Run workflow** → 填写 `tag_name`（如 `v1.0.2`）→ 运行。它只跑同步任务，直接从 GitHub Release v1.0.2 下载已有产物再传到 Gitee，不重新构建。
+**方式一（推荐，零本地依赖）**：GitHub 仓库页面 → Actions → 选择 `release` 工作流 → **Run workflow** → 填写 `tag_name`（如 `v1.0.2`）→ 运行。它只跑同步任务，不重新构建。
 
-**方式二（在本机执行）**：本机网络能直连 Gitee，自己准备产物目录后跑脚本。Windows 用 `.bat`，Linux / macOS / Git Bash 用 `.sh`，两者功能等价（都带重试 + 幂等 + 校验）：
+> 注意：脚本只在**创建** Gitee Release 时写正文（Gitee 的「更新 Release」接口方法与路径未能在官方文档核实，不去猜着调）。所以补同步一个「Gitee 上已存在但正文没有直链」的老 tag 时，脚本会明确报错并给你两条路子：A) 在 Gitee 网页端把报错里给出的那段正文粘进 Release 编辑框；B) 删掉 Gitee 上这个 Release（含同名 tag），重跑让脚本带直链重建。
+
+**方式二（在本机执行）**：本机网络能直连 Gitee，自己准备产物目录后跑脚本。Windows 用 `.bat`（它会真的把产物传上 Gitee，国内链路快），Linux / macOS / Git Bash 用 `.sh`（默认只写直链，要传东西就设 `UPLOAD_ARTIFACTS`）。
+
+> ⚠️ 产物目录**别用仓库自带的 `assets/`**——那是图标目录（`byte-tools.png` / `.ico` / `alipay.png` / `wechat.png`），`.bat` 会一个产物都找不到。默认值已改成 `release-assets/`（已加进 `.gitignore`，几百 MB 产物不会误入库），且现在会**先检查产物再请求 Gitee**，不会白跑一趟。
 
 ```bat
-REM Windows（双击运行会提示输入 tag 与令牌；也可直接传参）
-gh release download v1.0.2 --dir assets --clobber
-同步Gitee产物.bat v1.0.2 <Gitee私人令牌> assets
+REM Windows：先用 curl 取产物（不需要 gh），再跑脚本；令牌建议用交互提示输入
+mkdir release-assets
+curl -L -o release-assets\byte-tools.exe "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe"
+curl -L -o release-assets\byte-tools-windows-x64.zip "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-windows-x64.zip"
+curl -L -o release-assets\byte-tools-macos-arm64.zip "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-macos-arm64.zip"
+curl -L -o release-assets\byte-tools-linux-x64 "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-linux-x64"
+同步Gitee产物.bat v1.0.2 <Gitee私人令牌> release-assets
 ```
 
 ```bash
-# Linux / macOS / Git Bash
-gh release download v1.0.2 --dir ./assets --clobber
-GITEE_TOKEN=<Gitee 私人令牌> GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 "./同步Gitee产物.sh"
+# Linux / macOS / Git Bash。没装 gh 就用 curl 从 GitHub Release 直接取产物
+mkdir -p ./release-assets
+for f in byte-tools.exe byte-tools-windows-x64.zip byte-tools-macos-arm64.zip byte-tools-linux-x64; do
+  curl -L -o "./release-assets/$f" "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/$f"
+done
+
+# 令牌用 read -s 现问现用，不落进命令行历史和日志
+read -rsp "Gitee Token: " GITEE_TOKEN; export GITEE_TOKEN; echo
+GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.0.2 \
+GITHUB_REPO_SLUG=jilong2026/byte-tools ASSETS_DIR=./release-assets \
+"./同步Gitee产物.sh"
+unset GITEE_TOKEN
 ```
 
-> 两个脚本都依赖 `curl`；`.bat` 还需要系统自带的 PowerShell 5.1+（Win10 起自带）。`.bat` 文件内容保持纯 ASCII，因为 cmd 会按 GBK 解析 UTF-8 批处理文件，中文会导致语法错乱。
+> 两个脚本都依赖 `curl`；`.sh` 还需要 `awk`，`python3`/`python` 只用于解析 JSON（选不到可用解释器时回退 `grep`；Windows 上 `python3` 常是 Microsoft Store 的占位别名，脚本已改为先做握手测试再决定用哪个）。`.bat` 文件内容保持纯 ASCII，因为 cmd 会按 GBK 解析 UTF-8 批处理文件，中文会导致语法错乱。
 
 ---
 
@@ -512,8 +532,8 @@ byte-tools/
 ├── CODE_WIKI.md                        # 代码百科（类 / 模块 / 函数索引）
 ├── LICENSE                             # MIT 许可证
 ├── .gitignore                          # Git 忽略规则
-├── 同步Gitee产物.sh                # Gitee Release 同步脚本（Linux/macOS/CI，重试 + 幂等 + 校验）
-├── 同步Gitee产物.bat               # 同上，Windows 版（双击可运行，功能等价）
+├── 同步Gitee产物.sh                # Gitee Release 同步脚本（Linux/macOS/CI，默认只在正文写 GitHub 直链；快速失败 + 幂等 + 校验）
+├── 同步Gitee产物.bat               # 本机 Windows 版（双击可运行；它会真的把产物传上 Gitee，国内链路快）
 ├── .github/
 │   └── workflows/
 │       └── release.yml                 # 三平台自动构建 + 发布（含 Gitee 同步）

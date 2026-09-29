@@ -129,6 +129,9 @@ $RECYCLE.BIN/
 # 工具运行时创建的目录（用户机器上的下载缓存，不该进仓库）
 .env-tools/
 
+# 本机补同步 Gitee 时用来暂存 Release 产物的目录（几百 MB，绝不入库）
+release-assets/
+
 # 日志与临时文件
 *.log
 *.tmp
