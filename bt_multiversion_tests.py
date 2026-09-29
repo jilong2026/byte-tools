@@ -758,22 +758,29 @@ class InstalledCheckIcon(EnvSandbox):
 
     def test_apply_active_refreshes_the_marks(self):
         # Task 6 刻意留白、本任务补上的接线：_apply_active 成功后要重挂一次勾。
-        # 切换生效版本不改动磁盘目录，图标状态前后一致、无从观察，所以这里只能记录
-        # 调用是否发生；断言"至少一次"而非"恰好一次"，实现里增删刷新点不该变红。
+        # 断言只落在可观察状态（条目的 DecorationRole 图标）上，不看任何桩的调用
+        # 次数：先让 "11" 在磁盘上不存在（勾为 False），造出目录后走真实的
+        # _apply_active —— 勾变 True 的唯一途径就是它内部重扫了一次磁盘。
+        # 把那一行接线弄丢，本用例必红。
         self.as_windows()
         card = self._jdk_card()
-        calls = []
-        orig = main.ComponentCard._refresh_installed_marks
-        main.ComponentCard._refresh_installed_marks = lambda self: (
-            calls.append(1) or orig(self))
-        self.addCleanup(setattr, main.ComponentCard, "_refresh_installed_marks", orig)
-
-        self.assertTrue(card._apply_active("17"))
-
-        self.assertTrue(calls, "_apply_active 成功后未刷新已装标记")
-        # 记录器只是代理，刷新行为不能被它改掉
         combo = card.version_combo
-        self.assertEqual(self._mark(combo, combo.findText("17")), True)
+        self.assertEqual(tuple(self._labels(combo)), self.JDK_ALL)
+        self.assertEqual(self._mark(combo, combo.findText("11")), False,
+                         '夹具前提：11 此刻还没有安装目录，勾不该存在')
+
+        # 唯一的状态变化：磁盘上多出 jdk-11/bin。不打桩、不手动刷新、不动下拉框。
+        (card.component.install_dir("11") / "bin").mkdir(parents=True, exist_ok=True)
+
+        self.assertTrue(card._apply_active("11"))
+
+        self.assertEqual(self._mark(combo, combo.findText("11")), True,
+                         "_apply_active 成功后未重扫磁盘：新装的版本没挂上勾")
+        # 无附带损害：其余版本的勾各归各位（21/17 仍挂着，8 仍未装）
+        for label, expected in (("21", True), ("17", True), ("8", False)):
+            self.assertEqual(self._mark(combo, combo.findText(label)), expected, label)
+        # 刷新只许改图标数据，条目文本依旧逐字不变
+        self.assertEqual(tuple(self._labels(combo)), self.JDK_ALL)
 
 
 if __name__ == "__main__":
