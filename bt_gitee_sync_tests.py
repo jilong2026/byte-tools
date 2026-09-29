@@ -8,21 +8,27 @@
 
 场景（对应被测行为）：
   new              —— 无 Release：创建时正文必须带 4 条 GitHub 直链，默认一个产物都不传
+  repo404          —— tags 查询返回 404 时也要当成「没有 Release」继续创建，而不是判死
   existing_no_links—— Release 已存在且正文没直链：必须硬失败并给出网页端/重建两条补救
   existing_links   —— 已存在且正文有直链、上传清单为空：通过
   upload_ok        —— UPLOAD_ARTIFACTS 指定产物：已存在的跳过、缺失的上传并校验通过
   upload_missing   —— 上传接口假装成功但附件清单没它：必须硬失败
   server500        —— 全程 500：按 MAX_ATTEMPTS 重试后失败，且每次都打了可见日志
   client400        —— 4xx：立即判死，不浪费重试
+另有两组与真实脚本无关但同样容易踩空的守卫：
+  SyncScriptTest  —— 产物目录指错/为空时，必须在请求 Gitee 之前就拦住（断言 mock 收到 0 个请求）
+  ArtifactNameConsistency —— 产物名写在 4 个地方（build matrix / release.yml / .sh / .bat），改一处必须全红
+  BatEndToEnd     —— Windows 版 .bat 的完整流程（预检→复用→上传 4 个→附件校验），同样只打本地 mock
 """
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(r"E:\file\test\byte-tools")
@@ -119,7 +125,9 @@ class MockGitee(BaseHTTPRequestHandler):
 
 
 def start_server():
-    srv = HTTPServer(("127.0.0.1", 0), MockGitee)
+    # 线程化：单个 keep-alive 连接不该把后面的请求堵死（否则偶发超时会让测试时好时坏）
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), MockGitee)
+    srv.daemon_threads = True
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
@@ -183,6 +191,10 @@ class SyncScriptTest(unittest.TestCase):
         for name in ARTIFACTS:
             self.assertIn(f"{GH_BASE}/{name}", body)
         self.assertNotIn("alipay.png", body)
+        # 正文是给终端用户看的：不能写「Gitee 侧不挂大二进制」这种工程内部话，
+        # 因为本机 .bat 传过产物之后这句话就变成假的（2026-09-29 真实演练时发现）
+        self.assertNotIn("不挂大二进制", body)
+        self.assertIn("GitHub Release：", body)
 
     def test_404_on_tags_lookup_is_not_an_error(self):
         # 真实 Gitee 返回 200 + null（见 new 场景），仓库不存在才 404；两种都要能走到「创建」
@@ -309,6 +321,54 @@ class ArtifactNameConsistency(unittest.TestCase):
         self.assertEqual(preflight, self.EXPECT, "bat 预检清单不一致")
         self.assertEqual(loop, self.EXPECT, "bat 上传白名单不一致")
         self.assertEqual(want, self.EXPECT, "bat 收尾校验清单不一致")
+
+
+class BatEndToEnd(unittest.TestCase):
+    """Windows 版 .bat 的端到端流程：预检 → 复用 Release → 逐个上传 → 附件清单校验。
+
+    只在 Windows 上跑（要 cmd.exe），API 指向同一个本地 mock，绝不碰真实 gitee.com；
+    用几 KB 的假产物，免得把 220MB 灌进内存里的 mock。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not sys.platform.startswith("win"):
+            raise unittest.SkipTest(".bat 只在 Windows 上验证")
+        cls.srv = start_server()
+        cls.port = cls.srv.server_address[1]
+
+    def setUp(self):
+        STATE.clear()
+        STATE["assets"] = []
+        STATE["body"] = ""
+        STATE["reqs"] = []
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name in ARTIFACTS:
+            (Path(self.tmp.name) / name).write_bytes(b"Z" * 2048)
+        (Path(self.tmp.name) / "byte-tools.png").write_bytes(b"icon")
+
+    def test_bat_uploads_all_four_and_verifies(self):
+        env = dict(os.environ)
+        env["GITEE_API_BASE"] = f"http://127.0.0.1:{self.port}/api/existing_links/repos/owner/slug"
+        env["NO_PAUSE"] = "1"
+        proc = subprocess.run(
+            ["cmd.exe", "/c",
+             f'{REPO_ROOT / "同步Gitee产物.bat"} vTEST FAKE_TOKEN_NOT_REAL '
+             f'{self.tmp.name} nopause'],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(REPO_ROOT), env=env, timeout=300)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertIn("preflight ok: found 4 artifact file(s)", out)
+        self.assertIn("release exists, reuse ID: 777", out)
+        self.assertIn("skip non-artifact: byte-tools.png", out)
+        self.assertIn("verified: all 4 artifacts present", out)
+        self.assertIn("done: uploaded 4, skipped 0, ignored 1", out)
+        self.assertEqual(sorted(STATE["assets"]), sorted(ARTIFACTS))
+        # 上传必须带上可观测的 http/耗时/字节，别再回到「静默挂半小时」
+        self.assertGreaterEqual(out.count("curl: http=200"), 4, out)
+        self.assertNotIn("FAKE_TOKEN_NOT_REAL", out, "输出里回显了令牌")
 
 
 if __name__ == "__main__":

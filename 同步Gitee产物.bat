@@ -24,9 +24,10 @@ REM   this-script.bat v1.0.2 <GiteeToken> [assets_dir] [nopause]
 REM Usage (double click):
 REM   prompts for tag and token; assets dir defaults to release-assets
 REM
-REM Prepare the artifacts first - gh is optional, plain curl works:
+REM Prepare the artifacts first - no gh needed. Direct github.com often times out from
+REM mainland China, so use the accelerator prefix (see GH_ACCEL above):
 REM   mkdir release-assets
-REM   curl -L -o release-assets\byte-tools.exe https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe
+REM   curl -L -o release-assets\byte-tools.exe %GH_ACCEL%https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe
 REM   (same for byte-tools-windows-x64.zip / byte-tools-macos-arm64.zip / byte-tools-linux-x64)
 REM
 REM Requires: curl.exe (bundled with Windows 10 1803+) and PowerShell 5.1+
@@ -39,10 +40,20 @@ cd /d "%~dp0"
 
 set "GITEE_OWNER=jack_liujilong"
 set "GITEE_REPO=byte-tools"
-set "API_BASE=https://gitee.com/api/v5/repos/%GITEE_OWNER%/%GITEE_REPO%"
+REM GITEE_API_BASE is a test seam only: set it to a local mock server to exercise the
+REM whole flow without touching gitee.com. Leave it unset for real runs.
+if defined GITEE_API_BASE (set "API_BASE=%GITEE_API_BASE%") else (set "API_BASE=https://gitee.com/api/v5/repos/%GITEE_OWNER%/%GITEE_REPO%")
 set "RELEASE_PAGE=https://gitee.com/%GITEE_OWNER%/%GITEE_REPO%/releases"
 REM GitHub side, used only to tell you how to fetch the artifacts
 set "GH_REPO_SLUG=jilong2026/byte-tools"
+REM Direct github.com times out from mainland China (measured 2026-09-29: curl rc=28
+REM after 20s). All three accelerators answer a small range request, but throughput
+REM differs ~65x, so this was picked by measured speed, not by reachability:
+REM   gh-proxy.com  ~9 MB/s (220MB in 24s)  <- used here
+REM   ghfast.top    ~54 KB/s
+REM   ghproxy.net   ~28 KB/s (timed out mid-range)
+REM Edit this one line if the accelerator ever dies.
+set "GH_ACCEL=https://gh-proxy.com/"
 
 set "TOKEN_ENV=%GITEE_TOKEN%"
 set "TAG_NAME=%~1"
@@ -117,10 +128,11 @@ echo     byte-tools-linux-x64
 echo   Note .\assets in this repo is the ICON folder, not the artifact folder.
 echo.
 echo   Fetch the artifacts first - no gh CLI needed:
-echo     mkdir "%ASSETS_DIR%"echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
+echo     mkdir "%ASSETS_DIR%"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
 goto :fail_nopause
 
 :pre_ok
@@ -256,10 +268,10 @@ goto :fail_nopause
 echo error: assets dir not found: %ASSETS_DIR%
 echo   create it and fetch the release files into it, no gh CLI needed:
 echo     mkdir "%ASSETS_DIR%"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
+echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
 goto :fail_nopause
 
 :err_net

@@ -476,6 +476,34 @@ git push origin v1.0.1
 - 收尾强校验：正文里的 GitHub 直链必须回读到位；`UPLOAD_ARTIFACTS` 指定的附件必须全部出现。缺一项就报错，不会静默「同步成功」。
 - 令牌只作为 curl 表单字段传递，绝不拼进 URL，脚本也刻意不用 `curl -v`（那会把令牌打进日志）。
 
+### 每次发版的固定三步
+
+推 tag 之后 GitHub 侧全自动，Gitee 侧要你在本机补一步上传（境外 runner 传大二进制会挂死，国内链路只需几十秒）：
+
+1. **推 tag**（改动已推到 master 之后，顺序不能反：workflow 取的是 tag 指向那个 commit 里的版本）
+
+   ```bash
+   git tag v1.0.4 && git push origin v1.0.4
+   ```
+
+2. **等 Actions 全绿**。这一步之后：GitHub Release 有 3 平台 4 个产物且已正式发布；Gitee 有同名 Release，正文是 GitHub 直链表格，但**附件区还是空的**。
+3. **本机取产物并传上 Gitee**（令牌走交互输入，不落命令行历史）
+
+   ```bat
+   cd /d E:\file\test\byte-tools
+   mkdir release-assets
+   curl -L -o release-assets\byte-tools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools.exe"
+   curl -L -o release-assets\byte-tools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools-windows-x64.zip"
+   curl -L -o release-assets\byte-tools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools-macos-arm64.zip"
+   curl -L -o release-assets\byte-tools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools-linux-x64"
+   dir release-assets
+   同步Gitee产物.bat v1.0.4
+   ```
+
+   双击 `同步Gitee产物.bat` 也一样：它只会问 tag 和令牌，产物目录默认就是 `release-assets`。脚本幂等，重跑会跳过已存在的附件；跑完 `[3/3]` 会核对四个附件是否都在。
+
+> 想省掉第 3 步：把 `release.yml` 里 `sync-to-gitee` 的 `runs-on` 换成部署在国内的 `self-hosted` runner，并把该 step 的 `UPLOAD_ARTIFACTS` 填上四个产物名，CI 就能全自动把产物传上 Gitee。
+
 ### 补同步历史 tag（如 Gitee 侧漏了产物）
 
 v1.0.2 这类「GitHub 成功、Gitee 没同步好」的情况不用重发包。两种方式任选：
@@ -487,22 +515,25 @@ v1.0.2 这类「GitHub 成功、Gitee 没同步好」的情况不用重发包。
 **方式二（在本机执行）**：本机网络能直连 Gitee，自己准备产物目录后跑脚本。Windows 用 `.bat`（它会真的把产物传上 Gitee，国内链路快），Linux / macOS / Git Bash 用 `.sh`（默认只写直链，要传东西就设 `UPLOAD_ARTIFACTS`）。
 
 > ⚠️ 产物目录**别用仓库自带的 `assets/`**——那是图标目录（`byte-tools.png` / `.ico` / `alipay.png` / `wechat.png`），`.bat` 会一个产物都找不到。默认值已改成 `release-assets/`（已加进 `.gitignore`，几百 MB 产物不会误入库），且现在会**先检查产物再请求 Gitee**，不会白跑一趟。
+>
+> ⚠️ 国内直连 `github.com` 取产物会超时（2026-09-29 实测：`curl` rc=28，20 秒连不上；同一时刻 `https://gh-proxy.com/` 前缀返回 206 + 真实文件魔数）。下面的命令都带加速器前缀，`同步Gitee产物.bat` 报错时打印的提示也同样带。
 
 ```bat
-REM Windows：先用 curl 取产物（不需要 gh），再跑脚本；令牌建议用交互提示输入
+REM Windows：先用 curl（走加速器）取产物，再跑脚本；令牌建议用交互提示输入
 mkdir release-assets
-curl -L -o release-assets\byte-tools.exe "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe"
-curl -L -o release-assets\byte-tools-windows-x64.zip "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-windows-x64.zip"
-curl -L -o release-assets\byte-tools-macos-arm64.zip "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-macos-arm64.zip"
-curl -L -o release-assets\byte-tools-linux-x64 "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-linux-x64"
+curl -L -o release-assets\byte-tools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe"
+curl -L -o release-assets\byte-tools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-windows-x64.zip"
+curl -L -o release-assets\byte-tools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-macos-arm64.zip"
+curl -L -o release-assets\byte-tools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-linux-x64"
+dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 同步Gitee产物.bat v1.0.2 <Gitee私人令牌> release-assets
 ```
 
 ```bash
-# Linux / macOS / Git Bash。没装 gh 就用 curl 从 GitHub Release 直接取产物
+# Linux / macOS / Git Bash。同样走加速器前缀，直连 github.com 会超时
 mkdir -p ./release-assets
 for f in byte-tools.exe byte-tools-windows-x64.zip byte-tools-macos-arm64.zip byte-tools-linux-x64; do
-  curl -L -o "./release-assets/$f" "https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/$f"
+  curl -L -o "./release-assets/$f" "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/$f"
 done
 
 # 令牌用 read -s 现问现用，不落进命令行历史和日志

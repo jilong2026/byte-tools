@@ -249,7 +249,7 @@ fi
 # ---------------------------------------------------------------------------
 build_body() {
   {
-    printf '跨平台构建产物由 GitHub Actions 生成，**统一从 GitHub Release 下载**（Gitee 侧不挂大二进制，跨境上传容易长时间挂死）。\n\n'
+    printf '跨平台构建产物由 GitHub Actions 在三平台矩阵上构建，下表给出各产物的 GitHub 直链。\n\n'
     printf '| 文件 | 大小 | GitHub 直链 |\n| --- | --- | --- |\n'
     local name size
     for name in "${ARTIFACT_LIST[@]}"; do
@@ -261,6 +261,7 @@ build_body() {
       printf '| `%s` | %s | %s/%s |\n' "${name}" "${size}" "${GH_DOWNLOAD_BASE}" "${name}"
     done
     printf '\nGitHub Release：%s\n' "${GH_RELEASE_PAGE}"
+    printf '\n说明：若本站附件与上表同名，则是同一批构建产物；国内直连本站下载偏慢时，可直接用表中的 GitHub 链接。\n'
   }
 }
 RELEASE_BODY="${RELEASE_BODY:-$(build_body)}"
