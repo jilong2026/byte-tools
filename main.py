@@ -3943,6 +3943,69 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
     return steps
 
 
+def load_active_map() -> Dict[str, str]:
+    """读取"每个组件当前生效哪个版本"的登记表；文件缺失或损坏一律当空表。
+
+    返回: Dict[str, str]  {组件 key: 生效版本号}
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    active = data.get("active") if isinstance(data, dict) else None
+    return dict(active) if isinstance(active, dict) else {}
+
+
+def save_active_version(comp_key: str, version: Optional[str]) -> None:
+    """登记或清除某组件的生效版本。
+
+    入参 comp_key: str           组件 key
+    入参 version: Optional[str]  版本号；None 表示清除（已无生效版本）
+
+    说明: 必须**合并写**——先读原文件，只改 active 里那一项。整体覆盖会把
+          selections（下拉框选中版本）一起抹掉，用户下次启动选中的版本全丢。
+    """
+    data: Dict[str, object] = {}
+    if CONFIG_FILE.exists():
+        try:
+            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception:
+            data = {}
+    active = data.get("active")
+    if not isinstance(active, dict):
+        active = {}
+    if version:
+        active[comp_key] = version
+    else:
+        active.pop(comp_key, None)
+    data["active"] = active
+    ensure_dir(CONFIG_FILE.parent)
+    CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def infer_active_from_env(comp: Component) -> Optional[str]:
+    """老配置没记 active 时，从持久层的 XXX_HOME 反推当前生效版本。
+
+    返回: Optional[str]  版本号；反推不出（用户自己装的、指向别处、目录名不规范）时 None
+
+    说明: 这一步是为了不把"已经在用系统里那个 JDK 的用户"显示成"一个都没生效"。
+          推不出来就返回 None，界面写"均未生效"，不要乱猜。
+    """
+    if not comp.env_var:
+        return None
+    home = EnvManager.read_user_env(comp.env_var) or EnvManager.get(comp.env_var)
+    if not home:
+        return None
+    path = Path(os.path.expandvars(str(home)))
+    if not EnvManager._under_root(str(path), str(CONFIG_DIR / comp.key)):
+        return None
+    return version_from_install_dir(comp, path)
+
+
 def _dead_tool_path_predicate():
     """返回「PATH 条目是否属于本工具且目录已不存在」的判定函数。"""
     root = str(CONFIG_DIR)
@@ -5699,15 +5762,30 @@ class MainWindow(QMainWindow):
             pass
 
     def _save_settings(self) -> None:
+        """保存下拉框选中版本；active 由切换那侧维护，这里必须原样保留。
+
+        合并写：先读原文件只替换 selections 那一段。整体覆盖会把 active（生效版本
+        登记表）抹掉——那是切换功能写的数据，和用户这次选了哪个下拉项无关。
+        （负向对照：改回整体覆盖后，测试 SaveSettingsKeepsActive 即报 KeyError: 'active'。）
+        """
         try:
             ensure_dir(CONFIG_DIR)
-            data = {
-                "selections": {
-                    card.component.key: card.version_combo.currentText()
-                    for card in self.cards
-                }
+            data: dict = {}
+            if CONFIG_FILE.exists():
+                try:
+                    loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except Exception:
+                    data = {}
+            data["selections"] = {
+                card.component.key: card.version_combo.currentText()
+                for card in self.cards
             }
-            CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            if not isinstance(data.get("active"), dict):
+                data["active"] = {}
+            CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                                   encoding="utf-8")
         except Exception:
             pass
 

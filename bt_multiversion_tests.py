@@ -28,6 +28,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import main  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 def _restored_env_keys():
     """进程环境快照要跟着组件表长，别手写清单。
@@ -517,6 +518,58 @@ class SwitchActive(EnvSandbox):
         self.assertEqual(self.win_path, [old_bin])
         self.assertEqual(self.win_env["JAVA_HOME"], old_home)
         self.assertNotIn("回滚未完全成功", str(ctx.exception))
+
+
+class ActiveConfig(EnvSandbox):
+    def test_missing_file_gives_empty_map(self):
+        self.assertEqual(main.load_active_map(), {})
+
+    def test_corrupt_file_is_not_fatal(self):
+        main.CONFIG_FILE.write_text("{not json", encoding="utf-8")
+        self.assertEqual(main.load_active_map(), {})
+
+    def test_saving_active_keeps_selections(self):
+        main.CONFIG_FILE.write_text(json.dumps(
+            {"selections": {"jdk": "17.0.12", "node": "20.15.0"}}, ensure_ascii=False),
+            encoding="utf-8")
+        main.save_active_version("jdk", "21.0.4")
+        data = json.loads(main.CONFIG_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(data["active"], {"jdk": "21.0.4"})
+        self.assertEqual(data["selections"], {"jdk": "17.0.12", "node": "20.15.0"},
+                         "写 active 不许丢 selections")
+
+    def test_clearing_active_removes_only_that_key(self):
+        main.save_active_version("jdk", "21.0.4")
+        main.save_active_version("node", "20.15.0")
+        main.save_active_version("jdk", None)
+        self.assertEqual(main.load_active_map(), {"node": "20.15.0"})
+
+    def test_infer_active_from_env_reads_sandboxed_rc(self):
+        self.as_linux()
+        comp = self.make_component("jdk", "21.0.4")
+        main.EnvManager.write_user_env("JAVA_HOME", str(comp.install_dir("21.0.4")))
+        self.assertEqual(main.infer_active_from_env(comp), "21.0.4")
+
+    def test_infer_active_ignores_homes_pointing_elsewhere(self):
+        self.as_linux()
+        comp = self.make_component("jdk", "21.0.4")
+        main.EnvManager.write_user_env("JAVA_HOME", "/opt/other/jdk-11")
+        self.assertIsNone(main.infer_active_from_env(comp))
+
+
+class SaveSettingsKeepsActive(EnvSandbox):
+    def test_window_save_preserves_active(self):
+        main.save_active_version("jdk", "21.0.4")
+        app = QApplication.instance() or QApplication([])
+        orig_fetch = main.MainWindow._start_fetch_versions
+        main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
+        self.addCleanup(setattr, main.MainWindow, "_start_fetch_versions", orig_fetch)
+        win = main.MainWindow()
+        self.addCleanup(win.deleteLater)
+        win._save_settings()
+        data = json.loads(main.CONFIG_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(data["active"], {"jdk": "21.0.4"})
+        self.assertIn("jdk", data["selections"])
 
 
 if __name__ == "__main__":
