@@ -783,5 +783,86 @@ class InstalledCheckIcon(EnvSandbox):
         self.assertEqual(tuple(self._labels(combo)), self.JDK_ALL)
 
 
+class StatusCapsuleForMultiVersion(EnvSandbox):
+    """多版本组件的状态胶囊：已装清单 + 生效版本 + 按钮启用逻辑 + 只探测生效版本。
+
+    夹具纠偏（Task 6/7 都踩过的坑）：jdk 的下拉框由内置大版本清单 "21/17/11/8"
+    填充（main.py:2842-2845）。胶囊里的 selected 走 _current_version()（按下拉文本
+    反查清单）、active 走 active_version()，两者都与清单同源。若把安装目录名写成
+    "21.0.4"，findText 永远返回 -1、selected 反查落回清单首项 "21"，与
+    active="21.0.4" 永不相等 —— 想断言的分支一行都不会执行，是假绿灯。
+    所以这里全用清单里真实存在的大版本串，并自查它们确实进了下拉框。
+    另外 make_component 只造 bin/ 目录，探测分支要能被记录必须让 exec_path_in_home
+    命中：这里为每个已装版本补一个空的 java 桩文件。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    JDK_ACTIVE = "21"
+    JDK_OTHER = "17"
+
+    def _card(self, active=None):
+        comp = self.make_component("jdk", self.JDK_ACTIVE, self.JDK_OTHER)
+        # 补可执行文件桩：胶囊分支对"生效版本"排一次探测，前提是能找到 exe
+        for v in (self.JDK_ACTIVE, self.JDK_OTHER):
+            (comp.install_dir(v) / "bin" / "java").write_text("", encoding="utf-8")
+        self.as_windows()
+        if active:
+            main.save_active_version("jdk", active)
+        self.enable_detect()          # 胶囊用例要真实探测；探测线程已被 enable_detect 换成记录调用
+        # enable_detect 的记录桩写成 self.probe_calls，而那个 self 是卡片实例（bound
+        # method 的首参），不是 TestCase。卡片构造时就会触发一次探测，早于我们能拿到
+        # 卡片引用，所以只能把记录目标先挂到类属性上，让它与 TestCase 的列表同一对象。
+        main.ComponentCard.probe_calls = self.probe_calls
+        self.addCleanup(delattr, main.ComponentCard, "probe_calls")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        # 夹具自查：断言用到的版本标签必须真在下拉框里（Task 7 同款护栏）
+        for label in (self.JDK_ACTIVE, self.JDK_OTHER):
+            self.assertNotEqual(card.version_combo.findText(label), -1,
+                                f"夹具版本 {label} 不在 jdk 下拉清单里，分支测不到")
+        return card
+
+    def test_two_installed_one_active(self):
+        card = self._card(active=self.JDK_ACTIVE)
+        text = card.status_label.text()
+        self.assertIn("已装 2 个版本", text)
+        self.assertIn(f"生效 {self.JDK_ACTIVE}", text)
+        self.assertIn(self.JDK_OTHER, text)
+
+    def test_installed_but_none_active_says_so(self):
+        card = self._card(active=None)
+        self.assertIn("均未生效", card.status_label.text())
+
+    def test_configure_button_disabled_when_selection_is_already_active(self):
+        card = self._card(active=self.JDK_ACTIVE)
+        card.version_combo.setCurrentIndex(card.version_combo.findText(self.JDK_ACTIVE))
+        card._detect_status()
+        self.assertFalse(card.btn_configure.isEnabled())
+
+    def test_configure_button_enabled_for_the_other_version(self):
+        card = self._card(active=self.JDK_ACTIVE)
+        card.version_combo.setCurrentIndex(card.version_combo.findText(self.JDK_OTHER))
+        card._detect_status()
+        self.assertTrue(card.btn_configure.isEnabled())
+        self.assertIn("生效", card.btn_configure.toolTip())
+
+    def test_non_multi_version_capsule_text_unchanged(self):
+        # 回归护栏：非多版本组件的胶囊必须还是老文案，不能被新逻辑污染
+        comp = self.make_component("tomcat", "10.1.60")
+        self.as_windows()
+        self.win_env["CATALINA_HOME"] = str(comp.install_dir("10.1.60"))
+        self.enable_detect()
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.assertNotIn("已装", card.status_label.text())
+        self.assertTrue(card.status_label.text())     # 而不是空字符串
+
+    def test_only_the_active_version_is_probed(self):
+        card = self._card(active=self.JDK_ACTIVE)
+        self.assertEqual(len(self.probe_calls), 1, self.probe_calls)
+        self.assertIn(f"jdk-{self.JDK_ACTIVE}", self.probe_calls[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

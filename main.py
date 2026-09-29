@@ -4479,6 +4479,50 @@ class ComponentCard(QFrame):
         本方法在窗口构建卡片时就会被调用，因此绝不同步执行组件命令：detect 只判定
         存在（probe_version=False），版本号交给 VersionProbeWorker 异步回填。
         """
+        # 多版本组件：状态胶囊要表达的是"装了哪几个 + 哪个生效"，
+        # 而不是单一的"已配置/未配置"；生效以 active 登记表为准，探测只用于回填版本号。
+        if self.component.multi_version:
+            ordered = installed_versions(self.component)
+            active = self.active_version()
+            if not ordered:
+                self.status_label.setText("○ 未安装")
+                self.status_label.setStyleSheet(
+                    "color:#c62828;font-weight:600;padding:2px 8px;"
+                    "background:#ffebee;border-radius:10px;")
+                self.btn_configure.setEnabled(True)
+                self.btn_configure.setToolTip("将已下载的版本写入 XXX_HOME 与 PATH")
+                self.btn_uninstall.setEnabled(False)
+                self.btn_uninstall.setToolTip("当前组件未安装，无需卸载")
+                self._refresh_installed_marks()
+                return
+            names = "、".join(v for v, _p in ordered)
+            tail = f" · 生效 {active}" if active else " · 均未生效"
+            self.status_label.setText(f"● 已装 {len(ordered)} 个版本{tail}（{names}）")
+            self.status_label.setStyleSheet(
+                "color:#2e7d32;font-weight:600;padding:2px 8px;"
+                "background:#e8f5e9;border-radius:10px;" if active else
+                "color:#ef6c00;font-weight:600;padding:2px 8px;"
+                "background:#fff3e0;border-radius:10px;")
+            selected = self._current_version().version
+            self.btn_configure.setEnabled(selected != active)
+            self.btn_configure.setToolTip(
+                "把下拉框选中的版本设为生效版本：改 XXX_HOME，并把本组件在 PATH 里的"
+                "条目收敛成这一条；已开着的终端需重开才生效" if selected != active else
+                f"选中的 {selected} 已是生效版本；要换版本先在下拉框里选中")
+            self.btn_uninstall.setEnabled(True)
+            self.btn_uninstall.setToolTip(
+                f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
+                "其他已装版本不动")
+            for ver, path in ordered:
+                if ver == active:
+                    # 复用既有寻径（会试 bin/、根目录、.bat/.cmd 等），别自己拼路径
+                    exe = self.component.exec_path_in_home(str(path))
+                    if exe:
+                        self._schedule_version_probe(str(exe))
+                    break
+            self._refresh_installed_marks()
+            return
+
         result = self.component.detect(probe_version=False)
         self._status_shows_configured = bool(result.installed)
         if result.installed:
