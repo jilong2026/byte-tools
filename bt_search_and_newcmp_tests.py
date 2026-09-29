@@ -216,21 +216,44 @@ class MainWindowSearchBox(unittest.TestCase):
         self.win.search_box.setText("")
         self.assertEqual(len([c for c in self.win.cards if not c.isHidden()]), TOTAL)
 
-    def test_tab_titles_show_matched_over_total_while_searching(self):
-        self.win.search_box.setText("sql")   # mysql + postgresql 都在开发软件
-        labels = [self.win.tabs.tabText(i) for i in range(self.win.tabs.count())]
-        self.assertEqual(labels, [
-            "开发环境（0/10）", "开发软件（2/13）", "其它软件（0/3）",
-        ])
-        self.win.search_box.setText("")
-        self.assertEqual([self.win.tabs.tabText(i) for i in range(self.win.tabs.count())], [
-            f"{name}（{len(EXPECTED_MEMBERSHIP[name])}）" for name in EXPECTED_MEMBERSHIP
-        ])
+    def _result_widgets(self):
+        lay = self.win.results_layout
+        return [lay.itemAt(i).widget() for i in range(lay.count())
+                if lay.itemAt(i).widget() is not None]
 
-    def test_current_tab_jumps_to_a_tab_that_has_matches(self):
-        self.win.tabs.setCurrentIndex(2)
-        self.win.search_box.setText("jdk")   # jdk 在开发环境（第 0 页）
-        self.assertEqual(self.win.tabs.currentIndex(), 0)
+    def test_search_switches_to_unified_results_panel(self):
+        # sql 命中 mysql + postgresql，二者都在「开发软件」分类
+        self.win.search_box.setText("sql")
+        self.assertEqual(self.win.top_stack.currentIndex(), 1, "应切到统一结果面板")
+        self.assertIs(self.win.top_stack.currentWidget(), self.win.results_area)
+        visible = {c.component.key for c in self.win.cards if not c.isHidden()}
+        self.assertEqual(visible, {"mysql", "postgresql"})
+        # 结果面板里应出现「开发软件」分类小标题
+        headers = [w.text() for w in self._result_widgets()
+                   if w.objectName() == "resultCatHeader"]
+        self.assertIn("开发软件", headers)
+        # 命中卡片里确实包含 mysql / postgresql
+        shown = {w.component.key for w in self._result_widgets()
+                 if w in self.win.cards}
+        self.assertTrue({"mysql", "postgresql"} <= shown)
+        self.win.search_box.setText("")
+
+    def test_search_is_global_across_all_categories(self):
+        # 搜 jdk（在「开发环境」分类）也能在统一面板里找到——不是只搜某个 Tab 内
+        self.win.search_box.setText("jdk")
+        self.assertEqual(self.win.top_stack.currentIndex(), 1)
+        visible = {c.component.key for c in self.win.cards if not c.isHidden()}
+        self.assertEqual(visible, {"jdk"})
+        self.win.search_box.setText("")
+
+    def test_clearing_search_restores_tabs(self):
+        self.win.search_box.setText("kafka")
+        self.win.search_box.setText("")
+        self.assertEqual(self.win.top_stack.currentIndex(), 0, "清空后应回到 Tab 浏览")
+        self.assertEqual(
+            [self.win.tabs.tabText(i) for i in range(self.win.tabs.count())],
+            [f"{name}（{len(EXPECTED_MEMBERSHIP[name])}）" for name in EXPECTED_MEMBERSHIP],
+        )
 
     def test_filtering_does_not_break_the_flat_card_list(self):
         self.win.search_box.setText("redis-not-here")

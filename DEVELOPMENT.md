@@ -408,10 +408,12 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
 - 匹配内核是纯函数 `component_matches(comp, query)`：只比 `display_name` 与 `key`，忽略大小写与首尾空白，
   空查询（或全空白）返回 `True` 表示不过滤。**不要**把分类名纳入匹配——分类已由 Tab 表达，
   搜"开发"会命中全部卡片，等于没搜
-- 过滤**只改 `card.setVisible()`**，绝不从 `MainWindow.cards` 里摘项（原因见 R2.3 的全量平铺不变量）
-- Tab 标题在搜索期间显示 `分类（匹配数/总数）`，清空后回到 `分类（总数）`；右侧 `#searchHint`
-  显示"匹配 N / 26 个组件"。数字一律现算
-- 当前 Tab 一条都没命中而别的 Tab 有命中时，自动跳到第一个有命中的 Tab，避免用户对着空白页以为搜坏了
+- 过滤**只改 `card.setVisible()` 与卡片在布局里的归属**，绝不从 `MainWindow.cards` 里摘项（原因见 R2.3 的全量平铺不变量）
+- **全组件搜索的呈现方式**：搜索时收起三个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
+  把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
+  清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
+  右侧 `#searchHint` 仍显示"匹配 N / 26 个组件"（0 命中转警示红）。数字一律现算
+- 这正是"全组件搜索、而不是只搜某个 table 内"的要求：结果跨三个分类，统一归并展示
 - 新增组件**不需要**为搜索做任何登记：卡片建好就自动可搜。改匹配规则要同步 `bt_search_and_newcmp_tests.py`
 - 外观约定：输入框不直接描边，而是套一层胶囊外壳 `#searchShell`（放大镜 + 输入框同属一块白底圆角），
   聚焦时**整条外壳**描蓝边 —— 为此 `MainWindow.eventFilter()` 监听输入框焦点、经 `_set_search_focus()`

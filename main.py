@@ -82,6 +82,7 @@ try:
         QSizePolicy,
         QSpacerItem,
         QSplitter,
+        QStackedWidget,
         QTabWidget,
         QTextEdit,
         QToolTip,
@@ -4669,6 +4670,7 @@ class MainWindow(QMainWindow):
         # self.cards 仍是全量平铺列表——刷新版本 / 存取配置 / 关窗等探测都靠它遍历。
         self.cards: List[ComponentCard] = []
         self._tab_cards: List[List[ComponentCard]] = []
+        self._tab_layouts: list = []
         self.tabs = QTabWidget()
         self.tabs.setObjectName("compTabs")
         self.tabs.setDocumentMode(True)
@@ -4692,7 +4694,26 @@ class MainWindow(QMainWindow):
             scroll.setWidget(cards_wrap)
             self.tabs.addTab(scroll, f"{cat_name}（{len(comps)}）")
             self._tab_cards.append(tab_cards)
-        body.addWidget(self.tabs)
+            self._tab_layouts.append(cards_layout)
+
+        # 统一搜索结果面板：搜索时收起三个 Tab，把所有命中的组件按分类归并到
+        # 同一个滚动列表里（带分类小标题），一眼看全、不用切页——这就是「全组件搜索」。
+        self.results_area = QScrollArea()
+        self.results_area.setObjectName("resultsArea")
+        self.results_area.setWidgetResizable(True)
+        self.results_content = QWidget()
+        self.results_content.setObjectName("resultsContent")
+        self.results_layout = QVBoxLayout(self.results_content)
+        self.results_layout.setContentsMargins(18, 18, 18, 18)
+        self.results_layout.setSpacing(6)
+        self.results_area.setWidget(self.results_content)
+
+        # 浏览模式用 Tab，搜索模式用统一结果面板，二者互斥地放进一个栈
+        self.top_stack = QStackedWidget()
+        self.top_stack.setObjectName("topStack")
+        self.top_stack.addWidget(self.tabs)           # index 0：浏览
+        self.top_stack.addWidget(self.results_area)   # index 1：搜索结果
+        body.addWidget(self.top_stack)
 
         # 日志
         log_wrap = QWidget()
@@ -4811,45 +4832,99 @@ class MainWindow(QMainWindow):
 
     def _apply_search(self, query: str) -> None:
         """
-        按搜索词过滤卡片：命中的显示、其余隐藏，并把 Tab 标题改成「匹配数/总数」。
+        全组件搜索：命中跨所有分类，结果归并到统一面板。
 
-        入参 query: str  搜索框当前内容；空串（或全空白）表示不过滤，恢复原状。
+        入参 query: str  搜索框当前内容；空串（或全空白）表示退出搜索、恢复三个 Tab。
 
-        说明: 过滤只动卡片可见性，**不动 self.cards 平铺列表**——
-              刷新版本 / 存配置 / 关窗等探测逻辑都遍历那个列表，隐藏不能让它缺项。
+        行为:
+        - 退出搜索: 卡片全部回到各自 Tab、恢复可见，显示三个分类 Tab，Tab 标题恢复「总数」。
+        - 进入搜索: 收起 Tab，把所有命中的组件按分类归并到统一结果列表（带分类小标题），
+          一眼看全，不用切页。过滤只动卡片可见性/归属，**不动 self.cards 平铺列表**——
+          刷新版本 / 存配置 / 关窗等探测逻辑都遍历那个列表，隐藏不能让它缺项。
         """
         q = query.strip()
-        matched: List[int] = []
-        for tab_cards in self._tab_cards:
-            hits = 0
-            for card in tab_cards:
-                show = component_matches(card.component, q)
-                card.setVisible(show)
-                if show:
-                    hits += 1
-            matched.append(hits)
+        # 先无条件复位到「浏览基线」，保证重复搜索、清空再搜都从干净状态出发
+        self._restore_browse()
 
+        if not q:
+            self.search_hint.setText("")
+            self.search_hint.setProperty("empty", "false")
+            self.search_hint.style().unpolish(self.search_hint)
+            self.search_hint.style().polish(self.search_hint)
+            return
+
+        self._build_unified(q)
+
+    def _restore_browse(self) -> None:
+        """把全部卡片放回各自 Tab 并恢复可见，切回浏览模式。"""
+        # 从统一结果面板卸下所有卡片
+        for card in self.cards:
+            if self.results_layout.indexOf(card) != -1:
+                self.results_layout.removeWidget(card)
+        # 切回 Tab 浏览
+        self.top_stack.setCurrentIndex(0)
+        # 把每个 Tab 的卡片按原顺序插回（layout 末尾有一个 stretch，插到它前面）
+        for i, layout in enumerate(self._tab_layouts):
+            for j, card in enumerate(self._tab_cards[i]):
+                if layout.indexOf(card) == -1:
+                    layout.insertWidget(j, card)
+                card.setVisible(True)
+        # Tab 标题恢复成「分类（总数）」
         for idx, cat_name in enumerate(COMPONENT_CATEGORIES):
-            total = len(self._tab_cards[idx])
-            self.tabs.setTabText(
-                idx, f"{cat_name}（{matched[idx]}/{total}）" if q else f"{cat_name}（{total}）"
-            )
+            self.tabs.setTabText(idx, f"{cat_name}（{len(self._tab_cards[idx])}）")
+        # 清掉结果面板里残留的分类小标题
+        self._clear_results_layout()
 
-        total_hit = sum(matched)
-        self.search_hint.setText(
-            f"匹配 {total_hit} / {len(self.cards)} 个组件" if q else ""
-        )
+    def _build_unified(self, q: str) -> None:
+        """把命中的组件按分类归并进统一结果列表（带分类小标题）。"""
+        self._clear_results_layout()
+        cur_cat = None
+        hits = 0
+        # self.cards 已是分类顺序，便于在切换分类时插入分类小标题
+        for card in self.cards:
+            comp = card.component
+            if component_matches(comp, q):
+                cat = comp.category
+                if cat != cur_cat:
+                    header = QLabel(cat)
+                    header.setObjectName("resultCatHeader")
+                    self.results_layout.addWidget(header)
+                    cur_cat = cat
+                self._reparent(card, self.results_layout, self.results_layout.count())
+                card.setVisible(True)
+                hits += 1
+            else:
+                card.setVisible(False)
+        self.results_layout.addStretch(1)
+        self.top_stack.setCurrentIndex(1)
+
+        self.search_hint.setText(f"匹配 {hits} / {len(self.cards)} 个组件")
         # 一个都没命中时换个警示色，免得用户以为列表加载坏了
-        self.search_hint.setProperty("empty", "true" if (q and total_hit == 0) else "false")
+        self.search_hint.setProperty("empty", "true" if hits == 0 else "false")
         self.search_hint.style().unpolish(self.search_hint)
         self.search_hint.style().polish(self.search_hint)
-        # 当前 Tab 一条都没命中时，跳到第一个有命中的 Tab，免得用户看到空白页
-        if q and matched and self.tabs.currentIndex() < len(matched) \
-                and matched[self.tabs.currentIndex()] == 0:
-            for idx, hits in enumerate(matched):
-                if hits:
-                    self.tabs.setCurrentIndex(idx)
-                    break
+
+    def _reparent(self, card, target_layout, index) -> None:
+        """把卡片从任何已知 layout 摘下，再插入目标 layout 的指定位置。"""
+        for li in (self.results_layout, *self._tab_layouts):
+            if li.indexOf(card) != -1:
+                li.removeWidget(card)
+        target_layout.insertWidget(index, card)
+
+    def _clear_results_layout(self) -> None:
+        """清空统一结果面板里的所有条目（分类小标题等临时控件）。"""
+        while self.results_layout.count():
+            item = self.results_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                if w in self.cards:
+                    w.setParent(None)        # 卡片稍后由 _restore_browse 归位
+                else:
+                    w.deleteLater()          # 分类小标题等临时标签
+                continue
+            sp = item.spacerItem()
+            if sp is not None:
+                del sp
 
     def _apply_qss(self) -> None:
         """应用 QSS 样式表。"""
@@ -4924,6 +4999,18 @@ class MainWindow(QMainWindow):
             }
             #cardsScroll { border: none; background: transparent; }
             #cardsWrap { background: transparent; }
+
+            #topStack { background: transparent; }
+            #resultsArea { border: none; background: transparent; }
+            #resultsContent { background: transparent; }
+            #resultCatHeader {
+                font-weight: 600;
+                color: #33465c;
+                font-size: 13px;
+                padding: 8px 2px 2px 10px;
+                margin-top: 4px;
+                border-left: 3px solid #4a7fd0;
+            }
             #card {
                 background: white;
                 border-radius: 12px;
