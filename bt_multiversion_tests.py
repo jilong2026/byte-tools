@@ -1172,7 +1172,9 @@ class UninstallActiveGuardFix2(EnvSandbox):
         self.assertIn(str(comp.install_dir("17.0.12") / "bin"), self.win_path)
         self.assertNotIn(str(comp.install_dir("21.0.4") / "bin"), self.win_path)
         self.assertIn(r"C:\Windows\system32", self.win_path)
-        self.assertIn("生效版本已自动切到 17.0.12", summary)
+        # N-2 措辞分叉（task-9-fix-3.md）：target == active（17 本来就在生效）是
+        # "重建"不是"切"，旧句"生效版本已自动切到 17.0.12"在本场景是假话。
+        self.assertIn("已按生效版本 17.0.12 重建环境变量与 PATH", summary)
 
     # ---- I-2：D6 提醒进摘要 + 登记表写失败如实报告 ----
     def test_i2_repoint_summary_carries_d6_notice(self):
@@ -1338,6 +1340,113 @@ class UninstallButtonGate(EnvSandbox):
         tip = card.btn_uninstall.toolTip()
         self.assertIn("未安装", tip)
         self.assertIn("绿勾", tip, "禁用 tooltip 要告诉用户怎么选中已装版本")
+
+
+class UninstallHomeGuardFix3(EnvSandbox):
+    """Task 9 修复轮 3（裁决见 task-9-fix-3.md）：N-1 重建只针对"我们自己的 HOME 漂移"、
+    N-2 重建分支措辞分叉、N-3 infer_active_from_env 加目录存在性判据。
+
+    夹具沿用 UninstallScope / UninstallActiveGuardFix2 的形状：as_windows + jdk
+    21.0.4/17.0.12 + 两条版本 PATH 条目 + C:\\Windows\\system32 锚点。断言只看
+    win_env / win_path / CONFIG_FILE / 摘要文本与 status_label.text()，绝不断言桩的调用次数。
+    """
+
+    def _seed_jdk(self, home=None, active="21.0.4", versions=("21.0.4", "17.0.12")):
+        """装 versions 两个版本并各留一条 PATH 条目；home=None 表示根本不设 JAVA_HOME。
+
+        active=None 时不写登记表（模拟只有 selections 的老 config.json）。
+        """
+        self.as_windows()
+        comp = self.make_component("jdk", *versions)
+        self.win_path[:] = [str(comp.install_dir(v) / "bin") for v in versions] \
+                            + [r"C:\Windows\system32"]
+        if home:
+            self.win_env["JAVA_HOME"] = home
+        else:
+            # 宿主机可能自带 JAVA_HOME：第 2 步的 `read_user_env or get` 会兜底到
+            # os.environ，把用户真机的值混进摘要。EnvSandbox 结束时会还原 ENV_KEYS，
+            # 这里先弹出，保证"根本没设 JAVA_HOME"是干净的现场。
+            os.environ.pop("JAVA_HOME", None)
+        if active:
+            main.save_active_version("jdk", active)
+        else:
+            main.CONFIG_FILE.write_text(
+                json.dumps({"selections": {"jdk": "21.0.4"}}, ensure_ascii=False),
+                encoding="utf-8")
+        return comp
+
+    # ---- N-1（Important）：用户自己的 HOME 指在我们根外时绝不覆盖 ----
+    def test_n1_out_of_root_home_is_never_rebuilt(self):
+        # 评审实测的复现现场：登记表 active=我们的 21.0.4，但 JAVA_HOME 是用户自己
+        # 指到组件根之外的 JDK1.8。现网第 4 步只看"HOME 与 active 目录不同路径"就
+        # 重建，把用户自己的入口覆盖成我们的 jdk-21.0.4，和第 2 步的"未删除"自相矛盾。
+        # 红点：win_env["JAVA_HOME"] 变成了我们的 21.0.4 目录。
+        foreign = r"C:\Program Files\Java\jdk1.8.0_202"
+        comp = self._seed_jdk(home=foreign)
+        summary = comp.uninstall("17.0.12")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), foreign,
+                         "用户指到组件目录之外的 JAVA_HOME 绝不允许被卸载覆盖成我们的路径")
+        self.assertNotIn("重建环境变量与 PATH", summary)
+        self.assertNotIn("自动切到", summary)
+        # 第 2 步的如实陈述不能被第 4 步反悔
+        self.assertIn("指向其他目录", summary)
+        self.assertEqual(main.load_active_map()["jdk"], "21.0.4")
+        self.assertIn(str(comp.install_dir("21.0.4") / "bin"), self.win_path)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+    def test_n1b_missing_home_still_rebuilds_active(self):
+        # N-1 必须保留 `not home_now` 那一支：登记表说 21 生效、HOME 却被第 2 步删了
+        # （或根本没设），正是"我们自己的 HOME 被这次卸载带偏"，第 4 步仍要按 active 重建。
+        comp = self._seed_jdk(home=None)
+        summary = comp.uninstall("17.0.12")
+        self.assertEqual(self.win_env.get("JAVA_HOME"), str(comp.install_dir("21.0.4")))
+        self.assertIn("已按生效版本 21.0.4 重建环境变量与 PATH", summary)
+        self.assertIn(str(comp.install_dir("21.0.4") / "bin"), self.win_path)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+    # ---- N-2（Minor）：target == active 是"重建"不是"切" ----
+    def test_n2_rebuild_summary_does_not_say_switched(self):
+        # 同一场景：active=21 本来就活着，"生效版本已自动切到 21.0.4"是假话——
+        # 它没被切过。措辞要按 target 与 active 是否相同分叉。
+        comp = self._seed_jdk(home=None)
+        summary = comp.uninstall("17.0.12")
+        self.assertNotIn("自动切到 21.0.4", summary)
+        self.assertIn("已按生效版本 21.0.4 重建环境变量与 PATH", summary)
+
+    def test_n2b_python_without_env_var_is_untouched(self):
+        # python 是 7 个白名单里唯一 env_var=None 的（main.py:3020-3022）：
+        # 没有 HOME 可被带偏，第 4 步既不该动 PATH 也不该在摘要里写"重建/自动切到"。
+        self.as_windows()
+        comp = self.make_component("python", "3.12.4", "3.11.9")
+        self.win_path[:] = [str(comp.install_dir("3.12.4") / "Scripts"),
+                            str(comp.install_dir("3.11.9") / "Scripts"),
+                            r"C:\Windows\system32"]
+        main.save_active_version("python", "3.12.4")
+        summary = comp.uninstall("3.11.9")
+        self.assertIn(str(comp.install_dir("3.12.4") / "Scripts"), self.win_path)
+        self.assertNotIn(str(comp.install_dir("3.11.9") / "Scripts"), self.win_path)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+        self.assertNotIn("重建", summary)
+        self.assertNotIn("自动切到", summary)
+        self.assertEqual(main.load_active_map()["python"], "3.12.4")
+
+    # ---- N-3（Minor）：infer_active_from_env 要校验目录真实存在 ----
+    def test_n3_infer_rejects_dead_home(self):
+        # 双写失败（目录删了、HOME 没清掉）后胶囊能一直显示"生效 11"而盘上已无 11。
+        # 登记表为空 + JAVA_HOME 指我们根下不存在的 jdk-11 → 反推必须是 None，
+        # 胶囊必须走"均未生效"。红点：infer 返回 '11'（现网只看值、不看目录）。
+        comp = self._seed_jdk(home=None, active=None, versions=("21",))
+        dead = str(comp.install_dir("11"))            # jdk-11 只造路径、从不造目录
+        self.assertFalse(Path(dead).is_dir())
+        self.win_env["JAVA_HOME"] = dead
+        self.assertIsNone(main.infer_active_from_env(comp))
+        self.enable_detect()
+        main.ComponentCard.probe_calls = self.probe_calls   # 同 Task 8：记录桩的 self 是卡片实例
+        self.addCleanup(delattr, main.ComponentCard, "probe_calls")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.assertIsNone(card.active_version())
+        self.assertIn("均未生效", card.status_label.text())
+        self.assertNotIn("生效 11", card.status_label.text())
 
 
 class UninstallConfirmText(EnvSandbox):

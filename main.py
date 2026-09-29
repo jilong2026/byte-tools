@@ -438,8 +438,8 @@ class Component:
         #    读登记表/反推：老配置的生效版本靠 XXX_HOME 反推，而第 2 步可能已把那个 HOME
         #    删掉，事后再读永远是 None，"自动重排"会静默失效。
         #    全删光：清登记；HOME 只在指向本组件目录时才清，用户指到别处的绝不动。
-        #    还有剩余：删掉的正是生效版本就切到剩余里版本号最高的；生效版本还活着但它的
-        #    HOME 被这次卸载带偏/删掉，就按它重建生效配置。
+        #    还有剩余：删掉的正是生效版本就切到剩余里版本号最高的；只有"我们自己的
+        #    HOME"（落在组件根内）被这次卸载带偏/删掉，才按生效版本重建。
         if self.multi_version:
             remaining = installed_versions(self)
             removed_ver = version_from_install_dir(self, install_path) if install_path else None
@@ -464,10 +464,15 @@ class Component:
                 remaining_map = dict(remaining)
                 target = None
                 if active and active in remaining_map:
-                    # 生效版本还活着：若它的 HOME 被这次卸载带偏/删掉，就按它重建生效配置
+                    # 只在"我们自己的 HOME 被这次卸载带偏"时重建：
+                    #   · 该组件根本没有 HOME 变量（如 python，env_var=None）→ 没有 HOME 可带偏，不动 PATH 也不动；
+                    #   · HOME 在我们组件根之外 = 用户自己的安装，绝不覆盖（第 2 步已说过"未删除"，这里不能反悔）。
                     home_now = EnvManager.read_user_env(self.env_var) if self.env_var else None
-                    if not home_now or not EnvManager._same_path(
-                            str(home_now), str(remaining_map[active])):
+                    if self.env_var and (
+                            not home_now
+                            or (EnvManager._under_root(str(home_now), str(component_root))
+                                and not EnvManager._same_path(
+                                    str(home_now), str(remaining_map[active])))):
                         target = active
                 elif active and removed_ver == active:
                     # 删掉的正是生效版本：切到剩余里版本号最高的（installed_versions 已降序）
@@ -481,11 +486,17 @@ class Component:
                             save_active_version(self.key, None)
                         except Exception as save_exc:
                             summary_parts.append(f"清空生效登记也失败：{save_exc}")
+                        # N-2：target == active 是"按生效版本重建"，不是"切"——
+                        # 它本来就在生效，说"自动切到"是假话。失败分支同理分叉。
                         summary_parts.append(
-                            f"自动切到 {target} 失败，生效登记已清空，请重新点一次"
-                            f"「仅配置环境变量」：{exc}")
+                            (f"自动切到 {target} 失败，生效登记已清空，请重新点一次"
+                             f"「仅配置环境变量」：{exc}") if target != active else
+                            (f"按生效版本 {target} 重建环境变量与 PATH 失败，生效登记已清空，"
+                             f"请重新点一次「仅配置环境变量」：{exc}"))
                     else:
-                        summary_parts.append(f"生效版本已自动切到 {target}")
+                        summary_parts.append(
+                            f"生效版本已自动切到 {target}" if target != active
+                            else f"已按生效版本 {target} 重建环境变量与 PATH")
                         # D6：切换步骤日志（含"已开着的终端/IDE 需重开"与 Oracle
                         # javapath 抢先提醒）必须进摘要，与切换路径 _apply_active 同一套话。
                         summary_parts.extend(steps)
@@ -4099,6 +4110,8 @@ def infer_active_from_env(comp: Component) -> Optional[str]:
 
     说明: 这一步是为了不把"已经在用系统里那个 JDK 的用户"显示成"一个都没生效"。
           推不出来就返回 None，界面写"均未生效"，不要乱猜。
+          N-3：反推出来的版本目录必须真实存在——双写失败（目录删了、HOME 没清掉）
+          或早年手工删目录后，HOME 只是死配置，不能让它把胶囊撑成"生效 X"。
     """
     if not comp.env_var:
         return None
@@ -4106,6 +4119,9 @@ def infer_active_from_env(comp: Component) -> Optional[str]:
     if not home:
         return None
     path = Path(os.path.expandvars(str(home)))
+    if not path.is_dir():
+        # 存在性判据：HOME 指向的目录已不在磁盘上，反推出来的是幽灵版本
+        return None
     if not EnvManager._under_root(str(path), str(CONFIG_DIR / comp.key)):
         return None
     return version_from_install_dir(comp, path)
