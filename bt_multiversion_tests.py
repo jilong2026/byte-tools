@@ -529,14 +529,24 @@ class ActiveConfig(EnvSandbox):
         self.assertEqual(main.load_active_map(), {})
 
     def test_saving_active_keeps_selections(self):
+        # theme 代表"未来任务可能新增的其它顶层字段"：合并写必须连它一起保住，
+        # 只锚定 selections 会漏掉"保留两键但丢其它键"这类回归。
         main.CONFIG_FILE.write_text(json.dumps(
-            {"selections": {"jdk": "17.0.12", "node": "20.15.0"}}, ensure_ascii=False),
-            encoding="utf-8")
+            {"selections": {"jdk": "17.0.12", "node": "20.15.0"}, "theme": "keep-me"},
+            ensure_ascii=False), encoding="utf-8")
         main.save_active_version("jdk", "21.0.4")
         data = json.loads(main.CONFIG_FILE.read_text(encoding="utf-8"))
         self.assertEqual(data["active"], {"jdk": "21.0.4"})
         self.assertEqual(data["selections"], {"jdk": "17.0.12", "node": "20.15.0"},
                          "写 active 不许丢 selections")
+        self.assertEqual(data["theme"], "keep-me", "写 active 不许丢其它顶层键")
+
+    def test_saving_active_over_corrupt_file_rebuilds_it(self):
+        # 文件损坏时 save 的回落：不许抛，且要写出仅含新 active 的可读文件。
+        main.CONFIG_FILE.write_text("{not json", encoding="utf-8")
+        main.save_active_version("jdk", "21.0.4")  # 不应抛出
+        data = json.loads(main.CONFIG_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(data["active"], {"jdk": "21.0.4"})
 
     def test_clearing_active_removes_only_that_key(self):
         main.save_active_version("jdk", "21.0.4")
@@ -559,6 +569,8 @@ class ActiveConfig(EnvSandbox):
 
 class SaveSettingsKeepsActive(EnvSandbox):
     def test_window_save_preserves_active(self):
+        # theme 同 ActiveConfig：_save_settings 也只许改 selections，其它顶层键原样保留。
+        main.CONFIG_FILE.write_text(json.dumps({"theme": "keep-me"}), encoding="utf-8")
         main.save_active_version("jdk", "21.0.4")
         app = QApplication.instance() or QApplication([])
         orig_fetch = main.MainWindow._start_fetch_versions
@@ -570,6 +582,7 @@ class SaveSettingsKeepsActive(EnvSandbox):
         data = json.loads(main.CONFIG_FILE.read_text(encoding="utf-8"))
         self.assertEqual(data["active"], {"jdk": "21.0.4"})
         self.assertIn("jdk", data["selections"])
+        self.assertEqual(data["theme"], "keep-me", "_save_settings 不许丢其它顶层键")
 
 
 if __name__ == "__main__":
