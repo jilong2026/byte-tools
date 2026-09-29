@@ -1671,3 +1671,69 @@ git push origin master
 4. 切换失败不留中间态：Task 4 的回滚用例 + Task 6 的失败用例 + Task 9 的自动重排用例都绿。
 5. 非多版本组件的原有行为与文案未被改动（Task 8 的 `test_non_multi_version_capsule_text_unchanged`）。
 6. 用户完成 Task 8 Step 5 的 Windows 真机验收清单（6 项）。
+
+---
+
+## 执行期对计划的修正（2026-09-29，落地位于 HEAD `6c0ec43`）
+
+> 本节如实记录实现过程中偏离上文计划草案的地方。**上文各 Task 的原文照留、不作回改**——它们保留了当初的设计意图，
+> 下面的偏差条目才是"已经落地的真相"。凡与本节冲突，以本节 + 代码为准。
+
+### 1. 测试夹具的版本串 `21.0.4 / 17.0.12` 不在 jdk 离线清单里
+Task 0 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 的夹具大量用 `make_component("jdk", "21.0.4", "17.0.12")`，
+而 `build_components()` 里 jdk 的离线 catalog 是 `21 / 17 / 11 / 8`（`main.py:2960`）——**这两个精确小版本串从来不是可选项**。
+- 影响面：夹具本身是合法的——多版本模型只认 `<key>-<version>` 目录名，`make_component` 直接按传入串造目录，不查 catalog，
+  所以测试仍成立（落地后测试文件里仍保留 21.0.4/17.0.12 作为合成版本串）。
+- 真正需要纠正的是**面向用户的示例**：状态胶囊示例文案要用 catalog 里真实存在的主版本号 `生效 21（21、17）`，
+  不能拿 21.0.4 当"下拉框里可点的版本"。README / DEVELOPMENT.md 的胶囊例子据此改写为 `21 / 17`；
+  卸载摘要的例子保留 21.0.4/17.0.12（那里展示的是"卸载某精确版本"的日志措辞，不是下拉选项）。
+
+### 2. 状态胶囊清单分隔符：计划写 `｜`，代码用中文顿号 `、`
+Task 8 原文（`Produces` 一节）把多版本胶囊写成 `● 已装 {n} 个版本 · 生效 {ver}｜{已装清单}`。
+落地实现（`main.py:4639`）用的是 `、`：实际产出 `● 已装 2 个版本 · 生效 21（21、17）`。文档一律以 `、` 为准。
+
+### 3. PATH 清理范围：从"一律收窄"细化为"有兄弟版本才收窄，全删光回到按根清扫"
+计划与全局约束只说了"只清理本组件目录内的 PATH 条目"。实现（`Component.uninstall` 第 ③ 步，`main.py:420-435`）进一步分叉：
+- 磁盘上**还有同组件其它安装目录**时，scope 收窄到**本次被删的那个目录**，绝不按组件根扫（否则会把用户没删的其它版本条目一起删掉）；
+- 本组件**已无任何其它安装目录**时，scope 回到组件根 `CONFIG_DIR/<key>` 整体清扫，从而保住"早年手工删目录留下的死条目也能清掉"的自愈能力。
+一句话进 R3：**删一个版本不得影响同组件其它版本的目录、HOME 与 PATH 条目。**
+
+### 4. 卸载要快照 `active_before`（计划完全没有这一步）
+评审实测复现出一个真 bug：本期上线前装好的组件，`config.json` 里没有 `active` 条目，生效版本靠 `infer_active_from_env()`
+从 `XXX_HOME` 反推；而卸载第 ② 步可能正好把那个 HOME 删掉，事后再读永远是 `None`，"删掉生效版本后自动重排"会**静默失效**。
+修复：`Component.uninstall` 在**任何破坏性动作之前**先算好 `active_before = load_active_map().get(key) or infer_active_from_env(self)`
+（`main.py:375`，仅多版本才算），第 ④ 步只认这份快照。这是第 2 轮修复才补上的，计划里未预见。
+
+### 5. 措辞分叉：「自动切到」 vs 「按生效版本重建」
+计划只给了"自动切到剩余最高版本"一种说法。实现（`main.py:491-499`）按语义分成两种：
+- 删掉的**正是生效版本** → `生效版本已自动切到 {target}`（确实发生了切换）；
+- 生效版本**还活着**、只是环境变量被这次卸载带偏 → `已按生效版本 {target} 重建环境变量与 PATH`（本就在生效，说"切到"是假话）。
+失败分支同样分叉。另：`python` 这类 `env_var=None` 的组件没有 HOME 可带偏，第 ④ 步对它不写任何东西（`test_n2b_python_without_env_var_is_untouched`）。
+
+### 6. `resolve_uninstall_target` 为多版本组件放宽了"罢工"
+计划沿用旧语义：选了没装、磁盘又装着多个 → 罢工"请先在下拉框中选择具体版本"。实现（`main.py:293-338`）按 `multi_version` 分叉：
+- 多版本组件：改为按语义版本降序卸最高的，并说明"已装 …，改为卸载版本最高的 X"（罢工等于卸载失灵）；
+- 非多版本组件：**维持罢工原文**（R3.9 零影响，护栏 `test_non_multi_version_with_two_dirs_still_refuses`）。
+
+### 7. R3 规则：计划骨架 6 条（R3.1–R3.6）+ checklist（R3.7）扩到 9 条
+评审过程中新增两条约束，DEVELOPMENT.md R3 已落地：
+- **R3.8 测试沙箱是唯一接缝**：多版本测试一律走 `EnvSandbox`，产品代码不得为测试加开关；断言只看落盘结果，**不得断言桩调用次数**；
+  测试文件必须先 stub WMI 再 `import main`，碰 Qt 的加 `QT_QPA_PLATFORM=offscreen`。
+- **R3.9 非多版本组件零影响**：任何多版本分支都必须用 `component.multi_version` 门控，非多版本组件的状态文案 / 按钮 / 卸载结果必须与改造前逐字一致。
+
+### 8. 计划正文里的 `main.py:NNNN` 行号已整体漂移
+上文「文件结构」表与各处引用是写计划时对着旧版 `main.py`（约 4800 行）标的，本期落地后 `main.py` 增长到
+**6149 行 / 274759 字节**（HEAD `6c0ec43` 实测）。典型漂移：`_current_version()` 计划写 `4208`、实际 `4792`；
+combo 装载计划写 `4176-4215`、实际 `_reload_combo_items` 在 `4759`；状态胶囊计划写 `4075-4173`、实际 `_detect_status` 在 `4610`；
+`_save_settings` 计划写 `5421-5446`、实际 `6079`；`build_components()` 末尾计划写 `2716+`、实际赋值在 `3409`。
+**不要拿计划里的行号当免检结论**——检索以函数名为准。
+
+### 9. 环境层门面方法数量：计划说 7 个，实际 8 个
+计划 Task 3 / Task 10 Step 5 都说"`EnvManager` 上 7 个平台无关门面方法"。落地实现是 **8 个** public 门面方法
+（`main.py:3857-3958`）：`write_user_env` / `drop_user_env` / `read_user_env` / `add_path_entry` / `drop_path_entry` /
+`remove_path_entries_under` / `read_user_path_entries` / `restore_path_entries`（另有两处只给测试打桩用的私有读写接缝
+`_read_windows_user_env` / `_delete_windows_user_env`，不计入门面）。CODE_WIKI.md 4.6 已按 8 个登记。
+
+### 10. 用例数量：随每轮修复增长，以运行输出为准
+计划 Task 10 Step 5 与文档里出现的"84 个用例"是 HEAD `6c0ec43` 上的一次实测（`Ran 84 tests / OK`），并非固定值：
+Task 9 的三轮修复各追加了用例，且 `bt_multiversion_tests.py` 仍在并发演进。文档一律改为描述覆盖面、不钉死数字。

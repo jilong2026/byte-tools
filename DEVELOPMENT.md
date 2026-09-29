@@ -19,6 +19,7 @@
 
 - [规则 R1：国内镜像优先 + 多源故障转移](#规则-r1国内镜像优先--多源故障转移)
 - [规则 R2：组件三类分组与界面 Tab](#规则-r2组件三类分组与界面-tab)
+- [规则 R3：组件多版本与生效版本切换](#规则-r3组件多版本与生效版本切换)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -423,9 +424,106 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
 
 ---
 
+## 规则 R3：组件多版本与生效版本切换
+
+七个 PATH 型组件（jdk / python / node / go / maven / gradle / bun）允许在同一台机器上**并存多个版本**，
+并在界面上显式指定其中一个为「生效版本」。本规则的核心不变量只有一句：
+
+> **删一个版本、切一个版本，都不得影响同一组件其它版本的目录、`XXX_HOME` 与 PATH 条目。**
+
+版本目录统一落在 `<配置根>/<key>/<key>-<version>`（`CONFIG_DIR = Path.home() / ".env-tools"`，`main.py:103`；
+目录名由 `Component.install_dir()` 生成，`main.py:203`）。
+
+### R3.1 适用范围
+
+允许并存多版本并切换生效版本的组件只有 7 个：jdk / python / node / go / maven / gradle / bun
+（真源：`main.py` 的 `MULTI_VERSION_KEYS`，`main.py:2916`；由 `build_components()` 末尾统一写入
+`comp.multi_version = comp.key in MULTI_VERSION_KEYS`，`main.py:3409`，**不要在 `Component(...)` 构造处手写**）。
+判据是"归档解压安装 + 靠 `XXX_HOME`/PATH 生效"。
+conda 是 `installer_mode`，装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立；
+mysql/tomcat/nacos/es 等服务型组件的真矛盾在端口与数据目录。两者都不进本模型。
+白名单一扩大，`bt_multiversion_tests.py` 的 `EXPECTED_MULTI_VERSION`（`main.py` 之外唯一的第二处登记）即报不符。
+
+### R3.2 两个字段，不许混用
+
+- `selections`（`config.json`）：下拉框当前选中，语义是"我想装 / 我想操作哪个版本"。
+- `active`（`config.json`）：当前生效版本，语义是"系统的 `XXX_HOME` 与 PATH 指向哪个"。
+
+写 `config.json` 一律**合并写**：`MainWindow._save_settings` 只替换 `selections` 段并原样保留 `active`；
+`save_active_version` 只改 `active` 里那一项。任何一方整体覆盖都会把对方的数据抹掉。
+`active` 缺失或 `config.json` 损坏时按空表处理（`load_active_map()`），不报错、不重置用户配置。
+
+### R3.3 切换是原子操作（硬约束）
+
+唯一入口 `apply_active_version(comp, version)`（异常类型 `SwitchError`）：
+写 `XXX_HOME`（`EnvManager.write_user_env`）→ 用 `remove_path_entries_under(CONFIG_DIR/<key>)` 把本组件在
+PATH 里的条目全部收敛掉 → 只补回生效版本那一条（`target/<path_subdir>`；`path_subdir` 为空的组件如 bun 就用目录本身）
+→ 同步当前进程并广播 `WM_SETTINGCHANGE`。任一步失败按**持久层快照**整体回滚
+（`read_user_env` 的读值 + `remove_path_entries_under` 的返回值，补救走 `restore_path_entries`），
+回滚依据必须是注册表 / shell rc 的真值，不是 `os.environ`（本工具会把它改脏）。
+禁止留下「JAVA_HOME 指 A、PATH 指 B」的中间态；回滚未完全成功时**不得**在日志里写"已回滚"，
+必须把撤不干净的明细拼进 `SwitchError` 文本（半回滚恰恰是要用户手工介入的情形）。
+
+卸载路径同一条约束：**生效版本必须在任何破坏性动作之前快照**（`Component.uninstall` 里的 `active_before`，
+`main.py:375`）。原因是本期上线前装的用户 `config.json` 里没有 `active` 条目，生效版本靠 `infer_active_from_env()`
+从 `XXX_HOME` 反推，而卸载第 2 步可能正好把那个 HOME 删掉——事后再读永远是 `None`，"自动重排"会静默失效。
+同函数第 4 步（`main.py:443-508`）因此只认这份快照：删掉的正是生效版本→自动 `apply_active_version` 到剩余里版本号最高的；
+生效版本还活着、只是环境被这次卸载带偏→按生效版本**重建**（措辞分叉，不把"重建"说成"自动切到"）。
+
+### R3.4 下拉框显示文本不可改动
+
+已装 / 生效状态一律用 `Qt.DecorationRole` 图标表达（绿勾由 `_installed_icon()` 用 `QPainter`
+现画，不引入图片资源；挂 / 刷新的唯一出口是 `ComponentCard._refresh_installed_marks()`，装载下拉框的两条出口
+`_reload_combo_items()` 都会调它）。`_current_version()` 与 `SearchableComboBox.repopulate(preferred=…)`
+都按**显示文本**反查版本对象，往文本里加「✓」会连锁打错选版、安装、卸载与配置保存；
+`repopulate` 内部 `clear()` 会连带销毁旧条目的 `DecorationRole` 数据，所以重灌后必须重挂一次。
+
+### R3.5 版本目录命名是唯一契约
+
+安装目录必须叫 `<key>-<version>`（`Component.install_dir`）。`version_from_install_dir()`（`main.py:513`）与
+`installed_versions()`（`main.py:529`）依赖该约定；排序必须走 `_sort_semver_desc`（`main.py:2010`），
+字典序会把 jdk-8 排在 jdk-21 之后（2026-09-29 之前的「配置环境变量」正是踩了这个坑：用户选 21、配的却是 8）。
+`installed_dirs()`（`main.py:282`）排除 `downloads` 缓存与 `.` 开头的解压临时目录，`installed_versions()`
+再排除反解不出版本号的残缺目录名——所有"已装"判定（绿勾、状态胶囊、卸载范围）都只认这条链路的输出。
+
+### R3.6 非目标
+
+不做 cd 自动切换的 shell 钩子，不写用户项目的 pom/gradle/IDE 配置，不生成 `toolchains.xml`。
+
+### R3.7 新增 / 调整多版本组件 checklist
+
+- [ ] 只改 `main.py` 的 `MULTI_VERSION_KEYS` 一处（`main.py:2916`）
+- [ ] 同步 `bt_multiversion_tests.py` 的 `EXPECTED_MULTI_VERSION`（`main.py` 之外的第二处白名单登记）
+- [ ] 确认该组件不是 `installer_mode`、不是服务型组件
+- [ ] 跑：`QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_multiversion_tests.py`（全部用例须全绿；用例数随功能演进增长，以磁盘为准）
+- [ ] 同步 README.md / README_EN.md 的多版本小节与 `CODE_WIKI.md` 的 `multi_version` 字段、环境层小节
+
+### R3.8 测试沙箱是唯一接缝
+
+多版本相关测试一律走 `bt_multiversion_tests.py` 的 `EnvSandbox`（基类即 `unittest.TestCase`）：
+替换 `CONFIG_DIR` / `CONFIG_FILE` / `CURRENT_OS`、把 `EnvManager._shell_rc_file()` 指到临时 rc、
+Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_user_path` / `_write_registry_env` /
+`_delete_windows_user_env` / `EnvManager.get`），产品代码里**不得**为测试加开关。
+断言只看落盘结果（`win_env` / `win_path` / `CONFIG_FILE` / rc 文本 / `status_label.text()`），
+**不得断言桩调用次数**——调用次数是实现的代理指标，改成"另一种同样正确的实现"就会误报失败。
+测试文件必须先 stub WMI 再 `import main`（`platform._wmi_query` 抛 `OSError` + `platform.uname.cache_clear()`，
+`bt_multiversion_tests.py:19-30`），碰 Qt 的还要 `QT_QPA_PLATFORM=offscreen`。
+
+### R3.9 非多版本组件零影响
+
+任何多版本相关的分支都必须用 `component.multi_version` 门控（状态胶囊 `_render_status_label` /
+`_detect_status`、卸载目标 `resolve_uninstall_target`、卸载摘要 `Component.uninstall` 第 4 步、
+绿勾 `_refresh_installed_marks`、确认框尾巴 `on_uninstall_clicked`）。非多版本组件的状态文案、按钮逻辑与
+卸载结果必须与改造前**逐字一致**。护栏用例：`test_non_multi_version_capsule_text_unchanged`、
+`test_non_multi_version_with_two_dirs_still_refuses`、`test_non_multiversion_confirm_text_byte_identical`。
+典型陷阱：`resolve_uninstall_target`（`main.py:293-338`）里"选了没装的版本、磁盘上又装着多个"这种情形，
+多版本组件改为按语义降序卸最高的并说明（罢工等于卸载失灵），非多版本组件必须继续罢工、不得跟着放宽。
+
+---
+
 ## 后续规则占位
 
-> 后续新增的开发规则以「规则 R2 / R3 / ...」形式追加到本文件，并在「规则索引」中登记。
+> 后续新增的开发规则以「规则 R4 / R5 / ...」形式追加到本文件，并在「规则索引」中登记。
 > 每条规则必须包含：规则描述、适用范围、实施指引、checklist 四节。
 
-- R3: _待定_
+- R4: _待定_

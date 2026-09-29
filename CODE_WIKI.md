@@ -159,7 +159,7 @@
 
 ```
 byte-tools/
-├── main.py                  # 主程序（含 UI 与全部逻辑，约 4800 行）
+├── main.py                  # 主程序（含 UI 与全部逻辑，6149 行 / 274759 字节，2026-09-29 实测）
 ├── requirements.txt         # Python 依赖清单（PySide6、requests）
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
@@ -168,11 +168,17 @@ byte-tools/
 ├── 同步Gitee产物.bat    # 本机 Windows 版（双击可运行；它会真的把产物传上 Gitee，国内链路快，与 CI 策略有意不同；内容为纯 ASCII，避免 cmd 按 GBK 解析 UTF-8 出错）
 ├── README.md                # 中文说明（面向最终用户）
 ├── README_EN.md             # 英文说明
-├── DEVELOPMENT.md           # 开发者文档（开发约定、R1 规则等，面向二次开发者）
+├── DEVELOPMENT.md           # 开发者文档（开发约定、R1 / R2 / R3 规则等，面向二次开发者）
 ├── CODE_WIKI.md             # 本文档（代码 Wiki，面向二次开发者）
 ├── LICENSE                  # MIT 许可证
 ├── .gitignore               # Git 忽略规则
 ├── .github/workflows/       # 发布工作流（release.yml：三平台打包 + Gitee 同步）
+├── bt_multiversion_tests.py       # 离线回归测试：多版本并存与生效版本切换（见 4.9，覆盖清单与用例数以运行输出为准）
+├── bt_component_category_tests.py # 离线回归测试：组件三类分组（9 个用例，见 R2）
+├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
+├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
+├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（跑起来慢，本轮未计入复核清单）
+├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
 └── assets/                  # 静态资源（PyInstaller 打包时通过 datas 一并打入）
     ├── byte-tools-pt.png    # 主界面截图
     ├── byte-tools.png       # 应用窗口图标
@@ -286,18 +292,23 @@ byte-tools/
 | `version_probe` | bool | 是否允许在探测阶段真的执行该组件命令取版本。启动脚本型组件（Nacos / Seata / Kafka / RocketMQ / RabbitMQ）必须置 `False`：它们的脚本不认版本参数，一执行就把中间件服务拉起来并弹出控制台窗口 |
 | `versions` | List[ComponentVersion] | 该组件的所有可用版本 |
 | `installer_mode` | bool | 是否安装器模式（如 Miniconda 走 `.exe` / `.sh` 静默安装） |
+| `multi_version` | bool | 是否允许并存多个版本并切换「生效版本」。**只有 7 个组件为 True**：jdk / python / node / go / maven / gradle / bun（真源 `MULTI_VERSION_KEYS`，`main.py:2916`）。**不在 `Component(...)` 构造处手写**：`build_components()` 末尾统一执行 `comp.multi_version = comp.key in MULTI_VERSION_KEYS`（`main.py:3409`），不在白名单就是 False。它是所有多版本分支的唯一门控（状态胶囊、绿勾、按钮启用、卸载范围），非多版本组件的行为与文案必须与改造前逐字一致（见 DEVELOPMENT.md R3.9） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
 | `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 其它软件）。**不在构造处手写**：`build_components()` 末尾统一按 `COMPONENT_CATEGORY_OF[comp.key]` 赋值，漏登记即 KeyError |
 
 方法：
-- `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`
+- `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`（`main.py:203`）；**这个 `<key>-<version>` 命名是多版本模型的唯一契约**，反解靠模块函数 `version_from_install_dir()`
 - `exec_path_in_home(home)` → 在指定 `XXX_HOME` 下查找可执行文件，依次尝试 `path_subdir`/`bin`/`Scripts`/`condabin`/根目录；Windows 上按 `.exe`/`.bat`/`.cmd`/`.com`/无扩展名依次匹配（Tomcat 的 `catalina` 只有 `.bat`，只找 `.exe` 会漏检）
-- `installed_dirs()` → 列出 `CONFIG_DIR/<key>` 下真实存在的安装目录（排除 `downloads` 缓存）
-- `resolve_uninstall_target(version)` → 把下拉框选中的版本校正为磁盘上真正装着的目录，返回 `(目录, 中文说明)`
-- `uninstall(version)` → 删除安装目录、清理落在本组件目录内的 `XXX_HOME` 与 PATH 条目（不再依赖 `path_subdir` 是否配置）
+- `installed_dirs()` → 列出 `CONFIG_DIR/<key>` 下真实存在的安装目录（排除 `downloads` 缓存与 `.` 开头的解压临时目录，按目录名排序）
+- `resolve_uninstall_target(version)` → 把下拉框选中的版本校正为磁盘上真正装着的目录，返回 `(目录, 中文说明)`（`main.py:293-338`）。次序：① 选中版本精确命中目录 → ② `XXX_HOME` 落在本组件根内则以它定位（说明"按 JAVA_HOME 定位到实际安装目录 …"）→ ③ 磁盘上只有一个目录就用它 → ④ **多版本组件**装了多个且前两条都没命中：按语义版本降序取最高的，并说明"已装 21、17，改为卸载版本最高的 21"；**非多版本组件**维持罢工（"存在多个已安装版本（…），请先在下拉框中选择具体版本"），目录名反解不出版本号时同样罢工并提示
+- `uninstall(version)` → 卸载选中版本，返回中文摘要（各步以中文分号 `；` 连接）。四步：① `shutil.rmtree` 删**该版本**目录（安装器模式跳过）；② 只在 `XXX_HOME` 正指向被删目录时删它，指向同组件其它版本时保留、指向组件根之外时只报告"未删除"，指向组件根内已消失目录的死配置则清掉（`已清理指向不存在目录的环境变量：JAVA_HOME`）；③ PATH **默认只清理本次被删目录之下的条目**，只有本组件已无其它安装目录时才回到按组件根整体清扫（保住"手工删目录留下的死条目也能清掉"的自愈能力）；④ 多版本组件收尾：全删光则 `save_active_version(key, None)` 清登记；删掉的正是生效版本则自动 `apply_active_version` 到剩余里最高的（`生效版本已自动切到 …`）；生效版本还活着、只是被本次卸载带偏则按它重建（`已按生效版本 … 重建环境变量与 PATH`）。**生效版本在一切破坏性动作之前就以 `active_before` 快照取好**（`main.py:375`），因为老配置的生效版本靠 `XXX_HOME` 反推，而第 ② 步可能正好把那个 HOME 删掉
 - `detect(probe_version=True)` → **核心探测逻辑**，返回 `DetectResult`；`exec_name` 为 None 的组件（如 Jenkins）走 `_detect_by_home_dir()` 兜底：只要 `XXX_HOME` 指向本工具安装目录即视为已配置。界面构建卡片时传 `probe_version=False`，只判定存在、不执行外部命令
 - `exec_name` 在 Windows 上还会被 `shutil.which` 用 PATHEXT 匹配同名异扩展文件，因此 Nacos 必须写成带扩展名的 `startup.cmd`/`startup.sh`——写 `startup` 会命中 Tomcat 的 `startup.bat`，探测就变成了启动 Tomcat
+
+模块级版本清单函数：
+- `version_from_install_dir(comp, path)`（`main.py:513`）→ 从目录名反解版本号，不符合 `<key>-<version>` 约定（`downloads`、残缺名）返回 None；用 `comp.key` 做前缀判定，避免把 `python-3.12` 算到 jdk 头上
+- `installed_versions(comp)`（`main.py:529`）→ 磁盘上真实装着的版本 `[(版本号, 目录)]`，**按语义版本降序**（走 `_sort_semver_desc`，字典序会得到 `jdk-8 > jdk-21` 的错序）。"已装"绿勾、状态胶囊清单、卸载后自动切最高版本都以它的输出为准
 
 #### `DetectResult`
 
@@ -491,6 +502,57 @@ R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1
 | `set_unix_env(name, value)` | UNIX | 用 `# >>> byte-tools:<name> >>>` / `# <<< ... <<<` 标记包裹 `export` 语句，幂等更新；返回被修改的文件路径 |
 | `append_unix_path(entry)` | UNIX | 同上，但用 `entry` 作 key 防止重复追加 |
 
+**平台无关门面（`EnvManager` 类内最后一段，共 8 个 public 方法）**：切换生效版本的代码只调这一组，业务层不再各自判断 `CURRENT_OS`。读接口读的是**持久层**（注册表 / shell rc）而不是 `os.environ`——后者会被本工具自己改脏，不能当"改动前状态"（回滚依据）。
+
+| 门面方法 | Windows 分支 | UNIX 分支 | 说明 |
+|---------|-------------|-----------|------|
+| `write_user_env(name, value)` | `set_windows_user_env` | `set_unix_env` | 写 `XXX_HOME` |
+| `drop_user_env(name)` | `remove_windows_user_env` | `remove_unix_env` | 删 `XXX_HOME` |
+| `read_user_env(name)` | `_read_windows_user_env`（读 HKCU） | 解析 rc 里的 marker 块 | 读持久层的变量值，无则 None |
+| `add_path_entry(entry)` | `append_windows_path` | `append_unix_path` | 追加一条 PATH |
+| `drop_path_entry(entry)` | `remove_windows_path_entry` | `remove_unix_path_entry` | 精确删一条 PATH |
+| `remove_path_entries_under(root)` | `remove_windows_path_entries_under` | `remove_unix_path_entries_under` | 清掉落在 `root` 之下的全部 PATH 条目（含目录已不存在的历史残留），**返回被删条目列表**——切换时它就是回滚快照 |
+| `read_user_path_entries()` | `_read_windows_user_path` | 扫 rc 里的 PATH marker | 读持久层 PATH 条目；UNIX 侧只能看到本工具用 marker 写过的那些 |
+| `restore_path_entries(entries)` | 整表写入 `_write_registry_env("Path", …)` | 逐条 `append_unix_path` | 切换失败回滚专用。**刻意不循环调 `add_path_entry`**：触发回滚时那条码往往正是刚失败的那条路，改用"清表那一步刚验证可用"的整表写入 |
+
+另有两处只为测试留的读写接缝（不是门面，产品逻辑不直接调）：`_read_windows_user_env`（读侧）与 `_delete_windows_user_env`（写侧）——不打桩的话回滚用例会真删用户 `HKCU` 里的值。
+
+#### 多版本与生效版本切换（业务层函数）
+
+| 名称 | 位置 | 职责 |
+|------|------|------|
+| `MULTI_VERSION_KEYS` | `main.py:2916` | 允许并存多版本的 7 个组件白名单（唯一真源，`build_components()` 末尾据此写 `comp.multi_version`） |
+| `SwitchError` | `EnvManager` 之后 | 切换失败的异常（`RuntimeError` 子类），抛出前已尽量回滚，文本里带"已回滚"或"回滚未完全成功"的明细 |
+| `apply_active_version(comp, version)` | `SwitchError` 之后 | **生效版本切换的唯一入口**，见下方时序 |
+| `load_active_map()` | `apply_active_version` 之后 | 读 `config.json` 的 `active` 段（`{组件 key: 生效版本号}`）；文件缺失 / JSON 损坏 / 结构不对一律当空表，绝不抛错 |
+| `save_active_version(key, version)` | `load_active_map` 之后 | 登记 / 清除（传 `None`）某组件的生效版本；**合并写**：先读原文件只改 `active` 里那一项，整体覆盖会抹掉 `selections`；损坏文件重建 |
+| `infer_active_from_env(comp)` | `save_active_version` 之后 | 老配置没有 `active` 条目时，从持久层 `XXX_HOME` 反推生效版本。要求 HOME 指向的目录**真实存在**（否则返回 None，避免"目录已删、HOME 没清"的死配置撑起一个幽灵生效版本）、且落在 `CONFIG_DIR/<key>` 之内，再交给 `version_from_install_dir` 反解；推不出就 None，界面写"均未生效" |
+| `ComponentCard.active_version()` | `ComponentCard` 内 | 界面上的生效版本：`load_active_map().get(key) or infer_active_from_env(comp)`；非多版本组件直接 None |
+
+> 这一批函数的行号会随改动漂移，以函数名检索为准（同 5.4 的约定）。
+
+`apply_active_version()` 的时序与回滚语义：
+
+```
+apply_active_version(comp, version)
+  ├─ target = comp.install_dir(version)；不存在则立即抛 SwitchError（此时什么都没改）
+  ├─ 快照持久层：prev_home = read_user_env(comp.env_var)          # 不是 os.environ
+  ├─ if comp.env_var: write_user_env(env_var, target)             # ① 写 XXX_HOME
+  ├─ removed = remove_path_entries_under(CONFIG_DIR/<key>)        # ② 本组件 PATH 全收敛
+  ├─ added_entries.append(bin_dir) → add_path_entry(bin_dir)      # ③ 只补生效版本那一条
+  │     # 先记账再落盘：add_path_entry 可能"已写进持久层、随后才抛错"，
+  │     # 漏记就会在 PATH 里留下两条同时生效的条目
+  ├─ 任一步异常 → _rollback()：逆序撤销（删新增 → restore_path_entries(removed) → 恢复/删除 HOME）
+  │     ├─ prev_home 为 None 时回滚的正确形态是 drop_user_env（写空值会让 detect 误判"已配置"）
+  │     └─ 每步独立 try：宁可"半回滚"也不能让异常炸穿后面几步；
+  │        撤不干净的明细拼进 SwitchError 文本，绝不允许只写一句"已回滚"
+  └─ 成功：返回中文步骤清单，末行固定提示"当前进程已同步；已开着的终端与 IDE 需重开
+     才会读到新值（Windows 若装了 Oracle javapath，个别命令仍可能被它抢先）"
+```
+
+调用方只有两处：`ComponentCard._apply_active()`（用户点「配置环境变量」，成功后才 `save_active_version`）
+与 `Component.uninstall()` 第 ④ 步（删掉生效版本后自动重排 / 按生效版本重建）。
+
 幂等机制：UNIX 系统下用 `marker_begin` / `marker_end` 包裹写入块，再次写入时只替换两标记之间的内容，不会重复堆积。
 
 #### `extract_archive(archive, extract_to)`
@@ -527,22 +589,35 @@ R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1
 
 UI 组成（自上而下）：
 1. **顶部行**：组件名 `QLabel` + 状态胶囊 `QLabel`
-2. **中部行**：版本下拉框 `SearchableComboBox` + "下载并安装" + "配置环境变量" + "取消"按钮
+2. **中部行**：版本下拉框 `SearchableComboBox`（多版本组件里磁盘已装的条目带 `_installed_icon()` 画的绿色对勾）+ "下载并安装" + "配置环境变量" + "卸载" + "取消"按钮
 3. **底部**：进度条 `QProgressBar`
 
-状态胶囊三态（`_detect_status` 设置，全程不执行外部命令）：
-- 🟢 `✓ 已配置（CATALINA_HOME / PATH）· <version>` — 系统已能找到，禁用"配置环境变量"按钮、启用"卸载"；版本号先显示 `版本检测中…`，由 `VersionProbeWorker` 异步回填，`version_probe=False` 的组件不显示版本
-- 🟠 `● 已下载，未配置` — 本地已解压但环境变量未设
-- 🔴 `○ 未安装` — 完全没有
+状态胶囊（`_detect_status` 设置，全程不执行外部命令；**多版本组件走另一套文案**）：
+
+- 非多版本组件三态：
+  - 🟢 `✓ 已配置（CATALINA_HOME / PATH）· <version>` — 系统已能找到，禁用"配置环境变量"按钮、启用"卸载"；版本号先显示 `版本检测中…`，由 `VersionProbeWorker` 异步回填，`version_probe=False` 的组件不显示版本
+  - 🟠 `● 已下载，未配置` — 本地已解压但环境变量未设
+  - 🔴 `○ 未安装` — 完全没有
+- 多版本组件（`component.multi_version`，7 个）：**不**套用上面的 `✓ 已配置（…）`，而是"装了哪几个 + 哪个生效"（`_detect_status` 开头分支，正文存进 `self._mv_capsule`，`_render_status_label()` 只在末尾追加异步探测到的版本号）：
+  - 🟢 `● 已装 2 个版本 · 生效 21（21、17）` — 清单分隔符是中文顿号 `、`，版本清单来自 `installed_versions()`（语义降序），生效来自 `active_version()`
+  - 🟠 `● 已装 2 个版本 · 均未生效（21、17）` — 一个生效版本都没有
+  - 🔴 `○ 未安装` — 磁盘上一个版本都没有
+  - 🟢 探测回填后追加尾串：`● 已装 2 个版本 · 生效 21（21、17） · 21.0.4`
+  - 同一分支还负责按钮门控：`btn_configure` 仅在"选中的版本 != 生效版本"时启用（tooltip 说明怎么换）；`btn_uninstall` 仅在"选中的版本确实已装"时启用（未装时 tooltip 提示先在下拉框里选带绿勾的）；一个版本都没装时 `btn_configure` 启用、`btn_uninstall` 禁用
+  - 只对**生效版本**的目录起 `VersionProbeWorker` 回填版本号，并在重探测前清掉上一轮的 `_status_version` 与 `_version_worker`（否则切完版本胶囊还挂着旧版本号，迟到的旧回包也会污染新胶囊）
 
 关键方法：
 - `_schedule_version_probe(exe_path)` / `_start_version_probe(exe_path)` — `QTimer.singleShot(0, …)` 延后到事件循环空闲，再起 `VersionProbeWorker` 后台跑 `_probe_version`；`version_probe=False` 或 `version_args` 为空直接跳过
 - `_on_version_probed(text)` — 回填版本并重绘胶囊；状态已不是"已配置"时丢弃结果，避免晚到的回包把卸载后的标签刷回绿色
 - `set_versions(versions)` — 接收抓取线程返回的新版本列表，替换 `component.versions` 并刷新下拉框；保留上次选中版本（按 version 字段匹配）
 - `on_install_clicked()` — 取出当前选中版本，决定下载文件后缀（安装器模式按 `archive_map` 取扩展名；普通模式按 `archive_for_current()` 决定 `.zip` / `.tar.gz` / `.war` / `""`单二进制），构造 `urls = cv.urls_for_current()` 启动 `DownloadWorker(urls, dest)`；下载→解压→自动配置环境变量→刷新状态一条龙流程
-- `_on_download_ok(path, cv)` — 下载成功回调：安装器模式走 `_run_installer`；普通模式走 `extract_archive` + `shutil.move`；**单二进制 / `.war` 重命名逻辑**（kubectl-1.28.4.exe → kubectl.exe / kubectl-1.28.4 → kubectl / jenkins-2.426.war → jenkins.war）；最后自动调用 `_configure_env`
+- `_on_download_ok(path, cv)` — 下载成功回调：安装器模式走 `_run_installer`；普通模式走 `extract_archive` + `shutil.move`；**单二进制 / `.war` 重命名逻辑**（kubectl-1.28.4.exe → kubectl.exe / kubectl-1.28.4 → kubectl / jenkins-2.426.war → jenkins.war）；最后自动调用 `_configure_env`。**只覆盖同版本目录**（`install_dir(cv.version)`），同组件其它版本的目录不动，所以装第二个版本就是多版本并存
 - `_run_installer(installer_path, target_dir)` — 静默执行 Miniconda 等：Windows 拼 `/D=<path>`（不能带引号）；mac/Linux 用 `bash installer.sh -b -f -p <path>`
-- `on_configure_clicked()` — 仅配置环境变量：从本地已解压目录里按字典序选最新一个，调 `_configure_env`
+- `on_configure_clicked()` — "配置环境变量"按钮。**多版本组件**：把下拉框选中的版本交给 `_apply_active()` 设为生效版本（选中版本没装、或该组件在磁盘上一个符合命名的目录都没有时，只写一条 warn 日志并返回）；**非多版本组件**：沿用原有行为——从 `installed_versions()` 取语义版本最高的那个目录调 `_configure_env`（改造前这里是"按目录名字典序取最后一个"，会把 `jdk-8` 当成最新，2026-09-29 起统一走 `_sort_semver_desc`）
+- `active_version()` — 当前生效版本：`load_active_map().get(key)` 优先，取不到再 `infer_active_from_env(comp)` 从持久层 `XXX_HOME` 反推；非多版本组件恒为 None
+- `_apply_active(version)` — 调 `apply_active_version()`，失败只把 `SwitchError` 文本打进日志并返回 False（不改登记表），成功则逐步写日志、`save_active_version(key, version)`、`_refresh_installed_marks()` + `_detect_status()`
+- `_refresh_installed_marks()` — 给磁盘上已装的版本挂绿勾：`self.component.versions` 逐项 `setItemData(i, icon, Qt.DecorationRole)`，图标由 `_installed_icon()` 用 `QPainter` 现画（绿色 `#2e7d32`、16px、2 倍分辨率绘制）。**只动 `DecorationRole`，绝不改条目文本**；非多版本组件直接 return，连 `DecorationRole` 都不写（保持"从未挂过"的原始数据）。安装、卸载、切换生效、重灌条目（`_reload_combo_items` 的两条出口）之后都要重挂
+- `on_uninstall_clicked()` — 二次确认（`QMessageBox.question`）后调 `component.uninstall(cv.version)`，把中文摘要打进日志，再 `_refresh_installed_marks()` + `_detect_status()`。确认框正文的尾巴按 `multi_version` 分叉：多版本组件是"（只删除选中的这一个版本，其他已装版本不动；若删掉的正是当前生效版本，会自动切到剩余里版本号最高的那个）"，非多版本组件保持原有那句"（若所选版本与实际安装版本不一致，会以实际装着的目录为准）"逐字不变
 - `_configure_env(install_path)` — 写 `XXX_HOME` + 追加 PATH；Windows 用 `EnvManager.set_windows_user_env` + `append_windows_path`；UNIX 用 `set_unix_env` + `append_unix_path`
 - `on_cancel_clicked()` — 调 `worker.cancel()`
 
@@ -582,7 +657,7 @@ UI 组成：
 - `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（26 个并发），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
 - `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`
-- `_load_settings()` / `_save_settings()` — 启动时从 `CONFIG_FILE` 加载上次选中版本；`closeEvent` 时保存
+- `_load_settings()` / `_save_settings()` — 启动时从 `CONFIG_FILE` 加载上次选中版本；`closeEvent` 时保存。保存是**合并写**：先读原文件、只替换 `selections` 段，`active`（生效版本登记表，见 4.6）原样保留，整体覆盖会把切换功能写的数据抹掉
 - `_apply_qss()` — 应用整张 QSS 样式表（含标题栏、卡片、下拉框、按钮、进度条、滚动条、日志区、状态栏）
 
 ### 4.8 入口层
@@ -603,6 +678,48 @@ def main() -> int:
 - 启用高 DPI PassThrough 策略，避免缩放模糊
 - 创建 `~/.env-tools/` 工作目录
 - 进入 Qt 事件循环
+
+### 4.9 离线回归测试（`bt_*_tests.py`）
+
+根目录下每个 `bt_*_tests.py` 都是一套**离线**回归测试（不联网、不碰真实注册表与用户 shell rc），
+统一用 `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u <文件>` 运行，输出末行 `Ran N tests` / `OK` 即通过。
+
+| 文件 | 盯住的东西 |
+|------|-----------|
+| `bt_multiversion_tests.py` | 组件多版本与生效版本切换（规则 R3，见下文覆盖面） |
+| `bt_component_category_tests.py` | 三类分组与 Tab（R2；`EXPECTED_MEMBERSHIP` 是分类基线） |
+| `bt_search_and_newcmp_tests.py` | 组件搜索匹配与新增组件的自动登记（R2.5） |
+| `bt_mirror_spec_tests.py` | R1 镜像规范（镜像基址集中在 `MIRROR_BASES`、官网末位等） |
+| `bt_refresh_versions_tests.py` | 刷新版本链路 |
+| `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
+
+#### `bt_multiversion_tests.py` 覆盖面
+
+**唯一接缝是 `EnvSandbox` 基类**（它本身就是 `unittest.TestCase`，其余用例类都继承它，具体个数以文件为准）：
+替换 `CONFIG_DIR` / `CONFIG_FILE` / `CURRENT_OS`、把 `EnvManager._shell_rc_file()` 指到临时 rc、
+Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_user_path` / `_write_registry_env` /
+`_delete_windows_user_env` / `EnvManager.get`）。因此**产品代码里没有为测试留的开关**，
+断言只看落盘结果（内存注册表 `win_env` / `win_path`、`CONFIG_FILE` 文本、rc 文本、`status_label.text()`），
+**不断言桩被调用了几次**（调用次数是实现的代理指标，换个同样正确的实现就会误报）。
+文件顶部必须先 stub WMI 再 `import main`（`platform._wmi_query` 抛 `OSError` + `platform.uname.cache_clear()`），
+否则本机 WMI 卡死会让 `platform.system()` 永久阻塞。
+
+按能力划分的覆盖点（括号内是用例类）：
+
+1. **沙箱自身**（`SandboxSelfCheck`）：`CONFIG_DIR` 确实被换到临时目录、`make_component` 真建目录、Windows 读写与删除接缝都已打桩——防止"用例在真删用户注册表"这类事故
+2. **组件能力位**（`MultiVersionFlag`）：白名单恰为 7 个（与 `EXPECTED_MULTI_VERSION` 对齐）、服务型与 `installer_mode` 组件必须为 False、每个组件都有该属性
+3. **版本目录名 ⇄ 版本号**（`InstalledVersions`）：从 `<key>-<version>` 反解、忽略 `downloads` 与外来目录、按语义版本降序而非字典序、返回的目录对象就是 `install_dir()`
+4. **`EnvManager` 平台无关门面**（`EnvFacade`）：UNIX 写读删闭环、PATH 条目增删与列举、Windows 写与列举、读不存在的变量返回 None、`remove_*_under` 只动指定根之下的条目
+5. **切换与回滚**（`SwitchActive`）：Windows 切换写 HOME 并把 PATH 收敛成一条、Linux 写 rc、env 先写成功后失败的回滚、切换前没有该变量时回滚要"删掉"而不是写空值、目标目录不存在时抛错且什么都不改、Linux 失败按 rc 真值回滚、回滚本身失败要如实上报、各步失败的分支各自覆盖、"已落盘再抛错"的新条目也必须被撤掉
+6. **`active` 读写**（`ActiveConfig` / `SaveSettingsKeepsActive`）：文件缺失 → 空表、JSON 损坏 → 不致命、写 `active` 必须保留 `selections`、损坏文件被重建、清除只删自己那一项、`infer_active_from_env` 从沙箱 rc 反推、指向别处的 HOME 不认、关窗保存不丢 `active`
+7. **「配置环境变量」按选中版本生效**（`ConfigureUsesSelectedVersion`）：`_apply_active` 把 HOME 指向选中版本、按下拉框选中而非字典序最后一个、切换失败时登记表原样不动、非多版本组件仍走旧路径
+8. **绿勾图标**（`InstalledCheckIcon`）：已装条目挂 `Qt.DecorationRole` 且**条目文本逐字不变**、卡片刚建好就已经挂上、非多版本组件一个图标都不挂、重灌版本列表后标记仍在、未安装的版本失去勾、切换生效后勾跟着刷新
+9. **状态胶囊**（`StatusCapsuleForMultiVersion` / `StaleProbeWorkerGuard`）：`已装 N 个版本 · 生效 X（清单）`、`均未生效` 的橙色分支、选中即生效时「配置环境变量」置灰、选另一个时又可用、非多版本组件文案逐字不变、只对生效版本探测、探测到的版本号进胶囊、没有生效版本时丢弃回填、生效版本不是最高版本时胶囊说的是生效那个、上一轮探测线程的迟到回包不得污染新胶囊
+10. **卸载范围**（`UninstallScope` / `UninstallTargetResolve` / `UninstallButtonGate` / `UninstallConfirmText`）：只删被删版本的 PATH 条目、卸非生效版本不动生效 HOME、卸生效版本自动切到剩余最高、删掉最后一个版本清登记并删 HOME、选中版本没装时按 `XXX_HOME` 定位（不猜最高）/ 没有 HOME 时取最高 / 非多版本组件仍罢工 / 目录名反解不出版本号时罢工并说明、卸载按钮的启用门控、确认框文案多版本收窄且非多版本逐字不变
+11. **卸载修复轮**（`UninstallDeadHomeCleanup` / `UninstallActiveGuardFix2` / `UninstallHomeGuardFix3`）：组件根内的死 HOME 被清理（多版本 / 非多版本、`rmtree` 失败时不得误清、活着的其他版本 HOME 必须保住）、全删光时只清组件根内的 HOME、老配置（无 `active` 条目）在卸掉反推出来的生效版本后仍能自动重排、重建 vs 切换两种措辞的分叉、`python` 这类 `env_var=None` 的组件不被 HOME 守卫误伤、`infer_active_from_env` 拒绝指向已消失目录的死 HOME、重排日志带上"已开终端/IDE 需重开"与 Oracle javapath 提醒、登记表写入失败要按"部分成功"如实上报
+
+> 用例数会随每轮修复增长（例如 Task 9 的三轮修复各追加了若干条），**以运行输出的 `Ran N tests` 为准**；
+> 本仓库 2026-09-29 在提交 `6c0ec43` 上实测为 `Ran 84 tests / OK`。上面按"能力"列举覆盖点，不逐条罗列同名用例。
 
 ---
 
@@ -693,10 +810,10 @@ main()
   └─ MainWindow()
        ├─ setWindowIcon(assets/byte-tools.png)
        ├─ build_components()           # 构造 26 个组件的默认清单（全部用 url_list_map 走 R1 多源）
-       ├─ _build_ui()                 # 构造标题栏 + 卡片 + 日志区 + 状态栏(组件总数=24)
+       ├─ _build_ui()                 # 构造标题栏 + 卡片 + 日志区 + 状态栏(组件总数=26)
        ├─ _apply_qss()                # 应用样式表
        ├─ _load_settings()             # 从 config.json 恢复上次选中版本
-       └─ _start_fetch_versions()      # 启动 24 个 VersionFetchWorker 并发抓取
+       └─ _start_fetch_versions()      # 为 26 张卡片各起一个 VersionFetchWorker 并发抓取
             └─ 每个 worker 完成时发射 done → _on_versions_fetched → card.set_versions
 ```
 
@@ -742,15 +859,24 @@ ComponentCard.on_install_clicked()
               └─ _detect_status()              # 刷新状态胶囊
 ```
 
-### 6.3 仅配置环境变量流程
+### 6.3 配置环境变量 / 切换生效版本流程
 
 ```
-ComponentCard.on_configure_clicked()
-  ├─ 在 CONFIG_DIR/<key>/ 下找已解压目录
-  ├─ 字典序排序取最后一个（最新版本）
-  └─ _configure_env(latest_dir)
-       └─ _detect_status()
+ComponentCard.on_configure_clicked()   # main.py:5066
+  ├─ 组件根 CONFIG_DIR/<key> 不存在 → 提示"尚未下载，请先执行下载并安装"
+  ├─ ordered = installed_versions(component)          # 语义降序的真实已装版本
+  ├─ 多版本组件（multi_version=True）：
+  │    ├─ chosen = 下拉框选中的版本；不在 ordered 里 → 提示"下拉框选的是 X，磁盘上没有对应目录"
+  │    └─ _apply_active(chosen)                        # main.py:5045
+  │         ├─ apply_active_version(comp, chosen)      # 唯一入口，失败抛 SwitchError（已回滚）
+  │         ├─ 成功才 save_active_version(key, chosen) # 写 config.json 的 active 段
+  │         └─ _refresh_installed_marks() + _detect_status()
+  └─ 非多版本组件：沿用旧行为，取 ordered[0]（语义版本最高的目录）调 _configure_env()，
+        不写 active 表
 ```
+
+> 「仅配置环境变量」对多版本组件即"把选中版本设为生效版本"。选中版本已经是生效版本时按钮禁用
+> （`_detect_status` 里 `btn_configure.setEnabled(selected != active)`），tooltip 提示先在下拉框换版本。
 
 ### 6.4 版本抓取流程
 
@@ -772,6 +898,25 @@ _on_versions_fetched(key, versions)
   └─ _fetch_pending -= 1
        └─ ==0 时 btn_refresh 恢复 + 日志"获取完成"
 ```
+
+### 6.5 卸载流程（多版本只动选中版本）
+
+```
+on_uninstall_clicked()   # main.py:4995
+  ├─ 二次确认框（多版本尾巴："只删除选中的这一个版本，其他已装版本不动；若删掉的正是当前
+  │    生效版本，会自动切到剩余里版本号最高的那个"；非多版本尾巴逐字保持原文）
+  └─ Component.uninstall(version)   # main.py:340，返回中文摘要（各步以中文分号 `；` 连接）
+       ├─ active_before 快照（仅多版本，在任何破坏性动作之前，main.py:375）
+       ├─ ① 删该版本目录（installer_mode 跳过）
+       ├─ ② 删 XXX_HOME：仅当它正指向被删目录；指向同组件其它版本保留；指向组件根之外只报"未删除"；
+       │      指向根内已消失目录的死配置清掉
+       ├─ ③ PATH：默认只清本次被删目录之下的条目；本组件已无其它目录时才回到按组件根清扫
+       └─ ④ 多版本收尾（只认 active_before 快照）：全删光清登记；删掉的是生效版本→切剩余最高；
+              生效版本仍在但被带偏→按它重建（措辞"重建"而非"切"）
+```
+
+> 卸载目标定位（`resolve_uninstall_target`）与四步语义见 4.2 的方法说明；
+> `bt_multiversion_tests.py` 的覆盖面见 4.9（沙箱原则见 DEVELOPMENT.md R3.8，非多版本零影响护栏见 R3.9）。
 
 ---
 

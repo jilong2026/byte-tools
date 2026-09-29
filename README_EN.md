@@ -16,6 +16,8 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 - 🇨🇳 **China mirror priority.** Since v2.0 the tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top). Downloads try China sources first with multi-source failover — the official site is only used after all China sources fail (404 / timeout). Full Chinese logs report which source failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration. Per-component exceptions measured on 2026-09-28: mongodb and postgresql have **no** China mirror (official site only); nacos, bun, powershell and the macOS/Linux source tarballs of git go through the GitHub accelerators (no true mirror exists); nginx ships Windows-only binaries and only the two Huawei Cloud sub-domains carry them (Tsinghua / BFSU / NJU / Aliyun / Tencent all 404); kubectl prefers the DaoCloud `files.m.daocloud.io` proxy; seata is served from the Apache distribution directory via eight China mirrors.
 - 🛡️ **Reliable downloads.** Every request carries a custom `byte-tools` User-Agent (several university mirrors return 403 for the default UA), and each finished download is checked against the declared byte count — a "fake 200" empty file from a mirror automatically triggers a switch to the next source instead of leaving a broken archive behind.
 - 🔍 **Smart detection.** Checks whether `JAVA_HOME` and friends already exist and are valid; missing/invalid entries are flagged for reconfiguration.
+- 🔀 **Multiple versions + active-version switching.** Seven components (JDK / Python / Node.js / Go / Maven / Gradle / Bun) can keep several versions on disk at the same time, each in its own `~/.env-tools/<component>/<component>-<version>/` directory, and one of them is explicitly marked as the **active version**. Clicking **"Configure Only"** ("配置环境变量") makes the selected version active: `XXX_HOME` is repointed and this component's `PATH` entries are collapsed into the single entry of the active version. Any failure mid-switch is rolled back to the pre-switch state, so you never end up with `XXX_HOME` pointing at one version and `PATH` at another. In the version drop-down, a **green check mark** means that version is already installed on disk.
+- 🧹 **Safe uninstall and stale-entry cleanup.** Uninstall always targets a directory that really exists on disk. For the seven multi-version components it removes **only the version selected in the drop-down** — its directory and its own `PATH` entries — and leaves the sibling versions untouched; `XXX_HOME` is deleted only when it points at the version being removed. Only when no installed version of that component is left does the cleanup fall back to sweeping the whole component directory (which also clears dead entries left by manual deletions). The "Clean stale PATH entries" button in the title bar removes entries that point into this tool's folder but no longer exist.
 - 🛠️ **Environment-variable management.**
     - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
     - macOS / Linux: appends idempotent `export` blocks (with begin/end markers) to `.zshrc` / `.bash_profile` / `.bashrc` / `.profile`.
@@ -142,8 +144,8 @@ The UI groups them into **three tabs** along the top, each titled with its compo
 │  Byte Tools By rgh                            ★ GitHub — ▢ × │
 ├───────────────────────────────────────────────────────────────┤
 │  ┌─ JDK (Temurin) ────────────────────────────────────────┐   │
-│  │  Configured: JAVA_HOME=/Users/x/.env-tools/jdk/jdk-17  │   │
-│  │  Version [17 ▾]   [Install]  [Configure Only]  [Cancel]│   │
+│  │  ● 2 versions installed · active 17 (17, 11)          │   │
+│  │  Version [✓ 17 ▾]  [Install] [Configure] [Uninstall]   │   │
 │  │  ████████████████░░░░░  85%                            │   │
 │  └────────────────────────────────────────────────────────┘   │
 │                                                                │
@@ -153,6 +155,10 @@ The UI groups them into **three tabs** along the top, each titled with its compo
 │  [JDK] JAVA_HOME set                                           │
 └───────────────────────────────────────────────────────────────┘
 ```
+
+> The sketch is illustrative: every label in the real UI is Chinese
+> (`● 已装 2 个版本 · 生效 17（17、11）`, `下载并安装` / `配置环境变量` / `卸载`); the `✓` in front of `17`
+> marks a version that is already installed on disk — see [Multiple versions and the active version](#multiple-versions-and-the-active-version).
 
 ---
 
@@ -218,19 +224,73 @@ The working directory `~/.env-tools/` is created automatically on first launch a
 
 ## 5. Usage
 
-1. Pick the card for the component you want.
+1. Pick the card for the component you want. Its status pill in the top-right corner reports what the system sees:
+    - 🟢 `✓ 已配置（PATH）· openjdk version "17.0.10"` — already usable, no action needed
+    - 🟠 `● 已下载，未配置` — downloaded but the environment variables are not set
+    - 🔴 `○ 未安装` — nothing installed
+    - The seven multi-version components (JDK / Python / Node.js / Go / Maven / Gradle / Bun) use their own wording, which states both how many versions are installed and which one is active:
+        - 🟢 `● 已装 2 个版本 · 生效 21（21、17）` — the list in brackets is what is on disk (newest first), `生效 21` = the active version
+        - 🟠 `● 已装 2 个版本 · 均未生效（21、17）` — versions are installed, but `XXX_HOME` / `PATH` point at none of them
+        - 🔴 `○ 未安装` — no version installed at all
+        - Once the exact version string of the active version has been probed it is appended: `● 已装 2 个版本 · 生效 21（21、17） · 21.0.4`
+
+   (The pill texts above are quoted verbatim — the UI itself is Chinese-only.)
 2. Choose a version from the drop-down.
+    - A version with a **green check mark** in front of it is already installed on disk; entries without the mark are not.
 3. Click **"Download & Install"** — a one-stop flow that runs automatically:
     - the archive is streamed to `~/.env-tools/<component>/downloads/` (China mirrors first, automatic source failover; cancelable at any time);
     - it is extracted to `~/.env-tools/<component>/<component>-<version>/` (Miniconda runs its silent installer);
     - the corresponding `XXX_HOME` variable is written and the `bin` directory is appended to `PATH`;
-    - the card status is refreshed automatically — no need to click "Configure" afterwards.
-4. Already downloaded the archive manually but not configured? Click **"Configure Only"** to only write the environment variables.
+    - the card status is refreshed automatically — no need to click "Configure" afterwards;
+    - previously installed versions of the same component are **not** deleted, so installing a second one gives you side-by-side versions. Installation repoints the environment variables at the version just installed; click **"Configure Only"** once more if you want the pill to state that version as the active one and this component's `PATH` entries collapsed into a single entry.
+4. Click **"Configure Only"** ("配置环境变量") to only write the environment variables:
+    - **Multi-version components**: it makes the version selected in the drop-down the **active version** (`XXX_HOME` repointed, this component's `PATH` entries collapsed into that one entry). The button is greyed out when the selected version already is the active one, and its tooltip tells you to pick another version in the drop-down first.
+    - **All other components**: it configures the highest version found among the locally extracted directories, without re-downloading (handy when you fetched the archive yourself).
 5. All actions are echoed to the log panel (full Chinese logs, including mirror switching / failover).
+
+### Multiple versions and the active version
+
+JDK / Python / Node.js / Go / Maven / Gradle and Bun can keep several versions side by side, one directory per
+version: `~/.env-tools/<component>/<component>-<version>/` (e.g. `jdk-21` and `jdk-17` under `~/.env-tools/jdk/`).
+The **active version** is the one the operating system actually uses.
+
+- **Green check mark = installed on disk.** A checked version can be uninstalled directly; if you select a version
+  that is not installed, the **Uninstall** button is greyed out and its tooltip tells you to pick a checked version first.
+- **"Configure Only" = make the selected version active.** It repoints `XXX_HOME` at that version's directory and
+  collapses this component's `PATH` entries into the active version's single entry; entries belonging to other
+  components (and your own) are left alone. If any step fails mid-switch, everything already written is rolled back
+  from the pre-switch snapshot, so a half-configured state ("`JAVA_HOME` says 21, `PATH` says 17") cannot appear —
+  the log line ends with "已开着的终端与 IDE 需重开才会读到新值" once the switch succeeds.
+- **Uninstall removes only the selected version.** Just that version's directory and its own `PATH` entries; the
+  other versions' directories, variables and entries are untouched, and `XXX_HOME` is deleted only when it points at
+  the version being removed. The summary spells out each step, e.g. `已删除安装目录：…jdk-21`,
+  `已删除环境变量：JAVA_HOME`, `已从 PATH 移除：…jdk-21\bin`, `PATH 中没有本次卸载范围的条目`.
+- **Deleting the active version re-points automatically.** The log shows `生效版本已自动切到 17.0.12` (the highest of
+  the remaining versions). When the active version itself survived but this uninstall knocked the environment
+  off-line, you instead get `已按生效版本 21.0.4 重建环境变量与 PATH`; removing the last installed version yields
+  `已无安装版本，生效登记已清除`.
+- **Your own JDK outside this tool is never touched.** When `XXX_HOME` points outside the component folder the
+  uninstall neither deletes it nor repoints it — the log records that the variable was kept ("未删除"). The automatic
+  re-pointing that follows deleting the active version stays inside this tool's own component folders and never takes
+  over a copy you installed elsewhere yourself.
+- **Setups that predate this feature keep working.** For components installed before the active version was ever
+  recorded, the card infers the active version from the `XXX_HOME` the system already has; clicking
+  "Configure Only" once records it explicitly.
+- The tool does **not** rewrite `pom.xml` / `build.gradle` in your projects and does not touch IDE SDK settings —
+  multi-version setups are handled purely at the "active version" level. If an IDE needs a specific JDK, point its
+  SDK setting at that version's directory yourself.
 
 ### Applying variables
 
 - **Windows:** any new console window will see the fresh user variables. Restart already-open windows.
+- **The same applies to switching the active version:** already-open terminals **and IDEs** do not see the change.
+  Close and reopen terminals, and fully restart IntelliJ IDEA / Eclipse / VS Code (a new terminal tab inside a still
+  running IDE is often not enough).
+- **`where java` may still resolve to Oracle's javapath first.** Oracle's Java auto-update inserts
+  `C:\Program Files\Common Files\Oracle\Java\javapath` into the **system** `PATH`, and Windows puts system entries
+  before user entries, so `java -version` can keep reporting that copy even after `JAVA_HOME` points at the version
+  this tool installed. Run the self-check below; removing the javapath entry from the *system* `PATH` (requires
+  administrator rights) is what makes plain `java` follow the active version.
 - **macOS / Linux:**
     ```bash
     source ~/.zshrc     # or ~/.bashrc / ~/.bash_profile / ~/.profile
@@ -246,6 +306,20 @@ python --version
 node -v
 mysql --version
 ```
+
+After switching the active version of a multi-version component, run these three lines in a **newly opened** window
+(`where` lists matches in `PATH` order — **the first line is the one that actually runs**):
+
+```bat
+echo %JAVA_HOME%
+where java
+%JAVA_HOME%\bin\java -version
+```
+
+- `echo %JAVA_HOME%` should print `C:\Users\<you>\.env-tools\jdk\jdk-<active version>`.
+- The first line of `where java` should live under that same directory. If it is
+  `C:\Program Files\Common Files\Oracle\Java\javapath\java.exe`, Oracle's shim still wins; the third command bypasses
+  `PATH` and confirms that the copy this tool installed is fine.
 
 ---
 
@@ -310,7 +384,7 @@ Likely a slow or failed mirror. Since v2.0 the tool auto-fails over between Chin
 - macOS / Linux: make sure your shell rc files are writable.
 
 **Q3. Will my existing `JAVA_HOME` be overwritten?**
-Yes — the most recent installation wins. The new `bin` directory is appended to `PATH` idempotently.
+Yes — the path written by the most recent install / configure wins, and the new `bin` directory is appended to `PATH` idempotently (the same entry is never duplicated). When you switch the active version of a multi-version component the tool goes one step further: `JAVA_HOME` is repointed at the active version and this component's other `PATH` entries are collapsed away, leaving exactly one entry — entries of other components and anything you keep outside this tool's folders are never touched.
 
 **Q4. `.tar.xz` archives?**
 Supported (MySQL Linux distribution uses it).
@@ -329,6 +403,15 @@ Mostly no. Since v2.0 the built-in China-mirror-priority rule provides **11 main
 
 **Q9. After clicking "Download & Install", do I still need to configure env vars manually?**
 No. The "Download & Install" button is a **one-stop flow**: download → extract → auto-write `XXX_HOME` / `PATH` → refresh the card status. Once the flow finishes, the component is considered installed; you do not need to click "Configure Only" afterwards. That button is only for the case where you have already downloaded the archive manually and just want to write the environment variables.
+
+**Q10. I switched the active version, but `java -version` in my terminal still shows the old one.**
+Check these three things:
+1. **The window was not reopened** — a switch only reaches newly started processes. Close and reopen terminals; fully restart IntelliJ IDEA / Eclipse / VS Code.
+2. **Oracle's javapath wins.** If the *system* `PATH` contains `C:\Program Files\Common Files\Oracle\Java\javapath`, it is searched before user variables, so plain `java` still runs that copy. Run `where java` from the [Verifying](#verifying) section — the first line is what actually executes — and use `%JAVA_HOME%\bin\java -version` to confirm the copy this tool installed is healthy.
+3. **The switch itself failed.** A log line containing "切换失败" means the tool rolled back from the pre-switch snapshot, so nothing effectively changed; click "Configure Only" again. If that log also says the rollback was not fully successful, it lists exactly which item could not be restored and what value it should have — fix those by hand and retry.
+
+**Q11. Will uninstalling one version break the other installed versions of the same component?**
+No. For the multi-version components, uninstall removes only the directory of the version selected in the drop-down plus that version's own `PATH` entries; sibling versions' directories, variables and entries stay as they are, and `XXX_HOME` is cleared only when it points at the version being deleted. If the removed version was the active one, the tool immediately makes the highest remaining version active and says so in the log (`生效版本已自动切到 …`). A version that is not on disk has no green check mark in the drop-down and cannot be uninstalled — the button is greyed out.
 
 ---
 
