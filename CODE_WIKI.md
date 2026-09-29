@@ -178,6 +178,7 @@ byte-tools/
 ├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
 ├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
 ├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（跑起来慢，本轮未计入复核清单）
+├── bt_startup_tests.py            # 离线回归测试：启动期不碰 WMI（见 8.2 与 4.9）
 ├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
 └── assets/                  # 静态资源（PyInstaller 打包时通过 datas 一并打入）
     ├── byte-tools-pt.png    # 主界面截图
@@ -691,6 +692,7 @@ def main() -> int:
 | `bt_search_and_newcmp_tests.py` | 组件搜索匹配与新增组件的自动登记（R2.5） |
 | `bt_mirror_spec_tests.py` | R1 镜像规范（镜像基址集中在 `MIRROR_BASES`、官网末位等） |
 | `bt_refresh_versions_tests.py` | 刷新版本链路 |
+| `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 
 #### `bt_multiversion_tests.py` 覆盖面
@@ -1071,12 +1073,15 @@ RT_GROUP_ICON 里应列出 16/24/32/48/64/128/256 七档，且最大那条 RT_IC
 | `[1/4]` | 定位解释器：`where py` 命中则依次试 `py -3.12 / -3.13 / -3.11 / -3.10 / -3.9 / -3`，再退到 `python`；用 `-c "sys.exit(0 if version_info >= (3,9) else 1)"` 判定可用性 | 仅记 `BASE_PY` 为空，不中断（有可用 `.venv` 时不需要它） |
 | `[2/4]` | `.venv\Scripts\python.exe` 存在且能 `import sys` 就复用；损坏则 `venv --clear` 重建；缺失则新建 | `:err_no_python` / `:err_venv` |
 | `[3/4]` | `import PySide6, requests` 失败才 `pip install -r requirements.txt`；镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI** | `:err_deps` |
+| `[3/4] 前置` | **WMI 有界自检**：先 15 秒、无响应再等到 120 秒地试一次 `platform.win32_ver()`（daemon 线程 + `os._exit`，保证一定返回）。启动脚本只提示不中断；打包脚本 WMI 始终无响应时直接报错退出——因为 PyInstaller 一 `import` 就会调它，不拦就是"跑到检查 PyInstaller 之后再无输出" | `:finish_fail`（仅打包脚本） |
 | `[4/4]` | `python main.py`，或 `python -m PyInstaller --noconfirm byte-tools.spec` 并校验 `dist\byte-tools.exe` | `:err_main` / `:err_no_dist` |
 
 实现约束（改动时请保持）：
 - **编码**：UTF-8（无 BOM）+ CRLF，脚本第 2 行 `chcp 65001 >nul`。本机 `GetACP/GetOEMCP` 实测为 65001，GBK 版脚本双击必乱码；UTF-8 + 自带 `chcp` 在 65001 与强制 936 两种控制台下都验证过显示正常
 - **不用括号块读 errorlevel**：`if %errorlevel% ...` 一律配 `goto`，避免同一括号块内 `%errorlevel%` 在解析期展开导致读到旧值
 - **只在项目目录内动作**：不写注册表、不改系统 PATH、不改全局 Python
+- **`main.py` 启动期不得调用 `platform.system()` / `platform.machine()`**：这两个函数内部走 `uname() → win32_ver() → 一次 WMI 查询`，WINMGMT 冷启动时能阻塞几十秒到一两分钟（本机实测：预热后同一调用 0.6 秒），表现就是"双击启动脚本后窗口一直不出来"。系统名用 `sys.platform` 判、架构用 `PROCESSOR_ARCHITEW6432/PROCESSOR_ARCHITECTURE`（POSIX 用 `os.uname().machine`）取，取值与 `platform` 的原答案一致；护栏用例见 `bt_startup_tests.py`
+- **PyInstaller 可用性只查落盘文件**（`.venv\Lib\site-packages\PyInstaller\__init__.py`），不要用 `python -c "import PyInstaller"` 探测：那条 import 必问 WMI，冷启动时脚本就卡在那里
 - 中文文件名走 `CreateProcessW` 双击正常；用 Git Bash 以 UTF-8 argv 调用时会因编码转换失败，需用 Python `subprocess` 传绝对路径
 
 ### 8.3 开发者源码运行（跨平台）

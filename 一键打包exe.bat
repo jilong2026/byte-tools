@@ -82,6 +82,37 @@ REM ==========================================================================
 REM [3/4] 检查 / 安装依赖
 REM ==========================================================================
 echo.
+REM --------------------------------------------------------------------------
+REM 环境自检：python 的 platform.win32_ver() 会走 WMI。WINMGMT 冷启动时这条调用
+REM           可能阻塞几十秒到一两分钟（本机实测），期间脚本看起来就是"执行一半
+REM           没反应"。这里做有界探测：先等 15 秒，没结果再明确提示并最多等 120 秒。
+REM --------------------------------------------------------------------------
+echo.
+echo       自检系统 WMI（先等 15 秒）...
+"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(15);os._exit(1 if t.is_alive() else 0)" 2>nul
+if %errorlevel% equ 0 goto :wmi_ok
+echo       WMI 15 秒没响应，WINMGMT 多半在冷启动。
+echo       继续等待唤醒（最多 120 秒，期间不要关窗口）...
+"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(120);os._exit(1 if t.is_alive() else 0)" 2>nul
+if %errorlevel% equ 0 goto :wmi_warm
+echo.
+echo [错误] 本机 WMI 累计等待 135 秒仍无响应，打包无法继续。
+echo        PyInstaller 一 import 就会调 platform.win32_ver，那条调用不返回，
+echo        现象就是脚本跑到「检查 PyInstaller」之后再无输出。
+echo        修复办法（用管理员身份打开 CMD 后逐条执行）：
+echo          1. net stop winmgmt
+echo          2. net start winmgmt
+echo          3. winmgmt /verifyrepository   查看 WMI 仓库是否损坏
+echo          4. winmgmt /resetrepository    确认损坏才执行，会重建仓库
+echo        改好后重新双击本脚本；期间想看程序本身，可先用「一键启动项目.bat」。
+goto :finish_fail
+:wmi_warm
+echo       WMI 已唤醒（本次等待较久，下次通常秒过）
+goto :wmi_done
+:wmi_ok
+echo       WMI 正常
+:wmi_done
+echo.
 echo [3/4] 检查项目依赖...
 "%RUN_PY%" -c "import PySide6, requests" >nul 2>&1
 if %errorlevel% neq 0 goto :deps_install
@@ -95,15 +126,18 @@ if %errorlevel% neq 0 goto :err_deps
 echo       依赖安装完成
 :deps_runtime_done
 echo       检查 PyInstaller...
-"%RUN_PY%" -c "import PyInstaller" >nul 2>&1
-if %errorlevel% neq 0 goto :pyi_install
+REM 只查落盘文件，不 import：PyInstaller 一 import 就要问 WMI，冷启动时几十秒不返回
+if exist "%VENV_DIR%\Lib\site-packages\PyInstaller\__init__.py" goto :pyi_ok
+goto :pyi_install
+:pyi_ok
 echo       已就绪
 goto :deps_build_done
 :pyi_install
 echo       未安装 PyInstaller，开始安装...
 call :pip_install pyinstaller
-"%RUN_PY%" -c "import PyInstaller" >nul 2>&1
-if %errorlevel% neq 0 goto :err_deps
+if exist "%VENV_DIR%\Lib\site-packages\PyInstaller\__init__.py" goto :pyi_done_ok
+goto :err_deps
+:pyi_done_ok
 echo       PyInstaller 安装完成
 :deps_build_done
 

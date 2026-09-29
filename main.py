@@ -23,7 +23,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -103,10 +102,34 @@ GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-# 当前操作系统标识：'Windows' / 'Darwin' / 'Linux'
-CURRENT_OS = platform.system()
-# 当前 CPU 架构（大致判断，用于挑选二进制包）
-MACHINE = platform.machine().lower()
+# 当前操作系统标识与 CPU 架构：刻意不用 platform.system() / platform.machine()。
+# 那两个函数内部会走 platform.uname() -> win32_ver() -> 一次 WMI 查询，而 WINMGMT
+# 冷启动时这条查询能阻塞几十秒到一两分钟（本机实测），表现就是"双击启动脚本之后
+# 窗口一直没出来"。一个"挑哪个架构的包"的判断不该把整个程序锁在系统服务上：
+# sys.platform 是解释器自带的常量，架构在 Windows 上取自环境变量，都不作系统调用。
+def _os_name() -> str:
+    """返回 'Windows' / 'Darwin' / 'Linux'，与 platform.system() 的取值一致。"""
+    if sys.platform == "win32":
+        return "Windows"
+    if sys.platform == "darwin":
+        return "Darwin"
+    return "Linux"
+
+
+def _machine_name() -> str:
+    """返回小写 CPU 架构（amd64 / arm64 / x86_64 / aarch64 …），与 platform.machine().lower() 一致。"""
+    if sys.platform == "win32":
+        # 32 位进程跑在 64 位系统上时，PROCESSOR_ARCHITECTURE 只报 x86，
+        # 真实架构记在 PROCESSOR_ARCHITEW6432 里，所以它优先。
+        arch = (os.environ.get("PROCESSOR_ARCHITEW6432")
+                or os.environ.get("PROCESSOR_ARCHITECTURE") or "AMD64")
+    else:
+        arch = os.uname().machine
+    return arch.lower()
+
+
+CURRENT_OS = _os_name()
+MACHINE = _machine_name()
 IS_ARM = ("arm" in MACHINE) or ("aarch64" in MACHINE)
 
 
