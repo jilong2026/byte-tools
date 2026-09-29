@@ -394,6 +394,40 @@ class Component:
         return "；".join(summary_parts) if summary_parts else "无需卸载"
 
 
+def version_from_install_dir(comp: "Component", path: Path) -> Optional[str]:
+    """从安装目录名反解版本号；目录名必须符合 `<key>-<version>`，否则 None。
+
+    入参 comp: Component  用它的 key 做前缀判定（避免把 python-3.12 算到 jdk 头上）
+    入参 path: Path       磁盘上的目录对象
+    返回:      Optional[str]  版本号；不符合命名约定（downloads、残缺名）返回 None
+
+    说明: 安装落位时目录被统一重命名为 install_dir(version)，所以这里与写入端共用一套约定。
+    """
+    prefix = f"{comp.key}-"
+    name = path.name
+    if not name.startswith(prefix):
+        return None
+    return name[len(prefix):] or None
+
+
+def installed_versions(comp: "Component") -> List[Tuple[str, Path]]:
+    """该组件在磁盘上真实装着的版本，按语义版本**降序**（最新在前）。
+
+    入参 comp: Component
+    返回: List[Tuple[str, Path]]  (版本号, 安装目录)
+
+    说明: 排序必须走 _sort_semver_desc。用 str.sort() 会得到 jdk-8 > jdk-21 的错序，
+          "配置环境变量"和"卸载后自动切到剩余最高版本"都会挑错版本。
+    """
+    pairs: List[Tuple[str, Path]] = []
+    for path in comp.installed_dirs():
+        ver = version_from_install_dir(comp, path)
+        if ver:
+            pairs.append((ver, path))
+    order = {v: i for i, v in enumerate(_sort_semver_desc([v for v, _p in pairs]))}
+    return sorted(pairs, key=lambda p: order[p[0]])
+
+
 @dataclass
 class DetectResult:
     """系统级探测结果。"""

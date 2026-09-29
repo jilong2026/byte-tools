@@ -202,5 +202,31 @@ class MultiVersionFlag(EnvSandbox):
             self.assertIsInstance(comp.multi_version, bool, key)
 
 
+class InstalledVersions(EnvSandbox):
+    def test_parses_version_from_dir_name(self):
+        comp = self.make_component("jdk")
+        self.assertEqual(main.version_from_install_dir(comp, Path("x/jdk-21.0.4")), "21.0.4")
+        self.assertIsNone(main.version_from_install_dir(comp, Path("x/python-3.12.4")))
+        self.assertIsNone(main.version_from_install_dir(comp, Path("x/jdk")))
+        self.assertIsNone(main.version_from_install_dir(comp, Path("x/jdk-")))
+
+    def test_orders_by_semver_not_lexicographic(self):
+        # 这条正是旧 bug 的形状：目录名字典序会把 jdk-8 排在 jdk-21 之后
+        comp = self.make_component("jdk", "8", "21.0.4", "17.0.12")
+        self.assertEqual([v for v, _p in main.installed_versions(comp)],
+                         ["21.0.4", "17.0.12", "8"])
+
+    def test_ignores_downloads_and_foreign_dirs(self):
+        comp = self.make_component("jdk", "21.0.4")
+        (main.CONFIG_DIR / "jdk" / "downloads").mkdir(parents=True, exist_ok=True)
+        (main.CONFIG_DIR / "jdk" / "notajdk").mkdir(parents=True, exist_ok=True)
+        self.assertEqual([v for v, _p in main.installed_versions(comp)], ["21.0.4"])
+
+    def test_returns_pair_with_the_exact_install_dir(self):
+        comp = self.make_component("python", "3.12.4", "3.11.9")
+        pairs = main.installed_versions(comp)
+        self.assertEqual(pairs[0], ("3.12.4", comp.install_dir("3.12.4")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
