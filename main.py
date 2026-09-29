@@ -4766,19 +4766,64 @@ class ComponentCard(QFrame):
             self._log("error", f"卸载失败：{exc}")
 
     # ------------------------------------------------------------------
+    def active_version(self) -> Optional[str]:
+        """当前生效版本：优先读 active 登记表，其次从持久层环境变量反推。"""
+        if not self.component.multi_version:
+            return None
+        return load_active_map().get(self.component.key) or infer_active_from_env(self.component)
+
+    # ------------------------------------------------------------------
+    def _apply_active(self, version: str) -> bool:
+        """把指定版本设为生效版本；成功后写登记表并刷新界面。
+
+        返回: bool  成功与否。失败原因已在日志里，界面不再处理异常。
+
+        注意: 本任务先不调用 _refresh_installed_marks()（它是 Task 7 才引入的方法），
+              那里会补上这一次刷新，避免任务之间出现前向依赖。
+        """
+        try:
+            steps = apply_active_version(self.component, version)
+        except SwitchError as exc:
+            self._log("error", str(exc))
+            return False
+        for step in steps:
+            self._log("error" if ("失败" in step) else "ok", step)
+        save_active_version(self.component.key, version)
+        self._detect_status()
+        return True
+
+    # ------------------------------------------------------------------
     def on_configure_clicked(self) -> None:
-        """仅配置环境变量：从本地已存在的安装目录中选择最新一个。"""
+        """仅配置环境变量。
+
+        多版本组件：把下拉框选中的版本设为"当前生效版本"（PATH 只留它一条）。
+        其他组件：沿用原有"取已装目录里语义版本最高的一个"的行为，不写 active 表。
+
+        为什么必须按下拉框选中的版本生效，而不是照旧取"目录名字典序最后一个"：
+        jdk 装了 21.0.4 / 17.0.12 / 8 时，字符串排序会把 jdk-8 排到最后，
+        于是用户明明选的是 21.0.4，配出来的却是 8 —— 生效版本与所选版本必须一致。
+        """
         install_root = CONFIG_DIR / self.component.key
         if not install_root.exists():
             self._log("warn", "尚未下载，请先执行“下载并安装”。")
             return
-        candidates = [p for p in install_root.iterdir() if p.is_dir() and not p.name.startswith(".")
-                      and p.name != "downloads"]
-        if not candidates:
+        ordered = installed_versions(self.component)
+        if self.component.multi_version:
+            if not ordered:
+                self._log("warn", (f"未找到符合 {self.component.key}-<版本号> 命名的安装目录；"
+                                   f"可用『清理残留 PATH』自愈后重试"))
+                return
+            chosen = self._current_version().version
+            if chosen not in [v for v, _p in ordered]:
+                self._log("warn", (f"下拉框选的是 {chosen}，磁盘上没有对应目录；"
+                                   f"已装：{'、'.join(v for v, _p in ordered)}"))
+                return
+            self._apply_active(chosen)
+            return
+        if not ordered:
             self._log("warn", "未找到已解压的安装目录。")
             return
-        candidates.sort()
-        self._configure_env(candidates[-1])
+        self._configure_env(ordered[0][1])
         self._detect_status()
 
     # ------------------------------------------------------------------

@@ -585,5 +585,57 @@ class SaveSettingsKeepsActive(EnvSandbox):
         self.assertEqual(data["theme"], "keep-me", "_save_settings 不许丢其它顶层键")
 
 
+class ConfigureUsesSelectedVersion(EnvSandbox):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card(self, key="jdk", versions=("21", "17", "8")):
+        # jdk 的下拉框由组件内置清单（Adoptium 特性大版本 "21"/"17"/"11"/"8"）填充，
+        # on_configure_clicked 通过 _current_version() 按下拉文本反查版本，所以这里造的
+        # 安装目录必须用同样的大版本串，findText 才能命中；否则选不中、也就测不到"按下拉框生效"。
+        comp = self.make_component(key, *versions)
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        return card
+
+    def test_apply_active_sets_home_to_selected_version(self):
+        self.as_windows()
+        card = self._card()
+        self.assertTrue(card._apply_active("17"))
+        self.assertEqual(self.win_env["JAVA_HOME"],
+                         str(card.component.install_dir("17")))
+        self.assertEqual(main.load_active_map()["jdk"], "17")
+        self.assertEqual(card.active_version(), "17")
+
+    def test_configure_click_targets_combo_selection_not_lexicographic_last(self):
+        # 旧实现在这里会选中 jdk-8（字典序最后一个）
+        self.as_windows()
+        card = self._card()
+        card.version_combo.setCurrentIndex(card.version_combo.findText("21"))
+        card.on_configure_clicked()
+        self.assertEqual(self.win_env["JAVA_HOME"],
+                         str(card.component.install_dir("21")))
+
+    def test_apply_active_failure_leaves_active_untouched(self):
+        self.as_windows()
+        card = self._card()
+        orig = main.EnvManager.append_windows_path
+        main.EnvManager.append_windows_path = staticmethod(
+            lambda entry: (_ for _ in ()).throw(OSError("boom")))
+        self.addCleanup(setattr, main.EnvManager, "append_windows_path", orig)
+        self.assertFalse(card._apply_active("17"))
+        self.assertNotIn("jdk", main.load_active_map())
+
+    def test_non_multi_version_component_still_configures(self):
+        self.as_windows()
+        comp = self.make_component("tomcat", "10.1.60")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        card.on_configure_clicked()
+        self.assertEqual(self.win_env["CATALINA_HOME"],
+                         str(comp.install_dir("10.1.60")))
+        self.assertNotIn("tomcat", main.load_active_map(),
+                         "非多版本组件不进 active 表")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
