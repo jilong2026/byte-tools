@@ -802,6 +802,14 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
 
     JDK_ACTIVE = "21"
     JDK_OTHER = "17"
+    JDK_THIRD = "11"
+
+    def _wire_probe_recorder(self):
+        # enable_detect 的记录桩写成 self.probe_calls，而那个 self 是卡片实例（bound
+        # method 的首参），不是 TestCase。卡片构造时就会触发一次探测，早于我们能拿到
+        # 卡片引用，所以只能把记录目标先挂到类属性上，让它与 TestCase 的列表同一对象。
+        main.ComponentCard.probe_calls = self.probe_calls
+        self.addCleanup(delattr, main.ComponentCard, "probe_calls")
 
     def _card(self, active=None):
         comp = self.make_component("jdk", self.JDK_ACTIVE, self.JDK_OTHER)
@@ -812,14 +820,28 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
         if active:
             main.save_active_version("jdk", active)
         self.enable_detect()          # 胶囊用例要真实探测；探测线程已被 enable_detect 换成记录调用
-        # enable_detect 的记录桩写成 self.probe_calls，而那个 self 是卡片实例（bound
-        # method 的首参），不是 TestCase。卡片构造时就会触发一次探测，早于我们能拿到
-        # 卡片引用，所以只能把记录目标先挂到类属性上，让它与 TestCase 的列表同一对象。
-        main.ComponentCard.probe_calls = self.probe_calls
-        self.addCleanup(delattr, main.ComponentCard, "probe_calls")
+        self._wire_probe_recorder()
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         # 夹具自查：断言用到的版本标签必须真在下拉框里（Task 7 同款护栏）
         for label in (self.JDK_ACTIVE, self.JDK_OTHER):
+            self.assertNotEqual(card.version_combo.findText(label), -1,
+                                f"夹具版本 {label} 不在 jdk 下拉清单里，分支测不到")
+        return card
+
+    def _card3(self, active=None):
+        # 装三个版本 21/17/11（installed_versions 语义降序 = 21、17、11），
+        # 让"生效版本"与"最高已装版本"可区分：active 是中间的 17 或最低的 11 时，
+        # 任何"从清单首项推断生效"的实现都会露馅。
+        comp = self.make_component("jdk", self.JDK_ACTIVE, self.JDK_OTHER, self.JDK_THIRD)
+        for v in (self.JDK_ACTIVE, self.JDK_OTHER, self.JDK_THIRD):
+            (comp.install_dir(v) / "bin" / "java").write_text("", encoding="utf-8")
+        self.as_windows()
+        if active:
+            main.save_active_version("jdk", active)
+        self.enable_detect()
+        self._wire_probe_recorder()
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        for label in (self.JDK_ACTIVE, self.JDK_OTHER, self.JDK_THIRD):
             self.assertNotEqual(card.version_combo.findText(label), -1,
                                 f"夹具版本 {label} 不在 jdk 下拉清单里，分支测不到")
         return card
@@ -855,13 +877,74 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
         self.win_env["CATALINA_HOME"] = str(comp.install_dir("10.1.60"))
         self.enable_detect()
         card = main.ComponentCard(comp, lambda lvl, msg: None)
-        self.assertNotIn("已装", card.status_label.text())
-        self.assertTrue(card.status_label.text())     # 而不是空字符串
+        text = card.status_label.text()
+        self.assertNotIn("已装", text)
+        self.assertTrue(text)                          # 而不是空字符串
+        # 缺陷 C：把"逐字一致"真钉住——本 fixture 只造了空的 bin/ 目录、没有
+        # catalina 可执行文件，detect() 判不到「已配置」，落回「已下载未配置」这条
+        # 老文案（不是 ✓ 已配置、也不是 ○ 未安装）。断言实际产出的旧文案前缀。
+        self.assertEqual(text, "● 已下载，未配置")
 
     def test_only_the_active_version_is_probed(self):
         card = self._card(active=self.JDK_ACTIVE)
         self.assertEqual(len(self.probe_calls), 1, self.probe_calls)
         self.assertIn(f"jdk-{self.JDK_ACTIVE}", self.probe_calls[0])
+
+    # ---- 缺陷 A：异步版本探测回填必须进多版本胶囊 ----
+    def test_probed_version_lands_in_multiversion_capsule(self):
+        # _on_version_probed 的闸门读 _status_shows_configured，该标志此前只在
+        # 非多版本分支赋值 → 多版本卡片恒 False → 分支末尾排出去的 VersionProbeWorker
+        # 回来后（java --version 的精确串，如 21.0.4）被直接丢弃。改造前 jdk 能显示
+        # 精确版本，现在丢了。可观察结果 = status_label.text()：回填后既要有版本号，
+        # 又要基础胶囊文案逐字保留，且绝不落到旧的「✓ 已配置」文案。
+        card = self._card(active=self.JDK_ACTIVE)
+        base = card.status_label.text()
+        self.assertIn("已装 2 个版本", base)
+        self.assertIn(f"生效 {self.JDK_ACTIVE}", base)
+        self.assertNotIn("21.0.4", base)               # 回填前没有版本号
+        # 模拟探测线程 done 信号回来（worker 传默认 None，跳过"是否被新一轮取代"那道闸）
+        card._on_version_probed("21.0.4")
+        text = card.status_label.text()
+        self.assertIn("21.0.4", text)                  # 版本号进胶囊
+        self.assertIn("已装 2 个版本", text)            # 正文逐字不变
+        self.assertIn(f"生效 {self.JDK_ACTIVE}", text)
+        self.assertNotIn("已配置", text)               # 不许掉回旧的 ✓ 已配置文案
+        self.assertNotIn("版本检测中", text)           # 回填后不再是"检测中"占位
+
+    def test_probed_version_discarded_when_none_active(self):
+        # 均未生效（active 为空）时既没排探测、_status_shows_configured 也应为 False，
+        # 迟到的探测结果必须被丢掉，胶囊正文保持"均未生效"基础文案不被追加版本号。
+        card = self._card(active=None)
+        base = card.status_label.text()
+        self.assertIn("均未生效", base)
+        card._status_version = ""
+        card._on_version_probed("21.0.4")
+        self.assertEqual(card.status_label.text(), base)
+
+    # ---- 缺陷 B：生效版本一律以 active_version()（登记表）为准，不得推断为最高版本 ----
+    def test_active_is_not_the_highest_installed_version(self):
+        # 装 21/17/11，把生效登记成中间的 17、下拉框选中最高的 21。
+        # 若把 active 误写成 ordered[0][0]（最高版本），胶囊会说"生效 21"、且按钮被禁用，
+        # 这两处断言同时红——正是 reviewer 注入 ordered[0] 后现有用例抓不到的原因。
+        card = self._card3(active=self.JDK_OTHER)      # 生效 17
+        text = card.status_label.text()
+        self.assertIn("已装 3 个版本", text)
+        self.assertIn(f"生效 {self.JDK_OTHER}", text)
+        self.assertNotIn(f"生效 {self.JDK_ACTIVE}", text)   # 生效的不是最高版本 21
+        card.version_combo.setCurrentIndex(card.version_combo.findText(self.JDK_ACTIVE))
+        card._detect_status()
+        self.assertTrue(card.btn_configure.isEnabled())     # 选中 21 ≠ 生效 17 → 可点
+        self.assertIn("生效", card.btn_configure.toolTip())
+
+    def test_active_lowest_installed_version_is_the_active_one(self):
+        # 生效登记成最低的 11，同理必须显示"生效 11"而非最高版本 21。
+        card = self._card3(active=self.JDK_THIRD)      # 生效 11
+        text = card.status_label.text()
+        self.assertIn(f"生效 {self.JDK_THIRD}", text)
+        self.assertNotIn(f"生效 {self.JDK_ACTIVE}", text)
+        card.version_combo.setCurrentIndex(card.version_combo.findText(self.JDK_ACTIVE))
+        card._detect_status()
+        self.assertTrue(card.btn_configure.isEnabled())
 
 
 if __name__ == "__main__":

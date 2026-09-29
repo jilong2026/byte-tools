@@ -4326,6 +4326,9 @@ class ComponentCard(QFrame):
         self._status_where = ""
         self._status_version = ""
         self._status_shows_configured = False
+        # 多版本胶囊的基础文案：异步版本号回填时要在它后面续（" · <版本>"），
+        # 不能落到非多版本那条 "✓ 已配置（…）" 旧文案。
+        self._mv_capsule: str = ""
         self._version_worker: Optional["VersionProbeWorker"] = None
 
         self.setObjectName("card")
@@ -4430,6 +4433,21 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _render_status_label(self) -> None:
+        if self.component.multi_version:
+            # 多版本胶囊正文取 _detect_status 已算好的基础文案（逐字不变），异步版本号
+            # 只在其后追加；绿=有生效版本（_status_shows_configured），橙=均未生效。
+            # 绝不能落到下面那条非多版本的 "✓ 已配置（…）" 旧文案。
+            text = self._mv_capsule
+            if self._status_version:
+                text += f" · {self._status_version}"
+            self.status_label.setText(text)
+            self.status_label.setStyleSheet(
+                "color:#2e7d32;font-weight:600;padding:2px 8px;"
+                "background:#e8f5e9;border-radius:10px;" if self._status_shows_configured else
+                "color:#ef6c00;font-weight:600;padding:2px 8px;"
+                "background:#fff3e0;border-radius:10px;")
+            return
+
         text = f"✓ 已配置（{self._status_where}）"
         if self._status_version:
             text += f" · {self._status_version}"
@@ -4485,6 +4503,8 @@ class ComponentCard(QFrame):
             ordered = installed_versions(self.component)
             active = self.active_version()
             if not ordered:
+                self._mv_capsule = "○ 未安装"
+                self._status_shows_configured = False
                 self.status_label.setText("○ 未安装")
                 self.status_label.setStyleSheet(
                     "color:#c62828;font-weight:600;padding:2px 8px;"
@@ -4497,7 +4517,9 @@ class ComponentCard(QFrame):
                 return
             names = "、".join(v for v, _p in ordered)
             tail = f" · 生效 {active}" if active else " · 均未生效"
-            self.status_label.setText(f"● 已装 {len(ordered)} 个版本{tail}（{names}）")
+            capsule = f"● 已装 {len(ordered)} 个版本{tail}（{names}）"
+            self._mv_capsule = capsule
+            self.status_label.setText(capsule)
             self.status_label.setStyleSheet(
                 "color:#2e7d32;font-weight:600;padding:2px 8px;"
                 "background:#e8f5e9;border-radius:10px;" if active else
@@ -4513,6 +4535,10 @@ class ComponentCard(QFrame):
             self.btn_uninstall.setToolTip(
                 f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
                 "其他已装版本不动")
+            # 探测回填只在确有生效版本时开放闸门（_status_shows_configured），并把上一轮
+            # 生效版本回填过的旧版本号清掉——否则切完版本胶囊还挂着 21.0.4。
+            self._status_shows_configured = bool(active)
+            self._status_version = ""
             for ver, path in ordered:
                 if ver == active:
                     # 复用既有寻径（会试 bin/、根目录、.bat/.cmd 等），别自己拼路径
