@@ -29,7 +29,21 @@ if REPO_ROOT not in sys.path:
 
 import main  # noqa: E402
 
-ENV_KEYS = ("PATH", "JAVA_HOME", "MAVEN_HOME", "NODE_HOME", "GO_HOME", "GRADLE_HOME", "BUN_HOME")
+def _restored_env_keys():
+    """进程环境快照要跟着组件表长，别手写清单。
+
+    build_components() 里的 env_var（CATALINA_HOME / MYSQL_HOME / KAFKA_HOME …）
+    都会被 set_windows_user_env 同步进 os.environ（main.py:3437），漏一个键就是
+    跨用例泄漏，所以直接从产品组件表推导。
+    """
+    keys = {"PATH"}
+    for comp in main.build_components():
+        if comp.env_var:
+            keys.add(comp.env_var)
+    return tuple(sorted(keys))
+
+
+ENV_KEYS = _restored_env_keys()
 
 
 class EnvSandbox(unittest.TestCase):
@@ -71,6 +85,9 @@ class EnvSandbox(unittest.TestCase):
                 self.win_env[name] = value
 
         def fake_get(name):
+            # 规则（评审 controller 裁定）：持久化断言必须直读 self.win_env /
+            # self.win_path，EnvManager.get 只用于"生效值"读取。os.environ 兜底
+            # 正是 get 与 read_user_env 的区分点，别"简化"掉。
             return self.win_env.get(name) or os.environ.get(name)
 
         main.EnvManager._read_windows_user_path = staticmethod(fake_read)
@@ -142,6 +159,9 @@ class SandboxSelfCheck(EnvSandbox):
         self.assertEqual(main.CONFIG_FILE, self.root / "config.json")
         self.assertTrue(str(self.rc).startswith(self.tmp.name))
         self.assertNotEqual(main.CONFIG_DIR, Path.home() / ".env-tools")
+        # rc 桩必须活着：只断言 self.rc 的路径不构成保护——桩一旦失效，
+        # Unix 分支用例会把 export 块写进用户真实的 ~/.zshrc 而自检仍全绿。
+        self.assertEqual(main.EnvManager._shell_rc_file(), self.rc)
 
     def test_make_component_creates_real_dirs(self):
         comp = self.make_component("jdk", "21.0.4", "17.0.12")
@@ -150,9 +170,11 @@ class SandboxSelfCheck(EnvSandbox):
         self.assertTrue(str(comp.install_dir("21.0.4")).startswith(self.tmp.name))
 
     def test_windows_stub_is_installed(self):
-        # 沙箱必须已经接管 Windows 那两个落地点，否则测试会写真实 HKCU
+        # 沙箱必须已接管 Windows 的读、写与 get 三个落地点，否则测试会
+        # 读到 / 写进真实 HKCU，结果随宿主机环境漂移
         self.win_env["JAVA_HOME"] = "stubbed"
         self.assertEqual(main.EnvManager.get("JAVA_HOME"), "stubbed")
+        self.assertEqual(main.EnvManager._read_windows_user_path(), [])
         main.EnvManager._write_registry_env("Path", r"C:\a;C:\b")
         self.assertEqual(self.win_path, [r"C:\a", r"C:\b"])
 
