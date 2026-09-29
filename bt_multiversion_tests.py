@@ -947,5 +947,247 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
         self.assertTrue(card.btn_configure.isEnabled())
 
 
+class UninstallScope(EnvSandbox):
+    """Task 9：卸载只清被删版本的 PATH 条目，删掉生效版本时自动重排。
+
+    现状 bug：Component.uninstall 按「组件根」扫 PATH（main.py:381-392），
+    装了 21 和 17 时删 17 会把 21 的条目一起删掉 —— 多版本功能直接漏底。
+    C:\\Windows\\system32 是"用户自己的条目"锚点：任何卸载都不许碰它。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.comp = self.make_component("jdk", "21.0.4", "17.0.12")
+        self.win_path[:] = [str(self.comp.install_dir("21.0.4") / "bin"),
+                            str(self.comp.install_dir("17.0.12") / "bin"),
+                            r"C:\Windows\system32"]
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("21.0.4"))
+        main.save_active_version("jdk", "21.0.4")
+
+    def test_uninstall_keeps_other_versions_path_entry(self):
+        # 现状 bug：PATH 清理按组件根，删 17 会把 21 的条目一起删掉
+        self.comp.uninstall("17.0.12")
+        self.assertIn(str(self.comp.install_dir("21.0.4") / "bin"), self.win_path)
+        self.assertNotIn(str(self.comp.install_dir("17.0.12") / "bin"), self.win_path)
+        self.assertIn(r"C:\Windows\system32", self.win_path, "用户自己的条目不许被捎带删掉")
+
+    def test_uninstall_other_version_keeps_active_home(self):
+        # 删的非生效版本：JAVA_HOME 与 active 登记都必须原样保留
+        # （改造前第 2 步按 _under_root 判删，"删了 17 把 21 的 JAVA_HOME 也清了"）
+        self.comp.uninstall("17.0.12")
+        self.assertEqual(self.win_env["JAVA_HOME"], str(self.comp.install_dir("21.0.4")))
+        self.assertEqual(main.load_active_map()["jdk"], "21.0.4")
+
+    def test_uninstalling_active_version_repoints_to_highest_remaining(self):
+        summary = self.comp.uninstall("21.0.4")
+        self.assertEqual(main.load_active_map()["jdk"], "17.0.12")
+        self.assertEqual(self.win_env["JAVA_HOME"], str(self.comp.install_dir("17.0.12")))
+        self.assertIn("生效版本已自动切到 17.0.12", summary)
+
+    def test_uninstalling_last_version_clears_active_and_env(self):
+        self.comp.uninstall("21.0.4")
+        self.comp.uninstall("17.0.12")
+        self.assertNotIn("jdk", main.load_active_map())
+        self.assertNotIn("JAVA_HOME", self.win_env)
+        self.assertEqual([p for p in self.win_path if "jdk-" in p.lower()], [])
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+
+class UninstallTargetResolve(EnvSandbox):
+    """修正 1：resolve_uninstall_target 只做最小改动。
+
+    保留 exact → XXX_HOME → 单目录这条链（XXX_HOME 指的是当前生效版本，
+    比"猜最高"更准），只把 len(dirs) > 1 的"罢工"分支换成按 installed_versions()
+    降序取最高并说明；非多版本组件的罢工行为必须与改造前逐字一致。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.comp = self.make_component("jdk", "21.0.4", "17.0.12")
+
+    def test_missing_selection_resolves_to_env_home_not_guessed_highest(self):
+        # JAVA_HOME 指着生效中的 17：按它定位才对，按语义最高猜 21 会切错版本
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("17.0.12"))
+        path, note = self.comp.resolve_uninstall_target("99.9.9")
+        self.assertEqual(path, self.comp.install_dir("17.0.12"))
+        self.assertIn("JAVA_HOME", note)
+
+    def test_missing_selection_without_env_home_takes_highest(self):
+        # 改造前这条会罢工返回 None（卸载整条链路失灵）；现在降序取最高并说明
+        path, note = self.comp.resolve_uninstall_target("99.9.9")
+        self.assertEqual(path, self.comp.install_dir("21.0.4"))
+        self.assertIn("改为卸载版本最高的 21.0.4", note)
+
+    def test_unparseable_dirs_refuse_with_version_note(self):
+        # 多个目录但版本号都反解不出来：仍罢工，但说明原因换了（能识别时不走到这）
+        shutil.rmtree(self.comp.install_dir("21.0.4"))
+        shutil.rmtree(self.comp.install_dir("17.0.12"))
+        for name in ("weird-a", "weird-b"):
+            (main.CONFIG_DIR / "jdk" / name).mkdir(parents=True)
+        path, note = self.comp.resolve_uninstall_target("99.9.9")
+        self.assertIsNone(path)
+        self.assertIn("无法识别版本号", note)
+
+    def test_non_multi_version_with_two_dirs_still_refuses(self):
+        # 硬约束：非多版本组件行为与改造前逐字一致——装俩又定位不到就罢工
+        comp = self.make_component("tomcat", "10.1.60", "9.0.100")
+        path, note = comp.resolve_uninstall_target("8.8.8")
+        self.assertIsNone(path)
+        self.assertIn("请先在下拉框中选择具体版本", note)
+
+
+class StaleProbeWorkerGuard(EnvSandbox):
+    """并入项 A（Task 8 评审留）：重跑 _detect_status 后旧探测线程的迟到回调作废。
+
+    _on_version_probed 用 worker 身份（worker is self._version_worker）挡旧回包；
+    多版本分支重新排探测时没把 _version_worker 清掉，上一轮卡片里遗留的旧 worker
+    回来照样能贴上版本号——切完版本胶囊还挂着旧精确串，永久错标。
+    夹具沿用 Task 8 的 _card 形状（下拉清单真实大版本串 + java 桩 + enable_detect）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card_active21(self):
+        comp = self.make_component("jdk", "21", "17")
+        for v in ("21", "17"):
+            (comp.install_dir(v) / "bin" / "java").write_text("", encoding="utf-8")
+        self.as_windows()
+        main.save_active_version("jdk", "21")
+        self.enable_detect()
+        # 同 Task 8：记录桩的 self 是卡片实例，把列表挂到类属性上让两边同一对象
+        main.ComponentCard.probe_calls = self.probe_calls
+        self.addCleanup(delattr, main.ComponentCard, "probe_calls")
+        return main.ComponentCard(comp, lambda lvl, msg: None)
+
+    def test_stale_probe_callback_cannot_backfill_after_redetect(self):
+        # 红→绿必须真做：改造前 _detect_status 不清 _version_worker，哨兵存活，
+        # _on_version_probed("21.0.4", 哨兵) 会通过身份闸门把旧版本号贴进新胶囊。
+        card = self._card_active21()
+        stale = object()
+        card._version_worker = stale
+        card._detect_status()
+        card._on_version_probed("21.0.4", stale)
+        self.assertNotIn("21.0.4", card.status_label.text(),
+                         "旧轮次 worker 的回包不得再写进新一轮胶囊")
+
+    def test_negative_control_fresh_backfill_still_lands(self):
+        # 反向对照：胶囊回填链路本身是通的——worker=None 的常规回填照常进胶囊。
+        # 没有这条对照，上一条的"绿"可能只是闸门整个关了，而不是修好了。
+        card = self._card_active21()
+        card._version_worker = object()
+        card._detect_status()
+        card._on_version_probed("21.0.4")
+        self.assertIn("21.0.4", card.status_label.text())
+        self.assertIn("已装 2 个版本", card.status_label.text())
+
+
+class UninstallButtonGate(EnvSandbox):
+    """并入项 B：多版本卡片里卸载按钮只对"已装的选中版本"启用。
+
+    改造前 setEnabled(True) 是无条件的，而 tooltip 承诺"卸载下拉框选中的 {selected}"，
+    selected 完全可能没装——点下去会走 resolve 兜底，删掉用户没选中的版本。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card(self):
+        comp = self.make_component("jdk", "21", "17")
+        for v in ("21", "17"):
+            (comp.install_dir(v) / "bin" / "java").write_text("", encoding="utf-8")
+        self.as_windows()
+        main.save_active_version("jdk", "21")
+        self.enable_detect()
+        main.ComponentCard.probe_calls = self.probe_calls
+        self.addCleanup(delattr, main.ComponentCard, "probe_calls")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        # 夹具自查（Task 7/8 同款护栏）："8" 是未装版本，必须在下拉清单里
+        self.assertNotEqual(card.version_combo.findText("8"), -1)
+        self.assertNotEqual(card.version_combo.findText("17"), -1)
+        return card
+
+    def _select(self, card, label):
+        card.version_combo.setCurrentIndex(card.version_combo.findText(label))
+        card._detect_status()
+
+    def test_uninstall_enabled_for_installed_selection(self):
+        # 对照组（改造前后都绿）：选中的版本已装 → 按钮可点，tooltip 承诺不变
+        card = self._card()
+        self._select(card, "17")
+        self.assertTrue(card.btn_uninstall.isEnabled())
+        self.assertIn("卸载下拉框选中的 17", card.btn_uninstall.toolTip())
+
+    def test_uninstall_disabled_for_uninstalled_selection(self):
+        # 改造前红：setEnabled(True) 无条件
+        card = self._card()
+        self._select(card, "8")
+        self.assertFalse(card.btn_uninstall.isEnabled(),
+                         "选中的 8 没装，卸载按钮不该可点")
+        tip = card.btn_uninstall.toolTip()
+        self.assertIn("未安装", tip)
+        self.assertIn("绿勾", tip, "禁用 tooltip 要告诉用户怎么选中已装版本")
+
+
+class UninstallConfirmText(EnvSandbox):
+    """并入项 C：卸载确认框尾巴按 multi_version 分叉。
+
+    非多版本组件的原文必须逐字不变；多版本组件现在只动选中的那个版本，
+    旧句子「若所选版本与实际安装版本不一致，会以实际装着的目录为准」会变成假话。
+    整块替换 main.QMessageBox（不弹真框），断言只看用户能看到的文本本身。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    NON_MV_TAIL = "（若所选版本与实际安装版本不一致，会以实际装着的目录为准）"
+
+    def _capture_question(self):
+        captured = {}
+
+        class FakeBox:
+            Yes = 1
+            No = 2
+
+            @staticmethod
+            def question(parent, title, text, *a, **k):
+                captured["text"] = text
+                return FakeBox.No   # 一律答"否"：确认框文案用例不许真的卸载
+
+        orig = main.QMessageBox
+        main.QMessageBox = FakeBox
+        self.addCleanup(setattr, main, "QMessageBox", orig)
+        return captured
+
+    def test_multiversion_confirm_text_scopes_to_selected_version(self):
+        self.as_windows()
+        comp = self.make_component("jdk", "21", "17")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        card.version_combo.setCurrentIndex(card.version_combo.findText("17"))
+        captured = self._capture_question()
+        card.on_uninstall_clicked()
+        text = captured["text"]
+        self.assertIn("只删除选中的这一个版本", text)
+        self.assertIn("其他已装版本不动", text)
+        self.assertIn("自动切到剩余里版本号最高的", text)
+        self.assertNotIn("以实际装着的目录为准", text, "多版本组件这句话现在是假话")
+        # 用户点了"否"：磁盘上什么都不许被删
+        self.assertTrue(comp.install_dir("17").is_dir())
+        self.assertTrue(comp.install_dir("21").is_dir())
+
+    def test_non_multiversion_confirm_text_byte_identical(self):
+        self.as_windows()
+        comp = self.make_component("tomcat", "10.1.60")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        captured = self._capture_question()
+        card.on_uninstall_clicked()
+        self.assertIn(self.NON_MV_TAIL, captured["text"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

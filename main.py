@@ -296,6 +296,11 @@ class Component:
         离线默认清单可能落后于实际安装的版本（在线版本抓取失败时尤其明显），
         此时按选中版本去删会删一个不存在的目标，而目录、XXX_HOME、PATH 全都留着
         —— 界面因此仍显示「已配置」。返回 (目标目录或 None, 给用户的中文说明)。
+
+        多版本组件的新语义: 选中版本没装、磁盘上又装着多个版本时不再罢工，
+        改为按语义版本降序取最高的那个并说明；XXX_HOME 定位仍排在它之前——
+        HOME 指的是当前生效的那个版本，按它定位比"猜最高"更准。
+        非多版本组件维持原行为（定位不到具体哪个就罢工）。
         """
         exact = self.install_dir(version)
         if exact.is_dir():
@@ -316,21 +321,37 @@ class Component:
         if len(dirs) == 1:
             return dirs[0], f"所选版本 {self.key}-{version} 未安装，改为卸载实际存在的 {dirs[0].name}"
         if len(dirs) > 1:
+            if self.multi_version:
+                # 选中的版本没装、又装了多个：不能罢工（罢工等于卸载失灵）。
+                # 按语义版本降序取最高的那个，并把清单说清楚。
+                ordered = installed_versions(self)
+                if ordered:
+                    ver, path = ordered[0]
+                    return path, (f"所选版本 {self.key}-{version} 未安装；"
+                                  f"已装 {'、'.join(v for v, _p in ordered)}，"
+                                  f"改为卸载版本最高的 {ver}")
+                names = "、".join(d.name for d in dirs)
+                return None, f"存在多个已安装版本（{names}）但都无法识别版本号，请在下拉框中选择"
+            # 非多版本组件维持原行为：装了多个版本又定位不到具体是哪一个时罢工。
             names = "、".join(d.name for d in dirs)
             return None, f"存在多个已安装版本（{names}），请先在下拉框中选择具体版本"
         return None, f"未找到 {self.key}-{version} 的安装目录，也没有其他已安装版本"
 
     def uninstall(self, version: str) -> str:
         """
-        卸载指定版本：删除安装目录、移除本工具写入的 XXX_HOME、清理属于本组件的 PATH 条目。
+        卸载指定版本：删除安装目录、移除正指向被删目录的 XXX_HOME、只清理被删版本的
+        PATH 条目；多版本组件删掉生效版本时自动切到剩余里版本号最高的那个。
 
         入参 version: str  下拉框选中的版本号；与实际安装版本不一致时会自动校正目标
         返回: str           卸载结果摘要（中文，多步骤用中文分号分隔）
 
         说明:
-          - XXX_HOME 只有落在本组件目录（CONFIG_DIR/<key>）内才删除，用户自己的安装不动它；
-          - PATH 按「本组件目录之内」整体清理，因此 path_subdir 为空的组件（如 bun）
-            以及目录已被手工删除的历史条目都能一并清掉；
+          - XXX_HOME 只有正指向本次被删目录才删除；指向同组件其他版本时保留，
+            交给生效版本重排那一步处理；指向组件目录之外（用户自己的安装）绝不动；
+          - PATH 默认只清理"本次被删目录"之内的条目——多版本并存时按组件根扫会把
+            用户没删的那些版本的条目一起删掉；只有本组件已无其它安装目录时，才回到
+            按组件根整体清扫，此时目录已被手工删除的历史死条目也能一并清掉；
+            path_subdir 为空的组件（如 bun）条目就在被删目录本身之下，同样覆盖；
           - 安装器模式（如 Miniconda）跳过目录删除，仅清理环境变量与 PATH。
         """
         summary_parts: List[str] = []
@@ -353,43 +374,69 @@ class Component:
             except Exception as exc:
                 summary_parts.append(f"删除安装目录失败：{exc}")
 
-        # 2. 删除 XXX_HOME 环境变量（仅当它落在本组件目录内，避免误删用户其他配置）
+        # 2. 删除 XXX_HOME：只有它正指向本次被删的版本才删；指向同组件其他版本时保留，
+        #    交给第 4 步的生效重排处理，避免"删了 17，把 21 的 JAVA_HOME 也清了"。
+        #    读持久层而不是 os.environ：本进程可能早已被安装/切换写脏。
         if self.env_var:
-            current_home = EnvManager.get(self.env_var)
-            points_at_component = bool(current_home) and (
-                (
-                    install_path is not None
-                    and EnvManager._same_path(current_home, str(install_path))
-                )
-                or EnvManager._under_root(current_home, str(component_root))
-            )
-            if points_at_component:
+            current_home = EnvManager.read_user_env(self.env_var) or EnvManager.get(self.env_var)
+            if current_home and install_path is not None and EnvManager._same_path(
+                    current_home, str(install_path)):
                 try:
-                    if CURRENT_OS == "Windows":
-                        EnvManager.remove_windows_user_env(self.env_var)
-                    else:
-                        EnvManager.remove_unix_env(self.env_var)
+                    EnvManager.drop_user_env(self.env_var)
                     summary_parts.append(f"已删除环境变量：{self.env_var}")
                 except Exception as exc:
                     summary_parts.append(f"删除环境变量 {self.env_var} 失败：{exc}")
-            elif current_home:
-                # XXX_HOME 指向别处，可能是用户系统已有配置，不动它
+            elif current_home and not EnvManager._under_root(
+                    str(current_home), str(component_root)):
                 summary_parts.append(
-                    f"环境变量 {self.env_var} 指向其他目录（{current_home}），未删除"
-                )
+                    f"环境变量 {self.env_var} 指向其他目录（{current_home}），未删除")
+            # 沉默分支说明：current_home 落在本组件目录内、又没指向被删目录，
+            # 即它指向的是同组件的其他已装版本——绝不能删（删了生效版本就没了），
+            # 交给第 4 步按 active 登记表重排；第 4 步的"全删光"分支也会兜底清掉
+            # 指向已消失目录的残留 HOME。
 
-        # 3. 清理 PATH 中位于本组件目录内的条目（不再依赖 path_subdir 是否配置）
+        # 3. 清理 PATH 中属于"本次被删版本"的条目。
+        #    多版本并存时绝不能按组件根清——会把用户没删的那些版本的条目一起删掉；
+        #    只有本组件已无其它安装目录时，才回到"按组件根扫一遍"，顺带清掉早年手工删目录留下的死条目。
+        #    （第 1 步已把被删目录 rmtree 掉，所以 remaining_dirs 里不含它本身。）
+        remaining_dirs = [p for p in component_root.iterdir()
+                          if p.is_dir() and p.name != "downloads" and not p.name.startswith(".")] \
+                         if component_root.is_dir() else []
+        scope = str(component_root) if not remaining_dirs else str(install_path)
+        if install_path is None:
+            scope = str(component_root)
         try:
-            if CURRENT_OS == "Windows":
-                removed = EnvManager.remove_windows_path_entries_under(str(component_root))
-            else:
-                removed = EnvManager.remove_unix_path_entries_under(str(component_root))
-            if removed:
-                summary_parts.append("已从 PATH 移除：" + "、".join(removed))
-            else:
-                summary_parts.append("PATH 中没有本组件的条目")
+            removed = EnvManager.remove_path_entries_under(scope)
+            summary_parts.append("已从 PATH 移除：" + "、".join(removed) if removed
+                                 else "PATH 中没有本次卸载范围的条目")
         except Exception as exc:
             summary_parts.append(f"清理 PATH 失败：{exc}")
+
+        # 4. 多版本组件的生效登记收尾：删掉的正是生效版本时，自动切到剩余里版本号最高的；
+        #    全删光就清登记 + 清环境变量，避免界面显示"生效 17"而磁盘上已无 17。
+        if self.multi_version:
+            remaining = installed_versions(self)
+            removed_ver = version_from_install_dir(self, install_path) if install_path else None
+            active = load_active_map().get(self.key) or infer_active_from_env(self)
+            if not remaining:
+                save_active_version(self.key, None)
+                if self.env_var and EnvManager.read_user_env(self.env_var):
+                    try:
+                        EnvManager.drop_user_env(self.env_var)
+                    except Exception as exc:
+                        summary_parts.append(f"删除 {self.env_var} 失败：{exc}")
+                summary_parts.append("已无安装版本，生效登记与环境变量均已清除")
+            elif active and removed_ver and active == removed_ver:
+                nxt = remaining[0][0]
+                try:
+                    apply_active_version(self, nxt)
+                    save_active_version(self.key, nxt)
+                    summary_parts.append(f"生效版本已自动切到 {nxt}")
+                except SwitchError as exc:
+                    save_active_version(self.key, None)
+                    summary_parts.append(
+                        f"自动切到 {nxt} 失败，生效登记已清空，请重新点一次"
+                        f"「仅配置环境变量」：{exc}")
 
         return "；".join(summary_parts) if summary_parts else "无需卸载"
 
@@ -4531,14 +4578,27 @@ class ComponentCard(QFrame):
                 "把下拉框选中的版本设为生效版本：改 XXX_HOME，并把本组件在 PATH 里的"
                 "条目收敛成这一条；已开着的终端需重开才生效" if selected != active else
                 f"选中的 {selected} 已是生效版本；要换版本先在下拉框里选中")
-            self.btn_uninstall.setEnabled(True)
-            self.btn_uninstall.setToolTip(
-                f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
-                "其他已装版本不动")
+            # 卸载按钮只对"已装的选中版本"启用：tooltip 承诺卸载选中的那个，
+            # 而 selected 完全可能没装——放行会走 resolve 兜底删掉用户没选中的版本。
+            installed_set = {v for v, _p in ordered}
+            if selected in installed_set:
+                self.btn_uninstall.setEnabled(True)
+                self.btn_uninstall.setToolTip(
+                    f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
+                    "其他已装版本不动")
+            else:
+                self.btn_uninstall.setEnabled(False)
+                self.btn_uninstall.setToolTip(
+                    f"选中的 {selected} 未安装；要卸载其他版本先在下拉框里选中"
+                    "（下拉框里有绿勾的就是已装）")
             # 探测回填只在确有生效版本时开放闸门（_status_shows_configured），并把上一轮
             # 生效版本回填过的旧版本号清掉——否则切完版本胶囊还挂着 21.0.4。
             self._status_shows_configured = bool(active)
             self._status_version = ""
+            # 作废上一轮探测线程的迟到回调：_on_version_probed 靠 worker 身份挡旧回包，
+            # 不清旧 _version_worker 的话，旧 worker 回来会把上一轮生效版本的旧版本号
+            # 贴进这一轮的新胶囊里，永久错标。
+            self._version_worker = None
             for ver, path in ordered:
                 if ver == active:
                     # 复用既有寻径（会试 bin/、根目录、.bat/.cmd 等），别自己拼路径
@@ -4866,6 +4926,13 @@ class ComponentCard(QFrame):
         """
         cv = self._current_version()
         # 二次确认：卸载会删除本地目录、清理环境变量与 PATH，不可逆
+        # 确认框尾巴按组件是否多版本分叉：多版本现在只动选中的那个版本，
+        # 旧的"以实际装着的目录为准"在多选并存场景下会变成假话；
+        # 非多版本组件的原文逐字保持不变。
+        tail = ("（只删除选中的这一个版本，其他已装版本不动；"
+                "若删掉的正是当前生效版本，会自动切到剩余里版本号最高的那个）"
+                if self.component.multi_version else
+                "（若所选版本与实际安装版本不一致，会以实际装着的目录为准）")
         reply = QMessageBox.question(
             self,
             "确认卸载",
@@ -4874,7 +4941,7 @@ class ComponentCard(QFrame):
             f"  · 删除安装目录\n"
             f"  · 清理环境变量 {self.component.env_var or '（无）'}\n"
             f"  · 清理 PATH 中属于本组件安装目录的条目\n\n"
-            f"（若所选版本与实际安装版本不一致，会以实际装着的目录为准）",
+            f"{tail}",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
