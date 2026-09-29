@@ -347,7 +347,8 @@ class Component:
 
         说明:
           - XXX_HOME 只有正指向本次被删目录才删除；指向同组件其他版本时保留，
-            交给生效版本重排那一步处理；指向组件目录之外（用户自己的安装）绝不动；
+            交给生效版本重排那一步处理；指向本组件根下已消失目录的残留 HOME
+            （早年手工删目录留下的死配置）会被清掉；指向组件目录之外（用户自己的安装）绝不动；
           - PATH 默认只清理"本次被删目录"之内的条目——多版本并存时按组件根扫会把
             用户没删的那些版本的条目一起删掉；只有本组件已无其它安装目录时，才回到
             按组件根整体清扫，此时目录已被手工删除的历史死条目也能一并清掉；
@@ -390,10 +391,21 @@ class Component:
                     str(current_home), str(component_root)):
                 summary_parts.append(
                     f"环境变量 {self.env_var} 指向其他目录（{current_home}），未删除")
-            # 沉默分支说明：current_home 落在本组件目录内、又没指向被删目录，
-            # 即它指向的是同组件的其他已装版本——绝不能删（删了生效版本就没了），
-            # 交给第 4 步按 active 登记表重排；第 4 步的"全删光"分支也会兜底清掉
-            # 指向已消失目录的残留 HOME。
+            elif current_home and EnvManager._under_root(
+                    str(current_home), str(component_root)) and not Path(
+                    os.path.expandvars(str(current_home))).is_dir():
+                # HOME 落在本组件根内却指向一个已经不存在的目录 = 早年手工删目录留下的死配置，
+                # 留着它只会让界面无缘无故"检测不到"，这里清掉。
+                # 判据是"目录不存在"而不是"本次没删到东西"：rmtree 失败时目录还在，绝不该清 HOME。
+                try:
+                    EnvManager.drop_user_env(self.env_var)
+                    summary_parts.append(f"已清理指向不存在目录的环境变量：{self.env_var}")
+                except Exception as exc:
+                    summary_parts.append(f"清理环境变量 {self.env_var} 失败：{exc}")
+            # 沉默分支说明：current_home 落在本组件目录内、又没指向被删目录时，上一条
+            # 分支已把"指向同组件已消失目录"的死配置 HOME 清掉；真正沉默的只剩
+            # "HOME 指着同组件另一个还在的目录"这一种——绝不能删（删了生效版本就没了），
+            # 交给第 4 步按 active 登记表重排。
 
         # 3. 清理 PATH 中属于"本次被删版本"的条目。
         #    多版本并存时绝不能按组件根清——会把用户没删的那些版本的条目一起删掉；

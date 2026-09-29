@@ -994,6 +994,78 @@ class UninstallScope(EnvSandbox):
         self.assertIn(r"C:\Windows\system32", self.win_path)
 
 
+class UninstallDeadHomeCleanup(EnvSandbox):
+    """裁决 2（task-9-fix-1）：HOME 落在本组件根内、却指向一个已经不存在的目录 =
+    早年手工删目录留下的死配置，uninstall 第 2 步必须清掉它。判据是"目录不存在"
+    而不是"本次没删到东西"——rmtree 失败（目录还在）时不得误清活的 HOME。
+
+    夹具沿用 UninstallScope 的形状：as_windows + jdk 21.0.4/17.0.12 + 两条版本
+    PATH 条目 + C:\\Windows\\system32 锚点。断言只看 win_env / win_path / active
+    登记表 / 摘要文本，绝不断言桩的调用次数。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.comp = self.make_component("jdk", "21.0.4", "17.0.12")
+        self.win_path[:] = [str(self.comp.install_dir("21.0.4") / "bin"),
+                            str(self.comp.install_dir("17.0.12") / "bin"),
+                            r"C:\Windows\system32"]
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("21.0.4"))
+        main.save_active_version("jdk", "21.0.4")
+
+    def test_non_multi_version_dead_home_is_cleaned(self):
+        # 裁决 2 的复现路径（本条是必须修的那条）：用户手工删掉了安装目录，
+        # CATALINA_HOME 还指着 tomcat 根下那个已消失的目录，磁盘上没有任何已装目录。
+        # 改造前靠 _under_root 那一支顺手清掉；Task 9 把条件收紧成
+        # "install_path is not None" 后沉默了——非多版本组件没有第 4 步兜底，
+        # 死配置会永久留在注册表里。红点：CATALINA_HOME 仍在 win_env 里。
+        comp = self.make_component("tomcat")            # 不造任何安装目录
+        self.win_env["CATALINA_HOME"] = str(comp.install_dir("9.0.122"))  # 只造路径不造目录
+        summary = comp.uninstall("9.0.122")
+        self.assertNotIn("CATALINA_HOME", self.win_env)
+        self.assertIn("已清理指向不存在目录的环境变量：CATALINA_HOME", summary)
+
+    def test_multi_version_dead_home_cleared_with_last_version(self):
+        # 多版本侧：只装着 21，JAVA_HOME 指向 jdk-11（磁盘上不存在），卸载 21 之后
+        # JAVA_HOME 必须没了。改造前第 4 步"全删光"分支会兜底，这条可能上来就绿
+        # ——按裁决保留为回归护栏（裁决原文见 task-9-fix-1.md 必须补的测试 2）。
+        shutil.rmtree(self.comp.install_dir("17.0.12"))   # 场景是"只装着 21"
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("11"))   # jdk-11 从未安装
+        main.save_active_version("jdk", "21.0.4")
+        self.comp.uninstall("21.0.4")
+        self.assertNotIn("JAVA_HOME", self.win_env)
+
+    def test_rmtree_failure_does_not_trigger_dead_home_cleanup(self):
+        # 护栏 4（裁决原文形状：HOME 指向被删目录、rmtree 抛异常、目录仍在）：
+        # 新分支的判据是"目录不存在"，绝不能顺着"这次没删掉"把 HOME 当死配置清掉。
+        # shutil.rmtree 测试侧打桩（不在产品代码里加开关），addCleanup 还原。
+        orig_rmtree = shutil.rmtree
+        shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        self.addCleanup(setattr, shutil, "rmtree", orig_rmtree)
+        # setUp 夹具：JAVA_HOME 正指着要删的 21.0.4，active=21.0.4
+        summary = self.comp.uninstall("21.0.4")
+        self.assertTrue(self.comp.install_dir("21.0.4").is_dir())   # 目录确实还在磁盘
+        self.assertIn("删除安装目录失败", summary)
+        self.assertNotIn("已清理指向不存在目录的环境变量", summary)
+        # 目录还在 → HOME 不许被清成死值/指空：持久层里它必须仍指向一个存在的目录。
+        self.assertTrue(Path(self.win_env["JAVA_HOME"]).is_dir(),
+                        self.win_env)
+
+    def test_rmtree_failure_keeps_live_home_of_other_version(self):
+        # 同一条护栏的 win_env 直断言版：rmtree 失败没删掉的目录（21）还在磁盘上，
+        # 而 JAVA_HOME 指着另一个还在的版本（17）→ HOME 必须原样保留。
+        # 谁把新判据写成"删不到就清"，这条立刻红。
+        self.win_env["JAVA_HOME"] = str(self.comp.install_dir("17.0.12"))
+        main.save_active_version("jdk", "17.0.12")
+        orig_rmtree = shutil.rmtree
+        shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(OSError("disk full"))
+        self.addCleanup(setattr, shutil, "rmtree", orig_rmtree)
+        summary = self.comp.uninstall("21.0.4")
+        self.assertEqual(self.win_env["JAVA_HOME"], str(self.comp.install_dir("17.0.12")))
+        self.assertNotIn("已清理指向不存在目录的环境变量", summary)
+
+
 class UninstallTargetResolve(EnvSandbox):
     """修正 1：resolve_uninstall_target 只做最小改动。
 
