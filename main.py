@@ -3722,6 +3722,91 @@ class EnvManager:
             os.environ["PATH"] = ":".join(kept)
         return removed
 
+    # ------------------------------------------------------------------
+    # 平台无关门面：切换生效版本只调这组方法，业务层不再各自判断 CURRENT_OS。
+    # 读接口读的是「持久层」（注册表 / shell rc）而不是 os.environ ——
+    # os.environ 会被本工具自己改脏，不能当回滚用的"改动前状态"。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def write_user_env(name: str, value: str) -> None:
+        if CURRENT_OS == "Windows":
+            EnvManager.set_windows_user_env(name, value)
+        else:
+            EnvManager.set_unix_env(name, value)
+
+    @staticmethod
+    def drop_user_env(name: str) -> None:
+        if CURRENT_OS == "Windows":
+            EnvManager.remove_windows_user_env(name)
+        else:
+            EnvManager.remove_unix_env(name)
+
+    @staticmethod
+    def _read_windows_user_env(name: str) -> Optional[str]:
+        """读 HKCU\\Environment 里某个值。单独抽出来只为给测试一个可打桩的接缝
+        （Task 0 的沙箱替换它，避免测试读到用户真实的 JAVA_HOME）。"""
+        import winreg  # type: ignore
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                                winreg.KEY_READ) as key:
+                value, _ = winreg.QueryValueEx(key, name)
+            return str(value)
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def read_user_env(name: str) -> Optional[str]:
+        """读持久层里某环境变量的值，不存在返回 None。"""
+        if CURRENT_OS == "Windows":
+            return EnvManager._read_windows_user_env(name)
+        rc = EnvManager._shell_rc_file()
+        if not rc.exists():
+            return None
+        text = rc.read_text(encoding="utf-8")
+        marker_begin = f"# >>> byte-tools:{name} >>>"
+        marker_end = f"# <<< byte-tools:{name} <<<"
+        if marker_begin not in text or marker_end not in text:
+            return None
+        block = text.split(marker_begin, 1)[1].split(marker_end, 1)[0]
+        m = _re.search(r'export\s+' + _re.escape(name) + r'="([^"]*)"', block)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def add_path_entry(entry: str) -> None:
+        if CURRENT_OS == "Windows":
+            EnvManager.append_windows_path(entry)
+        else:
+            EnvManager.append_unix_path(entry)
+
+    @staticmethod
+    def drop_path_entry(entry: str) -> None:
+        if CURRENT_OS == "Windows":
+            EnvManager.remove_windows_path_entry(entry)
+        else:
+            EnvManager.remove_unix_path_entry(entry)
+
+    @staticmethod
+    def remove_path_entries_under(root: str) -> List[str]:
+        """删除 root 目录内（含目录已不存在的残留）的 PATH 条目，返回被删条目列表。"""
+        if CURRENT_OS == "Windows":
+            return EnvManager.remove_windows_path_entries_under(root)
+        return EnvManager.remove_unix_path_entries_under(root)
+
+    @staticmethod
+    def read_user_path_entries() -> List[str]:
+        """读持久层里的 PATH 条目。Unix 侧只能看到本工具用 marker 写过的那些。"""
+        if CURRENT_OS == "Windows":
+            return EnvManager._read_windows_user_path()
+        rc = EnvManager._shell_rc_file()
+        if not rc.exists():
+            return []
+        text = rc.read_text(encoding="utf-8")
+        pattern = _re.compile(
+            r"# >>> byte-tools:PATH:(.*?) >>>.*?# <<< byte-tools:PATH:\1 <<<", _re.DOTALL)
+        return [m.group(1) for m in pattern.finditer(text)]
+
 
 def _dead_tool_path_predicate():
     """返回「PATH 条目是否属于本工具且目录已不存在」的判定函数。"""

@@ -228,5 +228,50 @@ class InstalledVersions(EnvSandbox):
         self.assertEqual(pairs[0], ("3.12.4", comp.install_dir("3.12.4")))
 
 
+class EnvFacade(EnvSandbox):
+    def test_unix_write_read_drop_roundtrip(self):
+        self.as_linux()
+        Env = main.EnvManager
+        Env.write_user_env("JAVA_HOME", "/x/jdk-21.0.4")
+        self.assertEqual(Env.read_user_env("JAVA_HOME"), "/x/jdk-21.0.4")
+        self.assertIn('export JAVA_HOME="/x/jdk-21.0.4"', self.rc.read_text(encoding="utf-8"))
+        Env.drop_user_env("JAVA_HOME")
+        self.assertIsNone(Env.read_user_env("JAVA_HOME"))
+
+    def test_unix_path_entry_roundtrip_and_list(self):
+        self.as_linux()
+        Env = main.EnvManager
+        Env.add_path_entry("/x/jdk-21.0.4/bin")
+        Env.add_path_entry("/x/jdk-17.0.12/bin")
+        self.assertEqual(Env.read_user_path_entries(),
+                         ["/x/jdk-21.0.4/bin", "/x/jdk-17.0.12/bin"])
+        removed = Env.remove_path_entries_under("/x/jdk-17.0.12")
+        self.assertEqual(removed, ["/x/jdk-17.0.12/bin"])
+        self.assertEqual(Env.read_user_path_entries(), ["/x/jdk-21.0.4/bin"])
+
+    def test_windows_write_and_list(self):
+        self.as_windows()
+        Env = main.EnvManager
+        Env.write_user_env("JAVA_HOME", r"C:\x\jdk-21.0.4")
+        self.assertEqual(self.win_env["JAVA_HOME"], r"C:\x\jdk-21.0.4")
+        self.assertEqual(Env.read_user_env("JAVA_HOME"), r"C:\x\jdk-21.0.4")
+        Env.add_path_entry(r"C:\x\jdk-21.0.4\bin")
+        self.assertIn(r"C:\x\jdk-21.0.4\bin", Env.read_user_path_entries())
+
+    def test_windows_read_absent_env_returns_none(self):
+        self.as_windows()
+        self.assertIsNone(main.EnvManager.read_user_env("JAVA_HOME"))
+
+    def test_windows_remove_under_root_only_touches_that_root(self):
+        self.as_windows()
+        self.win_path[:] = [r"C:\x\jdk\jdk-17.0.12\bin",
+                            r"C:\x\jdk\jdk-21.0.4\bin",
+                            r"C:\Windows\system32"]
+        removed = main.EnvManager.remove_path_entries_under(r"C:\x\jdk\jdk-17.0.12")
+        self.assertEqual([p.lower() for p in removed], [r"c:\x\jdk\jdk-17.0.12\bin"])
+        self.assertIn(r"C:\x\jdk\jdk-21.0.4\bin", self.win_path)
+        self.assertIn(r"C:\Windows\system32", self.win_path)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
