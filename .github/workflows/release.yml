@@ -262,9 +262,19 @@ jobs:
     # runner 部署在能直连 gitee.com 的国内机器上（需预装 gh CLI 与 curl），脚本本身无需改动
     runs-on: ubuntu-latest
     steps:
-      # 1. 检出代码（仅用于触发 Gitee 同步时拿到默认分支信息）
-      - name: 检出代码
+      # 1. 检出代码（只为了拿到 同步Gitee产物.sh，不参与构建）
+      #    【2026-09-30 硬教训】这里必须固定 master，不能用 tag 的 commit。
+      #    默认 checkout 会取「触发本次 workflow 的那个 ref」——tag 推送时就是
+      #    tag 指向的 commit，于是脚本版本被旧 tag 钉死：v1.0.5、v1.0.6 两次都是
+      #    Gitee 同步脚本刚在 master 修好，但 tag 指向的 commit 上还是旧版，
+      #    重推 tag / Re-run job 都复用同一个旧 commit，永远修不好（且报错一模一样）。
+      #    同步脚本是运维工具而非产品代码，跟着 master 走才对：
+      #    任何历史 tag 补跑（workflow_dispatch）都能立刻吃到最新修复。
+      #    构建产物仍来自被推送的 tag（下面用 gh release download 按 TAG_NAME 取）。
+      - name: 检出代码（固定 master，取最新同步脚本）
         uses: actions/checkout@v4
+        with:
+          ref: master
 
       # 2. 用 gh CLI 下载 GitHub Release 当前 tag 下的所有产物
       #    gh 已预装在 GitHub runner，GITHUB_TOKEN 自动有 release 读取权限
