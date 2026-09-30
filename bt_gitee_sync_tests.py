@@ -135,6 +135,14 @@ class MockGitee(BaseHTTPRequestHandler):
         if sc == "patch400":
             return self.send_json(400, '{"message":"mock: patch refused"}')
         if "/releases/" in tail:
+            # 真实 Gitee 的 PATCH 是「编辑 Release」语义，校验必填字段：
+            # 只发 access_token + body 会被打回 400（2026-09-30 实测），
+            # 所以 mock 也照实校验，免得脚本在 mock 下能过、到真实 Gitee 就 400。
+            missing = [k for k in ("tag_name", "name") if not fields.get(k)]
+            if missing:
+                return self.send_json(
+                    400, '{"messages":["%s is missing"]}' % ' is missing","'.join(missing))
+            STATE["patch_fields"] = fields
             STATE["body"] = fields.get("body", "")
             return self.send_json(200, '{"id": 777, "tag_name": "%s"}' % TAG)
         return self.send_json(404, '{"message":"mock: unexpected PATCH"}')
@@ -169,6 +177,7 @@ class SyncScriptTest(unittest.TestCase):
         STATE["assets"] = []
         STATE["body"] = ""
         STATE["reqs"] = []
+        STATE["patch_fields"] = {}
         import tempfile
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -232,6 +241,11 @@ class SyncScriptTest(unittest.TestCase):
                       f"必须发一次 PATCH 补写正文，实际请求：{STATE['reqs']}")
         self.assertIn(GH_BASE, STATE["body"], "补写的正文里要有 GitHub 直链")
         self.assertIn("补写正文", out)
+        # Gitee 的 PATCH 要求 tag_name + name 一起提交，缺一个就 400（见 mock do_PATCH）
+        self.assertEqual(STATE["patch_fields"].get("tag_name"), TAG,
+                         "PATCH 必须带 tag_name，否则真实 Gitee 会 400")
+        self.assertEqual(STATE["patch_fields"].get("name"), TAG,
+                         "PATCH 必须带 name，否则真实 Gitee 会 400")
 
     def test_existing_release_with_links_is_not_rewritten(self):
         STATE["body"] = f"产物见 {GH_BASE}/byte-tools.exe"
@@ -375,6 +389,7 @@ class BatEndToEnd(unittest.TestCase):
         STATE["assets"] = []
         STATE["body"] = ""
         STATE["reqs"] = []
+        STATE["patch_fields"] = {}
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         for name in ARTIFACTS:

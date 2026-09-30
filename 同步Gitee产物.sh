@@ -310,8 +310,13 @@ else
     echo "   正文已含 GitHub 直链，无需改写"
   else
     echo "   正文里没有 GitHub 直链，补写正文（PATCH /releases/${RELEASE_ID}）..."
+    # Gitee 的 PATCH 是「编辑 Release」语义，会校验必填字段：只发 access_token + body
+    # 会被打回 400「tag_name is missing / name is missing」（2026-09-30 实测）。
+    # 所以这里必须把 tag_name 与 name 一起带上，否则收尾校验永远过不去。
     if gitee_request "${API_MAX_TIME}" -X PATCH "${API_BASE}/releases/${RELEASE_ID}" \
         -F "access_token=${GITEE_TOKEN}" \
+        -F "tag_name=${TAG_NAME}" \
+        -F "name=${TAG_NAME}" \
         -F "body=${RELEASE_BODY}" >/dev/null; then
       echo "   补写正文完成"
     else

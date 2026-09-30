@@ -168,7 +168,7 @@ if defined RELEASE_ID (
     type "%TMPDIR%\create.json"
     goto :fail
   )
-  echo   created, release ID: %RELEASE_ID%
+  echo   created, release ID: !RELEASE_ID!
 )
 
 REM ==========================================================================
