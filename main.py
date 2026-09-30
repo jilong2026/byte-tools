@@ -4013,6 +4013,71 @@ class EnvManager:
             r"# >>> byte-tools:PATH:(.*?) >>>.*?# <<< byte-tools:PATH:\1 <<<", _re.DOTALL)
         return [m.group(1) for m in pattern.finditer(text)]
 
+    @staticmethod
+    def composed_env() -> Dict[str, str]:
+        """读「Windows 为新建进程合成的环境变量块」，用于复验改完到底生效没有。
+
+        为什么不能用现成的两处：
+          · os.environ 是本进程启动时的快照，我们改完注册表它也不会重算；
+          · 直接读注册表要自己复刻合成规则（系统段 + 用户段、同名谁覆盖谁、
+            REG_EXPAND_SZ 什么时候展开），而实测证明这里头有非直觉的行为
+            （系统 PATH 里的 %JAVA_HOME% 是按**系统**表展开定死的，用户级覆盖不影响它）。
+        CreateEnvironmentBlock 就是系统自己那套合成逻辑，直接问它最准。
+
+        返回: Dict[str, str]  键统一大写；拿不到时返回**空 dict**（非 Windows、令牌被拒、
+        API 失败都算），调用方必须按"未能复验"处理，不许把空结果当成"复验通过"。
+        """
+        if CURRENT_OS != "Windows":
+            return {}
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            advapi32 = ctypes.windll.advapi32
+            userenv = ctypes.windll.userenv
+            # 不设 restype/argtypes 会被 ctypes 按 32 位 int 截断句柄，
+            # OpenProcessToken 就报 error 6（句柄无效）——实测踩过。
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            advapi32.OpenProcessToken.restype = wintypes.BOOL
+            advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                  ctypes.POINTER(wintypes.HANDLE)]
+            userenv.CreateEnvironmentBlock.restype = ctypes.c_bool
+            userenv.CreateEnvironmentBlock.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                                       wintypes.HANDLE, wintypes.BOOL]
+            userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
+
+            token = wintypes.HANDLE()
+            # 只要 TOKEN_QUERY(0x0008)。用 PROCESS_QUERY_INFORMATION / _LIMITED 在受限环境里
+            # 会被拒（error 5），实测过；拿进程令牌本来也不需要那两个权限。
+            if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008,
+                                             ctypes.byref(token)):
+                return {}
+            try:
+                block = ctypes.c_void_p()
+                if not userenv.CreateEnvironmentBlock(ctypes.byref(block), token, False):
+                    return {}
+                if not block.value:
+                    return {}
+                out: Dict[str, str] = {}
+                offset = 0
+                while True:
+                    entry = ctypes.wstring_at(block.value + offset * 2)
+                    if not entry:
+                        break
+                    if "=" in entry:
+                        key, _, value = entry.partition("=")
+                        out[key.upper()] = value
+                    offset += len(entry) + 1
+                return out
+            finally:
+                userenv.DestroyEnvironmentBlock(block)
+                kernel32.CloseHandle(token)
+        except Exception:
+            return {}
+
 
 class SwitchError(RuntimeError):
     """生效版本切换失败；抛出前已尽量回滚到切换前状态。"""
@@ -4536,6 +4601,14 @@ class ComponentCard(QFrame):
         # 多版本胶囊的基础文案：异步版本号回填时要在它后面续（" · <版本>"），
         # 不能落到非多版本那条 "✓ 已配置（…）" 旧文案。
         self._mv_capsule: str = ""
+        # 多版本胶囊是否用橙色告警态（未对齐 / 被 PATH 更靠前的条目遮蔽）
+        self._mv_orange: bool = False
+        # 多版本按钮状态：切换/卸载两个按钮要按"当前选中的版本"重算，
+        # 而重算有两个触发点（探测之后、下拉框换选中），故把输入缓存在这里。
+        self._mv_active: Optional[str] = None
+        self._mv_warned: bool = False
+        self._mv_installed_set: set = set()
+        self._mv_buttons_ready: bool = False
         self._version_worker: Optional["VersionProbeWorker"] = None
 
         self.setObjectName("card")
@@ -4565,6 +4638,24 @@ class ComponentCard(QFrame):
         title.setFont(QFont("", 14, QFont.Bold))
         top.addWidget(title)
 
+        # 多版本能力角标：一个版本都没装时，这张卡片跟其它组件长得一样，
+        # 用户看不出"它支持同时装几个版本"。做成独立 QLabel 而不是拼进标题文本——
+        # display_name 同时是搜索匹配（component_matches）与日志前缀（_log）的真源。
+        # 非多版本组件不创建这个节点（不是创建后隐藏），那 19 张卡片保持原样。
+        if self.component.multi_version:
+            badge = QLabel("可多版本")
+            badge.setObjectName("multiVersionBadge")
+            badge.setStyleSheet(
+                "color:#5c6f82;background:#eef2f6;border-radius:9px;"
+                "padding:2px 8px;font-size:11px;font-weight:600;"
+            )
+            badge.setToolTip(
+                "这个组件可以同时安装多个版本。在下拉框里选中某个版本后点"
+                "「配置环境变量」，就把它设为生效版本（改写 XXX_HOME 与 PATH）；"
+                "带绿色对勾的版本表示磁盘上已安装。"
+            )
+            top.addWidget(badge)
+
         self.status_label = QLabel("检测中…")
         self.status_label.setObjectName("statusLabel")
         top.addWidget(self.status_label)
@@ -4587,6 +4678,10 @@ class ComponentCard(QFrame):
         self.version_combo.setFixedWidth(220)
         self.version_combo.setFixedHeight(34)
         self.version_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # 换选中就要重算切换/卸载按钮：不连这条，切一次生效版本后按钮会一直灰着
+        # （2026-09-30 真机反馈）。只做按钮同步，不重跑探测、不起版本探测子进程。
+        self.version_combo.currentIndexChanged.connect(
+            lambda *_: self._sync_switch_buttons())
         mid.addWidget(self.version_combo)
 
         mid.addSpacing(8)
@@ -4602,6 +4697,10 @@ class ComponentCard(QFrame):
         self.btn_configure.setObjectName("secondaryBtn")
         self.btn_configure.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_configure.setFixedHeight(34)
+        # 多版本组件上这个按钮的真实语义是"把下拉框选中的版本设为生效版本"，
+        # 叫「配置环境变量」会让人以为只是写写变量、不敢点，故按能力位改文案。
+        if self.component.multi_version:
+            self.btn_configure.setText("切换为生效版本")
         self.btn_configure.clicked.connect(self.on_configure_clicked)
         mid.addWidget(self.btn_configure)
 
@@ -4640,19 +4739,21 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _render_status_label(self) -> None:
-        if self.component.multi_version:
+        if self.component.multi_version and self._mv_capsule:
             # 多版本胶囊正文取 _detect_status 已算好的基础文案（逐字不变），异步版本号
-            # 只在其后追加；绿=有生效版本（_status_shows_configured），橙=均未生效。
-            # 绝不能落到下面那条非多版本的 "✓ 已配置（…）" 旧文案。
+            # 只在其后追加；绿=有生效版本（_status_shows_configured），橙=均未生效/未对齐。
+            # _mv_capsule 为空串表示这次走的是"本工具没装过、探测到系统安装"的通用分支，
+            # 那时必须落到下面的 ✓ 已配置 文案，不能渲染一个空胶囊。
             text = self._mv_capsule
             if self._status_version:
                 text += f" · {self._status_version}"
             self.status_label.setText(text)
             self.status_label.setStyleSheet(
-                "color:#2e7d32;font-weight:600;padding:2px 8px;"
-                "background:#e8f5e9;border-radius:10px;" if self._status_shows_configured else
                 "color:#ef6c00;font-weight:600;padding:2px 8px;"
-                "background:#fff3e0;border-radius:10px;")
+                "background:#fff3e0;border-radius:10px;"
+                if self._mv_orange or not self._status_shows_configured else
+                "color:#2e7d32;font-weight:600;padding:2px 8px;"
+                "background:#e8f5e9;border-radius:10px;")
             return
 
         text = f"✓ 已配置（{self._status_where}）"
@@ -4693,6 +4794,38 @@ class ComponentCard(QFrame):
         self._render_status_label()
 
     # ------------------------------------------------------------------
+    def _sync_switch_buttons(self) -> None:
+        """按「当前选中的版本」重算切换与卸载两个按钮的启用状态与提示。
+
+        单独成方法是因为它有两个触发时机：① _detect_status 之后；
+        ② 下拉框换选中之后。只挂在 ① 上就会出现真机反馈的那个问题——
+        切一次生效版本后按钮置灰，用户换选另一个版本，没人重算，按钮一直灰着。
+        """
+        if not self._mv_buttons_ready:
+            return
+        selected = self._current_version().version
+        # 未对齐/被遮蔽时按钮必须可用：哪怕 selected 恰好等于 active，
+        # 也得让用户能再点一次去收敛 PATH 与登记表
+        can_switch = selected != self._mv_active or self._mv_warned
+        self.btn_configure.setEnabled(can_switch)
+        self.btn_configure.setToolTip(
+            "把下拉框选中的版本设为生效版本：改 XXX_HOME，并把本组件在 PATH 里的"
+            "条目收敛成这一条；已开着的终端需重开才生效" if can_switch else
+            f"选中的 {selected} 已是生效版本；要换版本先在下拉框里选中")
+        # 卸载按钮只对"已装的选中版本"启用：tooltip 承诺卸载选中的那个，
+        # 而 selected 完全可能没装——放行会走 resolve 兜底删掉用户没选中的版本。
+        if selected in self._mv_installed_set:
+            self.btn_uninstall.setEnabled(True)
+            self.btn_uninstall.setToolTip(
+                f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
+                "其他已装版本不动")
+        else:
+            self.btn_uninstall.setEnabled(False)
+            self.btn_uninstall.setToolTip(
+                f"选中的 {selected} 未安装；要卸载其他版本先在下拉框里选中"
+                "（下拉框里有绿勾的就是已装）")
+
+    # ------------------------------------------------------------------
     def _detect_status(self) -> None:
         """检测该组件当前是否已安装、已配置。
 
@@ -4708,73 +4841,83 @@ class ComponentCard(QFrame):
         # 而不是单一的"已配置/未配置"；生效以 active 登记表为准，探测只用于回填版本号。
         if self.component.multi_version:
             ordered = installed_versions(self.component)
-            active = self.active_version()
-            if not ordered:
-                self._mv_capsule = "○ 未安装"
-                self._status_shows_configured = False
-                self.status_label.setText("○ 未安装")
+            # 只有"本工具目录下确实装着版本"时才走多版本胶囊。一个都没有时不许就此断言
+            # "未安装"——用户很可能自己装了 JDK/Maven（JAVA_HOME 或 PATH 里就有），
+            # 那要交给下面的通用探测识别成"已配置（系统安装）"。
+            if ordered:
+                home_ver = (load_active_map().get(self.component.key)
+                            or infer_active_from_env(self.component))
+                path_ver = self._path_hit_version()
+                active = home_ver or path_ver
+                # HOME 与 PATH 指向不同版本时，命令行实际用的是 PATH 那个；只报 HOME 里的
+                # 就是骗人（2026-09-30 真机：bun 1.4.2 与 1.4.1 同时留在 PATH 里）。
+                mismatch = bool(home_ver and path_ver and home_ver != path_ver)
+                # 复验"新终端实际会命中谁"：被 PATH 里更靠前的条目（系统级变量、用户自装的
+                # 版本）压住时，不许只写"生效 X"——那正是本机 jdk 的处境。
+                verdict, shadow = self._path_effective_check(active)
+                warned = mismatch or verdict == "shadowed"
+                names = "、".join(v for v, _p in ordered)
+                if mismatch:
+                    capsule = (f"● 已装 {len(ordered)} 个版本 · 未对齐：PATH 用的是 {path_ver}，"
+                               f"{self.component.env_var or '环境变量'} 指 {home_ver}（{names}）")
+                elif verdict == "shadowed":
+                    capsule = (f"● 已装 {len(ordered)} 个版本 · 生效 {active}（{names}）"
+                               f" · 但 PATH 先命中 {shadow}")
+                else:
+                    tail = f" · 生效 {active}" if active else " · 均未生效"
+                    capsule = f"● 已装 {len(ordered)} 个版本{tail}（{names}）"
+                self._mv_capsule = capsule
+                self._mv_orange = warned
+                self.status_label.setText(capsule)
                 self.status_label.setStyleSheet(
-                    "color:#c62828;font-weight:600;padding:2px 8px;"
-                    "background:#ffebee;border-radius:10px;")
-                self.btn_configure.setEnabled(True)
-                self.btn_configure.setToolTip("将已下载的版本写入 XXX_HOME 与 PATH")
-                self.btn_uninstall.setEnabled(False)
-                self.btn_uninstall.setToolTip("当前组件未安装，无需卸载")
+                    "color:#ef6c00;font-weight:600;padding:2px 8px;"
+                    "background:#fff3e0;border-radius:10px;" if warned or not active else
+                    "color:#2e7d32;font-weight:600;padding:2px 8px;"
+                    "background:#e8f5e9;border-radius:10px;")
+                selected = self._current_version().version
+                # 按钮启用状态交给 _sync_switch_buttons()：它还有第二个触发时机 ——
+                # 下拉框换选中。只挂在这里会出真机 bug（2026-09-30）：切一次之后按钮置灰，
+                # 用户换选另一个版本，没人重算，按钮一直灰着点不动。
+                self._mv_active = active
+                self._mv_warned = warned
+                self._mv_installed_set = {v for v, _p in ordered}
+                self._mv_buttons_ready = True
+                self._sync_switch_buttons()
+                # 探测回填只在确有生效版本、且没有未对齐时开放闸门，并把上一轮
+                # 生效版本回填过的旧版本号清掉——否则切完版本胶囊还挂着 21.0.4。
+                self._status_shows_configured = bool(active) and not mismatch
+                self._status_version = ""
+                # 作废上一轮探测线程的迟到回调：_on_version_probed 靠 worker 身份挡旧回包，
+                # 不清旧 _version_worker 的话，旧 worker 回来会把上一轮生效版本的旧版本号
+                # 贴进这一轮的新胶囊里，永久错标。
+                self._version_worker = None
+                if not mismatch:
+                    for ver, path in ordered:
+                        if ver == active:
+                            # 复用既有寻径（会试 bin/、根目录、.bat/.cmd 等），别自己拼路径
+                            exe = self.component.exec_path_in_home(str(path))
+                            if exe:
+                                self._schedule_version_probe(str(exe))
+                            break
                 self._refresh_installed_marks()
                 return
-            names = "、".join(v for v, _p in ordered)
-            tail = f" · 生效 {active}" if active else " · 均未生效"
-            capsule = f"● 已装 {len(ordered)} 个版本{tail}（{names}）"
-            self._mv_capsule = capsule
-            self.status_label.setText(capsule)
-            self.status_label.setStyleSheet(
-                "color:#2e7d32;font-weight:600;padding:2px 8px;"
-                "background:#e8f5e9;border-radius:10px;" if active else
-                "color:#ef6c00;font-weight:600;padding:2px 8px;"
-                "background:#fff3e0;border-radius:10px;")
-            selected = self._current_version().version
-            self.btn_configure.setEnabled(selected != active)
-            self.btn_configure.setToolTip(
-                "把下拉框选中的版本设为生效版本：改 XXX_HOME，并把本组件在 PATH 里的"
-                "条目收敛成这一条；已开着的终端需重开才生效" if selected != active else
-                f"选中的 {selected} 已是生效版本；要换版本先在下拉框里选中")
-            # 卸载按钮只对"已装的选中版本"启用：tooltip 承诺卸载选中的那个，
-            # 而 selected 完全可能没装——放行会走 resolve 兜底删掉用户没选中的版本。
-            installed_set = {v for v, _p in ordered}
-            if selected in installed_set:
-                self.btn_uninstall.setEnabled(True)
-                self.btn_uninstall.setToolTip(
-                    f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
-                    "其他已装版本不动")
-            else:
-                self.btn_uninstall.setEnabled(False)
-                self.btn_uninstall.setToolTip(
-                    f"选中的 {selected} 未安装；要卸载其他版本先在下拉框里选中"
-                    "（下拉框里有绿勾的就是已装）")
-            # 探测回填只在确有生效版本时开放闸门（_status_shows_configured），并把上一轮
-            # 生效版本回填过的旧版本号清掉——否则切完版本胶囊还挂着 21.0.4。
-            self._status_shows_configured = bool(active)
-            self._status_version = ""
-            # 作废上一轮探测线程的迟到回调：_on_version_probed 靠 worker 身份挡旧回包，
-            # 不清旧 _version_worker 的话，旧 worker 回来会把上一轮生效版本的旧版本号
-            # 贴进这一轮的新胶囊里，永久错标。
-            self._version_worker = None
-            for ver, path in ordered:
-                if ver == active:
-                    # 复用既有寻径（会试 bin/、根目录、.bat/.cmd 等），别自己拼路径
-                    exe = self.component.exec_path_in_home(str(path))
-                    if exe:
-                        self._schedule_version_probe(str(exe))
-                    break
-            self._refresh_installed_marks()
-            return
 
         result = self.component.detect(probe_version=False)
+        # 通用分支（非多版本组件、或多版本组件但本工具没装过）自己管按钮状态，
+        # 必须关掉多版本按钮同步，否则下拉框一换选中就把这里设好的状态改回去。
+        self._mv_buttons_ready = False
         self._status_shows_configured = bool(result.installed)
         if result.installed:
             where = result.source or "系统"
+            if self.component.multi_version:
+                # 多版本组件走到这里 = 本工具没装过任何版本，探测到的是用户自己装的。
+                # 不写清楚的话，用户会以为这枚"已配置"是本工具装的，找不到切换入口。
+                where = f"{where} · 系统安装，不由本工具管理"
             self._status_where = where
             self._status_version = ""
+            # 走通用分支 = 本工具没装过这个组件，多版本胶囊不适用；清空它，
+            # 否则 _render_status_label 会渲染上一轮留下的旧胶囊。
+            self._mv_capsule = ""
             self._render_status_label()
             # 已可用 —— 禁用「仅配置环境变量」按钮
             self.btn_configure.setEnabled(False)
@@ -4783,9 +4926,17 @@ class ComponentCard(QFrame):
                 f"（{result.exe_path or where}），无需再次配置。"
             )
             # 已配置状态下允许卸载（仅能清理由本工具写入的 XXX_HOME/PATH marker）
-            self.btn_uninstall.setEnabled(True)
-            self.btn_uninstall.setToolTip(
-                "卸载将删除本地安装目录，并清理由本工具写入的环境变量"
+            if self.component.multi_version:
+                # 走到这里 = 本工具一个版本都没装，探测到的是用户自己装的。
+                # 放开卸载按钮只会给出一个做不到的承诺（真点下去也只会回"未找到安装目录"）。
+                self.btn_uninstall.setEnabled(False)
+                self.btn_uninstall.setToolTip(
+                    "系统里这个是你自己装的，本工具不代为卸载。想交给本工具管理并在多个"
+                    "版本间切换，先在下拉框选一个版本点「下载并安装」。")
+            else:
+                self.btn_uninstall.setEnabled(True)
+                self.btn_uninstall.setToolTip(
+                    "卸载将删除本地安装目录，并清理由本工具写入的环境变量"
             )
             self._schedule_version_probe(result.exe_path)
             return
@@ -5029,7 +5180,7 @@ class ComponentCard(QFrame):
 
             self._extracted_path = final
             # 自动尝试配置环境变量
-            self._configure_env(final)
+            self._configure_after_extract(final)
         except Exception as exc:
             self._log("error", f"安装/配置失败：{exc}\n{traceback.format_exc()}")
         finally:
@@ -5127,11 +5278,82 @@ class ComponentCard(QFrame):
             self._log("error", f"卸载失败：{exc}")
 
     # ------------------------------------------------------------------
+    def _path_hit_version(self) -> Optional[str]:
+        """按 PATH 顺序找出命令行**实际**会命中的"本工具装的那个版本"。
+
+        读的是持久层 PATH（新开终端真正会用到的那份），不是 os.environ —— 后者只是本进程
+        启动时的快照，可能被之前的安装/切换改脏。找不到属于本组件的条目时返回 None。
+        """
+        comp = self.component
+        if not comp.exec_name:
+            return None
+        root = str(CONFIG_DIR / comp.key)
+        names = [comp.exec_name]
+        if CURRENT_OS == "Windows" and not os.path.splitext(comp.exec_name)[1]:
+            names = [comp.exec_name + s for s in (".exe", ".cmd", ".bat", "")]
+        for entry in EnvManager.read_user_path_entries():
+            if not EnvManager._under_root(entry, root):
+                continue
+            for ver, path in installed_versions(comp):
+                bin_dir = (path / comp.path_subdir) if comp.path_subdir else path
+                if not EnvManager._same_path(str(bin_dir), entry):
+                    continue
+                for name in names:
+                    if (bin_dir / name).exists():
+                        return ver
+        return None
+
+    def _expected_bin_dir(self, version: str) -> Path:
+        """生效版本"应当"出现在 PATH 里的那个目录（写变量与复验共用一套算法）。"""
+        home = self.component.install_dir(version)
+        return home / self.component.path_subdir if self.component.path_subdir else home
+
+    def _path_effective_check(self, active: Optional[str]) -> Tuple[str, Optional[str]]:
+        """复验：按系统合成的 PATH 顺序，命令行第一个命中的目录是不是生效版本该在的那个。
+
+        返回 ("ok", None) | ("shadowed", 抢走命令的目录) | ("unknown", None)。
+        unknown 含"拿不到合成环境"和"PATH 里根本没有这个命令"两种，都不许当成通过：
+        前者是没测，后者说明命令压根不在 PATH 上。
+
+        为什么必须有这一步（2026-09-30 真机实测）：用户 PATH 整体排在系统 PATH 之后，
+        且系统 PATH 里的 %JAVA_HOME%\\bin 是按**系统**表展开定死的 —— 我们把
+        JAVA_HOME 与自己的 PATH 条目都写对了，命令行仍可能命中用户自装的那个版本。
+        只报"已切到 X"就是假话。
+        """
+        if not active or not self.component.exec_name:
+            return "unknown", None
+        composed = EnvManager.composed_env()
+        path_value = composed.get("PATH")
+        if not path_value:
+            return "unknown", None
+        exec_name = self.component.exec_name
+        names = ([exec_name] if CURRENT_OS != "Windows"
+                 else ([exec_name + s for s in (".exe", ".cmd", ".bat", "")]
+                       if not os.path.splitext(exec_name)[1] else [exec_name]))
+        expected = str(self._expected_bin_dir(active))
+        for entry in path_value.split(";"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                hit = any(os.path.exists(os.path.join(entry, n)) for n in names)
+            except (OSError, ValueError):
+                continue
+            if hit:
+                return ("ok", None) if EnvManager._same_path(entry, expected) else ("shadowed", entry)
+        return "unknown", None
+
     def active_version(self) -> Optional[str]:
-        """当前生效版本：优先读 active 登记表，其次从持久层环境变量反推。"""
+        """当前生效版本：active 登记表 → 持久层 XXX_HOME 反推 → PATH 实际命中。
+
+        第三级兜底是必要的：老配置既没登记表、HOME 又被手工清过时，PATH 里那条
+        本工具写入的条目就是唯一的事实来源。
+        """
         if not self.component.multi_version:
             return None
-        return load_active_map().get(self.component.key) or infer_active_from_env(self.component)
+        return (load_active_map().get(self.component.key)
+                or infer_active_from_env(self.component)
+                or self._path_hit_version())
 
     # ------------------------------------------------------------------
     def _apply_active(self, version: str) -> bool:
@@ -5150,6 +5372,20 @@ class ComponentCard(QFrame):
         for step in steps:
             self._log("error" if ("失败" in step) else "ok", step)
         save_active_version(self.component.key, version)
+        # 写完必须复验"新终端实际会命中谁"：PATH 是系统段 + 用户段拼出来的，
+        # 我们写的是用户段，完全可能被前面那条（用户自装的版本）压住。
+        verdict, shadow = self._path_effective_check(version)
+        if verdict == "ok":
+            self._log("ok", f"复验通过：新开的终端会用到 {self._expected_bin_dir(version)}")
+        elif verdict == "shadowed":
+            self._log("warn", (f"环境变量已切到 {version}，但复验发现新终端里 "
+                               f"{self.component.exec_name} 仍会先命中 {shadow} —— "
+                               "它排在 PATH 更前面（多半是系统级变量或你自己装的版本）。"
+                               "本工具不改系统级环境变量：要让所选版本真正生效，"
+                               "需要在「系统变量」的 PATH 里删掉/后移那条，再重开终端。"))
+        else:
+            self._log("warn", "未能复验新终端会用到哪个目录（拿不到系统合成后的环境），"
+                              "请重开一个终端手动确认一次。")
         self._refresh_installed_marks()
         self._detect_status()
         return True
@@ -5188,6 +5424,29 @@ class ComponentCard(QFrame):
             return
         self._configure_env(ordered[0][1])
         self._detect_status()
+
+    # ------------------------------------------------------------------
+    def _configure_after_extract(self, install_path: Path) -> None:
+        """安装/解压收尾时配置环境变量。
+
+        多版本组件走**原子切换**（写 XXX_HOME + 把本组件在 PATH 里的条目收敛成这一条
+        + 记 active 表），不能再走 _configure_env 的"追加一条"：装两个版本就会在 PATH 里
+        留下两条，命令行按顺序只认第一条，界面上说的"生效版本"就成了假话
+        （2026-09-30 用户真机反馈：bun 1.4.2 与 1.4.1 同时在 PATH）。
+        非多版本组件保持原有行为逐字不变。
+        """
+        comp = self.component
+        if not comp.multi_version:
+            self._configure_env(install_path)
+            return
+        version = version_from_install_dir(comp, install_path)
+        if not version:
+            # 目录名不符合 <key>-<version> 约定（历史安装），无法登记生效版本，
+            # 退回老路径配置，至少让组件可用
+            self._configure_env(install_path)
+            return
+        self._log("info", f"多版本组件：把新装的 {version} 设为生效版本并收敛 PATH")
+        self._apply_active(version)
 
     # ------------------------------------------------------------------
     def _configure_env(self, install_path: Path) -> None:

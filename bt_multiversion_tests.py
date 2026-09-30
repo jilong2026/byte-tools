@@ -134,6 +134,13 @@ class EnvSandbox(unittest.TestCase):
         main.ComponentCard._detect_status = lambda self, *a, **k: None
         self.addCleanup(setattr, main.ComponentCard, "_detect_status", self._orig_detect)
 
+        # 复验要读"系统为新进程合成的环境"，那是宿主机真实状态：不桩住的话，
+        # 同一套用例在装了 JDK 的机器上会多出"被 PATH 遮蔽"的橙色态而误红。
+        # 默认给"拿不到"（unknown = 不告警），需要具体态的用例自己覆盖。
+        self._orig_composed = main.EnvManager.composed_env
+        main.EnvManager.composed_env = staticmethod(lambda: {})
+        self.addCleanup(setattr, main.EnvManager, "composed_env", self._orig_composed)
+
         # 产品代码会写 os.environ，逐键还原
         self._orig_environ = {k: os.environ.get(k) for k in ENV_KEYS}
 
@@ -162,10 +169,14 @@ class EnvSandbox(unittest.TestCase):
         self.addCleanup(setattr, main.ComponentCard, "_detect_status",
                         lambda self, *a, **k: None)
         orig_probe = main.ComponentCard._schedule_version_probe
+        # 记录清单挂在**类**上：桩里的 self 是卡片实例而不是 TestCase，
+        # 写成 self.probe_calls 会让卡片下次访问时 AttributeError（历史上踩了三次）。
         self.probe_calls = []
+        main.ComponentCard.probe_calls = self.probe_calls
         main.ComponentCard._schedule_version_probe = (
-            lambda self, exe_path, *a, **k: self.probe_calls.append(exe_path))
+            lambda self, exe_path, *a, **k: main.ComponentCard.probe_calls.append(exe_path))
         self.addCleanup(setattr, main.ComponentCard, "_schedule_version_probe", orig_probe)
+        self.addCleanup(lambda: setattr(main.ComponentCard, "probe_calls", []))
 
     def make_component(self, key: str, *versions):
         """取真实组件定义，并在沙箱里造出这些版本的安装目录。"""
@@ -1770,6 +1781,326 @@ class UninstallConfirmText(EnvSandbox):
         captured = self._capture_question()
         card.on_uninstall_clicked()
         self.assertIn(self.NON_MV_TAIL, captured["text"])
+
+
+class MultiVersionBadge(EnvSandbox):
+    """卡片标题后的「可多版本」角标：让 7 个支持多版本的组件在**一个版本都没装时**也认得出来。
+
+    两条硬要求：
+      · 非多版本组件不创建这个 QLabel（不是隐藏），那 19 张卡片与改造前逐字一致；
+      · 角标是独立节点，绝不拼进标题文本或组件名 —— display_name 是搜索匹配
+        （component_matches_query）与日志前缀（ComponentCard._log）的共用真源。
+    """
+
+    BADGE_TEXT = "可多版本"
+    MV_KEYS = ("jdk", "python", "node", "go", "maven", "gradle", "bun")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card(self, key):
+        comp = self.make_component(key, "1.2.3")
+        return main.ComponentCard(comp, lambda lvl, msg: None)
+
+    def _badges(self, card):
+        from PySide6.QtWidgets import QLabel
+        return [w for w in card.findChildren(QLabel)
+                if w.objectName() == "multiVersionBadge"]
+
+    def test_badge_on_every_multi_version_card(self):
+        self.as_windows()
+        for key in self.MV_KEYS:
+            with self.subTest(key=key):
+                card = self._card(key)
+                badges = self._badges(card)
+                self.assertEqual(len(badges), 1)
+                self.assertEqual(badges[0].text(), self.BADGE_TEXT)
+                self.assertTrue(badges[0].toolTip().strip(), "角标必须有悬停说明")
+                self.assertIn("生效", badges[0].toolTip())
+
+    def test_no_badge_widget_on_other_components(self):
+        self.as_windows()
+        others = [c.key for c in main.build_components() if not c.multi_version]
+        self.assertTrue(others)
+        for key in others:
+            with self.subTest(key=key):
+                card = self._card(key)
+                self.assertEqual(self._badges(card), [],
+                                 "非多版本组件不该创建角标节点（不是创建后隐藏）")
+
+    def test_title_text_stays_exactly_display_name(self):
+        self.as_windows()
+        from PySide6.QtWidgets import QLabel
+        for key in ("jdk", "tomcat"):
+            comp = next(c for c in main.build_components() if c.key == key)
+            card = self._card(key)
+            titles = [w.text() for w in card.findChildren(QLabel)
+                      if w.objectName() == "cardTitle"]
+            self.assertEqual(titles, [comp.display_name],
+                              "角标必须是独立 QLabel，不许拼进标题文本")
+
+    def test_badge_text_is_not_searchable(self):
+        """角标只是装饰：搜「可多版本」不该命中任何组件。"""
+        self.as_windows()
+        comp = next(c for c in main.build_components() if c.key == "jdk")
+        self.assertFalse(main.component_matches(comp, self.BADGE_TEXT))
+
+
+class RealMachineRegressions(EnvSandbox):
+    """2026-09-30 用户真机反馈的两个问题的回归护栏。
+
+    ① 装了 bun 1.4.2 + 1.4.1：安装收尾对每个版本各追加一条 PATH，两条都在 PATH 里，
+       命令行按顺序命中 1.4.2，而 BUN_HOME 指 1.4.1 —— 胶囊说"生效 1.4.1"是假的。
+    ② 用户自己装的 JDK / Maven：_detect_status 的多版本分支在"本工具目录下一个都没有"时
+       直接 return「○ 未安装」，压根没调 detect() —— 7 个白名单组件丢了"系统里已装"的识别。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card(self, key="jdk", versions=("21", "17")):
+        comp = self.make_component(key, *versions)
+        for v in versions:
+            (comp.install_dir(v) / "bin" / "java.exe").write_bytes(b"\x00")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        card._detect_status()
+        return card
+
+    # ---- ① 安装收尾必须收敛，不能每装一个版本就多一条 PATH ----
+    def test_second_install_collapses_path_and_registers_active(self):
+        self.as_windows()
+        comp = self.make_component("jdk", "21", "17")
+        for v in ("21", "17"):
+            (comp.install_dir(v) / "bin" / "java.exe").write_bytes(b"\x00")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        # 先让 17 生效，再装 21：装完之后 PATH 里只该有 21 这一条
+        card._apply_active("17")
+        card._configure_after_extract(comp.install_dir("21"))
+        mine = [p for p in self.win_path if "jdk" in p.lower()]
+        self.assertEqual(mine, [str(comp.install_dir("21") / "bin")],
+                         "安装收尾必须把本组件的 PATH 条目收敛成新版本这一条")
+        self.assertEqual(main.load_active_map().get("jdk"), "21")
+        self.assertEqual(self.win_env["JAVA_HOME"], str(comp.install_dir("21")))
+
+    def test_non_multi_version_install_still_appends(self):
+        """非多版本组件的安装路径不许被顺手改掉。"""
+        self.as_windows()
+        comp = self.make_component("tomcat", "10.1.60")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        card._configure_after_extract(comp.install_dir("10.1.60"))
+        self.assertEqual(self.win_env["CATALINA_HOME"], str(comp.install_dir("10.1.60")))
+        self.assertIn(str(comp.install_dir("10.1.60") / "bin"), self.win_path)
+        self.assertNotIn("tomcat", main.load_active_map())
+
+    # ---- ① 的显示面：HOME 与 PATH 命中不一致时不许只报一个 ----
+    def test_home_and_path_mismatch_is_disclosed_not_hidden(self):
+        self.as_windows()
+        comp = self.make_component("jdk", "21", "17")
+        for v in ("21", "17"):
+            (comp.install_dir(v) / "bin" / "java.exe").write_bytes(b"\x00")
+        # 老配置：登记表为空，JAVA_HOME 指 17，但 PATH 里 21 排在前面
+        self.win_env["JAVA_HOME"] = str(comp.install_dir("17"))
+        self.win_path[:] = [str(comp.install_dir("21") / "bin"),
+                            str(comp.install_dir("17") / "bin")]
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        card._detect_status()
+        text = card.status_label.text()
+        print("不一致胶囊:", text)
+        self.assertIn("未对齐", text)
+        self.assertIn("21", text)
+        self.assertIn("17", text)
+        self.assertNotIn("● 已装 2 个版本 · 生效 17（21、17）", text,
+                         "不能再只报 HOME 里那个版本当作生效版本")
+        self.assertIn("#ef6c00", card.status_label.styleSheet(), "不一致必须是橙色告警态")
+        self.assertTrue(card.btn_configure.isEnabled(),
+                        "不一致时切换按钮必须可用，让用户能自己校正")
+
+    # ---- ② 我们一个都没装时，回落到 detect 认系统里的安装 ----
+    def test_external_install_is_detected_when_we_have_none(self):
+        self.as_windows()
+        external = main.CONFIG_DIR.parent / "own-jdk"
+        (external / "bin").mkdir(parents=True, exist_ok=True)
+        (external / "bin" / "java.exe").write_bytes(b"\x00")
+        self.win_env["JAVA_HOME"] = str(external)
+        comp = next(c for c in main.build_components() if c.key == "jdk")
+        self.assertEqual(comp.installed_dirs(), [], "本工具目录下必须一个都没有")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        card._detect_status()
+        text = card.status_label.text()
+        print("外部安装胶囊:", text)
+        self.assertIn("已配置", text)
+        self.assertIn("JAVA_HOME", text)
+        self.assertIn("系统", text, "要说清这是系统里的安装，不是本工具装的")
+        self.assertNotIn("未安装", text)
+        # 本工具没装过 = 没有可卸的东西，按钮不许给出做不到的承诺
+        self.assertFalse(card.btn_uninstall.isEnabled())
+        self.assertIn("你自己装的", card.btn_uninstall.toolTip())
+
+    def test_non_multi_version_external_detection_text_unchanged(self):
+        """非多版本组件的这条回落文案逐字不变。"""
+        self.as_windows()
+        external = main.CONFIG_DIR.parent / "own-tomcat"
+        (external / "bin").mkdir(parents=True, exist_ok=True)
+        (external / "bin" / "catalina.bat").write_bytes(b"@echo off\r\n")
+        self.win_env["CATALINA_HOME"] = str(external)
+        comp = next(c for c in main.build_components() if c.key == "tomcat")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        card._detect_status()
+        # tomcat 的 version_probe 为真，异步版本号还没回来时旧文案就带这个尾巴，
+        # 逐字照抄改造前的产物 —— 这条断言的意义就是"非多版本一个字符都没变"
+        self.assertEqual(card.status_label.text(), "✓ 已配置（CATALINA_HOME） · 版本检测中…")
+        self.assertTrue(card.btn_uninstall.isEnabled())
+        self.assertEqual(card.btn_uninstall.toolTip(),
+                         "卸载将删除本地安装目录，并清理由本工具写入的环境变量")
+
+    # ---- ① 的操作面：多版本组件的按钮要叫「切换为生效版本」----
+    def test_switch_button_label_only_for_multi_version(self):
+        self.as_windows()
+        mv = self._card("jdk")
+        self.assertEqual(mv.btn_configure.text(), "切换为生效版本")
+        comp = self.make_component("tomcat", "10.1.60")
+        ordinary = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.assertEqual(ordinary.btn_configure.text(), "配置环境变量")
+
+
+class SwitchVerification(EnvSandbox):
+    """切换生效版本后必须复验"新终端到底会用到谁"，不许报了成功实际没生效。
+
+    实测依据（2026-09-30 真机）：系统 PATH 里的 %JAVA_HOME%\\bin 在合并用户变量之前
+    就按系统表展开定死了，而用户 PATH 整体排在系统之后 —— 于是本工具把
+    JAVA_HOME 改对、把自己的 bin 写进用户 PATH 之后，命令行仍会命中系统那个 JDK。
+    复验走 CreateEnvironmentBlock 拿"系统为新进程合成的环境"。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.logs = []
+        self.comp = self.make_component("jdk", "21", "17")
+        for v in ("21", "17"):
+            (self.comp.install_dir(v) / "bin" / "java.exe").write_bytes(b"\x00")
+        # 模拟"用户自己装的、排在 PATH 更前面的那份"。必须落在沙箱里：
+        # 拿真实机器上的 JDK 目录当夹具会往用户安装里写文件。
+        self.FOREIGN = str(self.root / "own-jdk" / "bin")
+        main.Path(self.FOREIGN).mkdir(parents=True, exist_ok=True)
+        (main.Path(self.FOREIGN) / "java.exe").write_bytes(b"\x00")
+        self.card = main.ComponentCard(self.comp, lambda lvl, msg: self.logs.append((lvl, msg)))
+        # 不调 enable_detect 的话 _detect_status 还是沙箱默认的 no-op，
+        # 胶囊永远是初始的"检测中…"，那两条 assertNotIn 就成了假绿
+        self.enable_detect()
+
+    def _stub_composed(self, path_value):
+        """把"系统合成后的环境"打桩成可控值（复验唯一依赖的外部事实）。"""
+        orig = main.EnvManager.composed_env
+        main.EnvManager.composed_env = staticmethod(
+            lambda: ({"PATH": path_value, "JAVA_HOME": ""} if path_value is not None else {}))
+        self.addCleanup(setattr, main.EnvManager, "composed_env", orig)
+
+    def _warns(self):
+        return [m for lvl, m in self.logs if lvl in ("warn", "error")]
+
+    def test_switch_logs_success_when_our_entry_wins(self):
+        mine = str(self.comp.install_dir("17") / "bin")
+        self._stub_composed(mine + ";" + self.FOREIGN)
+        self.assertTrue(self.card._apply_active("17"))
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertIn("复验通过", joined)
+        self.assertEqual(self._warns(), [], f"不该有告警：{self._warns()}")
+        self.card._detect_status()
+        self.assertNotIn("先命中", self.card.status_label.text())
+
+    def test_shadowed_by_foreign_path_entry_is_reported_not_success(self):
+        self._stub_composed(self.FOREIGN + ";" + str(self.comp.install_dir("17") / "bin"))
+        self.card._apply_active("17")
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertNotIn("复验通过", joined)
+        self.assertTrue(any("复验" in m for m in self._warns()),
+                        f"必须有一条复验告警，实际日志：{joined}")
+        self.assertIn(self.FOREIGN, joined, "告警要点名是谁把命令抢走的")
+        self.card._detect_status()
+        text = self.card.status_label.text()
+        self.assertIn("先命中", text, "胶囊要常驻显示这个不一致，不能只闪一行日志")
+        self.assertIn("#ef6c00", self.card.status_label.styleSheet())
+
+    def test_unverifiable_is_admitted_not_assumed_ok(self):
+        """拿不到合成环境（非 Windows / API 失败）时不许说"复验通过"。"""
+        self._stub_composed(None)
+        self.card._apply_active("17")
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertNotIn("复验通过", joined)
+        self.assertTrue(any("未能复验" in m for m in self._warns()), joined)
+        # 也无法判定遮蔽 → 胶囊保持正常绿色，不制造假告警
+        self.card._detect_status()
+        self.assertNotIn("先命中", self.card.status_label.text())
+
+
+class SelectionReenablesSwitch(EnvSandbox):
+    """改下拉框选中必须让「切换为生效版本」重新可点。
+
+    2026-09-30 真机反馈：切一次之后按钮变灰，换选另一个版本仍然灰、无法再切。
+    根因是启用判定只写在 _detect_status 里，而卡片从没连接下拉框的变更信号。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.comp = self.make_component("jdk", "21", "17", "11")
+        for v in ("21", "17", "11"):
+            (self.comp.install_dir(v) / "bin" / "java.exe").write_bytes(b"\x00")
+        self.card = main.ComponentCard(self.comp, lambda lvl, msg: None)
+        self.enable_detect()
+        self.card._detect_status()
+
+    def _select(self, version):
+        idx = self.card.version_combo.findText(version)
+        self.assertGreaterEqual(idx, 0, f"下拉框里没有 {version}")
+        self.card.version_combo.setCurrentIndex(idx)
+        self.card._detect_status()   # 显式重算一次，证明"重算后确实该亮"
+
+    def test_selection_change_reenables_switch_button(self):
+        # 先把 17 设为生效：此时若仍选中 17，按钮该灰
+        self._select("17")
+        self.assertTrue(self.card._apply_active("17"))
+        self.assertFalse(self.card.btn_configure.isEnabled(),
+                         "选中的就是生效版本时该禁用")
+        # 只改选中，不做任何其它操作 —— 按钮必须自己亮回来
+        idx = self.card.version_combo.findText("21")
+        self.card.version_combo.setCurrentIndex(idx)
+        self.assertEqual(self.card.version_combo.currentText(), "21")
+        self.assertTrue(self.card.btn_configure.isEnabled(),
+                        "换选成 21 后必须能再次切换（当前仍灰 = 回归）")
+
+    def test_selection_change_also_reenables_uninstall(self):
+        self._select("11")
+        self.assertTrue(self.card.btn_uninstall.isEnabled())
+        idx = self.card.version_combo.findText("8")     # 8 没装
+        self.card.version_combo.setCurrentIndex(idx)
+        self.assertFalse(self.card.btn_uninstall.isEnabled(),
+                         "换选成没装的版本后卸载该禁用")
+
+    def test_switch_button_state_survives_repeated_selection(self):
+        # 反复在两个已装版本之间挑，状态必须跟着走，不能卡在第一次的结果
+        self._select("21")
+        self.assertTrue(self.card._apply_active("21"))
+        for version, expect in (("17", True), ("21", False), ("11", True)):
+            with self.subTest(version=version):
+                self.card.version_combo.setCurrentIndex(
+                    self.card.version_combo.findText(version))
+                self.assertEqual(self.card.btn_configure.isEnabled(), expect)
 
 
 if __name__ == "__main__":

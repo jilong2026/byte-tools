@@ -443,6 +443,10 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
 conda 是 `installer_mode`，装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立；
 mysql/tomcat/nacos/es 等服务型组件的真矛盾在端口与数据目录。两者都不进本模型。
 白名单一扩大，`bt_multiversion_tests.py` 的 `EXPECTED_MULTI_VERSION`（`main.py` 之外唯一的第二处登记）即报不符。
+界面上这 7 个组件的标题后带一枚灰色「可多版本」角标（`QLabel`，`objectName="multiVersionBadge"`），
+让"能不能多装几个版本"在一个版本都没装时也看得出来；非多版本组件**不创建**该节点。
+角标是独立装饰节点，**不许拼进 `display_name` 或标题文本**——后者同时是搜索匹配（`component_matches`）
+与日志前缀（`ComponentCard._log`）的真源。护栏用例：`bt_multiversion_tests.py` 的 `MultiVersionBadge`。
 
 ### R3.2 两个字段，不许混用
 

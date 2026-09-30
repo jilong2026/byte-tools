@@ -84,7 +84,9 @@ class StartupNoWmi(unittest.TestCase):
     def test_windows_derivation_uses_env_not_wmi(self):
         """Windows 分支：架构取自环境变量，且不受 platform 影响。"""
         import main
-        if platform.system() != "Windows":
+        # 这里绝不能用 platform.system() 判平台：它内部就是 WMI，冷启动时本用例会
+        # 永久挂住（正是本文件要防的那件事，我自己先踩了一遍）
+        if sys.platform != "win32":
             self.skipTest("只在 Windows 上有 PROCESSOR_ARCHITECTURE 可验")
         self.assertEqual(main.CURRENT_OS, "Windows")
         self.assertEqual(main._machine_name(),
