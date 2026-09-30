@@ -266,6 +266,15 @@ build_body() {
 }
 RELEASE_BODY="${RELEASE_BODY:-$(build_body)}"
 
+# 补不上正文时给人工补救用（PATCH 被拒 / 收尾校验没过都会打这段）
+print_remedies() {
+  echo "已存在的 Release 只能二选一处理："
+  echo "  A) 在 Gitee 网页端把下面这段正文粘进 ${RELEASE_PAGE} 的编辑框；"
+  echo "  B) 删掉 Gitee 的这个 Release（含同名 tag），重跑本任务让脚本带直链重建。"
+  echo "----- 建议正文 -----"
+  printf '%s\n' "${RELEASE_BODY}"
+}
+
 # ---------------------------------------------------------------------------
 # 2. 获取或创建 Gitee Release（幂等：已有则复用 ID）
 # ---------------------------------------------------------------------------
@@ -292,6 +301,25 @@ if [ -z "${RELEASE_ID}" ]; then
 else
   echo "   Release 已存在，复用 ID: ${RELEASE_ID}（幂等，重跑不会重复创建）"
   CREATED_NEW=0
+  # 正文必须在这里自己补齐。v1.0.5 真实翻车：Release 是旧版脚本建的、正文没有 GitHub 直链，
+  # 而这条分支只复用 ID 不写正文，于是收尾校验永远失败——重跑一百次也好不了。
+  # 接口是实测出来的（2026-09-30）：PATCH /repos/{owner}/{repo}/releases/{id} 这个路由存在
+  # （不带 token 返回 401「登录失效」，而 /releases/{id}/update 那种不存在的路径返回 404）。
+  EXIST_BODY=$(json_get "${RELEASE_RESP}" "body")
+  if printf '%s' "${EXIST_BODY}" | grep -qF "${GH_DOWNLOAD_BASE}"; then
+    echo "   正文已含 GitHub 直链，无需改写"
+  else
+    echo "   正文里没有 GitHub 直链，补写正文（PATCH /releases/${RELEASE_ID}）..."
+    if gitee_request "${API_MAX_TIME}" -X PATCH "${API_BASE}/releases/${RELEASE_ID}" \
+        -F "access_token=${GITEE_TOKEN}" \
+        -F "body=${RELEASE_BODY}" >/dev/null; then
+      echo "   补写正文完成"
+    else
+      echo "错误：补写正文失败（Gitee 拒绝了 PATCH /releases/${RELEASE_ID}）"
+      print_remedies
+      exit 1
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -359,12 +387,8 @@ FINAL_BODY=$(json_get "${FINAL_RESP}" "body")
 
 if ! printf '%s' "${FINAL_BODY}" | grep -qF "${GH_DOWNLOAD_BASE}"; then
   echo "错误：Gitee 上这个 Release 的正文里没有 GitHub 直链（${GH_DOWNLOAD_BASE}）"
-  echo "脚本不会去猜「更新 Release」的接口（官方 swagger 是 JS 页，方法/路径未能核实），"
-  echo "所以已存在的 Release 只能二选一处理："
-  echo "  A) 在 Gitee 网页端把下面这段正文粘进 ${RELEASE_PAGE} 的编辑框；"
-  echo "  B) 删掉 Gitee 的这个 Release（含同名 tag），重跑本任务让脚本带直链重建。"
-  echo "----- 建议正文 -----"
-  printf '%s\n' "${RELEASE_BODY}"
+  echo "脚本已经试过自己补写（见上面 [1/3] 的输出），仍然没到位，所以："
+  print_remedies
   exit 1
 fi
 
@@ -381,8 +405,5 @@ fi
 echo "同步完成：上传 ${UPLOADED} 个，跳过已存在 ${SKIPPED} 个，按策略不上传 ${NOT_UPLOADED} 个"
 if [ "${#UPLOAD_LIST[@]}" -eq 0 ]; then
   echo "提示：本次只写入直链正文，Gitee 站内不提供二进制下载（这是 2026-09-29 起的默认策略）"
-fi
-if [ "${CREATED_NEW}" = "0" ] && [ "${#UPLOAD_LIST[@]}" -eq 0 ]; then
-  echo "提示：Release 之前已存在，正文沿用现有内容（脚本只在创建时写正文）"
 fi
 echo "Gitee Release: ${RELEASE_PAGE}"

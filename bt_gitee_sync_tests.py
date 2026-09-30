@@ -9,8 +9,9 @@
 场景（对应被测行为）：
   new              —— 无 Release：创建时正文必须带 4 条 GitHub 直链，默认一个产物都不传
   repo404          —— tags 查询返回 404 时也要当成「没有 Release」继续创建，而不是判死
-  existing_no_links—— Release 已存在且正文没直链：必须硬失败并给出网页端/重建两条补救
-  existing_links   —— 已存在且正文有直链、上传清单为空：通过
+  existing_no_links—— Release 已存在且正文没直链：脚本自己 PATCH 补写，补不动才硬失败
+  existing_links   —— 已存在且正文已有直链：通过，且**不再重复写**正文
+  patch400         —— 补写正文被 Gitee 拒绝（4xx）：硬失败并给出网页端/重建两条补救
   upload_ok        —— UPLOAD_ARTIFACTS 指定产物：已存在的跳过、缺失的上传并校验通过
   upload_missing   —— 上传接口假装成功但附件清单没它：必须硬失败
   server500        —— 全程 500：按 MAX_ATTEMPTS 重试后失败，且每次都打了可见日志
@@ -95,7 +96,10 @@ class MockGitee(BaseHTTPRequestHandler):
                 return self.send_json(200, 'null')
             if sc == "repo404":
                 return self.send_json(404, '{"message":"Not Found Project"}')
-            return self.send_json(200, '{"id": 777, "tag_name": "%s"}' % TAG)
+            # 真实 Gitee 这个接口返回完整 release 对象（含 body）；脚本要靠它判断
+            # "现有正文里有没有直链"，所以 mock 也必须带上 body。
+            return self.send_json(200, '{"id": 777, "tag_name": "%s", "body": %s}' % (
+                TAG, __import__("json").dumps(STATE.get("body", ""))))
         if "/releases/777" in tail or "/releases/888" in tail:
             assets = [{"name": n, "browser_download_url": "x"} for n in STATE.get("assets", [])]
             body = STATE.get("body", "")
@@ -122,6 +126,18 @@ class MockGitee(BaseHTTPRequestHandler):
             STATE["assets"].append(name)
             return self.send_json(200, '{"browser_download_url":"https://x/%s"}' % name)
         return self.send_json(404, '{"message":"mock: unexpected POST"}')
+
+
+    def do_PATCH(self):
+        sc, tail = self.scenario(), self.tail()
+        STATE["reqs"].append(("PATCH", tail))
+        fields = self.read_multipart()
+        if sc == "patch400":
+            return self.send_json(400, '{"message":"mock: patch refused"}')
+        if "/releases/" in tail:
+            STATE["body"] = fields.get("body", "")
+            return self.send_json(200, '{"id": 777, "tag_name": "%s"}' % TAG)
+        return self.send_json(404, '{"message":"mock: unexpected PATCH"}')
 
 
 def start_server():
@@ -203,19 +219,36 @@ class SyncScriptTest(unittest.TestCase):
         self.assertIn("尚无 Release，创建中...", out)
         self.assertIn("创建成功，Release ID: 777", out)
 
-    def test_existing_release_without_links_fails_loudly_with_remedies(self):
+    def test_existing_release_without_links_is_patched_then_passes(self):
+        """已存在但正文没直链：必须自己补写（PATCH），不能把活儿丢给人。
+
+        v1.0.5 真实翻车场景：Release 是旧版脚本建的、正文没直链，脚本只复用不写正文，
+        于是收尾校验永远失败，重跑一百次也好不了。
+        """
         STATE["body"] = "跨平台构建产物（旧默认说明，没有直链）"
         code, out = self.run_script("existing_no_links")
-        self.assertEqual(code, 1, out)
-        self.assertIn("没有 GitHub 直链", out)
-        self.assertIn("A) 在 Gitee 网页端", out)
-        self.assertIn("B) 删掉 Gitee 的这个 Release", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn(("PATCH", "/repos/owner/slug/releases/777"), STATE["reqs"],
+                      f"必须发一次 PATCH 补写正文，实际请求：{STATE['reqs']}")
+        self.assertIn(GH_BASE, STATE["body"], "补写的正文里要有 GitHub 直链")
+        self.assertIn("补写正文", out)
 
-    def test_existing_release_with_links_passes(self):
+    def test_existing_release_with_links_is_not_rewritten(self):
         STATE["body"] = f"产物见 {GH_BASE}/byte-tools.exe"
         code, out = self.run_script("existing_links")
         self.assertEqual(code, 0, out)
-        self.assertIn("Release 之前已存在，正文沿用现有内容", out)
+        self.assertNotIn(("PATCH", "/repos/owner/slug/releases/777"), STATE["reqs"],
+                         "正文已经含直链就不该再写一次（每次发版多一次无谓的写）")
+        self.assertIn("正文已含 GitHub 直链", out)
+
+    def test_existing_release_patch_refused_fails_loudly_with_remedies(self):
+        """PATCH 真被 Gitee 拒了才回到人工补救，不许静默放过。"""
+        STATE["body"] = "没有直链的旧正文"
+        code, out = self.run_script("patch400")
+        self.assertEqual(code, 1, out)
+        self.assertIn("补写正文失败", out)
+        self.assertIn("A) 在 Gitee 网页端", out)
+        self.assertIn("B) 删掉 Gitee 的这个 Release", out)
 
     # ---------- 场景 2：显式要求上传（小包）时按清单走 ----------
     def test_upload_subset_skips_existing_and_uploads_missing(self):
