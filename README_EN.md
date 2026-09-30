@@ -287,10 +287,15 @@ The **active version** is the one the operating system actually uses.
 
 ### Applying variables
 
-- **Windows:** any new console window will see the fresh user variables. Restart already-open windows.
-- **The same applies to switching the active version:** already-open terminals **and IDEs** do not see the change.
-  Close and reopen terminals, and fully restart IntelliJ IDEA / Eclipse / VS Code (a new terminal tab inside a still
-  running IDE is often not enough).
+- **Windows:** any new console window will see the fresh user variables. After every write the tool notifies
+  the shell (`Shell_TrayWnd`) by name so it rebuilds its own environment block immediately — terminals opened
+  from the Start menu, taskbar or desktop therefore pick up the new value within about a second.
+- **If something still shows the old version, a long-lived host process is the cause.** Windows *copies* the
+  environment block into each new process, so IDEs and any resident application that opens terminals on demand
+  keep handing out the block they had at their own start time. After a switch the log names every terminal
+  window older than that switch (pid plus start time) — close those windows entirely. When in doubt, click
+  **"🖥 Open verification terminal"** in the title bar: that window is built from the environment Windows
+  computes for a brand-new process.
 - **`where java` may still resolve to Oracle's javapath first.** Oracle's Java auto-update inserts
   `C:\Program Files\Common Files\Oracle\Java\javapath` into the **system** `PATH`, and Windows puts system entries
   before user entries, so `java -version` can keep reporting that copy even after `JAVA_HOME` points at the version

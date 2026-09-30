@@ -596,6 +596,50 @@ R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对�
 启动路径上没有任何一步会问 WMI；等 WMI 只对 `一键打包exe.bat` 有意义（PyInstaller 导入期必调
 `platform.win32_ver()`），那边的有界自检保留。实测本机 WMI 冷启动时：改前白等最多 135 秒，改后 2.3 秒继续。
 
+### R3.15 环境写完必须**点名**通知外壳，`HWND_BROADCAST` 那条路是无效的
+
+`_broadcast_env_change()` 过去只发 `PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")`。
+2026-09-30 真机实测证明它**对 explorer 完全不起作用**：注册表已改成 `bun-1.4.2`，
+explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开始栏、任务栏、桌面开的
+**每一个**新终端都继承 explorer 那份旧环境，"重开终端"永远无效（这就是第 3、4 轮真机反馈的总根因）。
+改成 `SendMessageTimeoutW(FindWindowW("Shell_TrayWnd"), …, SMTO_ABORTIFHUNG|SMTO_NOTIMEOUTIFNOTHUNG, 3000)`
+后，explorer **1 秒内**翻成新值，单次调用只花 0.02 秒。
+
+三条不许回退的点：
+- **同步、点名**（`Shell_TrayWnd` + `Progman`）。老注释说"同步会卡住"，那是没带
+  `SMTO_ABORTIFHUNG`；带上僵死窗口会被直接跳过。
+- `"Environment"` 必须是**同步调用期间活着**的宽字符串缓冲区（`create_unicode_buffer`）。
+  异步 PostMessage 正是死在这里：消息排队到 explorer 处理时发送方缓冲区已回收，
+  它读到的不是 `Environment` 就直接忽略。
+- 给其它顶层窗口（IDE 这类自己监听环境变化的）那一路走 `HWND_BROADCAST`，
+  放**后台线程**、超时 1 秒，不许拖住点按钮的人。
+
+`notify_shell_environment(user32=None)` 的 `user32` 参数是注入接缝（不是运行时开关）：
+测试传假对象即可断言"发给谁、带什么标志、lParam 指向哪个字符串"，并钉住**不再使用 PostMessageW**。
+护栏用例：`ShellRefreshNotification`（4 条）。
+
+### R3.16 端到端验收要跑真机演练脚本，单元测试不算数
+
+`bt_real_machine_drill.py` 是唯一允许碰真注册表的验收手段（默认只读体检，加 `--yes` 才切换，
+且结束时必然还原回演练前的生效版本并逐字比对基线）。它验的是三层，缺一层都不算通过：
+
+1. **注册表真值** —— 产品写完后的持久层；
+2. **explorer 自己的环境块** —— 直接读它的 PEB（读法见脚本注释：`EnvironmentSize` 可能为 0，
+   要分块读；一次读太大块会整次失败并把"有"误报成"没有"）；
+3. **由 explorer 现场启动的探针进程** —— 这才是"用户从开始栏/任务栏新开终端会看到什么"。
+
+为什么第 2、3 层不可省：2026-09-30 那次，第 1 层全对、`composed_env()` 复验也"通过"，
+而 explorer 揣的还是旧环境块，用户重开终端永远是旧值 —— 只看注册表的验收当场失效。
+反过来，只看"我这边新开进程对不对"也不够：本机同时挂着 9~12 个 explorer 实例，
+只有当前主 shell 会响应通知，其它实例是死的（演练输出里那些 `(没有 BUN_HOME)` 就是它们）。
+
+同轮真机演练还抓出一条假日志：`remove_path_entries_under` 按"本组件根目录下"整片清扫，
+生效版本自己那条也会被摘掉再重加，旧文案却一律写成"已移除同组件其他版本的条目"，
+于是出现过"目标是 1.4.2、日志说移除了 1.4.2"这种自相矛盾的话。
+现在点名前先用 `_same_path` 排除生效版本自己，全被排除就整行不打
+（护栏用例：`SwitchActive.test_switch_to_the_version_already_on_path_does_not_claim_a_removal`、
+`test_removal_line_names_only_the_versions_that_really_left`）。
+
 ---
 
 ## 后续规则占位

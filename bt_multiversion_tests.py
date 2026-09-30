@@ -7,6 +7,7 @@
   · 产品代码会顺手改 os.environ（PATH / JAVA_HOME），每个用例结束都还原。
 计划文档：docs/superpowers/plans/2026-09-29-multi-version-switch.md
 """
+import ctypes
 import json
 import os
 import platform as _platform
@@ -86,7 +87,8 @@ class EnvSandbox(unittest.TestCase):
             return list(self.win_path)
 
         # F10：_write_registry_env 的真实实现写完注册表值后会调
-        # EnvManager._broadcast_env_change()（PostMessageW 广播 WM_SETTINGCHANGE）。
+        # EnvManager._broadcast_env_change()（现改为同步 SendMessageTimeoutW 点名
+        # Shell_TrayWnd —— 旧的 PostMessageW(HWND_BROADCAST) 实测根本刷不动 explorer）。
         # 把广播原语打桩成"记录请求"（产品码不动）：fake_write 沿用同一调用点
         # 契约，remove_windows_user_env 那条**产品代码里的**直接调用也走这里。
         # 断言广播被请求过 = 断言"持久层写确实发生"这一可观察副作用；广播本身
@@ -234,7 +236,7 @@ class SandboxSelfCheck(EnvSandbox):
     def test_broadcast_primitive_is_stubbed(self):
         # F10 沙箱自检：广播桩失联时，用例会把 WM_SETTINGCHANGE 真广播到用户
         # 桌面，而所有 win_env/win_path 断言照样全绿——所以必须主动调一次，
-        # 确认调用被记录、而不是落向真实 PostMessageW。
+        # 确认调用被记录、而不是落向真实的外壳广播。
         before = len(self.broadcast_calls)
         main.EnvManager._broadcast_env_change()
         self.assertEqual(len(self.broadcast_calls), before + 1)
@@ -409,6 +411,26 @@ class SwitchActive(EnvSandbox):
         # 由沙箱广播桩记录；真实的 WM_SETTINGCHANGE 绝不发给用户桌面）。
         self.assertTrue(self.broadcast_calls,
                         "切换成功时应当请求过一次环境变更广播")
+
+    def test_switch_to_the_version_already_on_path_does_not_claim_a_removal(self):
+        self.as_windows()
+        mine = str(self.comp.install_dir("21.0.4") / "bin")
+        self.win_path[:] = [mine, r"C:\Windows\system32"]
+        steps = main.apply_active_version(self.comp, "21.0.4")
+        self.assertFalse([s for s in steps if "已移除" in s],
+                         f"生效版本自己那条只是被重加，日志不许说「已移除其他版本」：{steps}")
+        self.assertEqual([p for p in self.win_path if "jdk-" in p.lower()], [mine],
+                         "PATH 里本组件必须仍然只有一条")
+
+    def test_removal_line_names_only_the_versions_that_really_left(self):
+        self.as_windows()
+        self.win_path[:] = [str(self.comp.install_dir("21.0.4") / "bin"),
+                            str(self.comp.install_dir("17.0.12") / "bin")]
+        steps = main.apply_active_version(self.comp, "17.0.12")
+        line = [s for s in steps if "已移除" in s]
+        self.assertEqual(len(line), 1, steps)
+        self.assertIn("jdk-21.0.4", line[0], "要点名真正被去掉的那条")
+        self.assertNotIn("jdk-17.0.12", line[0], "生效版本自己不许出现在「已移除」里")
 
     def test_linux_switch_writes_rc(self):
         self.as_linux()
@@ -2550,6 +2572,66 @@ class CleanTerminalWindow(EnvSandbox):
                 clipped.append(f"{name} 宽{b.geometry().width()} < 文字{need}")
         self.assertEqual(clipped, [], "标题栏按钮在最窄窗口里被压扁裁字")
         self.assertLessEqual(right, win.width(), "按钮排到了窗口外面，最后一个点不到")
+
+
+class ShellRefreshNotification(EnvSandbox):
+    """广播必须真的让 explorer 重建环境块 —— 旧写法根本没做到。
+
+    2026-09-30 真机实测：注册表已改成 bun-1.4.2，explorer 的环境块 6 秒后仍是 1.4.1，
+    于是用户从开始栏/任务栏开的每个新终端都继承旧环境，"重开终端"永远无效。
+    换成同步 SendMessageTimeoutW(Shell_TrayWnd, WM_SETTINGCHANGE, "Environment",
+    SMTO_ABORTIFHUNG) 后 1 秒内 explorer 就翻成新值，单次只花 0.02 秒。
+    """
+
+    class FakeUser32:
+        def __init__(self, find_ok=0x1234, send_ok=1):
+            self.find_ok = find_ok
+            self.send_ok = send_ok
+            self.found = []
+            self.sent = []
+            self.posted = []
+
+        def FindWindowW(self, cls, title):
+            self.found.append(cls)
+            return self.find_ok
+
+        def SendMessageTimeoutW(self, hwnd, msg, wp, lp, flags, ms, out):
+            self.sent.append((hwnd, msg, lp, flags, ms))
+            return self.send_ok
+
+        def PostMessageW(self, *a):
+            self.posted.append(a)
+            return 1
+
+    def test_sends_settingchange_to_the_shell_window_with_a_live_wide_string(self):
+        fake = self.FakeUser32()
+        self.assertTrue(main.notify_shell_environment(user32=fake))
+        self.assertIn("Shell_TrayWnd", fake.found, "必须点名外壳窗口，HWND_BROADCAST 对 explorer 无效")
+        self.assertTrue(fake.sent, "一条都没发")
+        for _hwnd, msg, lp, _flags, _ms in fake.sent:
+            self.assertEqual(msg, 0x1A, "WM_SETTINGCHANGE")
+            self.assertEqual(ctypes.string_at(lp, 24).decode("utf-16-le").rstrip("\x00"),
+                             "Environment",
+                             "lParam 必须指向一个还活着的双字节字符串；指错了 explorer 会直接忽略")
+        self.assertFalse(fake.posted, "PostMessageW 那条老路已被实测证明无效，不许再用")
+
+    def test_flags_must_abort_hung_windows_so_the_ui_cannot_be_frozen(self):
+        fake = self.FakeUser32()
+        main.notify_shell_environment(user32=fake)
+        for _h, _m, _lp, flags, ms in fake.sent:
+            self.assertTrue(flags & 0x0002, "SMTO_ABORTIFHUNG：没有它，一个僵死窗口就能把界面卡住")
+            self.assertGreater(ms, 0, "必须有超时上限")
+
+    def test_reports_failure_when_the_shell_never_acked(self):
+        self.assertFalse(main.notify_shell_environment(user32=self.FakeUser32(find_ok=0)))
+        self.assertFalse(main.notify_shell_environment(user32=self.FakeUser32(send_ok=0)))
+
+    def test_registry_write_path_still_notifies_the_shell(self):
+        # 沙箱已经把 _broadcast_env_change 换成记录桩（见 setUp 里的 broadcast_calls），
+        # 这里要证的是"写注册表这条路仍然会去通知外壳"，不是通知的实现。
+        self.as_windows()
+        main.EnvManager._broadcast_env_change()
+        self.assertTrue(self.broadcast_calls, "写完成后再也不通知外壳 = 用户重开终端永远拿旧环境")
 
 
 if __name__ == "__main__":

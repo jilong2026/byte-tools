@@ -3569,6 +3569,90 @@ class DownloadWorker(QThread):
 # ---------------------------------------------------------------------------
 # 环境变量处理
 # ---------------------------------------------------------------------------
+# WM_SETTINGCHANGE 与 SendMessageTimeout 的常量（Windows 外壳通知）
+WM_SETTINGCHANGE = 0x1A
+SMTO_ABORTIFHUNG = 0x0002
+SMTO_NOTIMEOUTIFNOTHUNG = 0x0004
+HWND_BROADCAST = 0xFFFF
+
+
+def notify_shell_environment(user32=None, timeout_ms: int = 3000) -> bool:
+    """点名通知 Windows 外壳"环境变量变了"，让它重建自己那份环境块。
+
+    为什么不能用 PostMessageW(HWND_BROADCAST, ...)（旧写法，已被真机否掉）：
+    2026-09-30 实测——注册表已经改成 bun-1.4.2，explorer 的环境块 6 秒后仍是 1.4.1，
+    于是用户从开始栏/任务栏开的**每一个**新终端都继承那份旧环境，"重开终端"永远无效。
+    换成同步 SendMessageTimeoutW(Shell_TrayWnd, ...) 后 explorer 1 秒内就翻成新值，
+    单次调用只花 0.02 秒。
+
+    老注释担心"同步广播会被僵死窗口拖住"——那是没带 SMTO_ABORTIFHUNG 的同步发送；
+    带上它 + 超时上限，僵死窗口会被直接跳过。
+
+    参数: user32 传 None 时用真实 user32；测试里传一个假对象即可断言"发给谁、
+    带什么标志、lParam 指向哪个字符串"。返回是否至少有一个外壳窗口确认收到。
+    """
+    if CURRENT_OS != "Windows":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    if user32 is None:
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = wintypes.HWND
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p,
+            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_ssize_t),
+        ]
+
+    # 同步调用期间这块内存必须活着 —— 异步 PostMessage 正是死在这里：
+    # 消息排队到 explorer 处理时，发送方的缓冲区早没了，它读到的不是 "Environment" 就直接忽略。
+    label = ctypes.create_unicode_buffer("Environment")
+    lparam = ctypes.cast(label, ctypes.c_void_p).value
+    out = ctypes.c_ssize_t(0)
+    acked = False
+    for window_class in ("Shell_TrayWnd", "Progman"):
+        try:
+            hwnd = user32.FindWindowW(window_class, None)
+            if not hwnd:
+                continue
+            if user32.SendMessageTimeoutW(hwnd, WM_SETTINGCHANGE, 0, lparam,
+                                          SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG,
+                                          timeout_ms, ctypes.byref(out)):
+                acked = True
+        except Exception:
+            continue
+    return acked
+
+
+def _notify_other_top_level_windows(timeout_ms: int = 1000) -> None:
+    """再给所有顶层窗口发一遍，让 IDE 这类自己监听环境变化的应用也能刷新。
+
+    放在后台线程里做：这条走的是 HWND_BROADCAST，窗口数量不可控，
+    虽然带 SMTO_ABORTIFHUNG 仍可能耗上一阵，不该拖住点按钮的人。
+    """
+    if CURRENT_OS != "Windows":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p,
+            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_ssize_t),
+        ]
+        label = ctypes.create_unicode_buffer("Environment")
+        out = ctypes.c_ssize_t(0)
+        user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+                                   ctypes.cast(label, ctypes.c_void_p).value,
+                                   SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(out))
+    except Exception:
+        pass
+
+
 class EnvManager:
     """跨平台环境变量管理器。"""
 
@@ -3588,30 +3672,25 @@ class EnvManager:
 
     @staticmethod
     def _broadcast_env_change() -> None:
-        """异步广播 WM_SETTINGCHANGE("Environment")，让已运行的程序知道环境变了。
+        """通知外壳与其它程序"环境变量变了"。
 
         取代原先的 setx：setx 会把超过 1024 字符的 PATH 直接截断，而且它自身要靠
         PATH 查找（PATH 一旦被写坏就彻底失效），而持久化本来就由写注册表完成。
-        这里用 PostMessageW（异步）而不是 SendMessageTimeoutW（同步）：同步广播要等
-        所有顶层窗口应答，只要有一个窗口不处理消息就会把调用方卡住。
+
+        外壳那一路必须**同步**发（见 notify_shell_environment 的真机数据）；
+        给其它顶层窗口那一路放后台线程，发不出去也不影响已经写好的注册表。
         """
         if CURRENT_OS != "Windows":
             return
         try:
-            import ctypes
-
-            HWND_BROADCAST = 0xFFFF
-            WM_SETTINGCHANGE = 0x1A
-            user32 = ctypes.windll.user32
-            user32.PostMessageW.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_uint,
-                ctypes.c_void_p,
-                ctypes.c_wchar_p,
-            ]
-            user32.PostMessageW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment")
+            notify_shell_environment()
         except Exception:
-            pass  # 广播失败只影响其他进程的即时刷新，注册表已经写入
+            pass
+        try:
+            _threading.Thread(target=_notify_other_top_level_windows,
+                              daemon=True).start()
+        except Exception:
+            pass
 
     @staticmethod
     def _write_registry_env(name: str, value: str) -> None:
@@ -4171,7 +4250,13 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
         EnvManager.add_path_entry(bin_dir)
         steps.append(f"PATH 已收敛为生效版本这一条：{bin_dir}")
         if removed_entries:
-            steps.append("已移除同组件其他版本的条目：" + "、".join(removed_entries))
+            # remove_path_entries_under 是按"本组件根目录下"整片清扫的，生效版本自己
+            # 那条（切换前就在 PATH 里时）也会被摘掉再重加 —— 它是"换了个位置"，
+            # 不是"被移除"。写进日志就等于告诉用户"刚生效的那条被删了"（真机演练时
+            # 抓到过这句自相矛盾的话），所以点名前要把它排除掉。
+            others = [e for e in removed_entries if not EnvManager._same_path(e, bin_dir)]
+            if others:
+                steps.append("已移除同组件其他版本的条目：" + "、".join(others))
     except Exception as exc:
         problems = _rollback()
         # 回滚全成时措辞与原来完全一致；只要有一步没撤干净，就不能再说"已回滚"，
