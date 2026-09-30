@@ -515,6 +515,11 @@ pip install pyinstaller
 pyinstaller byte-tools.spec --noconfirm --clean
 ```
 
+> 💡 如果你的机器上 PyInstaller 一开始跑就长时间没输出（WINMGMT 冷启动，`platform.win32_ver()`
+> 卡住不返回），改用仓库里现成的入口，效果相同但全程不查 WMI：
+> `python pyinstaller_no_wmi.py byte-tools.spec --noconfirm --clean`。
+> 双击 `一键打包exe.bat` 走的已经是这条路径。
+
 产物：
 - Windows：`dist/byte-tools.exe`
 - macOS：`dist/byte-tools.app`
@@ -622,6 +627,7 @@ byte-tools/
 ├── main.py                             # 主程序（含 UI 与全部逻辑）
 ├── 一键启动项目.bat                # 一键脚本：自动装环境（.venv + 依赖）后启动 GUI
 ├── 一键打包exe.bat                 # 一键脚本：自动装环境后用 PyInstaller 产出 exe
+├── pyinstaller_no_wmi.py           # 打包入口：绕开 PyInstaller 导入期/子进程对 WMI 的依赖
 ├── requirements.txt                    # Python 依赖清单
 ├── byte-tools.spec                 # PyInstaller 打包配置
 ├── README.md                           # 中文说明（本文件）

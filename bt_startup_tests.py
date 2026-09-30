@@ -11,6 +11,7 @@ WINMGMT 冷启动时这条 WMI 查询能卡几十秒到一两分钟（预热后�
 """
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import unittest
@@ -92,6 +93,153 @@ class StartupNoWmi(unittest.TestCase):
         self.assertEqual(main._machine_name(),
                          os.environ["PROCESSOR_ARCHITECTURE"].lower())
         self.assertIn(main.MACHINE, {"amd64", "arm64", "x86"})
+
+
+class PackagingEntryNoWmi(unittest.TestCase):
+    """打包入口必须不碰 WMI：PyInstaller 一 import 就读 win32_ver()[0]。
+
+    2026-09-30 本机实测 `platform._wmi_query` 25 秒不返回（预热后 0.6 秒），
+    打包脚本因此"跑到检查 PyInstaller 之后再无输出"。修法不是等它，而是让
+    `_wmi_query` 立刻抛 OSError，走标准库自带的非 WMI 退路。
+    """
+
+    def setUp(self):
+        import pyinstaller_no_wmi
+        self.mod = pyinstaller_no_wmi
+        self._orig = getattr(platform, "_wmi_query", None)
+
+    def tearDown(self):
+        if self._orig is not None:
+            platform._wmi_query = self._orig
+
+    def _win32_ver_bounded(self, seconds: float = 3.0):
+        import threading
+        box = {}
+
+        def _run():
+            try:
+                box["v"] = platform.win32_ver()
+            except Exception as exc:            # noqa: BLE001
+                box["e"] = exc
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(seconds)
+        self.assertFalse(t.is_alive(),
+                         f"换掉 _wmi_query 后 win32_ver() 仍然阻塞 >{seconds}s")
+        return box.get("v")
+
+    def test_disable_actually_replaces_the_wmi_probe(self):
+        if sys.platform != "win32":
+            self.skipTest("_wmi_query 只在 Windows 上存在")
+        self.assertTrue(self.mod.disable_wmi_lookup(), "没换掉任何函数 = 这个护栏是空的")
+        self.assertIsNot(platform._wmi_query, self._orig)
+        with self.assertRaises(OSError):
+            platform._wmi_query("OS", "Version")
+
+    def test_win32_ver_answers_fast_and_non_empty_after_the_swap(self):
+        if sys.platform != "win32":
+            self.skipTest("win32_ver 只在 Windows 上有意义")
+        self.mod.disable_wmi_lookup()
+        got = self._win32_ver_bounded()
+        self.assertIsNotNone(got, "标准库退路没走通")
+        self.assertIn(got[0], {"10", "11", "post11"}, f"PyInstaller 的判据要的是大版本，实际 {got}")
+
+    def test_release_is_the_same_the_stdlib_table_gives(self):
+        """不许自己编版本号：换掉 WMI 后的答案必须与标准库那张表算出来的一致。"""
+        if sys.platform != "win32":
+            self.skipTest("只在 Windows 上验")
+        self.mod.disable_wmi_lookup()
+        got = self._win32_ver_bounded()
+        v = sys.getwindowsversion()
+        intversion = (v.major, v.minor, v.build)
+        is_client = getattr(v, "product_type", 1) == 1
+        table = platform._WIN32_CLIENT_RELEASES if is_client else platform._WIN32_SERVER_RELEASES
+        want = next((r for ver, r in table if ver <= intversion), "")
+        self.assertEqual(got[0], want,
+                         f"应当由标准库的表判版本，实际 got={got[0]!r} want={want!r}")
+
+
+class PackagingChildProcessesNoWmi(unittest.TestCase):
+    """桩必须传进 PyInstaller 的 isolated 子进程，只桩父进程等于没做。
+
+    2026-09-30 真机实测：只桩父进程时打包耗时 2394 秒（38.7 分钟）才跑完，
+    而 WMI 已热的情况下原版只要 63 秒 —— 差距全在子进程排队等冷 WMI 上。
+    子进程是 `PyInstaller/isolated/_child.py`，另起的一个 python，
+    父进程里改过的 platform 它看不见。
+    """
+
+    CHILD = (
+        "import platform, time\n"
+        "try:\n"
+        "    platform._wmi_query('OS', 'Version')\n"
+        "    print('WMI_NOT_STUBBED')\n"
+        "except OSError:\n"
+        "    print('WMI_FAILS_FAST')\n"
+        "t0 = time.time()\n"
+        "rel = platform.win32_ver()[0]\n"
+        "print('RELEASE', rel, round(time.time() - t0, 2))\n"
+        "import os\n"
+        "print('CHAINED', os.environ.get('BT_CHAIN_MARKER', 'no'))\n"
+    )
+
+    def setUp(self):
+        import pyinstaller_no_wmi
+        self.mod = pyinstaller_no_wmi
+        self._orig_pp = os.environ.get("PYTHONPATH")
+
+    def tearDown(self):
+        if self._orig_pp is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = self._orig_pp
+
+    def _run_child(self):
+        return subprocess.run([sys.executable, "-c", self.CHILD],
+                              capture_output=True, text=True, timeout=60,
+                              env=os.environ.copy(), cwd=REPO_ROOT)
+
+    def _bootstrap(self, extra_dirs=()):
+        d = self.mod.install_child_bootstrap(extra_dirs=extra_dirs)
+        # 不收拾的话每跑一次测试就在 %TEMP% 留一个注入目录
+        self.addCleanup(shutil.rmtree, os.path.dirname(d), True)
+        return d
+
+    def test_without_the_bootstrap_a_child_still_asks_wmi(self):
+        """对照组：不注入时子进程拿到的是标准库原函数（会真去问 WMI）。"""
+        if sys.platform != "win32":
+            self.skipTest("只在 Windows 上验")
+        out = self._run_child().stdout
+        self.assertIn("WMI_NOT_STUBBED", out,
+                      f"对照组应当是「没桩」，实际输出：{out!r}")
+
+    def test_bootstrap_makes_childs_wmi_probe_fail_fast(self):
+        if sys.platform != "win32":
+            self.skipTest("只在 Windows 上验")
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._bootstrap(extra_dirs=[td])
+            out = self._run_child().stdout
+        self.assertIn("WMI_FAILS_FAST", out,
+                      f"子进程里 WMI 查询必须立刻失败，实际：{out!r}")
+        line = [l for l in out.splitlines() if l.startswith("RELEASE")]
+        self.assertTrue(line and line[0].split()[1] in {"10", "11", "post11"},
+                        f"版本号仍要算得出来，实际：{out!r}")
+        self.assertLess(float(line[0].split()[2]), 5.0,
+                        "子进程算版本号不该等 WMI")
+
+    def test_bootstrap_does_not_shadow_an_existing_sitecustomize(self):
+        """注入目录排最前，必须把别人原有的 sitecustomize 接着执行掉。"""
+        if sys.platform != "win32":
+            self.skipTest("只在 Windows 上验")
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "sitecustomize.py"), "w", encoding="utf-8") as f:
+                f.write("import os\nos.environ['BT_CHAIN_MARKER'] = 'yes'\n")
+            self._bootstrap(extra_dirs=[td])
+            out = self._run_child().stdout
+        self.assertIn("CHAINED yes", out,
+                      f"别人的 sitecustomize 被我们抢掉了，实际：{out!r}")
 
 
 if __name__ == "__main__":

@@ -589,12 +589,32 @@ R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对�
 钉住这条；注意 `QLabel.setMinimumWidth(0)` 和 `QSizePolicy.Fixed` **都挡不住**总宽不足时
 布局的挤压（实测仍裁字），唯一有效的是把窗口最小宽抬到实际需要的值。
 
-### R3.14 启动脚本不得为 WMI 阻塞用户
+### R3.14 两个一键脚本都不许为 WMI 阻塞用户
 
-`一键启动项目.bat` 里那段 WMI 自检已从"15 秒 + 再等 120 秒"改成**只探 2 秒、超时也只提示不等待**。
-理由：`main.py` 已改用 `sys.platform` / `PROCESSOR_ARCHITEW6432` 判断系统与架构（R3 之前的启动卡死修复），
-启动路径上没有任何一步会问 WMI；等 WMI 只对 `一键打包exe.bat` 有意义（PyInstaller 导入期必调
-`platform.win32_ver()`），那边的有界自检保留。实测本机 WMI 冷启动时：改前白等最多 135 秒，改后 2.3 秒继续。
+`main.py` 已改用 `sys.platform` / `PROCESSOR_ARCHITEW6432` 判断系统与架构（R3 之前的启动卡死修复），
+启动路径上没有任何一步会问 WMI。
+
+- **`一键启动项目.bat`**：WMI 自检从"15 秒 + 再等 120 秒"改成**只探 2 秒、超时也只提示不等待**。
+  实测本机 WMI 冷启动时：改前白等最多 135 秒，改后 2.3 秒继续；把探针换成必然返回 0 的对照组
+  只要 0.4 秒且一行提示都不打（不制造假告警）。
+- **`一键打包exe.bat`**：那段等待**整块删掉**，改为走 `pyinstaller_no_wmi.py`。
+  这里曾是真依赖（PyInstaller 导入期读 `platform.win32_ver()[0]` 来定 `is_win_10 / is_win_11`），
+  但正确解法不是等 WMI，而是让标准库自己那条**不查 WMI 的退路**走通：把 `platform._wmi_query`
+  换成"立刻抛 OSError"就行，版本号仍由标准库算
+  （本机实测 `('11', '10.0.26200', 'SP0', 'Multiprocessor Free')`，与走 WMI 的判据一致）。
+
+**关键陷阱（踩过一次，代价 38.7 分钟）**：PyInstaller 6.x 的分析跑在
+`PyInstaller/isolated/_child.py` 这个**独立子进程**里，父进程改过的 `platform` 它看不见。
+只桩父进程实测打包耗时 **2394 秒**（子进程排队等冷 WMI，不是永久卡死，但等于不可用）；
+桩传到位后 **127 秒**跑完，产物 exe 6.9 秒起窗、正常退出。
+所以桩必须由 `install_child_bootstrap()` 生成一个带 `sitecustomize.py` 的目录塞进 `PYTHONPATH`
+最前，让**每个子进程启动时自己装上**；该 sitecustomize 还要链式执行别处原有的
+`sitecustomize.py`（我们排在最前，不许悄悄抢位）。
+护栏用例：`PackagingEntryNoWmi`（3 条）+ `PackagingChildProcessesNoWmi`（3 条，含"不注入时
+子进程确实会去问 WMI"的对照组，以及对冷 WMI 的**确定性模拟**——子进程里 `_wmi_query` 必须立刻抛、
+`win32_ver()` 必须 5 秒内算出结果，不用赌机器上 WINMGMT 的状态）。
+注入目录用完由 `main()` 的 `finally` 删除，测试里也要 `addCleanup`，否则 `%TEMP%` 会堆垃圾
+（实测漏过 4 个）。
 
 ### R3.15 环境写完必须**点名**通知外壳，`HWND_BROADCAST` 那条路是无效的
 

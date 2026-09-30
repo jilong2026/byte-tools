@@ -83,35 +83,15 @@ REM [3/4] 检查 / 安装依赖
 REM ==========================================================================
 echo.
 REM --------------------------------------------------------------------------
-REM 环境自检：python 的 platform.win32_ver() 会走 WMI。WINMGMT 冷启动时这条调用
-REM           可能阻塞几十秒到一两分钟（本机实测），期间脚本看起来就是"执行一半
-REM           没反应"。这里做有界探测：先等 15 秒，没结果再明确提示并最多等 120 秒。
+REM 这里以前是一段"等 WMI 醒过来"的自检（15 秒 + 最多再等 120 秒），已删。
+REM 它等的是 PyInstaller 导入期的 platform.win32_ver()：WINMGMT 冷启动时这条调用
+REM 不返回也不报错（本机实测 25 秒无响应，热的时候 0.1 秒），最坏白等 135 秒再报错。
+REM 现在改成根本不去问：[4/4] 走 pyinstaller_no_wmi.py —— 把 platform 的 WMI 查询换成
+REM "立刻抛 OSError"，版本号仍由标准库自己算；并通过 PYTHONPATH 里的 sitecustomize
+REM 把同一个桩传进 PyInstaller 的 isolated 子进程（PyInstaller/isolated/_child.py）。
+REM 只桩父进程是不够的：实测那样打包要 2394 秒，桩到位后是 60 秒级。
+REM 护栏用例：bt_startup_tests.py 的 PackagingEntryNoWmi / PackagingChildProcessesNoWmi。
 REM --------------------------------------------------------------------------
-echo.
-echo       自检系统 WMI（先等 15 秒）...
-"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(15);os._exit(1 if t.is_alive() else 0)" 2>nul
-if %errorlevel% equ 0 goto :wmi_ok
-echo       WMI 15 秒没响应，WINMGMT 多半在冷启动。
-echo       继续等待唤醒（最多 120 秒，期间不要关窗口）...
-"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(120);os._exit(1 if t.is_alive() else 0)" 2>nul
-if %errorlevel% equ 0 goto :wmi_warm
-echo.
-echo [错误] 本机 WMI 累计等待 135 秒仍无响应，打包无法继续。
-echo        PyInstaller 一 import 就会调 platform.win32_ver，那条调用不返回，
-echo        现象就是脚本跑到「检查 PyInstaller」之后再无输出。
-echo        修复办法（用管理员身份打开 CMD 后逐条执行）：
-echo          1. net stop winmgmt
-echo          2. net start winmgmt
-echo          3. winmgmt /verifyrepository   查看 WMI 仓库是否损坏
-echo          4. winmgmt /resetrepository    确认损坏才执行，会重建仓库
-echo        改好后重新双击本脚本；期间想看程序本身，可先用「一键启动项目.bat」。
-goto :finish_fail
-:wmi_warm
-echo       WMI 已唤醒（本次等待较久，下次通常秒过）
-goto :wmi_done
-:wmi_ok
-echo       WMI 正常
-:wmi_done
 echo.
 echo [3/4] 检查项目依赖...
 "%RUN_PY%" -c "import PySide6, requests" >nul 2>&1
@@ -147,7 +127,9 @@ REM ==========================================================================
 echo.
 echo [4/4] 用 PyInstaller 按 byte-tools.spec 打包（约 1-3 分钟，请勿关闭窗口）
 echo.
-"%RUN_PY%" -m PyInstaller --noconfirm byte-tools.spec
+REM 不直接 -m PyInstaller：它 import 期就读 platform.win32_ver()（要走 WMI），
+REM 而且分析跑在 isolated 子进程里。这个入口把"不查 WMI"同时装进父进程和子进程。
+"%RUN_PY%" pyinstaller_no_wmi.py --noconfirm byte-tools.spec
 if %errorlevel% neq 0 goto :err_main
 
 if not exist "dist\byte-tools.exe" goto :err_no_dist

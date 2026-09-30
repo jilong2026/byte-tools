@@ -441,6 +441,7 @@ byte-tools/
 ├─ main.py              # entry point (UI + logic)
 ├─ 一键启动项目.bat      # One-click launcher: auto-provisions .venv + deps, then starts the GUI
 ├─ 一键打包exe.bat       # One-click builder: auto-provisions env + PyInstaller, then builds the exe
+├─ pyinstaller_no_wmi.py # Build entry: keeps PyInstaller (and its child processes) from querying WMI
 ├─ requirements.txt     # dependency list
 ├─ byte-tools.spec  # PyInstaller build spec
 ├─ 同步Gitee产物.sh       # Gitee Release sync (Linux/macOS/CI; writes GitHub links only, no cross-ocean binary push; fast-fail + idempotent + verify), called by release.yml
