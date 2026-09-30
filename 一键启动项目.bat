@@ -83,30 +83,17 @@ REM [3/4] 检查 / 安装依赖
 REM ==========================================================================
 echo.
 REM --------------------------------------------------------------------------
-REM 环境自检：python 的 platform.win32_ver() 会走 WMI。WINMGMT 冷启动时这条调用
-REM           可能阻塞几十秒到一两分钟（本机实测），期间脚本看起来就是"执行一半
-REM           没反应"。这里做有界探测：先等 15 秒，没结果再明确提示并最多等 120 秒。
+REM WMI 只做一次 2 秒的轻量提示。本脚本后续步骤（含 main.py 本身）都不再问 WMI：
+REM 程序改用 sys.platform / PROCESSOR_ARCHITECTURE 判断系统与架构，WINMGMT 冷启动
+REM 卡的是打包脚本（PyInstaller 导入期必调 platform.win32_ver()），那边的有界自检保留。
+REM 以前这里等 15 秒再等 120 秒，纯粹是让启动的人白等，已删。
 REM --------------------------------------------------------------------------
 echo.
-echo       自检系统 WMI（先等 15 秒）...
-"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(15);os._exit(1 if t.is_alive() else 0)" 2>nul
-if %errorlevel% equ 0 goto :wmi_ok
-echo       WMI 15 秒没响应，WINMGMT 多半在冷启动。
-echo       继续等待唤醒（最多 120 秒，期间不要关窗口）...
-"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(120);os._exit(1 if t.is_alive() else 0)" 2>nul
-if %errorlevel% equ 0 goto :wmi_warm
-echo       [提示] WMI 等满 135 秒仍无响应。
-echo              启动 byte-tools 不受影响（程序不再依赖 WMI 判断系统）；
-echo              但「一键打包exe.bat」会卡住，因为 PyInstaller 导入时必问 WMI。
-echo              想打包就先修 WMI（管理员 CMD）：net stop winmgmt 再 net start winmgmt，
-echo              仍不行就 winmgmt /verifyrepository 检查仓库。
-goto :wmi_skip_ok
-:wmi_warm
-echo       WMI 已唤醒（本次等待较久，下次通常秒过）
-:wmi_skip_ok
-goto :wmi_done
-:wmi_ok
-echo       WMI 正常
+"%RUN_PY%" -c "import threading,platform,os;t=threading.Thread(target=lambda:platform.win32_ver(),daemon=True);t.start();t.join(2);os._exit(1 if t.is_alive() else 0)" 2>nul
+if %errorlevel% equ 0 goto :wmi_done
+echo       [提示] 系统 WMI 2 秒内没响应（WINMGMT 多半在冷启动）。不影响本次启动；
+echo              但「一键打包exe.bat」会卡住，要打包就先修 winmgmt：
+echo              管理员 CMD 里 net stop winmgmt，再 net start winmgmt。
 :wmi_done
 echo.
 echo [3/4] 检查项目依赖...

@@ -10,9 +10,11 @@
 import json
 import os
 import platform as _platform
+import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -140,6 +142,12 @@ class EnvSandbox(unittest.TestCase):
         self._orig_composed = main.EnvManager.composed_env
         main.EnvManager.composed_env = staticmethod(lambda: {})
         self.addCleanup(setattr, main.EnvManager, "composed_env", self._orig_composed)
+
+        # 同理：切换后会扫"还开着的旧终端"，真机扫描结果随机器状态变化，
+        # 默认打桩成"扫不到"，需要内容的用例自己覆盖（见 StaleTerminalNotice）。
+        self._orig_shells = main.list_shell_processes
+        main.list_shell_processes = lambda: []
+        self.addCleanup(setattr, main, "list_shell_processes", self._orig_shells)
 
         # 产品代码会写 os.environ，逐键还原
         self._orig_environ = {k: os.environ.get(k) for k in ENV_KEYS}
@@ -2043,6 +2051,34 @@ class SwitchVerification(EnvSandbox):
         self.card._detect_status()
         self.assertNotIn("先命中", self.card.status_label.text())
 
+    # ---- 切换成功后必须给出"怎么自己校验"的可复制指引 ----
+    def test_success_logs_copy_ready_verification_hint(self):
+        """用户按字面"重开终端"却只开了个新标签页 → 仍看到旧版本。必须写清怎么验。"""
+        mine = str(self.comp.install_dir("17") / "bin")
+        self._stub_composed(mine + ";" + self.FOREIGN)
+        self.card._apply_active("17")
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertIn("where java", joined, "要给可直接粘贴的校验命令")
+        self.assertIn("GetEnvironmentVariable", joined,
+                      "要给不想重开时的当前会话刷新命令")
+        self.assertIn("关掉重开", joined, "必须点破：新标签页/IDE 内终端不算新终端")
+
+    def test_unknown_verdict_still_gives_the_hint(self):
+        """没能复验时更要把校验方法交给用户。"""
+        self._stub_composed(None)
+        self.card._apply_active("17")
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertIn("where java", joined)
+        self.assertIn("关掉重开", joined)
+
+    def test_shadowed_case_does_not_blame_the_terminal(self):
+        """被系统级 PATH 压住时，问题不在旧终端，不许塞"重开终端"指引误导用户。"""
+        self._stub_composed(self.FOREIGN + ";" + str(self.comp.install_dir("17") / "bin"))
+        self.card._apply_active("17")
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertIn("系统", joined, "要说明是系统级条目抢在前面")
+        self.assertNotIn("GetEnvironmentVariable", joined)
+
 
 class SelectionReenablesSwitch(EnvSandbox):
     """改下拉框选中必须让「切换为生效版本」重新可点。
@@ -2101,6 +2137,419 @@ class SelectionReenablesSwitch(EnvSandbox):
                 self.card.version_combo.setCurrentIndex(
                     self.card.version_combo.findText(version))
                 self.assertEqual(self.card.btn_configure.isEnabled(), expect)
+
+
+class InstallButtonBlockedWhenInstalled(EnvSandbox):
+    """选中的版本磁盘上已经装好 → 「下载并安装」置灰，避免重复下载并静默覆盖。
+
+    规则（2026-09-30 与用户确认）：全部 26 个组件都管；已装时只灰不改名，
+    tooltip 指路「要重装先卸载」。目录在但里面找不到可执行文件的不算已装 ——
+    否则半截安装会把按钮灰掉、卸载又无事可做，用户就被困死了。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card_with_install(self, key, version="1.2.3", *, with_exe=True):
+        # 沙箱默认把 _detect_status 换成 no-op；本类要跑真实探测路径，必须放开，
+        # 否则只有"换选中触发信号"的用例会同步按钮，其余用例是假绿/假红。
+        self.enable_detect()
+        main.ComponentCard.probe_calls = []
+        comp = next(c for c in main.build_components() if c.key == key)
+        home = comp.install_dir(version)
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        if with_exe:
+            name = comp.exec_name or f"{key}.war"
+            target = home / "bin" if comp.exec_name else home
+            target.mkdir(parents=True, exist_ok=True)
+            (target / name).write_bytes(b"\x00")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        card._reload_combo_items(preferred=version)
+        card._detect_status()
+        return card, comp
+
+
+    def test_installed_version_greys_out_install_button(self):
+        self.as_windows()
+        card, comp = self._card_with_install("jdk", "21")
+        idx = card.version_combo.findText("21")
+        self.assertGreaterEqual(idx, 0)
+        card.version_combo.setCurrentIndex(idx)
+        card._detect_status()
+        self.assertFalse(card.btn_install.isEnabled(), "已装的 21 不该再点下载并安装")
+        self.assertIn("卸载", card.btn_install.toolTip(), "必须告诉用户想重装先卸载")
+        self.assertIn(str(comp.install_dir("21")), card.btn_install.toolTip(),
+                      "tooltip 要带上装在哪，便于用户核对")
+
+    def test_uninstalled_version_stays_clickable(self):
+        self.as_windows()
+        card, _comp = self._card_with_install("jdk", "21")
+        idx = card.version_combo.findText("8")
+        card.version_combo.setCurrentIndex(idx)
+        self.assertTrue(card.btn_install.isEnabled(), "换选成没装的 8 必须能点")
+
+    def test_half_installed_dir_is_not_treated_as_installed(self):
+        """目录在、里面没有可执行文件 → 不算已装，不许把用户困住。"""
+        self.as_windows()
+        card, _comp = self._card_with_install("jdk", "21", with_exe=False)
+        idx = card.version_combo.findText("21")
+        card.version_combo.setCurrentIndex(idx)
+        card._detect_status()
+        self.assertTrue(card.btn_install.isEnabled(),
+                        "空目录/半截安装不该灰掉安装按钮")
+
+    def test_every_component_respects_the_rule(self):
+        """26 个组件逐个走一遍：装了就该灰，且换选未装版本能亮回来。"""
+        self.as_windows()
+        self.enable_detect()
+        main.ComponentCard.probe_calls = []
+        checked = 0
+        for comp in main.build_components():
+            version = comp.versions[0].version
+            card = main.ComponentCard(comp, lambda lvl, msg: None)
+            home = comp.install_dir(version)
+            (home / "bin").mkdir(parents=True, exist_ok=True)
+            name = comp.exec_name or f"{comp.key}.war"
+            target = home / "bin" if comp.exec_name else home
+            target.mkdir(parents=True, exist_ok=True)
+            (target / name).write_bytes(b"\x00")
+            card._reload_combo_items(preferred=version)
+            card._detect_status()
+            with self.subTest(key=comp.key):
+                self.assertFalse(card.btn_install.isEnabled(),
+                                 f"{comp.key} 已装 {version} 时安装按钮必须置灰")
+            checked += 1
+        self.assertEqual(checked, len(main.build_components()))
+
+    def test_download_in_progress_is_never_re_enabled(self):
+        """下载途中换选中，不许把按钮点亮。"""
+        self.as_windows()
+        card, _comp = self._card_with_install("tomcat", "10.1.60")
+
+        class FakeWorker:
+            def isRunning(self):
+                return True
+
+        card.worker = FakeWorker()
+        card.btn_install.setEnabled(False)
+        card._sync_action_buttons()
+        self.assertFalse(card.btn_install.isEnabled(),
+                         "下载进行中必须保持禁用，否则能并发触发第二次下载")
+
+    def test_uninstall_reenables_install_button(self):
+        self.as_windows()
+        import shutil
+        card, comp = self._card_with_install("jdk", "21")
+        self.assertFalse(card.btn_install.isEnabled())
+        shutil.rmtree(comp.install_dir("21"))
+        card._detect_status()
+        self.assertTrue(card.btn_install.isEnabled(), "卸掉之后必须能重新安装")
+
+
+class InstalledVersionNotInCatalog(EnvSandbox):
+    """磁盘上装着、但在线清单里已经没有的版本，必须出现在下拉框里。
+
+    2026-09-30 真机：bun 装着 1.4.1 与 1.4.2，在线清单只剩 1.4.2/1.3.14/1.2.16/1.1.0，
+    于是胶囊写着"已装 2 个版本（1.4.2、1.4.1）"，下拉框里却根本没有 1.4.1 ——
+    那个版本切不了、卸不掉，用户反复点「切换」只能在别的版本之间打转。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _bun_card(self, *installed):
+        comp = self.make_component("bun", *installed)
+        for v in installed:
+            (comp.install_dir(v) / "bun.exe").write_bytes(b"\x00")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        main.ComponentCard.probe_calls = []
+        card._detect_status()
+        return card, comp
+
+    def _items(self, card):
+        return [card.version_combo.itemText(i) for i in range(card.version_combo.count())]
+
+    def test_installed_extras_are_listed_in_semver_order_with_mark(self):
+        self.as_windows()
+        card, comp = self._bun_card("1.4.1")
+        items = self._items(card)
+        catalog = [v.version for v in comp.versions]
+        self.assertNotIn("1.4.1", catalog, "这条用例的前提就是清单里没有 1.4.1")
+        self.assertIn("1.4.1", items, "磁盘装着的版本必须能选")
+        self.assertEqual(items[:3], [catalog[0], "1.4.1", catalog[1]],
+                         f"要按语义版本插在正确位置，实际 {items}")
+        from PySide6.QtCore import Qt
+        idx = card.version_combo.findText("1.4.1")
+        data = card.version_combo.itemData(idx, Qt.DecorationRole)
+        self.assertTrue(data and not data.isNull(), "合成项同样要挂绿勾")
+
+    def test_extras_are_selectable_and_switchable(self):
+        self.as_windows()
+        card, comp = self._bun_card("1.4.1")
+        card.version_combo.setCurrentIndex(card.version_combo.findText("1.4.1"))
+        self.assertEqual(card._current_version().version, "1.4.1",
+                         "反查必须落到合成项，不能悄悄回落到第一项")
+        self.assertTrue(card.btn_configure.isEnabled())
+        self.assertTrue(card._apply_active("1.4.1"))
+        self.assertEqual(main.load_active_map().get("bun"), "1.4.1")
+        self.assertEqual([p for p in self.win_path if "bun" in p.lower()],
+                         [str(comp.install_dir("1.4.1"))])
+
+    def test_extras_are_uninstallable_and_disappear_afterwards(self):
+        self.as_windows()
+        import shutil
+        card, comp = self._bun_card("1.4.1")
+        card.version_combo.setCurrentIndex(card.version_combo.findText("1.4.1"))
+        self.assertTrue(card.btn_uninstall.isEnabled(), "选中的是已装版本，卸载该可用")
+        shutil.rmtree(comp.install_dir("1.4.1"))
+        card._refresh_installed_marks()
+        card._detect_status()
+        self.assertNotIn("1.4.1", self._items(card), "目录没了，这一项也该从下拉框消失")
+
+    def test_online_refresh_keeps_installed_extras(self):
+        self.as_windows()
+        card, comp = self._bun_card("1.4.1")
+        fresh = [main.ComponentVersion(version=v, url_map={}) for v in ("1.5.0", "1.4.2")]
+        card.set_versions(fresh)
+        items = self._items(card)
+        self.assertIn("1.5.0", items)
+        self.assertIn("1.4.1", items, "在线刷新不许把磁盘上已装、清单里没有的版本冲掉")
+        self.assertEqual(items[0], "1.5.0")
+
+    def test_extra_item_cannot_be_installed_but_does_not_crash(self):
+        self.as_windows()
+        card, _comp = self._bun_card("1.4.1")
+        card.version_combo.setCurrentIndex(card.version_combo.findText("1.4.1"))
+        card._sync_action_buttons()
+        self.assertFalse(card.btn_install.isEnabled(), "已装的版本不该再点下载并安装")
+        # 万一有别的入口调到安装：没有 URL 时只能友好报错，不许抛异常
+        card.on_install_clicked()
+
+    def test_no_duplicates_when_catalog_already_lists_it(self):
+        self.as_windows()
+        card, comp = self._bun_card("1.4.2")
+        items = self._items(card)
+        self.assertEqual(len(items), len(set(items)), f"不该出现重复条目：{items}")
+        self.assertEqual(items, [v.version for v in comp.versions],
+                         "清单里本来就有的版本，顺序与内容都不该变")
+
+    def test_non_multi_version_components_are_not_synthesised(self):
+        self.as_windows()
+        comp = self.make_component("tomcat", "9.9.9")
+        card = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        main.ComponentCard.probe_calls = []
+        card._detect_status()
+        self.assertNotIn("9.9.9", self._items(card),
+                         "非多版本组件的下拉框清单逐字不变（R3.9）")
+
+
+class StaleTerminalNotice(EnvSandbox):
+    """切换成功后必须点名"比这次切换更早、还活着的终端窗口"。
+
+    真机依据（2026-09-30）：用户报"重开终端了还是旧版本"，实测注册表与新进程都是
+    新版本（由 explorer 现场启动的探针 `bun -v` → 1.4.1），屏幕上那个 PowerShell
+    进程创建于切换之前 12 分钟。"重开标签页"不产生新进程，光讲道理没用，得把
+    pid 与起始时间摆出来让用户能核对。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.logs = []
+        self.comp = self.make_component("jdk", "21", "17")
+        for v in ("21", "17"):
+            (self.comp.install_dir(v) / "bin" / "java.exe").write_bytes(b"\x00")
+        self.card = main.ComponentCard(self.comp, lambda lvl, msg: self.logs.append((lvl, msg)))
+        self.enable_detect()
+        mine = str(self.comp.install_dir("17") / "bin")
+        orig = main.EnvManager.composed_env
+        main.EnvManager.composed_env = staticmethod(lambda: {"PATH": mine, "JAVA_HOME": ""})
+        self.addCleanup(setattr, main.EnvManager, "composed_env", orig)
+
+    def _stub_scan(self, procs):
+        orig = main.list_shell_processes
+        main.list_shell_processes = lambda: procs
+        self.addCleanup(setattr, main, "list_shell_processes", orig)
+
+    # ---- 纯格式化：谁该被点名 ----
+
+    def test_only_shells_older_than_the_switch_are_listed(self):
+        procs = [(111, "powershell.exe", 1000.0, True),   # 早于切换 → 该点名
+                 (222, "cmd.exe", 2000.0, True)]          # 晚于切换 → 环境是新的，不许点名
+        lines = main.stale_shell_lines(procs, since_epoch=1500.0, self_pid=999)
+        joined = "\n".join(lines)
+        self.assertIn("111", joined)
+        self.assertNotIn("222", joined, "比切换更晚的进程本来就是新环境，点名是误导")
+
+    def test_admin_window_is_called_out_as_unreachable(self):
+        # openable=False 实测就是 OpenProcess 返回 error 5 —— 管理员窗口的特征
+        lines = main.stale_shell_lines([(333, "powershell.exe", 1000.0, False)],
+                                       since_epoch=1500.0, self_pid=999)
+        self.assertIn("管理员", "\n".join(lines))
+
+    def test_our_own_process_is_not_listed(self):
+        lines = main.stale_shell_lines([(999, "cmd.exe", 1000.0, True)],
+                                       since_epoch=1500.0, self_pid=999)
+        self.assertEqual([x for x in lines if "999" in x], [],
+                         "把工具自己写进「还开着的旧终端」里，用户会去关错窗口")
+
+    def test_list_is_capped(self):
+        procs = [(1000 + i, "cmd.exe", 1000.0 - i, True) for i in range(20)]
+        lines = main.stale_shell_lines(procs, since_epoch=9000.0, self_pid=999)
+        self.assertLessEqual(len([x for x in lines if re.search(r"pid=\d+", x)]), 6,
+                             "刷屏式列举等于没列举")
+
+    # ---- 接线：切换成功后要真的把这些行写进日志 ----
+
+    def test_switch_log_names_the_stale_windows(self):
+        self._stub_scan([(7984, "powershell.exe", time.time() - 3600, False)])
+        self.assertTrue(self.card._apply_active("17"))
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertIn("7984", joined, "日志要点名旧终端的 pid，否则用户不知道该关哪个")
+        self.assertIn("比这次切换更早", joined)
+
+    def test_no_stale_window_adds_no_such_line(self):
+        self._stub_scan([])
+        self.card._apply_active("17")
+        joined = " | ".join(m for _l, m in self.logs)
+        self.assertNotIn("比这次切换更早", joined,
+                         "没有旧终端却报这一行，是在制造假问题")
+
+    def test_scan_failure_never_breaks_the_switch(self):
+        orig = main.list_shell_processes
+        def boom():
+            raise OSError("Toolhelp 挂了")
+        main.list_shell_processes = boom
+        self.addCleanup(setattr, main, "list_shell_processes", orig)
+        self.assertTrue(self.card._apply_active("17"),
+                        "点名旧终端只是附加信息，它失败时不许把切换本身拖成失败")
+
+
+class CleanTerminalWindow(EnvSandbox):
+    """顶栏「开验证终端」：用系统为新进程合成的环境开一个 cmd，让"生效没"一眼可见。
+
+    真机背景（2026-09-30）：注册表与 explorer 现场启动的进程都是 1.4.1，用户新开
+    标签页看到的仍是 1.4.2 —— 因为那个标签页继承的是旧宿主进程的环境块。
+    跟用户解释"Windows 复制环境块"没用，直接给一个肯定干净的窗口才有结论。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls._orig_fetch = main.MainWindow._start_fetch_versions
+        cls._orig_detect = main.ComponentCard._detect_status
+        main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
+        main.ComponentCard._detect_status = lambda self, *a, **k: None
+        cls.win = main.MainWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        main.MainWindow._start_fetch_versions = cls._orig_fetch
+        main.ComponentCard._detect_status = cls._orig_detect
+        cls.win.deleteLater()
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.log_view_text = lambda: self.win.log_view.toPlainText()
+
+    def _stub_composed(self, value):
+        orig = main.EnvManager.composed_env
+        main.EnvManager.composed_env = staticmethod(lambda: value)
+        self.addCleanup(setattr, main.EnvManager, "composed_env", orig)
+
+    def _stub_opener(self, result=4321):
+        calls = []
+        orig = main.open_clean_console
+        main.open_clean_console = lambda env: (calls.append(env) or result)
+        self.addCleanup(setattr, main, "open_clean_console", orig)
+        return calls
+
+    def test_top_bar_has_the_clean_terminal_button(self):
+        self.assertIn("验证终端", self.win.btn_clean_terminal.text())
+
+    def test_click_passes_the_composed_environment(self):
+        composed = {"PATH": "C:\\x", "BUN_HOME": "C:\\x\\bun-1.4.1"}
+        self._stub_composed(composed)
+        calls = self._stub_opener()
+        self.win._on_clean_terminal_clicked()
+        self.assertEqual(calls, [composed], "必须把「新进程会拿到的那份环境」原样传进去")
+
+    def test_unavailable_composed_env_opens_nothing_and_says_so(self):
+        self._stub_composed({})
+        calls = self._stub_opener()
+        self.win._on_clean_terminal_clicked()
+        self.assertEqual(calls, [], "拿不到合成环境时不许凭当前进程那份旧快照开窗口")
+        self.assertIn("拿不到", self.log_view_text())
+
+    def test_launch_failure_is_reported_not_swallowed(self):
+        self._stub_composed({"PATH": "C:\\x"})
+        self._stub_opener(result=None)
+        self.win._on_clean_terminal_clicked()
+        self.assertIn("开不了", self.log_view_text())
+
+    def test_success_logs_the_pid_so_the_user_knows_which_window(self):
+        self._stub_composed({"PATH": "C:\\x"})
+        self._stub_opener(result=4321)
+        self.win._on_clean_terminal_clicked()
+        self.assertIn("4321", self.log_view_text())
+
+    def test_real_opener_passes_env_and_new_console_flag(self):
+        # 只测这一处真 Popen 调用：桩掉 Popen 本身，钉住"env 与 creationflags 传对了"，
+        # 否则参数名写错要等用户点下去才炸。
+        seen = {}
+
+        class FakeProc:
+            pid = 99
+
+        def fake_popen(argv, **kw):
+            seen["argv"] = argv
+            seen.update(kw)
+            return FakeProc()
+
+        orig = main.subprocess.Popen
+        main.subprocess.Popen = fake_popen
+        self.addCleanup(setattr, main.subprocess, "Popen", orig)
+        pid = main.open_clean_console({"PATH": "C:\\x"})
+        self.assertEqual(pid, 99)
+        self.assertEqual(seen["argv"], ["cmd.exe"])
+        self.assertEqual(seen["env"], {"PATH": "C:\\x"})
+        self.assertEqual(seen["creationflags"], main.subprocess.CREATE_NEW_CONSOLE)
+
+    def test_real_opener_returns_none_when_launch_fails(self):
+        def boom(argv, **kw):
+            raise OSError("没这个 shell")
+        orig = main.subprocess.Popen
+        main.subprocess.Popen = boom
+        self.addCleanup(setattr, main.subprocess, "Popen", orig)
+        self.assertIsNone(main.open_clean_console({"PATH": "C:\\x"}),
+                          "开不了要返回 None 让界面如实说，不许把异常抛给 Qt 槽")
+
+    def test_title_bar_buttons_are_not_clipped_at_minimum_width(self):
+        """多一个按钮不许把标题栏挤裁字（实测最窄窗口下「清理残留 PATH」曾裁字）。"""
+        win = self.win
+        win.show()
+        win.resize(win.minimumWidth(), 700)
+        for _ in range(30):
+            self.app.processEvents()
+        clipped, right = [], 0
+        for name in ("btn_github", "btn_refresh", "btn_cleanup_path",
+                     "btn_clean_terminal", "btn_donate"):
+            b = getattr(win, name)
+            need = b.fontMetrics().horizontalAdvance(b.text())
+            right = max(right, b.geometry().x() + b.geometry().width())
+            if b.geometry().width() < need:
+                clipped.append(f"{name} 宽{b.geometry().width()} < 文字{need}")
+        self.assertEqual(clipped, [], "标题栏按钮在最窄窗口里被压扁裁字")
+        self.assertLessEqual(right, win.width(), "按钮排到了窗口外面，最后一个点不到")
 
 
 if __name__ == "__main__":

@@ -243,6 +243,7 @@ The working directory `~/.env-tools/` is created automatically on first launch a
     - the corresponding `XXX_HOME` variable is written and the `bin` directory is appended to `PATH`;
     - the card status is refreshed automatically — no need to click "Configure" afterwards;
     - previously installed versions of the same component are **not** deleted, so installing a second one gives you side-by-side versions. Installation repoints the environment variables at the version just installed; click **"Configure Only"** once more if you want the pill to state that version as the active one and this component's `PATH` entries collapsed into a single entry.
+    - if the version selected in the drop-down **is already installed on disk**, **"Download & Install" is greyed out** and its tooltip says to uninstall first. This applies to all 26 components, so a finished install can never be overwritten by a second click; to reinstall, uninstall then install again.
 4. Click **"Configure Only"** ("配置环境变量") to only write the environment variables:
     - **Multi-version components**: it makes the version selected in the drop-down the **active version** (`XXX_HOME` repointed, this component's `PATH` entries collapsed into that one entry). The button is greyed out when the selected version already is the active one, and its tooltip tells you to pick another version in the drop-down first.
     - **All other components**: it configures the highest version found among the locally extracted directories, without re-downloading (handy when you fetched the archive yourself).
@@ -256,6 +257,10 @@ The **active version** is the one the operating system actually uses.
 
 - **Green check mark = installed on disk.** A checked version can be uninstalled directly; if you select a version
   that is not installed, the **Uninstall** button is greyed out and its tooltip tells you to pick a checked version first.
+- **An installed version always appears in the drop-down.** The mirrors' online version lists change over time, and a
+  version you have installed can drop out of them. When that happens the drop-down re-inserts it at its semver position
+  with the green check — otherwise such a version could not be selected, switched or uninstalled from the UI at all.
+  This synthesis applies only to the seven multi-version components; every other component's list stays exactly as published.
 - **"Configure Only" = make the selected version active.** It repoints `XXX_HOME` at that version's directory and
   collapses this component's `PATH` entries into the active version's single entry; entries belonging to other
   components (and your own) are left alone. If any step fails mid-switch, everything already written is rolled back
@@ -405,8 +410,9 @@ Mostly no. Since v2.0 the built-in China-mirror-priority rule provides **11 main
 No. The "Download & Install" button is a **one-stop flow**: download → extract → auto-write `XXX_HOME` / `PATH` → refresh the card status. Once the flow finishes, the component is considered installed; you do not need to click "Configure Only" afterwards. That button is only for the case where you have already downloaded the archive manually and just want to write the environment variables.
 
 **Q10. I switched the active version, but `java -version` in my terminal still shows the old one.**
+First click **"🖥 Open verification terminal"** in the title bar: that window is started with the environment block Windows builds for a *new* process, so the version you see there is what any freshly opened terminal will report. If it is correct and your old window is not, that window simply predates the switch (see step 1 below).
 Check these three things:
-1. **The window was not reopened** — a switch only reaches newly started processes. Close and reopen terminals; fully restart IntelliJ IDEA / Eclipse / VS Code.
+1. **The window was not reopened** — a switch only reaches newly started processes. Close and reopen terminals; fully restart IntelliJ IDEA / Eclipse / VS Code. After a successful switch the log names every terminal window still older than that switch (pid plus start time), so you can tell which window to close; entries marked as an administrator window cannot be reached by this tool's refresh notification at all — only closing the whole window and reopening it works. Windows Terminal tabs and IDE terminals inherit the host process' environment, so closing a tab is not reopening a terminal — a fresh tab even prints the PowerShell banner again while still carrying the host's old environment.
 2. **Oracle's javapath wins.** If the *system* `PATH` contains `C:\Program Files\Common Files\Oracle\Java\javapath`, it is searched before user variables, so plain `java` still runs that copy. Run `where java` from the [Verifying](#verifying) section — the first line is what actually executes — and use `%JAVA_HOME%\bin\java -version` to confirm the copy this tool installed is healthy.
 3. **The switch itself failed.** A log line containing "切换失败" means the tool rolled back from the pre-switch snapshot, so nothing effectively changed; click "Configure Only" again. If that log also says the rollback was not fully successful, it lists exactly which item could not be restored and what value it should have — fix those by hand and retry.
 

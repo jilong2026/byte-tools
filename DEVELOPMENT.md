@@ -523,6 +523,79 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 典型陷阱：`resolve_uninstall_target`（`main.py:293-338`）里"选了没装的版本、磁盘上又装着多个"这种情形，
 多版本组件改为按语义降序卸最高的并说明（罢工等于卸载失灵），非多版本组件必须继续罢工、不得跟着放宽。
 
+**一条明确豁免**：「下载并安装」的"选中版本已装则置灰"是**面向全部 26 个组件**的新规则
+（`ComponentCard._installed_here()` + `_sync_action_buttons()`），**不受本条约束**，
+也不许为了本条去把它门控回"只多版本组件"。判据是"目录存在且里面找得到该组件的可执行文件"，
+半截安装不算已装（否则按钮灰掉、卸载又无事可做，用户会被困死）。
+护栏用例：`InstallButtonBlockedWhenInstalled`。
+
+### R3.10 下拉框清单必须包含"已装但清单里没有"的版本
+
+在线版本清单只保留近期版本（实测：bun 清单里已无 1.4.1，磁盘上却装着 `bun-1.4.1`）。
+下拉框清单由 `ComponentCard._combo_version_list()` 统一生成 = 内置/在线清单 +
+`installed_versions()` 里清单外的版本（按语义版本插入，文本就是版本号），
+`_reload_combo_items`、`_current_version`、`_refresh_installed_marks` **三处必须共用它**——
+不一致就会出现"下拉框显示着 1.4.1、反查却落回 1.4.2"，用户以为在切 A 实际配出去的是 B。
+`_detect_status` 在增减已装集合后按行数比对重灌一次（放在 `if ordered` **之前**，
+否则最后一个额外版本被卸掉时那一行永远摘不掉）。合成项没有下载 URL，靠 R3.11 的
+"已装置灰安装按钮"兜住；非多版本组件不合成（R3.9）。
+护栏用例：`InstalledVersionNotInCatalog`（7 条）。
+
+### R3.11 选中版本已装则置灰「下载并安装」
+
+面向**全部 26 个组件**：`_installed_here(version)` 判"目录存在 **且** 里面找得见该组件可执行文件"
+（半截安装不算，否则按钮灰掉、卸载又无事可做，用户会被困死），已装时禁用安装按钮，
+tooltip 写清装在哪、并指路「要重新安装请先点卸载」。
+状态由 `_sync_action_buttons()` 统一计算，三个触发点：`_detect_status` 之后、
+下拉框换选中之后（`currentIndexChanged`）、下载结束/失败之后。
+下载进行中一律不碰该按钮，否则换个选中就能并发触发第二次下载。
+**本条不受 R3.9 约束**（是全局新规则，不得门控回"只多版本组件"）。
+护栏用例：`InstallButtonBlockedWhenInstalled`、`SelectionReenablesSwitch`。
+
+### R3.12 切换成功后必须点名"比这次切换更早、还开着的终端"
+
+Windows 把环境块**复制**给新进程，所以"复验通过"和"用户屏幕上还是旧版本"可以同时为真——
+2026-09-30 真机实测就是这样：注册表与新进程都是 1.4.1（由 explorer 现场启动的探针 `bun -v` → 1.4.1），
+用户那个 PowerShell 进程却创建于切换前 12 分钟，而且 `OpenProcess` 返回 error 5（管理员窗口，
+UIPI 挡着我们的 `WM_SETTINGCHANGE`，环境块还是登录时那一份）。光在日志里讲"要重开终端"没用，
+用户已经"重开"过了。
+
+所以 `_log_verification_hint(since_epoch)` 必须把 `list_shell_processes()` 的结果按"创建时间早于本次切换"
+过滤后**点名到 pid 与起始时间**，管理员窗口单独标注"本工具的通知进不去"。两个函数分工：
+`list_shell_processes()` 是唯一的外部接缝（失败返回 `[]`，调用方按"没测到"处理，**不许**当成"没有旧终端"），
+`stale_shell_lines()` 是纯函数（过滤、排序、限 6 条、排除自己），逻辑都堆在纯函数这边便于断言。
+这条信息只能以 **info** 级输出——它是附加说明，写成 warn 会让"复验通过"的用例凭空多一条告警。
+扫描失败绝不影响切换本身（`_apply_active` 仍返回 True）。护栏用例：`StaleTerminalNotice`（7 条）。
+
+### R3.13 必须提供"必然干净的环境"验证入口
+
+R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对了没有"。顶栏 `btn_clean_terminal`
+（「🖥 开验证终端」）用 `EnvManager.composed_env()` 现算的那份环境块起一个 `cmd.exe`
+（`open_clean_console(env)`，`CREATE_NEW_CONSOLE`），这个窗口里的版本号就是任何全新终端应当看到的版本。
+
+三条硬约束：
+- **拿不到合成环境就不许开**（`composed_env()` 返回空 ⇒ 只写 warn 并给出原地刷新的 PowerShell 命令）。
+  退化成用本进程 `os.environ` 开出来的窗口，验证价值为零，还会给出错误结论。
+- 开不了（`Popen` 抛异常）要 `error` 级说明，不许静默。
+- `open_clean_console()` 是唯一副作用接缝；有一条用例真桩 `subprocess.Popen` 钉住
+  `env` 与 `creationflags` 两个参数名——写错了只有用户点下去才会炸。
+
+护栏用例：`CleanTerminalWindow`（8 条）。
+
+**加标题栏按钮要重量最窄窗口**：标题栏（标题 + 按钮 + 窗口控制）实测需要 ~992 像素，
+而窗口最小宽原本只有 880 —— 布局早就在挤压标题文字，多一个按钮后开始把
+「清理残留 PATH」压到裁字（178→144）。已把 `setMinimumSize` 抬到 1000（正好等于默认宽），
+并给四个文字按钮设 `QSizePolicy.Fixed`。`test_title_bar_buttons_are_not_clipped_at_minimum_width`
+钉住这条；注意 `QLabel.setMinimumWidth(0)` 和 `QSizePolicy.Fixed` **都挡不住**总宽不足时
+布局的挤压（实测仍裁字），唯一有效的是把窗口最小宽抬到实际需要的值。
+
+### R3.14 启动脚本不得为 WMI 阻塞用户
+
+`一键启动项目.bat` 里那段 WMI 自检已从"15 秒 + 再等 120 秒"改成**只探 2 秒、超时也只提示不等待**。
+理由：`main.py` 已改用 `sys.platform` / `PROCESSOR_ARCHITEW6432` 判断系统与架构（R3 之前的启动卡死修复），
+启动路径上没有任何一步会问 WMI；等 WMI 只对 `一键打包exe.bat` 有意义（PyInstaller 导入期必调
+`platform.win32_ver()`），那边的有界自检保留。实测本机 WMI 冷启动时：改前白等最多 135 秒，改后 2.3 秒继续。
+
 ---
 
 ## 后续规则占位

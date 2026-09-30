@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import traceback
 import zipfile
 from dataclasses import dataclass, field
@@ -2047,13 +2048,16 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
     raise last_exc
 
 
+def _semver_key(v: str):
+    """语义版本排序键：逐段转 int，转不了的（如 "21.0.4-beta"）退到最小档。"""
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except ValueError:
+        return (0,)
+
+
 def _sort_semver_desc(vs) -> list:
-    def key(v: str):
-        try:
-            return tuple(int(x) for x in v.split("."))
-        except ValueError:
-            return (0,)
-    return sorted(set(vs), key=key, reverse=True)
+    return sorted(set(vs), key=_semver_key, reverse=True)
 
 
 def fetch_jdk_versions() -> List[ComponentVersion]:
@@ -4581,6 +4585,124 @@ def _installed_icon(color: str = "#2e7d32", size: int = 16) -> QIcon:
 
 
 # ---------------------------------------------------------------------------
+# 旧终端点名：切换之后，哪些还开着的窗口拿的是旧环境
+# ---------------------------------------------------------------------------
+
+# 不含 conhost.exe：一台机器上常年挂着几十个，全列出来等于没列
+SHELL_PROCESS_NAMES = ("powershell.exe", "pwsh.exe", "cmd.exe",
+                       "windowsterminal.exe", "wt.exe")
+
+
+def list_shell_processes() -> List[Tuple[int, str, float, bool]]:
+    """当前活着的终端类进程，返回 [(pid, 名字, 创建时间 epoch, 本进程能否打开它)]。
+
+    拿不到就返回空表，调用方按"没测到"处理，不许据此断言"没有旧终端"。
+
+    最后一项为 False 基本等于那个窗口是「以管理员身份运行」的：OpenProcess 直接
+    error 5。这类窗口既拿不到我们的 WM_SETTINGCHANGE 广播（UIPI 挡在中间），
+    环境块又是登录时那一份，只有整窗关掉重开才会更新。
+    """
+    if CURRENT_OS != "Windows":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class _PE(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_char * 260)]
+
+        class _FT(ctypes.Structure):
+            _fields_ = [("lo", wintypes.DWORD), ("hi", wintypes.DWORD)]
+
+        class _ST(ctypes.Structure):
+            _fields_ = [(n, wintypes.WORD) for n in
+                        ("wYear", "wMonth", "wDayOfWeek", "wDay",
+                         "wHour", "wMinute", "wSecond", "wMilliseconds")]
+
+        def _epoch(st: "_ST") -> float:
+            return time.mktime((st.wYear, st.wMonth, st.wDay, st.wHour,
+                                st.wMinute, st.wSecond, 0, 0, -1))
+
+        snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)
+        if not snap or snap == -1:
+            return []
+        out: List[Tuple[int, str, float, bool]] = []
+        try:
+            entry = _PE()
+            entry.dwSize = ctypes.sizeof(_PE)
+            got = kernel32.Process32First(ctypes.c_void_p(snap), ctypes.byref(entry))
+            while got:
+                name = entry.szExeFile.decode("mbcs", "replace").lower()
+                pid = int(entry.th32ProcessID)
+                if name in SHELL_PROCESS_NAMES:
+                    start = 0.0
+                    h = kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED
+                    if h:
+                        ft, zero = _FT(), _FT()
+                        if kernel32.GetProcessTimes(h, ctypes.byref(ft), ctypes.byref(zero),
+                                                    ctypes.byref(zero), ctypes.byref(zero)):
+                            st, lst = _ST(), _ST()
+                            kernel32.FileTimeToSystemTime(ctypes.byref(ft), ctypes.byref(st))
+                            kernel32.SystemTimeToTzSpecificLocalTime(None, ctypes.byref(st),
+                                                                     ctypes.byref(lst))
+                            start = _epoch(lst)
+                        kernel32.CloseHandle(h)
+                    probe = kernel32.OpenProcess(0x0410, False, pid)  # VM_READ|QUERY_INFO
+                    openable = bool(probe)
+                    if probe:
+                        kernel32.CloseHandle(probe)
+                    out.append((pid, name, start, openable))
+                got = kernel32.Process32Next(ctypes.c_void_p(snap), ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snap)
+        return out
+    except Exception:
+        return []
+
+
+def stale_shell_lines(procs: List[Tuple[int, str, float, bool]],
+                      since_epoch: float, self_pid: int,
+                      limit: int = 6) -> List[str]:
+    """把比 since_epoch 更早、还活着的终端进程写成可点名的日志行（纯函数，便于测）。"""
+    old = [p for p in procs if p[0] != self_pid and p[2] and p[2] < since_epoch]
+    if not old:
+        return []
+    old.sort(key=lambda p: p[2])
+    lines = [f"另有 {len(old)} 个终端窗口比这次切换更早，它们揣的还是切换前那份环境"
+             "（关掉标签页不算新终端，要关掉整个窗口）："]
+    for pid, name, start, openable in old[:limit]:
+        tail = ("" if openable
+                else "  ← 管理员窗口：本工具的通知进不去，只能整窗关掉重开")
+        lines.append(f"    {name}  pid={pid}  起于 "
+                     f"{time.strftime('%H:%M:%S', time.localtime(start))}{tail}")
+    if len(old) > limit:
+        lines.append(f"    …另有 {len(old) - limit} 个更早的窗口未列出")
+    return lines
+
+
+def open_clean_console(env: Dict[str, str]) -> Optional[int]:
+    """用给定的环境块开一个独立的 cmd 窗口，返回 pid；开不了返回 None。
+
+    这是顶栏「开验证终端」唯一的副作用接缝，也是它唯一的测试接缝 ——
+    参数名（env / creationflags）写错的话界面要点下去才炸，所以有一条用例专门钉它。
+    """
+    try:
+        proc = subprocess.Popen(["cmd.exe"], env=env,
+                                creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return proc.pid
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # UI 组件：卡片
 # ---------------------------------------------------------------------------
 class ComponentCard(QFrame):
@@ -4681,7 +4803,7 @@ class ComponentCard(QFrame):
         # 换选中就要重算切换/卸载按钮：不连这条，切一次生效版本后按钮会一直灰着
         # （2026-09-30 真机反馈）。只做按钮同步，不重跑探测、不起版本探测子进程。
         self.version_combo.currentIndexChanged.connect(
-            lambda *_: self._sync_switch_buttons())
+            lambda *_: self._sync_action_buttons())
         mid.addWidget(self.version_combo)
 
         mid.addSpacing(8)
@@ -4794,23 +4916,48 @@ class ComponentCard(QFrame):
         self._render_status_label()
 
     # ------------------------------------------------------------------
-    def _sync_switch_buttons(self) -> None:
-        """按「当前选中的版本」重算切换与卸载两个按钮的启用状态与提示。
+    def _installed_here(self, version: str) -> Optional[Path]:
+        """该版本是否真的装好了：装好返回安装目录，否则 None。
 
-        单独成方法是因为它有两个触发时机：① _detect_status 之后；
-        ② 下拉框换选中之后。只挂在 ① 上就会出现真机反馈的那个问题——
-        切一次生效版本后按钮置灰，用户换选另一个版本，没人重算，按钮一直灰着。
+        只看目录存在不够 —— 解压一半失败也会留下目录，那时按钮灰掉、
+        卸载又删不出东西，用户就被卡死了。所以还要在里面找得到该组件的可执行文件；
+        没有 exec_name 的组件（Jenkins 只有一个 war 包）退化成"目录非空"。
         """
+        home = self.component.install_dir(version)
+        if not home.is_dir():
+            return None
+        if self.component.exec_name:
+            return home if self.component.exec_path_in_home(str(home)) else None
+        return home if any(home.iterdir()) else None
+
+    # ------------------------------------------------------------------
+    def _sync_action_buttons(self) -> None:
+        """按「当前选中的版本」重算三个按钮：下载并安装 / 切换生效 / 卸载。
+
+        三个触发点：① _detect_status 之后；② 下拉框换选中之后；
+        ③ 下载结束或失败之后。只挂 ① 会出真机 bug —— 切一次生效版本后按钮置灰，
+        用户换选另一个版本没人重算，按钮一直灰着点不动（2026-09-30 反馈）。
+        """
+        # 下载途中按钮归下载流程管：否则换个选中就能并发触发第二次下载
+        if not (self.worker and self.worker.isRunning()):
+            selected = self._current_version().version
+            home = self._installed_here(selected)
+            self.btn_install.setEnabled(home is None)
+            self.btn_install.setToolTip(
+                f"该版本已安装在 {home}；要重新安装请先点「卸载」" if home else
+                "下载该版本并解压安装到本工具工作目录")
         if not self._mv_buttons_ready:
             return
-        selected = self._current_version().version
-        # 未对齐/被遮蔽时按钮必须可用：哪怕 selected 恰好等于 active，
+        # 未对齐/被遮蔽时切换按钮必须可用：哪怕 selected 恰好等于 active，
         # 也得让用户能再点一次去收敛 PATH 与登记表
+        selected = self._current_version().version
         can_switch = selected != self._mv_active or self._mv_warned
         self.btn_configure.setEnabled(can_switch)
         self.btn_configure.setToolTip(
             "把下拉框选中的版本设为生效版本：改 XXX_HOME，并把本组件在 PATH 里的"
-            "条目收敛成这一条；已开着的终端需重开才生效" if can_switch else
+            "条目收敛成这一条；已开着的终端需重开才生效"
+            "（Windows Terminal 的新标签页、IDE 里的新终端都还是旧环境，要整个关掉重开）"
+            if can_switch else
             f"选中的 {selected} 已是生效版本；要换版本先在下拉框里选中")
         # 卸载按钮只对"已装的选中版本"启用：tooltip 承诺卸载选中的那个，
         # 而 selected 完全可能没装——放行会走 resolve 兜底删掉用户没选中的版本。
@@ -4837,10 +4984,18 @@ class ComponentCard(QFrame):
         本方法在窗口构建卡片时就会被调用，因此绝不同步执行组件命令：detect 只判定
         存在（probe_version=False），版本号交给 VersionProbeWorker 异步回填。
         """
+        # 「下载并安装」的启用状态只取决于选中的版本装没装好，与后面走哪条探测分支无关，
+        # 所以在分支之前先同步一次；多版本那两个按钮要等本方法算出 active 之后再同步。
+        self._sync_action_buttons()
         # 多版本组件：状态胶囊要表达的是"装了哪几个 + 哪个生效"，
         # 而不是单一的"已配置/未配置"；生效以 active 登记表为准，探测只用于回填版本号。
         if self.component.multi_version:
             ordered = installed_versions(self.component)
+            # 磁盘上的已装集合刚变过（装完/卸完），"已装但清单里没有"的合成项要跟着增减。
+            # 必须放在 `if ordered` 之前：最后一个额外版本被卸掉时 ordered 为空，
+            # 会直接落到下面的通用探测分支，放里面就永远摘不掉那一行。
+            if self.version_combo.count() != len(self._combo_version_list()):
+                self._reload_combo_items(preferred=self.version_combo.currentText())
             # 只有"本工具目录下确实装着版本"时才走多版本胶囊。一个都没有时不许就此断言
             # "未安装"——用户很可能自己装了 JDK/Maven（JAVA_HOME 或 PATH 里就有），
             # 那要交给下面的通用探测识别成"已配置（系统安装）"。
@@ -4875,14 +5030,14 @@ class ComponentCard(QFrame):
                     "color:#2e7d32;font-weight:600;padding:2px 8px;"
                     "background:#e8f5e9;border-radius:10px;")
                 selected = self._current_version().version
-                # 按钮启用状态交给 _sync_switch_buttons()：它还有第二个触发时机 ——
+                # 按钮启用状态交给 _sync_action_buttons()：它还有第二个触发时机 ——
                 # 下拉框换选中。只挂在这里会出真机 bug（2026-09-30）：切一次之后按钮置灰，
                 # 用户换选另一个版本，没人重算，按钮一直灰着点不动。
                 self._mv_active = active
                 self._mv_warned = warned
                 self._mv_installed_set = {v for v, _p in ordered}
                 self._mv_buttons_ready = True
-                self._sync_switch_buttons()
+                self._sync_action_buttons()
                 # 探测回填只在确有生效版本、且没有未对齐时开放闸门，并把上一轮
                 # 生效版本回填过的旧版本号清掉——否则切完版本胶囊还挂着 21.0.4。
                 self._status_shows_configured = bool(active) and not mismatch
@@ -4974,6 +5129,30 @@ class ComponentCard(QFrame):
     def _display_label(self, cv: ComponentVersion) -> str:
         return getattr(cv, "display_label", None) or cv.version
 
+    def _combo_version_list(self) -> List[ComponentVersion]:
+        """下拉框真正要显示的清单：内置/在线清单 + 磁盘已装但清单里没有的版本。
+
+        必须合成是因为在线清单只保留近期版本（2026-09-30 真机：bun 清单里已无 1.4.1，
+        磁盘上却装着），否则会出现"胶囊说已装 2 个版本、下拉框里只有 1 个能选"——
+        那个版本切不了也卸不掉。合成项没有下载 URL，但"已装即置灰安装按钮"正好兜住。
+        只对多版本组件合成：其余 19 个组件的清单逐字不变（R3.9）。
+        """
+        result = list(self.component.versions)
+        if not self.component.multi_version:
+            return result
+        known = {cv.version for cv in result}
+        extras = [v for v, _p in installed_versions(self.component) if v not in known]
+        for ver in extras:
+            cv = ComponentVersion(version=ver, url_map={}, archive_map={})
+            key = _semver_key(ver)
+            pos = len(result)
+            for i, existing in enumerate(result):
+                if _semver_key(existing.version) < key:
+                    pos = i
+                    break
+            result.insert(pos, cv)
+        return result
+
     def _refresh_installed_marks(self) -> None:
         """给磁盘上已装的版本挂绿勾；只动 DecorationRole，不碰条目文本。
 
@@ -4985,23 +5164,25 @@ class ComponentCard(QFrame):
         """
         if not self.component.multi_version:
             return
+        versions = self._combo_version_list()
         # F4 护栏：下面的循环按 enumerate(versions) 的行号往 combo 写数据，前提是
-        # 行数与版本清单 1:1。哪天有调用点在改清单的同时没重灌 combo（搜索过滤、
+        # 行数与下拉框清单 1:1。哪天有调用点在改清单的同时没重灌 combo（搜索过滤、
         # repopulate 时机变化），按位写会写歪或直接 IndexError——宁可这一轮不刷勾，
         # 也不写歪：行数不齐就整轮跳过。
-        if self.version_combo.count() != len(self.component.versions):
+        if self.version_combo.count() != len(versions):
             return
         installed = {v for v, _p in installed_versions(self.component)}
         icon = _installed_icon()
         empty = QIcon()
-        for i, cv in enumerate(self.component.versions):
+        for i, cv in enumerate(versions):
             self.version_combo.setItemData(i, icon if cv.version in installed else empty,
                                            Qt.DecorationRole)
 
     # ------------------------------------------------------------------
     def _reload_combo_items(self, preferred: Optional[str] = None) -> None:
-        """把 self.component.versions 灌进下拉框，并重挂"已装"图标。"""
-        labels = [self._display_label(v) for v in self.component.versions]
+        """把下拉框清单（含"已装但清单里没有"的合成项）灌进 combo，并重挂"已装"图标。"""
+        versions = self._combo_version_list()
+        labels = [self._display_label(v) for v in versions]
         # 若首次调用（combo 里还没内容），走普通 addItems 路径
         if self.version_combo.count() == 0:
             self.version_combo.blockSignals(True)
@@ -5033,13 +5214,19 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _current_version(self) -> ComponentVersion:
-        """按显示 label 反查真实版本，兼容 SearchableComboBox 的可编辑文本。"""
+        """按显示 label 反查真实版本，兼容 SearchableComboBox 的可编辑文本。
+
+        必须与 `_reload_combo_items` 用同一份清单（含"已装但清单里没有"的合成项）：
+        两处不一致时，下拉框里明明显示着某个版本，反查却落回第一项，
+        用户以为在切 1.4.1、实际配出去的是 1.4.2。
+        """
         text = self.version_combo.currentText().strip()
-        for cv in self.component.versions:
+        versions = self._combo_version_list()
+        for cv in versions:
             if self._display_label(cv) == text or cv.version == text:
                 return cv
         idx = max(0, self.version_combo.currentIndex())
-        return self.component.versions[min(idx, len(self.component.versions) - 1)]
+        return versions[min(idx, len(versions) - 1)]
 
     # ------------------------------------------------------------------
     def on_install_clicked(self) -> None:
@@ -5184,8 +5371,9 @@ class ComponentCard(QFrame):
         except Exception as exc:
             self._log("error", f"安装/配置失败：{exc}\n{traceback.format_exc()}")
         finally:
-            self.btn_install.setEnabled(True)
+            # 按钮状态统一交给 _sync_action_buttons（已装的版本不许被重新点亮）
             self.btn_configure.setEnabled(True)
+            self._sync_action_buttons()
             # 装成功与否都会在磁盘上留下（或不留）目录，勾的有无正由磁盘决定，
             # 这里统一刷新一次，省得在两个分支各写一遍。
             self._refresh_installed_marks()
@@ -5220,8 +5408,8 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _on_download_fail(self, msg: str) -> None:
-        self.btn_install.setEnabled(True)
         self.btn_configure.setEnabled(True)
+        self._sync_action_buttons()
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.setVisible(False)
         self.progress.setRange(0, 100)
@@ -5355,6 +5543,37 @@ class ComponentCard(QFrame):
                 or infer_active_from_env(self.component)
                 or self._path_hit_version())
 
+    def _log_verification_hint(self, since_epoch: Optional[float] = None) -> None:
+        """切换后给出可直接复制的校验命令，并点名"比这次切换更早、还开着的终端"。
+
+        写这么细是因为真实踩过的坑：Windows 是把环境块**复制**给新进程的，
+        Windows Terminal 的新标签页、IDE 里新开的终端都还继承着宿主进程那份旧环境。
+        用户按"重开终端"的字面意思操作，看到的仍然是切换前的版本，
+        于是以为切换没生效（2026-09-30 真机反馈）。
+        只讲道理没用——同一天实测：注册表与新进程都是 1.4.1，用户屏幕上那个
+        PowerShell 进程创建于切换前 12 分钟。所以这里直接把 pid 和起始时间摆出来。
+        """
+        exe = self.component.exec_name or ""
+        args = " ".join(self.component.version_args or ["--version"])
+        lines = ["校验是否真生效（必须在切换之后新启动的终端里跑）："]
+        if exe:
+            lines.append(f"    where {exe}      ← 应当指向上面那个目录")
+            lines.append(f"    {exe} {args}")
+        if self.component.env_var:
+            lines.append(f"    echo %{self.component.env_var}%      ← cmd 里看变量值")
+        lines.append("不想重开，可以在当前 PowerShell 里先刷新再验：")
+        lines.append("    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine')"
+                     " + ';' + [Environment]::GetEnvironmentVariable('Path','User')")
+        lines.append("注意：Windows Terminal 的新标签页、IDE 里新开的终端都还是旧环境，"
+                     "要把整个 Windows Terminal / IDE 关掉重开。")
+        if since_epoch:
+            try:
+                procs = list_shell_processes()
+            except Exception:
+                procs = []
+            lines.extend(stale_shell_lines(procs, since_epoch, os.getpid()))
+        self._log("info", "\n".join(lines))
+
     # ------------------------------------------------------------------
     def _apply_active(self, version: str) -> bool:
         """把指定版本设为生效版本；成功后写登记表并刷新界面。
@@ -5364,6 +5583,7 @@ class ComponentCard(QFrame):
         刷新已装勾是必要的：apply_active_version 中途失败会回滚磁盘/环境状态，
         生效版本变了也可能连带影响状态探测读到的目录，图标得跟磁盘重新对齐。
         """
+        t_switch = time.time()
         try:
             steps = apply_active_version(self.component, version)
         except SwitchError as exc:
@@ -5377,6 +5597,7 @@ class ComponentCard(QFrame):
         verdict, shadow = self._path_effective_check(version)
         if verdict == "ok":
             self._log("ok", f"复验通过：新开的终端会用到 {self._expected_bin_dir(version)}")
+            self._log_verification_hint(t_switch)
         elif verdict == "shadowed":
             self._log("warn", (f"环境变量已切到 {version}，但复验发现新终端里 "
                                f"{self.component.exec_name} 仍会先命中 {shadow} —— "
@@ -5386,6 +5607,7 @@ class ComponentCard(QFrame):
         else:
             self._log("warn", "未能复验新终端会用到哪个目录（拿不到系统合成后的环境），"
                               "请重开一个终端手动确认一次。")
+            self._log_verification_hint(t_switch)
         self._refresh_installed_marks()
         self._detect_status()
         return True
@@ -5603,7 +5825,9 @@ class MainWindow(QMainWindow):
         if _icon_path.exists():
             self.setWindowIcon(QIcon(str(_icon_path)))
         self.resize(1000, 680)
-        self.setMinimumSize(880, 560)
+        # 标题栏（标题 + 5 个按钮 + 窗口控制）实测需要 ~992 像素；原来 880 时布局已经
+        # 在挤压，多一个「开验证终端」后开始把「清理残留 PATH」压到裁字（178→144）。
+        self.setMinimumSize(1000, 560)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
 
@@ -5671,6 +5895,24 @@ class MainWindow(QMainWindow):
         )
         self.btn_cleanup_path.clicked.connect(self._on_cleanup_path_clicked)
         tb.addWidget(self.btn_cleanup_path)
+
+        # 开验证终端按钮
+        self.btn_clean_terminal = QPushButton("🖥 开验证终端")
+        self.btn_clean_terminal.setObjectName("iconBtn")
+        self.btn_clean_terminal.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_clean_terminal.setToolTip(
+            "用「系统为新进程合成的环境」开一个命令行窗口\n"
+            "在这里查版本号，等价于在一个全新打开的终端里查——"
+            "已开着的终端/IDE 标签页拿的仍是旧环境，那里对不上不代表切换失败"
+        )
+        self.btn_clean_terminal.clicked.connect(self._on_clean_terminal_clicked)
+        tb.addWidget(self.btn_clean_terminal)
+
+        # 标题栏按钮定宽：空间不足时宁可让窗口最小宽去兜（见上面 setMinimumSize），
+        # 也不许把按钮压扁裁字。
+        for _btn in (self.btn_github, self.btn_refresh, self.btn_cleanup_path,
+                     self.btn_clean_terminal):
+            _btn.setSizePolicy(QSizePolicy.Fixed, _btn.sizePolicy().verticalPolicy())
 
         # 捐赠图标（不在 README 中提及）
         self.btn_donate = QPushButton("♥")
@@ -6306,6 +6548,32 @@ class MainWindow(QMainWindow):
             self.btn_max.setText("❐")
 
     # ------------------------------------------------------------------
+    def _on_clean_terminal_clicked(self) -> None:
+        """开一个"新进程环境"的命令行窗口，用来判定切换到底生效没有。
+
+        为什么非做不可：Windows 是把环境块**复制**给新进程的，旧宿主（Windows Terminal、
+        IDE）开出来的新标签页拿的还是宿主那份旧环境。2026-09-30 真机就是这个局面 ——
+        注册表与 explorer 现场启动的进程都是 1.4.1，用户"新开的"窗口里仍是 1.4.2。
+        跟用户解释机制没用，给一个必然干净的窗口才有结论。
+        """
+        composed = EnvManager.composed_env()
+        if not composed:
+            self._append_log(
+                "warn", "拿不到系统为新进程合成的环境（非 Windows 或 API 被拒），"
+                        "无法开验证终端。可以在当前 PowerShell 里原地刷新再验："
+                        "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine')"
+                        " + ';' + [Environment]::GetEnvironmentVariable('Path','User')")
+            return
+        pid = open_clean_console(composed)
+        if pid is None:
+            self._append_log("error", "验证终端开不了（cmd.exe 启动失败）。")
+            return
+        self._append_log(
+            "ok", f"已开一个干净环境的命令行窗口（pid={pid}）。在里面跑 bun -v / java -version，"
+                  "得到的版本就是任何**全新**终端应当看到的版本；"
+                  "若这里正确、你原来那个窗口不对，说明那个窗口比本次切换更早"
+                  "（见日志里点名的旧终端清单）。")
+
     def _on_cleanup_path_clicked(self) -> None:
         """扫描并清理 PATH 中指向本工具目录、但已不存在的残留条目。"""
         dead = find_dead_tool_path_entries()
