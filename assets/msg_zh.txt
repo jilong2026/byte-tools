@@ -1,0 +1,77 @@
+# byte-tools one-click script messages (Chinese).
+#
+# This file is DATA, not code. The .bat files stay pure ASCII on purpose: a
+# multibyte .bat plus "chcp 65001" desyncs cmd.exe's read offset and it starts
+# executing the middle of a line. Chinese text therefore never appears in the
+# script itself, only here.
+#
+# Format:  key=value     (one per line, '#' starts a comment)
+# Line endings MUST stay LF. cmd's "for /f" leaves the CR of a CRLF file inside
+# the value, and echo then emits CR CR LF: every message gets a stray carriage
+# return. bt_boot_script_tests.py asserts this.
+# {0} in a value is replaced by the third argument of call :say.
+# Do not use '!' in a value: FOR-variable substitution plus delayed expansion
+# eats it. Full-width punctuation is fine.
+# Indentation is part of the message, keep it aligned with the English text.
+
+hdr_1=  byte-tools 一键启动
+hdr_2=  工作目录: {0}
+step1=[1/4] 查找可用的 Python 3.10-3.14 ...
+step1_found=      找到: {0}
+step1_none=      未找到独立解释器，稍后仅尝试复用已有 .venv
+step2=[2/4] 检查 Python 虚拟环境...
+step2_ready=      虚拟环境就绪:
+step2_creating=      未找到虚拟环境，正在创建 {0} ...
+step2_rebuild=      已有虚拟环境不可用，重建中...
+step2_nopip=      虚拟环境缺少 pip，执行 ensurepip...
+step3=[3/4] 检查项目依赖...
+step3_ready=      PySide6 / requests 已就绪
+step3_installing=      缺少 PySide6 / requests，开始安装（清华镜像优先）...
+step3_done=      依赖安装完成
+step3_2=      清华镜像失败，改用阿里云镜像...
+step3_3=      阿里云镜像也失败，回退官方 PyPI...
+step4=[4/4] 启动 byte-tools 图形界面（关闭程序窗口即退出）
+step4_pack=[4/4] 用 PyInstaller 按 byte-tools.spec 打包，约 1-3 分钟，请勿关闭窗口
+wmi_1=      [提示] 系统 WMI 2 秒内没响应（WINMGMT 多半在冷启动）。不影响本次启动；
+wmi_2=             但「一键打包exe.bat」会卡住，要打包就先修 winmgmt：
+wmi_3=             管理员 CMD 里 net stop winmgmt，再 net start winmgmt。
+press_key=按任意键关闭窗口...
+
+hdr_pack=  byte-tools 一键打包 exe
+pyi_check=      检查 PyInstaller...
+pyi_ready=      已就绪
+pyi_installing=      未安装 PyInstaller，开始安装...
+pyi_done=      PyInstaller 安装完成
+pack_ok_1=  打包成功: {0}
+pack_ok_2=  文件大小: {0} 字节
+pack_ok_3=  生成时间: {0}
+pack_ok_4=  双击 dist 里的 byte-tools.exe 即可运行，也可拷到其他 Win10/11 64 位电脑
+
+boot_winget=      没找到可用 Python，正在用 winget 静默安装 3.12（用户级，无需管理员）...
+boot_winget_fail=      winget 没能装出可用的 Python，改用官方安装包直接下载...
+boot_no_winget=      本机没有 winget，改用官方安装包直接下载...
+boot_try=      尝试下载地址: {0}
+boot_dl_ok=      安装包下载完成，体积校验通过
+boot_dl_bad=      这个源拿到的文件不完整（小于 5 MB），换下一个源...
+boot_installing=      正在静默安装，约 1 分钟，请稍候...
+boot_failed=      自动安装失败：winget 与三个下载地址都没能装出可用的 Python。
+
+err_no_app_1=[错误] 当前目录缺少 byte-tools 的必要文件。
+err_no_app_2=       请把本脚本放在 byte-tools 项目根目录里再运行。
+err_no_app_3=       当前目录: {0}
+err_no_spec=[错误] 当前目录缺少 byte-tools.spec，请确认脚本在项目根目录里。
+err_no_python_1=[错误] 自动准备 Python 失败，脚本已经把能自动化的路都走了一遍。
+err_no_python_2=       依次尝试过: winget 静默安装、华为云镜像、npmmirror 镜像、python.org 官方地址。
+err_no_python_3=       最常见的原因是断网或被安全软件拦截，恢复网络后重新双击本脚本即可。
+err_no_python_4=       仍然不行时，最后一步手工处理：安装 Python 3.12 后重新双击本脚本。
+err_venv_1=[错误] 创建或重建虚拟环境 {0} 失败。
+err_venv_2=       可以先手工删掉 {0} 目录再重试；完整报错见上方输出。
+err_deps_1=[错误] 依赖安装失败。
+err_deps_2=       原因一：网络不通，换个网络后重试，或手工执行：
+err_deps_3=         {0} -m pip install -r requirements.txt
+err_deps_4=       原因二：磁盘剩余空间不足，PySide6 安装后要 1 GB 左右。
+err_main_1=[错误] 启动失败，退出码: {0}
+err_main_2=       请把上面的报错信息一起反馈，方便定位。
+err_pack_1=[错误] 打包失败，退出码: {0}
+err_pack_2=       请把上面的报错信息一起反馈，方便定位。
+err_no_dist=[错误] 打包流程结束，但没有找到 dist\byte-tools.exe

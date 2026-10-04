@@ -22,7 +22,7 @@
 
 ## 一、项目概述
 
-**byte-tools** 是一款基于 **Python 3.9 + PySide6** 的跨平台桌面 GUI 工具，目标是把开发者最常用的语言运行时、构建工具、中间件的下载与配置全部自动化。
+**byte-tools** 是一款基于 **Python 3.10–3.14 + PySide6** 的跨平台桌面 GUI 工具，目标是把开发者最常用的语言运行时、构建工具、中间件的下载与配置全部自动化。
 
 一句话定位：
 
@@ -63,7 +63,7 @@
 
 技术栈速览：
 
-- **语言**：Python 3.9+
+- **语言**：Python 3.10 – 3.14（PySide6 6.11 声明 `requires_python >=3.10,<3.15`）
 - **GUI 框架**：PySide6（Qt 6 官方 Python 绑定，LGPL 授权）
 - **HTTP 客户端**：requests
 - **压缩解压**：Python 标准库 `zipfile` + `tarfile` + 单二进制 / `.war` 单文件直接重命名
@@ -180,11 +180,13 @@ byte-tools/
 ├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（跑起来慢，本轮未计入复核清单）
 ├── bt_startup_tests.py            # 离线回归测试：启动期不碰 WMI（见 8.2 与 4.9）
 ├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
+├── bt_boot_script_tests.py        # 离线回归测试：两个一键脚本的编码/换行/消息表/Python 自动安装闭环（见 8.2）
 └── assets/                  # 静态资源（PyInstaller 打包时通过 datas 一并打入）
     ├── byte-tools-pt.png    # 主界面截图
     ├── byte-tools.png       # 应用窗口图标
     ├── wechat.png           # 微信收款码
-    └── alipay.png           # 支付宝收款码
+    ├── alipay.png           # 支付宝收款码
+    └── msg_zh.txt           # 一键脚本的中文文案表（脚本本体必须纯 ASCII，见 8.2）
 ```
 
 运行时目录（程序首次启动自动创建）：
@@ -694,6 +696,7 @@ def main() -> int:
 | `bt_refresh_versions_tests.py` | 刷新版本链路 |
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
+| `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
 
 #### `bt_multiversion_tests.py` 覆盖面
 
@@ -1066,22 +1069,29 @@ RT_GROUP_ICON 里应列出 16/24/32/48/64/128/256 七档，且最大那条 RT_IC
 一键打包exe.bat nopause :: 供其它脚本调用（结束不等待按键）
 ```
 
-两者共用同一套四步流程（打包脚本在 [3/4] 之后多一步 PyInstaller 检查）：
+两者共用同一套流程（打包脚本在 [3/4] 之后多一步 PyInstaller 检查）：
 
 | 步骤 | 行为 | 失败出口 |
 | --- | --- | --- |
-| `[1/4]` | 定位解释器：`where py` 命中则依次试 `py -3.12 / -3.13 / -3.11 / -3.10 / -3.9 / -3`，再退到 `python`；用 `-c "sys.exit(0 if version_info >= (3,9) else 1)"` 判定可用性 | 仅记 `BASE_PY` 为空，不中断（有可用 `.venv` 时不需要它） |
-| `[2/4]` | `.venv\Scripts\python.exe` 存在且能 `import sys` 就复用；损坏则 `venv --clear` 重建；缺失则新建 | `:err_no_python` / `:err_venv` |
+| `[1/4]` | **先验 `.venv`**：版本落在 3.10–3.14 内就整步跳过，不找也不装解释器（省时间与流量）。否则依次试 `py -3.12/-3.13/-3.11/-3.10/-3.14` → `python`/`python3` → `%LOCALAPPDATA%\Programs\Python\Python<若干命名>\python.exe` → `for /d` 通配扫 `%LOCALAPPDATA%\Programs\Python\*`、`%ProgramFiles%\Python*`、`%ProgramFiles(x86)%\Python*`。**全空才自动安装**：`winget`（`where` 看不见就直接探 `%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe`）→ 不行再按 **华为云 → npmmirror → python.org** 下载官方安装包，拿到的文件 `< 5 MB` 判该源无效并换下一个，装完 30 秒内有界复扫 | 全部试过仍没有 Python 才 `:err_no_python`，文案先说清"脚本自动走过哪些路"，手工安装只作最后一句兜底 |
+| `[2/4]` | `.venv\Scripts\python.exe` 存在且版本落在 3.10–3.14 就复用；缺失则新建，损坏或版本越界则 `venv --clear` 重建 | `:err_no_python` / `:err_venv` |
 | `[3/4]` | `import PySide6, requests` 失败才 `pip install -r requirements.txt`；镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI** | `:err_deps` |
-| `[3/4] 前置` | **WMI 有界自检**：先 15 秒、无响应再等到 120 秒地试一次 `platform.win32_ver()`（daemon 线程 + `os._exit`，保证一定返回）。启动脚本只提示不中断；打包脚本 WMI 始终无响应时直接报错退出——因为 PyInstaller 一 `import` 就会调它，不拦就是"跑到检查 PyInstaller 之后再无输出" | `:finish_fail`（仅打包脚本） |
-| `[4/4]` | `python main.py`，或 `python -m PyInstaller --noconfirm byte-tools.spec` 并校验 `dist\byte-tools.exe` | `:err_main` / `:err_no_dist` |
+| `[3/4] 前置` | **WMI 只做一次 2 秒有界探测**（daemon 线程 + `os._exit`，保证一定返回），只提示不阻塞；以前"等 15 秒再等 120 秒"是让用户白看，已删。打包侧真正的问题由 `pyinstaller_no_wmi.py` 解决 | 无（提示后继续） |
+| `[4/4]` | `call "%RUN_PY%" main.py`，或 `call "%RUN_PY%" pyinstaller_no_wmi.py --noconfirm byte-tools.spec` 并校验 `dist\byte-tools.exe` | `:err_main` / `:err_no_dist` |
 
-实现约束（改动时请保持）：
-- **编码**：UTF-8（无 BOM）+ CRLF，脚本第 2 行 `chcp 65001 >nul`。本机 `GetACP/GetOEMCP` 实测为 65001，GBK 版脚本双击必乱码；UTF-8 + 自带 `chcp` 在 65001 与强制 936 两种控制台下都验证过显示正常
+实现约束（改动时请保持，护栏用例 `bt_boot_script_tests.py`）：
+- **`.bat` 本体必须 100% 纯 ASCII**。这不是格式洁癖：cmd.exe 用字节偏移量记录它读批处理的位置，文件里有多字节字符、又在中途 `chcp 65001` 时，偏移会错位，于是从**行的中间**开始解析——`REM` 注释与 `echo` 文案被当成命令执行，整条语句被吞掉。2026-10-05 本机实测：原 UTF-8 版脚本跑出 7 行 `'xxx' is not recognized as an internal or external command`，被吞的正好是 `:bootstrap_python` 的后半段（下载安装包 → 静默安装 → 复扫），于是"机器上没装 Python"就直落到"叫用户自己 winget / 自己去 python.org 下载"。同一份内容转成纯 ASCII（保留 `chcp 65001`）或转成 GBK + `chcp 936`，异常都是 0 行
+  > 本节旧文写的是"UTF-8 + 自带 chcp 已验证显示正常"——那只验了**显示**，没验**语句有没有真的执行**，结论是假的
+- **中文文案是数据不是代码**：放在 `assets\msg_zh.txt`（`key=value`，UTF-8，**LF 结尾**——`for /f` 会把 CRLF 的 `CR` 留在值里，`echo` 再补一个，每条消息多一次回车），由 `call :say key "英文兜底" "{0}的实参"` 打印。表值里不许有 `!`（延迟展开会吃掉）；英文兜底不许有 cmd 元字符 `&|<>()^"`，它走解析期插入，而表值不走
+- **语言选择 fail-open**：`chcp` 之前先抓 OEM 码页，再用 `reg query "HKCU\Control Panel\International" /v Locale` 取 LCID 末 4 位（0804/0404/0C04/1004）判中文；两者都不成立、或消息表文件缺失 → 退回英文。**不许用 `| find` 做过滤**：Git Bash 的 GNU find 会顶掉 `find.exe`，在 `/i` 参数上直接报错（本机踩过）
+- **外部调用一律带 `call`**：批处理里不带 `call` 调用另一个批处理，控制权不返回。`python.bat` / `curl.cmd` / `winget.cmd` 这类垫片（Anaconda、scoop 常见）会一模一样把脚本当场掐死——本机用 `stub\winget.bat` 复现过：脚本打印完"正在用 winget 静默安装"就再没有下文
+- **版本区间只有一处真源**：3.10–3.14，取自 PySide6 6.11 的 `requires_python >=3.10,<3.15`。收 3.9 或收 3.15 都会让用户走到"依赖装不上"的死路，而那里的旧文案是叫他自己再装一个 3.12
+- **自动安装不写 PATH**：`InstallAllUsers=0 PrependPath=0 Include_launcher=0`。发现逻辑读的是安装目录，写 PATH 既不必要，也违背"不修改系统环境"的承诺
 - **不用括号块读 errorlevel**：`if %errorlevel% ...` 一律配 `goto`，避免同一括号块内 `%errorlevel%` 在解析期展开导致读到旧值
-- **只在项目目录内动作**：不写注册表、不改系统 PATH、不改全局 Python
+- **只在项目目录内动作**：不写注册表、不改系统 PATH、不改全局 Python；唯一例外是本机一个可用 Python 都没有时按用户级装一份 3.12（落在 `%LOCALAPPDATA%\Programs\Python`）
 - **`main.py` 启动期不得调用 `platform.system()` / `platform.machine()`**：这两个函数内部走 `uname() → win32_ver() → 一次 WMI 查询`，WINMGMT 冷启动时能阻塞几十秒到一两分钟（本机实测：预热后同一调用 0.6 秒），表现就是"双击启动脚本后窗口一直不出来"。系统名用 `sys.platform` 判、架构用 `PROCESSOR_ARCHITEW6432/PROCESSOR_ARCHITECTURE`（POSIX 用 `os.uname().machine`）取，取值与 `platform` 的原答案一致；护栏用例见 `bt_startup_tests.py`
 - **PyInstaller 可用性只查落盘文件**（`.venv\Lib\site-packages\PyInstaller\__init__.py`），不要用 `python -c "import PyInstaller"` 探测：那条 import 必问 WMI，冷启动时脚本就卡在那里
+- **行尾必须是 CRLF**：LF-only 的批处理会让标签查找失败，本机实测报 `cannot find the batch label specified - try_dir`（用 Python 生成 .bat 时最容易顺手写成 LF）
 - 中文文件名走 `CreateProcessW` 双击正常；用 Git Bash 以 UTF-8 argv 调用时会因编码转换失败，需用 Python `subprocess` 传绝对路径
 
 ### 8.3 开发者源码运行（跨平台）

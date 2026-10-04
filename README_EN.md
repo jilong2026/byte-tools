@@ -175,10 +175,11 @@ Two Chinese-named one-click scripts live in the project root — **just double-c
 
 Both share the same bootstrap flow:
 
-1. Locate a usable Python (≥ 3.9; prefers `py -3.12/3.13/…`, falls back to `python`)
-2. Reuse the existing `.venv`; create or rebuild (`--clear`) it when missing or broken
-3. Install `requirements.txt` when needed, mirroring **Tsinghua TUNA → Aliyun → official PyPI**; the build script additionally installs PyInstaller
-4. Launch `main.py`, or build with `byte-tools.spec` and report the produced file size and timestamp
+1. Check whether `.venv` is already usable — if it is, the interpreter search is skipped entirely and nothing is downloaded
+2. Find a usable Python (**3.10 – 3.14**, matching PySide6's `requires_python`): `py -3.12/3.13/…` → `python`/`python3` → a directory sweep of `%LOCALAPPDATA%\Programs\Python\*` and `%ProgramFiles%\Python*`. When the machine has none, the script installs one itself: `winget` first, then the official installer downloaded in **Huawei Cloud → npmmirror → python.org** order, silently, per-user, no admin, no PATH edit
+3. Reuse the existing `.venv`; create or rebuild (`--clear`) it when missing or broken
+4. Install `requirements.txt` when needed, mirroring **Tsinghua TUNA → Aliyun → official PyPI**; the build script additionally installs PyInstaller
+5. Launch `main.py`, or build with `byte-tools.spec` and report the produced file size and timestamp
 
 ```text
 double-click 一键启动项目.bat  →  auto-configure + launch GUI
@@ -186,6 +187,7 @@ double-click 一键打包exe.bat   →  auto-configure + build dist/byte-tools.e
 ```
 
 > 💡 The scripts only touch `.venv` inside the project directory — they never modify the system PATH or your global Python.
+> Only when no usable Python exists at all do they install one, into the **current user's** `%LOCALAPPDATA%\Programs\Python` (per-user, no PATH edit, no admin).
 > Pass `nopause` when invoking them from another script (skips the final "press any key").
 
 > 🎨 The Windows build carries the project icon (`assets/byte-tools.ico`, derived from `assets/byte-tools.png` at 16–256 px). See [CODE_WIKI.md](./CODE_WIKI.md) 7.4 to regenerate it after a logo change. If Explorer still shows the old icon after an in-place rebuild, that is the Windows icon cache — rename the file or run `ie4uinit.exe -show`.
@@ -194,7 +196,7 @@ double-click 一键打包exe.bat   →  auto-configure + build dist/byte-tools.e
 
 #### Requirements
 
-- Python **3.9+**
+- Python **3.10 – 3.14**
 - A virtual environment is recommended (venv / conda).
 
 #### Clone and install

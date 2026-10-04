@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="python"/>
+  <img src="https://img.shields.io/badge/python-3.10%20to%203.14-blue.svg" alt="python"/>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg" alt="platform"/>
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license"/>
   <img src="https://img.shields.io/badge/GUI-PySide6-brightgreen.svg" alt="pyside6"/>
@@ -219,7 +219,7 @@
 
 ## 💻 环境要求
 
-- **Python**：3.9 及以上
+- **Python**：3.10 – 3.14（PySide6 6.11 声明 `requires_python >=3.10,<3.15`）；Windows 用户不必手工安装，两个一键脚本会自动发现、必要时静默装一个
 - **操作系统**：Windows 10 / 11、macOS 12+、Ubuntu 20.04+
 - **网络**：需要能访问对应组件的下载源（如 Apache 归档、Adoptium API、Node.js dist 等）
 - **磁盘**：视安装的组件而定，建议预留 3 GB 以上（JDK+Maven+Node+Python+MySQL 加起来约 1.5-2 GB）
@@ -241,10 +241,11 @@
 
 两者共用同一套自动装配流程：
 
-1. 查找可用的 Python（要求 ≥ 3.9；优先 `py -3.12/3.13/…`，找不到再退到 `python`）
-2. 复用已有的 `.venv`；缺失或损坏时自动创建 / 重建（`--clear`）
-3. 依赖缺失时安装 `requirements.txt`，镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI**；打包脚本额外安装 PyInstaller
-4. 启动 `main.py`，或按 `byte-tools.spec` 打包并在结束时显示产物大小与时间
+1. 先看 `.venv` 是不是已经能用；能用就直接跳过找解释器这一步，不浪费流量
+2. 找可用的 Python（**3.10 – 3.14**，与 PySide6 的 `requires_python` 对齐）：`py -3.12/3.13/…` → `python`/`python3` → `%LOCALAPPDATA%\Programs\Python\*` 与 `%ProgramFiles%\Python*` 目录扫描。**一个都没有就自己装**：先 `winget`，再按 **华为云 → npmmirror → python.org** 的顺序下载官方安装包静默安装（用户级、无需管理员、不写 PATH）
+3. 复用已有的 `.venv`；缺失或损坏时自动创建 / 重建（`--clear`）
+4. 依赖缺失时安装 `requirements.txt`，镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI**；打包脚本额外安装 PyInstaller
+5. 启动 `main.py`，或按 `byte-tools.spec` 打包并在结束时显示产物大小与时间
 
 ```text
 双击 一键启动项目.bat  →  自动配置 + 启动 GUI
@@ -252,6 +253,7 @@
 ```
 
 > 💡 脚本只读写项目目录内的 `.venv`，不会修改系统 PATH，也不会动系统全局 Python。
+> 只有在本机一个可用 Python 都没有时，它才会在**当前用户的** `%LOCALAPPDATA%\Programs\Python` 下装一份 3.12（用户级、不写 PATH、不需要管理员权限）。
 > 想脚本化调用可加参数 `nopause`（跑完不等待按键）。
 
 ### 手动方式（macOS / Linux 用户或想自定义者）
@@ -735,7 +737,7 @@ MongoDB 支持 Windows / Linux 自动下载；macOS 官方只提供源码或 Hom
 
 ## 🛠️ 技术栈
 
-- **Language**：Python 3.9+
+- **Language**：Python 3.10 – 3.14
 - **GUI 框架**：[PySide6](https://doc.qt.io/qtforpython-6/)（Qt 6 官方 Python 绑定，LGPL 授权）
 - **HTTP 客户端**：[requests](https://requests.readthedocs.io/)
 - **压缩包解压**：Python 标准库 `zipfile` + `tarfile`

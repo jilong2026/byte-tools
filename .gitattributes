@@ -1,0 +1,8 @@
+# 只钉死一键脚本自举契约（DEVELOPMENT.md 规则 R4）依赖的两个行尾。
+# 本机 core.autocrlf=true 会在检出时改写行尾，不声明的话别人 clone 出来：
+#   assets\msg_zh.txt 变 CRLF -> cmd 的 for /f 把 CR 留在消息值里，echo 再补
+#     一个，每条中文提示多一次回车；
+#   *.bat 变 LF -> cmd 的标签查找失败（实测报 cannot find the batch label）。
+# 其余文件一律不改行为。
+assets/msg_zh.txt text eol=lf
+*.bat text eol=crlf
