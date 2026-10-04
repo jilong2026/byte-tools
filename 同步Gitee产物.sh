@@ -2,6 +2,11 @@
 # -*- coding: utf-8 -*-
 # 把 GitHub Release 的产物信息同步到 Gitee Release。
 #
+# 谁会跑它：发布维护者（以及 release.yml 的 sync-to-gitee 任务）。普通用户不需要
+# 这个脚本，也不需要任何产物目录——他们从 Releases 页下载 byte-tools.exe，或双击
+# 仓库根目录那两个一键脚本。本机暂存产物用的 release-assets/ 被 .gitignore 排除是
+# 故意的：约 220 MB 二进制不该进版本库，同步完就可以删。
+#
 # 【2026-09-29 策略变更】Gitee 侧不再挂大二进制产物，只在 Release 正文里写清各平台
 #   产物的 GitHub 直链。原因：GitHub 托管 runner 在境外，往 gitee.com 推 84MB 附件
 #   会长时间挂死且服务端根本不落地（v1.0.3 实测：一次 POST 挂了 70 分钟，
@@ -222,6 +227,10 @@ fi
 
 if [ ! -d "${ASSETS_DIR}" ]; then
   echo "错误：产物目录不存在: ${ASSETS_DIR}"
+  echo "      谁会跑这个脚本：发布维护者，用来把 GitHub Release 镜像到 Gitee。"
+  echo "      普通用户不需要这个目录——他们要么从 Releases 页下载 byte-tools.exe，"
+  echo "      要么双击本目录下那两个一键脚本。它被 .gitignore 排除是故意的："
+  echo "      约 220 MB 的二进制不该进版本库，同步完这个目录就可以删掉。"
   echo "      先取产物：curl -L -o \"${ASSETS_DIR}/<文件名>\" \"${GH_DOWNLOAD_BASE}/<文件名>\""
   exit 1
 fi
@@ -238,6 +247,7 @@ if [ "${FOUND_ART}" -eq 0 ]; then
     echo "      期望的文件名：${RELEASE_ARTIFACTS}"
     echo "      实际看到：$(ls -1 "${ASSETS_DIR}" 2>/dev/null | tr '\n' ' ')"
     echo "      注意仓库根目录的 assets/ 是图标目录，不是产物目录（本机暂存请用 release-assets/）"
+    echo "      再提醒一次：这是发布维护者用的脚本，普通用户不需要任何产物目录"
     exit 1
   fi
   echo "   警告：${ASSETS_DIR} 里没有产物文件；本次不上传任何东西，"

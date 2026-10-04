@@ -24,6 +24,11 @@ REM   this-script.bat v1.0.2 <GiteeToken> [assets_dir] [nopause]
 REM Usage (double click):
 REM   prompts for tag and token; assets dir defaults to release-assets
 REM
+REM Who runs this: the release maintainer, to mirror a GitHub Release onto Gitee.
+REM End users never need release-assets - they download the exe from the Releases
+REM page, or run the two one-click scripts in this folder. The dir is gitignored
+REM on purpose; 220 MB of binaries must not enter the repository.
+REM
 REM Prepare the artifacts first - no gh needed. Direct github.com often times out from
 REM mainland China, so use the accelerator prefix (see GH_ACCEL above):
 REM   mkdir release-assets
@@ -266,6 +271,12 @@ goto :fail_nopause
 
 :err_dir
 echo error: assets dir not found: %ASSETS_DIR%
+echo   who runs this script: the release maintainer, to mirror a GitHub Release
+echo   onto Gitee. End users never need this directory - they either download
+echo   byte-tools.exe from the Releases page, or run the two one-click scripts
+echo   sitting in this folder. It is gitignored on purpose: about 220 MB of
+echo   binaries must not enter the repository, and this dir is scratch space
+echo   that can be deleted right after a sync.
 echo   create it and fetch the release files into it, no gh CLI needed:
 echo     mkdir "%ASSETS_DIR%"
 echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
