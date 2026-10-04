@@ -29,11 +29,9 @@ REM End users never need release-assets - they download the exe from the Release
 REM page, or run the two one-click scripts in this folder. The dir is gitignored
 REM on purpose; 220 MB of binaries must not enter the repository.
 REM
-REM Prepare the artifacts first - no gh needed. Direct github.com often times out from
-REM mainland China, so use the accelerator prefix (see GH_ACCEL above):
-REM   mkdir release-assets
-REM   curl -L -o release-assets\byte-tools.exe %GH_ACCEL%https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe
-REM   (same for byte-tools-windows-x64.zip / byte-tools-macos-arm64.zip / byte-tools-linux-x64)
+REM The artifacts are downloaded automatically into that dir when missing - from
+REM the accelerator first, github.com last (rule R1: mirror first, origin last).
+REM See GH_ACCEL below for the measured throughput of each accelerator.
 REM
 REM Requires: curl.exe (bundled with Windows 10 1803+) and PowerShell 5.1+
 REM Note: this file is intentionally ASCII-only. UTF-8 batch files are parsed
@@ -103,6 +101,11 @@ set "RETRY_OPT=--retry 1 --retry-delay 5"
 curl.exe --help all 2>nul | findstr /i "retry-all-errors" >nul
 if not errorlevel 1 set "RETRY_OPT=%RETRY_OPT% --retry-all-errors"
 
+REM ---- assets dir: create it and pull whatever is missing ----
+REM One-click means one-click. Telling the maintainer to run four curl commands
+REM is the same defect the one-click launch scripts used to have.
+call :ensure_assets
+
 REM ---- assets dir check ----
 if not exist "%ASSETS_DIR%\" goto :err_dir
 
@@ -124,6 +127,12 @@ echo.
 echo error: no build artifact found in "%ASSETS_DIR%".
 echo   What is in there:
 dir /b "%ASSETS_DIR%"
+if not defined FETCH_FAILED goto :no_art_manual
+echo.
+echo   automatic download was tried first and failed for:%FETCH_FAILED%
+echo   that means both the accelerator and github.com were unreachable, or the
+echo   tag has no release assets yet - check TAG_NAME and the network.
+:no_art_manual
 echo.
 echo   This script wants the release files, named exactly:
 echo     byte-tools.exe
@@ -132,7 +141,7 @@ echo     byte-tools-macos-arm64.zip
 echo     byte-tools-linux-x64
 echo   Note .\assets in this repo is the ICON folder, not the artifact folder.
 echo.
-echo   Fetch the artifacts first - no gh CLI needed:
+echo   Last resort, fetch them by hand (no gh CLI needed):
 echo     mkdir "%ASSETS_DIR%"
 echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
 echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
@@ -260,6 +269,60 @@ echo.
 if not defined NO_PAUSE pause
 exit /b 0
 
+REM ==========================================================================
+REM Auto-fetch the release artifacts
+REM ==========================================================================
+:ensure_assets
+REM Create the staging dir and download only what is not there yet. A rerun must
+REM not pull 220 MB again, and a file the maintainer placed by hand is left
+REM untouched - except a 0-byte leftover from an interrupted run, which can only
+REM ever be garbage. AUTO_FETCH_ASSETS=0 is the test seam that keeps the
+REM regression suite offline; same name as the .sh one on purpose.
+if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof
+if not exist "%ASSETS_DIR%\" mkdir "%ASSETS_DIR%" >nul 2>nul
+if not exist "%ASSETS_DIR%\" goto :eof
+for %%N in (byte-tools.exe byte-tools-windows-x64.zip byte-tools-macos-arm64.zip byte-tools-linux-x64) do call :fetch_asset %%N
+goto :eof
+
+:fetch_asset
+REM %~1 = artifact name as published on the GitHub Release.
+set "DST=%ASSETS_DIR%\%~1"
+set "RAW=https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/%~1"
+if not exist "%DST%" goto :fetch_start
+set "SZ=0"
+for %%P in ("%DST%") do set "SZ=%%~zP"
+if not "%SZ%"=="0" goto :eof
+del /q "%DST%" >nul 2>nul
+:fetch_start
+echo   downloading %~1 ...
+set "DL_OK="
+call :curl_fetch "%GH_ACCEL%%RAW%" "%DST%"
+if defined DL_OK goto :fetch_report
+call :curl_fetch "%RAW%" "%DST%"
+:fetch_report
+if defined DL_OK goto :eof
+set "FETCH_FAILED=%FETCH_FAILED% %~1"
+echo     neither the accelerator nor github.com produced a usable file for %~1
+goto :eof
+
+:curl_fetch
+REM %~1 = URL, %~2 = destination. Accepted only when curl reports success AND
+REM the file is at least 1 MB: a mirror that answers 200 with a small HTML page
+REM would otherwise be shipped to Gitee as if it were the artifact.
+del /q "%~2" >nul 2>nul
+curl.exe -sS -fL %RETRY_OPT% --connect-timeout 20 --max-time 1800 -o "%~2" "%~1" -w "     http=%%{http_code} time=%%{time_total}s size=%%{size_download}B speed=%%{speed_download}B/s\n"
+if errorlevel 1 goto :curl_fetch_bad
+if not exist "%~2" goto :curl_fetch_bad
+set "CSZ=0"
+for %%P in ("%~2") do set "CSZ=%%~zP"
+if %CSZ% LSS 1048576 goto :curl_fetch_bad
+set "DL_OK=1"
+goto :eof
+:curl_fetch_bad
+del /q "%~2" >nul 2>nul
+set "DL_OK="
+goto :eof
+
 :err_args
 echo error: missing tag or Gitee token.
 echo usage: sync.bat v1.0.2 ^<token^> [assets_dir] [nopause]
@@ -270,19 +333,14 @@ echo error: curl.exe not found. Windows 10 1803+ bundles it.
 goto :fail_nopause
 
 :err_dir
-echo error: assets dir not found: %ASSETS_DIR%
-echo   who runs this script: the release maintainer, to mirror a GitHub Release
-echo   onto Gitee. End users never need this directory - they either download
-echo   byte-tools.exe from the Releases page, or run the two one-click scripts
-echo   sitting in this folder. It is gitignored on purpose: about 220 MB of
-echo   binaries must not enter the repository, and this dir is scratch space
-echo   that can be deleted right after a sync.
-echo   create it and fetch the release files into it, no gh CLI needed:
-echo     mkdir "%ASSETS_DIR%"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
+echo error: could not create the assets dir: %ASSETS_DIR%
+echo   this script downloads the release artifacts into that folder and uploads
+echo   them to Gitee, so it has to be writable. Check free disk and permissions,
+echo   or point it somewhere else with the 3rd argument:
+echo     sync.bat %TAG_NAME% ^<token^> D:\somewhere\else
+echo   who runs this at all: the release maintainer. End users never need it,
+echo   they either download byte-tools.exe from the Releases page or run the two
+echo   one-click scripts sitting in this folder.
 goto :fail_nopause
 
 :err_net

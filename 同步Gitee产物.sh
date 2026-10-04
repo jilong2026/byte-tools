@@ -25,6 +25,11 @@
 #
 # 依赖：curl、awk（human_size 用）；python3 可选（JSON 解析，缺失时回退 grep）
 #
+# Windows 上请优先用同目录的 同步Gitee产物.bat，不要用 Git Bash 跑本脚本：本机实测
+# （2026-10-05）Git Bash 默认的 /mingw64/bin/curl 会把 -F 参数里的中文按 GBK 发出，
+# Gitee 收到的正文就是乱码；C:\Windows\System32\curl.exe 则原样保留 UTF-8。两者的
+# 行为差异只在 Windows 存在，Linux runner 上等价于 System32 那一档。
+#
 # 环境变量：
 #   GITEE_TOKEN          (必需) Gitee 私人令牌。只作为表单字段传递，绝不拼进 URL，
 #                        也绝不使用 curl -v（那会把请求内容打进日志）
@@ -33,6 +38,10 @@
 #   TAG_NAME             (必需) 要同步的 tag，如 v1.0.1
 #   GITHUB_REPO_SLUG     (必需) GitHub 的 owner/repo，用于生成产物直链
 #   ASSETS_DIR           产物目录，默认 ./assets
+#   GH_ACCEL_PREFIX      自动下载产物时用的加速器前缀，默认 https://gh-proxy.com/；
+#                        直连 github.com 排在它后面（规则 R1：镜像优先、官网末位）
+#   AUTO_FETCH_ASSETS    缺产物时脚本自己去下载，默认 1；设 0 关掉（测试接缝，
+#                        保证回归用例不碰网络）
 #   TARGET_COMMITISH     tag 在 Gitee 不存在时的指向，默认 master
 #   MAX_ATTEMPTS         单次请求最大尝试次数，默认 3（退避 5s / 10s）
 #   API_MAX_TIME         JSON 接口单请求上限（秒），默认 60
@@ -73,6 +82,9 @@ RELEASE_PAGE="https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}/releases/${TAG_NAME
 GH_SERVER="${GITHUB_SERVER_URL:-https://github.com}"
 GH_RELEASE_PAGE="${GH_SERVER}/${GITHUB_REPO_SLUG}/releases/tag/${TAG_NAME}"
 GH_DOWNLOAD_BASE="${GH_SERVER}/${GITHUB_REPO_SLUG}/releases/download/${TAG_NAME}"
+# 自动下载产物时先走加速器、最后才直连 github.com（规则 R1：镜像优先、官网末位）。
+# 境外直连 github.com 从国内经常超时，本机 同步Gitee产物.bat 用的是同一个 gh-proxy.com。
+GH_ACCEL_PREFIX="${GH_ACCEL_PREFIX:-https://gh-proxy.com/}"
 # Gitee 附件单次上限：100MB（注意：这是沿用值，未重新实测；上传走这条路的别指望它兜底）
 MAX_UPLOAD_BYTES=104857600
 
@@ -95,6 +107,13 @@ is_upload_target() {
 # ---------------------------------------------------------------------------
 # 通用工具
 # ---------------------------------------------------------------------------
+
+# Windows 控制台默认跟着系统码页（简体中文 = cp936）。正文里只要有一个它编不出
+# 来的字符（emoji、CJK 扩展汉字，或解码失败留下的 U+FFFD），json_get 里那句
+# print 就抛 UnicodeEncodeError，而它是带 `2>/dev/null || true` 跑的 —— 错误被
+# 咽掉、stdout 变空串，脚本于是得出「Gitee 正文里没有 GitHub 直链」这个假结论，
+# 收尾校验永远过不去（本机 4 个回归用例就是这么红的）。Linux 上本来就是 UTF-8。
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 
 # 选一个「真能解析 JSON」的解释器：Windows 上 python3 常是 Microsoft Store 的占位别名，
 # 命令存在但一跑就退出码 49 且不输出，会让 json_get 静默返回空 —— 于是「已存在的 Release」
@@ -226,13 +245,38 @@ else
 fi
 
 if [ ! -d "${ASSETS_DIR}" ]; then
-  echo "错误：产物目录不存在: ${ASSETS_DIR}"
-  echo "      谁会跑这个脚本：发布维护者，用来把 GitHub Release 镜像到 Gitee。"
-  echo "      普通用户不需要这个目录——他们要么从 Releases 页下载 byte-tools.exe，"
-  echo "      要么双击本目录下那两个一键脚本。它被 .gitignore 排除是故意的："
-  echo "      约 220 MB 的二进制不该进版本库，同步完这个目录就可以删掉。"
-  echo "      先取产物：curl -L -o \"${ASSETS_DIR}/<文件名>\" \"${GH_DOWNLOAD_BASE}/<文件名>\""
-  exit 1
+  mkdir -p "${ASSETS_DIR}" 2>/dev/null || {
+    echo "错误：无法创建产物目录: ${ASSETS_DIR}"
+    echo "      本脚本要把 GitHub 产物下载到这里再传到 Gitee，所以它必须可写。"
+    echo "      查一下磁盘剩余空间和目录权限，或者换个位置："
+    echo "        ASSETS_DIR=/tmp/bt-assets ./\"$0\""
+    echo "      谁会跑它：发布维护者。普通用户不需要这个目录——他们从 Releases 页"
+    echo "      下载 byte-tools.exe，或双击仓库根目录那两个一键脚本。"
+    exit 1
+  }
+fi
+
+# 缺产物就自己去下载，而不是打几条 curl 让维护者手跑——两个一键脚本已经按这个
+# 标准改过，这里是同一条契约。只在真要往 Gitee 传二进制时才下载：CI 默认
+# UPLOAD_LIST 为空（正文只写 GitHub 直链），为那种模式拉 220MB 毫无意义。
+# AUTO_FETCH_ASSETS=0 是测试接缝，让回归用例保持离线。
+if [ "${#UPLOAD_LIST[@]}" -gt 0 ] && [ "${AUTO_FETCH_ASSETS:-1}" != "0" ]; then
+  for _name in "${UPLOAD_LIST[@]}"; do
+    [ -s "${ASSETS_DIR}/${_name}" ] && continue
+    echo "   下载 ${_name} → ${ASSETS_DIR}/"
+    _got=0
+    for _url in "${GH_ACCEL_PREFIX}${GH_DOWNLOAD_BASE}/${_name}" "${GH_DOWNLOAD_BASE}/${_name}"; do
+      if curl -fsSL --connect-timeout 20 --max-time 1800 -o "${ASSETS_DIR}/${_name}.part" "${_url}" \
+         && [ "$(wc -c < "${ASSETS_DIR}/${_name}.part" 2>/dev/null || echo 0)" -ge 1048576 ]; then
+        mv -f "${ASSETS_DIR}/${_name}.part" "${ASSETS_DIR}/${_name}"
+        _got=1
+        break
+      fi
+      rm -f "${ASSETS_DIR}/${_name}.part"
+      echo "      这个源没拿到有效文件，换下一个"
+    done
+    [ "${_got}" -eq 1 ] || echo "   警告：加速器与 github.com 都没能取到 ${_name}" >&2
+  done
 fi
 
 # 预检：目录里到底有没有产物。之前没有这一关，把仓库自带的图标目录 assets/ 当产物目录
