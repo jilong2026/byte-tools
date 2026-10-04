@@ -184,10 +184,15 @@ class SyncScriptTest(unittest.TestCase):
 
     def run_script(self, scenario, extra_env=None, assets_dir=None, max_attempts=2):
         env = dict(os.environ)
-        # bash -l 的子进程 PATH 里没有 python3/python，脚本会退到它自己标注为
-        # 「够用但脆弱」的 grep 解析，mock 场景的断言就跟着失真。把当前解释器所在
-        # 目录递给子进程，等价于 CI 上自带 python3 的 Linux runner。
-        env["PATH"] = os.pathsep.join([os.path.dirname(sys.executable), env.get("PATH", "")])
+        # 两处 PATH 调整，都是为了让子进程的行为等价于 CI 的 Linux runner：
+        #  1) bash -l 里没有 python3/python，脚本会退到它自己标注「够用但脆弱」的
+        #     grep 解析，mock 场景断言随之失真 —— 递进当前解释器所在目录。
+        #  2) Git Bash 把 /mingw64/bin 排在 System32 前面，而本机实测 mingw64 的
+        #     curl 会把 argv 里的中文按 GBK 发出（System32 的 curl 保持 UTF-8），
+        #     正文回读断言因此永远对不上 —— 让 System32 的 curl 优先。
+        env["PATH"] = os.pathsep.join(
+            ["C:\\Windows\\System32", os.path.dirname(sys.executable),
+             env.get("PATH", "")])
         env.update({
             "GITEE_TOKEN": "mock-token-never-asserted",
             "GITEE_OWNER": "owner",
@@ -200,10 +205,16 @@ class SyncScriptTest(unittest.TestCase):
             "API_MAX_TIME": "10",
             "UPLOAD_MAX_TIME": "10",
             "GITEE_API_BASE": f"http://127.0.0.1:{self.port}/api/{scenario}/repos/owner/slug",
+            # 用例的产物是 KB 级假文件，脚本现在会自己去下载缺的那几个 —— 关掉，
+            # 保证整棵树离线（下载路径本身由静态用例对账，不靠真网络）
+            "AUTO_FETCH_ASSETS": "0",
         })
         for k, v in (extra_env or {}).items():
             env[k] = v
-        proc = subprocess.run([BASH, "-l", str(SCRIPT)], capture_output=True, text=True,
+        # 不用 -l：login shell 会按 /etc/profile 重建 PATH，把 /mingw64/bin 抢回
+        # 最前面，上面那个"System32 的 curl 优先"就白写了（实测 command -v curl
+        # 又变回 /mingw64/bin/curl）。非登录 shell 保留我们递进去的顺序。
+        proc = subprocess.run([BASH, str(SCRIPT)], capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
                               env=env, cwd=str(self.tmp.name), timeout=180)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
@@ -325,13 +336,18 @@ class SyncScriptTest(unittest.TestCase):
         self.assertIn("本地未取到", STATE["body"])
         self.assertIn(f"{GH_BASE}/byte-tools.exe", STATE["body"])
 
-    def test_missing_dir_reports_curl_hint(self):
-        code, out = self.run_script("new",
-                                    assets_dir=str(Path(self.tmp.name) / "nope"))
-        self.assertEqual(code, 1, out)
-        self.assertIn("产物目录不存在", out)
-        self.assertIn("curl -L -o", out)
-        self.assertEqual(STATE["reqs"], [])
+    def test_missing_dir_is_created_not_handed_back(self):
+        """目录不存在就自己建，不许把 mkdir + 4 条 curl 甩给维护者（一键契约）。
+
+        旧行为是报错退出并打印手工命令，等于"这步你自己做"。这里只断言契约改变
+        的那部分：目录被建出来、那句提示没了、流程走进了 [1/3]。最终退出码不由本
+        用例负责（另 4 个用例仍卡在 mock 桩的正文回读上，是既有问题）。
+        """
+        missing = Path(self.tmp.name) / "nope"
+        code, out = self.run_script("new", assets_dir=str(missing))
+        self.assertTrue(missing.is_dir(), "脚本没有把产物目录建出来")
+        self.assertNotIn("产物目录不存在", out)
+        self.assertIn("[1/3]", out, "还停在暂存阶段，没有真的继续")
 
 
 class ArtifactNameConsistency(unittest.TestCase):
@@ -375,6 +391,69 @@ class ArtifactNameConsistency(unittest.TestCase):
         self.assertEqual(want, self.EXPECT, "bat 收尾校验清单不一致")
 
 
+class AutoFetchContract(unittest.TestCase):
+    """一键契约：缺产物要脚本自己去下载，而不是打印几条 curl 让维护者手跑。
+
+    起因（2026-10-05）：本机双击 同步Gitee产物.bat，看到 release-assets 不存在就
+    报错退出并贴出 4 条 mkdir/curl；第二次跑还是同一处。"这步你自己做"本身就是
+    缺陷，两个一键脚本当初也是这个毛病（见 DEVELOPMENT.md R4）。
+    """
+
+    MIN_BYTES = "1048576"
+
+    def _bat(self):
+        return (REPO_ROOT / "同步Gitee产物.bat").read_text(encoding="ascii")
+
+    def _sh(self):
+        return (REPO_ROOT / "同步Gitee产物.sh").read_text(encoding="utf-8")
+
+    def test_bat_fetches_before_the_dir_check(self):
+        bat = self._bat()
+        self.assertIn("call :ensure_assets", bat)
+        flat = bat.replace("\r\n", "\n")
+        for label in (":ensure_assets", ":fetch_asset", ":curl_fetch"):
+            self.assertIn("\n" + label + "\n", flat, f"缺子过程 {label}")
+        self.assertLess(
+            bat.index("call :ensure_assets"),
+            bat.index('if not exist "%ASSETS_DIR%\\" goto :err_dir'),
+            "必须先自动补齐产物，再判目录存在性")
+
+    def test_both_scripts_try_accelerator_first_and_github_last(self):
+        """规则 R1 同样适用于这条下载：镜像优先、官网末位。"""
+        bat = self._bat()
+        self.assertLess(bat.index('call :curl_fetch "%GH_ACCEL%%RAW%"'),
+                        bat.index('call :curl_fetch "%RAW%"'),
+                        "bat 把 github.com 直连排在了加速器前面")
+        sh = self._sh()
+        self.assertLess(sh.index('"${GH_ACCEL_PREFIX}${GH_DOWNLOAD_BASE}/${_name}"'),
+                        sh.index('"${GH_DOWNLOAD_BASE}/${_name}"'),
+                        "sh 把 github.com 直连排在了加速器前面")
+        self.assertIn('GH_ACCEL_PREFIX="${GH_ACCEL_PREFIX:-https://gh-proxy.com/}"', sh)
+
+    def test_downloaded_file_is_size_validated_in_both(self):
+        """镜像会用 200 + 小 HTML 应付缺失文件，不校验体积就会把假产物传上 Gitee。"""
+        self.assertIn(f"LSS {self.MIN_BYTES}", self._bat())
+        self.assertIn(f"-ge {self.MIN_BYTES}", self._sh())
+
+    def test_ci_mode_never_downloads(self):
+        """CI 默认 UPLOAD_ARTIFACTS 为空（正文只写直链），那种模式下一个字节都不该下。"""
+        cond = '[ "${#UPLOAD_LIST[@]}" -gt 0 ] && [ "${AUTO_FETCH_ASSETS:-1}" != "0" ]'
+        self.assertIn(cond, self._sh(),
+                      "自动下载没有绑在「真要往 Gitee 传二进制」这个条件上")
+
+    def test_offline_seam_exists_in_both(self):
+        """回归用例的产物是 KB 级假文件，必须能用同一个开关把下载关掉。"""
+        self.assertIn('if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof', self._bat())
+        self.assertIn('[ "${AUTO_FETCH_ASSETS:-1}" != "0" ]', self._sh())
+
+    def test_bat_is_still_ascii_and_crlf(self):
+        raw = (REPO_ROOT / "同步Gitee产物.bat").read_bytes()
+        self.assertEqual(sorted({b for b in raw if b > 0x7F}), [],
+                         "cmd 按字节偏移解析批处理，非 ASCII 会让语句错位被整段吞掉")
+        self.assertEqual(raw.count(b"\n") - raw.count(b"\r\n"), 0,
+                         "LF-only 批处理会导致标签查找失败")
+
+
 class BatEndToEnd(unittest.TestCase):
     """Windows 版 .bat 的端到端流程：预检 → 复用 Release → 逐个上传 → 附件清单校验。
 
@@ -405,6 +484,7 @@ class BatEndToEnd(unittest.TestCase):
         env = dict(os.environ)
         env["GITEE_API_BASE"] = f"http://127.0.0.1:{self.port}/api/existing_links/repos/owner/slug"
         env["NO_PAUSE"] = "1"
+        env["AUTO_FETCH_ASSETS"] = "0"   # 同上：回归用例不许碰网络
         proc = subprocess.run(
             ["cmd.exe", "/c",
              f'{REPO_ROOT / "同步Gitee产物.bat"} vTEST FAKE_TOKEN_NOT_REAL '
