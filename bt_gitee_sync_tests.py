@@ -32,7 +32,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-REPO_ROOT = Path(r"E:\file\test\byte-tools")
+REPO_ROOT = Path(__file__).resolve().parent
 SCRIPT = REPO_ROOT / "同步Gitee产物.sh"
 TAG = "vTEST"
 GH_BASE = f"https://github.com/owner/slug/releases/download/{TAG}"
@@ -184,6 +184,10 @@ class SyncScriptTest(unittest.TestCase):
 
     def run_script(self, scenario, extra_env=None, assets_dir=None, max_attempts=2):
         env = dict(os.environ)
+        # bash -l 的子进程 PATH 里没有 python3/python，脚本会退到它自己标注为
+        # 「够用但脆弱」的 grep 解析，mock 场景的断言就跟着失真。把当前解释器所在
+        # 目录递给子进程，等价于 CI 上自带 python3 的 Linux runner。
+        env["PATH"] = os.pathsep.join([os.path.dirname(sys.executable), env.get("PATH", "")])
         env.update({
             "GITEE_TOKEN": "mock-token-never-asserted",
             "GITEE_OWNER": "owner",
@@ -200,6 +204,7 @@ class SyncScriptTest(unittest.TestCase):
         for k, v in (extra_env or {}).items():
             env[k] = v
         proc = subprocess.run([BASH, "-l", str(SCRIPT)], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
                               env=env, cwd=str(self.tmp.name), timeout=180)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 

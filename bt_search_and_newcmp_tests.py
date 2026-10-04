@@ -9,7 +9,7 @@ import platform as _platform
 import sys
 import unittest
 
-REPO_ROOT = r"E:\file\test\byte-tools"
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def _no_wmi(*_a, **_k):

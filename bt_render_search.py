@@ -11,7 +11,8 @@ platform._wmi_query = lambda *_a, **_k: (_ for _ in ()).throw(OSError("stub"))
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-spec = importlib.util.spec_from_file_location("btmain", r"E:\file\test\byte-tools\main.py")
+spec = importlib.util.spec_from_file_location(
+    "btmain", os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py"))
 main = importlib.util.module_from_spec(spec)
 sys.modules["btmain"] = main
 spec.loader.exec_module(main)
