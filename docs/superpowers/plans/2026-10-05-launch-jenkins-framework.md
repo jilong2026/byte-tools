@@ -1886,7 +1886,10 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 62 tests ... OK`
+Expected: `Ran 71 tests ... OK`
+（不是本任务正文里那 5 条：初稿的 62 与"未测的接线要补用例"这条要求不能同时成立。
+实现者补 5 条守护用例到 67，评审轮又补 4 条（QThread 两条删除窗口 ×2、`_sync_action_buttons` 锁、
+zombie 可见性）到 71。后续任务的预期数已按 71 起算。）
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1911,35 +1914,83 @@ git commit -m "feat(ui): 组件卡片启动/停止/打开控制台按钮，运�
 
 ```python
 class MainWindowAdopt(unittest.TestCase):
+    """这一层的用例一律不构造真 MainWindow：`MainWindow.__init__` 会建 26 张卡片、
+    起版本探测线程，把宿主机网络和 Qt 生命周期都拖进来。用 `__new__` 拿到一个未初始化的实例、
+    只补这个方法真正用到的成员，才是本任务这一层的可测形状。"""
+
+    def bare_win(self, logs):
+        win = main.MainWindow.__new__(main.MainWindow)
+        win._append_log = lambda level, msg: logs.append((level, msg))
+        return win
+
+    def setUp(self):
+        self.calls = []
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig_file = main.RUNNING_FILE
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
+        self._orig_mgr = main.SERVICE_MANAGER
+        self.addCleanup(setattr, main, "SERVICE_MANAGER", self._orig_mgr)
+        # 找回路径"绝不执行进程"要有牙齿：任何 Popen 都要留下证据
+        self._orig_popen = main.subprocess.Popen
+        main.subprocess.Popen = lambda *a, **k: self.calls.append(a)
+        self.addCleanup(setattr, main.subprocess, "Popen", self._orig_popen)
+
     def test_current_components_covers_whitelist(self):
         got = main.MainWindow.current_components()
         self.assertTrue(main.LAUNCH_KEYS.issubset(set(got)), "启动白名单组件必须能在卡片间互相看见（needs 判定要用）")
 
-    def test_adopt_drops_zombie_records_without_touching_processes(self):
-        calls = []
-        orig_popen = main.subprocess.Popen
-        main.subprocess.Popen = lambda *a, **k: calls.append(a)
-        self.addCleanup(setattr, main.subprocess, "Popen", orig_popen)
-        with tempfile.TemporaryDirectory() as td:
-            orig = main.RUNNING_FILE
-            main.RUNNING_FILE = Path(td) / "running.json"
-            self.addCleanup(setattr, main, "RUNNING_FILE", orig)
-            main.save_running_map({"jenkins": main.RunRecord(
-                key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
-                console_url="u", pid=1, pid_role="server", started_at=0.0, launcher_cmd=[])})
-            mgr_orig, main.SERVICE_MANAGER = main.SERVICE_MANAGER, main.ServiceManager(
-                is_listening=lambda p, host="127.0.0.1": False,
-                http_ok=lambda u, timeout=2.0: False, process_alive=lambda pid: True)
-            self.addCleanup(setattr, main, "SERVICE_MANAGER", mgr_orig)
-            main.SERVICE_MANAGER.reconcile(main.MainWindow.current_components())
-            self.assertEqual(main.load_running_map(), {})
-            self.assertEqual(calls, [], "找回过程拉起了进程")
+    def test_adopt_running_drops_zombies_without_touching_processes(self):
+        """僵尸（登记在、端口没在听）必须被清掉，而且整个过程一次进程都不许起。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="u", pid=1, pid_role="server", started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": False,
+            http_ok=lambda u, timeout=2.0: False, process_alive=lambda pid: True)
+        logs = []
+        self.bare_win(logs)._adopt_running()
+        self.assertEqual(main.load_running_map(), {})
+        self.assertEqual(self.calls, [], "找回过程拉起了进程")
+        self.assertEqual(logs, [], "僵尸不该被报成"检测到正在运行"")
+
+    def test_adopt_running_reports_what_it_found_running(self):
+        """开工具时如果 Jenkins 还在跑，日志要认出它 —— 这是"关掉了再打开也认得"那条判据。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8123,
+            console_url="http://127.0.0.1:8123/", pid=1, pid_role="server",
+            started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": True,
+            http_ok=lambda u, timeout=2.0: True, process_alive=lambda pid: True)
+        logs = []
+        self.bare_win(logs)._adopt_running()
+        self.assertEqual([m for _, m in logs], ["检测到 jenkins 正在运行（端口 8123）"])
+        self.assertIn("jenkins", main.load_running_map(), "在跑的登记不许被清掉")
+
+    def test_close_cancels_then_waits_every_in_flight_worker(self):
+        """Task 9 的 cancel 落点：关窗口时先给每个在跑的 worker 一次体面退出，
+        不是把线程连同 QThread 一起扔了（cancel 只停止"等端口"，不动别人的进程）。"""
+        done = []
+
+        class FakeWorker:
+            def cancel(self):
+                done.append("cancel")
+            def wait(self, ms):
+                done.append(("wait", ms))
+
+        win = self.bare_win([])
+        win.findChildren = lambda cls: [FakeWorker(), FakeWorker()]
+        self.assertEqual(win._cancel_launch_workers(), 2)
+        self.assertEqual(done, ["cancel", "cancel", ("wait", 2000), ("wait", 2000)],
+                         "必须先全部 cancel 再 wait，否则第二个 worker 要白等第一个的超时")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: FAIL，`no attribute '_adopt_running'`。
+Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第二条用例）。
 （`test_current_components_covers_whitelist` 这时应当**已经通过** —— 那个方法按裁定 F1 在 Task 10 就落地了，
 本任务只是它的第一次跨卡片回归断言。若它红，说明 Task 10 漏交付，回去补 Task 10，不要在这里重定义。）
 
@@ -1954,6 +2005,20 @@ Expected: FAIL，`no attribute '_adopt_running'`。
         for key, st in states.items():
             if st.state == "running":
                 self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
+
+    def _cancel_launch_workers(self) -> int:
+        """关窗口前让在跑的启动/停止线程体面收尾：只取消"还在等端口"，不动被管理的进程。
+        先全部 cancel 再统一 wait —— 反过来写，后一个 worker 要白等前一个的超时。"""
+        workers = self.findChildren(LaunchWorker)
+        for w in workers:
+            w.cancel()
+        for w in workers:
+            w.wait(2000)
+        return len(workers)
+
+    def closeEvent(self, event) -> None:
+        self._cancel_launch_workers()
+        super().closeEvent(event)
 ```
 
 在 `MainWindow.__init__` 建完卡片之后调用一次 `self._adopt_running()`，并把每个卡口的 `_refresh_launch_state()` 接进去（卡片在 `__init__` 末尾自己会调，`_detect_status` 已含）。
@@ -1961,7 +2026,7 @@ Expected: FAIL，`no attribute '_adopt_running'`。
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 64 tests ... OK`
+Expected: `Ran 75 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
