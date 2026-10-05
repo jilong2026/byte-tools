@@ -1414,6 +1414,32 @@ class CardLaunchUi(unittest.TestCase):
         self.assertIn("jenkins-data", text,
                       "Jenkins 的数据在 ~/.env-tools 下、卸载后保留——这句话不能因为本期改动而丢")
 
+    def test_uninstall_confirm_text_names_the_env_var_being_removed(self):
+        """确认框里必须点名要清哪个环境变量。
+
+        计划初稿把它写成泛指的"清理它的环境变量"，而计划一的三条 bullet 里
+        `清理环境变量 {comp.env_var}` 是实打实的信息。卸载不可逆，
+        让用户在确认框里看不到变量名，只能自己去翻 PATH 才能确认删的是什么。
+        """
+        for key, var in (("jenkins", "JENKINS_HOME"), ("activemq", "ACTIVEMQ_HOME"),
+                         ("nacos", "NACOS_HOME")):
+            with self.subTest(key):
+                comp = next(c for c in main.build_components() if c.key == key)
+                self.assertEqual(comp.env_var, var, "组件的 env_var 变了，先查组件定义")
+                self.assertIn(var, main.uninstall_confirm_text(comp),
+                              f"{key} 的卸载确认没点名要清的环境变量")
+
+    def test_uninstall_confirm_text_falls_back_for_components_without_launch(self):
+        """26 个组件里绝大多数不可启动（launch 为 None），它们照样能点卸载。
+        那条兜底文案现在没有任何用例锁住：把 `if not note:` 改成永假，
+        上面两条 data_note 用例照样全绿，而所有非启动组件的确认框会丢掉整段说明。"""
+        comp = next(c for c in main.build_components() if c.key == "maven")
+        self.assertIsNone(comp.launch, "maven 本期不可启动，这条用例的前提是它没有 launch")
+        text = main.uninstall_confirm_text(comp)
+        self.assertIn(comp.display_name, text)
+        self.assertIn("不会碰你手工放到别处的文件", text,
+                      "不可启动组件必须落到兜底文案，而不是 data_note 为空就把说明丢掉")
+
 
 class MainWindowAdopt(unittest.TestCase):
     """这一层的用例一律不构造真 MainWindow：`MainWindow.__init__` 会建 26 张卡片、

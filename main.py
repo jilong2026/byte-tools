@@ -3618,7 +3618,12 @@ def uninstall_confirm_text(comp: Component) -> str:
     Jenkins 的数据在 ~/.env-tools/jenkins-data、卸载后保留；
     Nacos 的 derby 在版本目录里、会跟着一起删；ActiveMQ 两者都有（副本 + 存储在 ~/.env-tools 下）。
     一句含混的"数据会被清理"对其中任何一个都是假话。"""
-    text = f"删除 {comp.display_name} 已安装的版本，并清理它的环境变量与 PATH 条目。"
+    # 环境变量名要点名：卸载不可逆，确认框里写"它的环境变量"等于让用户自己回忆是哪个。
+    # 计划初稿写的是泛指的"环境变量与 PATH 条目"，相对计划一的三条 bullet 少了一个变量名 ——
+    # 那条 bullet 里的 `{comp.env_var or '（无）'}` 是实打实的信息，不许在重写时丢掉。
+    var = comp.env_var or "（无）"
+    text = f"删除 {comp.display_name} 已安装的版本，"
+    text += f"并清理环境变量 {var} 与 PATH 中属于它的条目。"
     note = getattr(comp.launch, "data_note", "") if getattr(comp, "launch", None) else ""
     if not note:
         # 不可启动的组件没有 launch 描述符，退回计划一那句既有说法（保留原措辞，别改口径）
