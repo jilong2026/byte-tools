@@ -105,6 +105,9 @@
 │  │ DownloadWorker      │  │ VersionFetchWorker         │    │
 │  │ (多源故障转移下载) │  │ (后台抓取官网版本)         │    │
 │  └─────────┬──────────┘  └─────────────┬──────────────┘    │
+│  ┌─────────▼──────────────────────────┐                    │
+│  │ LaunchWorker (启动/停止的耗时动作) │  ← 一键启动新增    │
+│  └─────────┬──────────────────────────┘                    │
 └────────────┼───────────────────────────┼──────────────────┘
              │                            │
 ┌────────────▼───────────────────────────▼──────────────────┐
@@ -112,6 +115,16 @@
 │   构造镜像 URL 列表 → 遍历尝试 → 失败切换 → 末位官网回退  │
 │   MIRROR_BASES / DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_TIMEOUT│
 │   DOWNLOAD_RETRY_PER_URL / _mb() / _gh_accelerated()       │
+└────────────┬──────────────────────────────────────────────┘
+             │
+┌────────────▼──────────────────────────────────────────────┐
+│   生命周期层（一键启动，见规则 R5）                       │
+│   LaunchSpec / LAUNCH_OF 登记表                            │
+│   ServiceManager（status/adopt/reconcile/start/stop/       │
+│                   force_stop，探针全可注入）               │
+│   pick_free_cluster / build_launch_plan / resolve_java_home │
+│   load_running_map / save_running_map（~/.env-tools/       │
+│                   running.json：端口是真相、PID 是提示）    │
 └────────────┬──────────────────────────────────────────────┘
              │
 ┌────────────▼──────────────────────────────────────────────┐
@@ -152,6 +165,7 @@
 3. **跨平台抽象集中在 `EnvManager`**：上层逻辑只调用 `set_windows_user_env` / `set_unix_env` 等统一接口，平台差异在内部消化。
 4. **数据驱动配置**：组件清单、URL 构造器、版本抓取器全部以 `dataclass` + 函数表（`FETCHERS` 字典）形式声明，新增组件只需添加数据项。
 5. **R1 多源故障转移**：`DownloadWorker` 内部遍历 `url_list_map` 提供的 URL 列表，按"国内镜像优先 + 故障转移 + 末位官网回退"顺序尝试，单源失败自动切换下一个，全部失败才向上抛错（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1 规则）。
+6. **生命周期层（一键启动）**：`ServiceManager` 是本机进程生命周期的唯一入口，探针（`is_listening` / `http_ok` / `process_alive` / `terminate`）全部可注入，测试因此不碰网络也不碰进程；`status/adopt/reconcile` 只读、绝不拉起进程（`bt_launch_tests.py` 的 `NoExecInvariant` 钉死）。当前仅 `LAUNCH_KEYS`（本期 `{jenkins}`）出现启动按钮；能力已实现并有离线护栏，Windows 真机验证待用户在场执行（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R5）。
 
 ---
 
@@ -177,10 +191,11 @@ byte-tools/
 ├── bt_component_category_tests.py # 离线回归测试：组件三类分组（9 个用例，见 R2）
 ├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
 ├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
-├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（跑起来慢，本轮未计入复核清单）
+├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（见 4.9，全量回归 9 套件之一）
 ├── bt_startup_tests.py            # 离线回归测试：启动期不碰 WMI（见 8.2 与 4.9）
 ├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
 ├── bt_boot_script_tests.py        # 离线回归测试：两个一键脚本的编码/换行/消息表/Python 自动安装闭环（见 8.2）
+├── bt_launch_tests.py             # 离线回归测试：组件一键启动契约（规则 R5；LaunchSpec 表/端口簇/僵尸登记/NoExec 不变量/启停流/卡片与主窗接线）
 └── assets/                  # 静态资源（PyInstaller 打包时通过 datas 一并打入）
     ├── byte-tools-pt.png    # 主界面截图
     ├── byte-tools.png       # 应用窗口图标
@@ -483,6 +498,23 @@ R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1
 - `cancel()` 设置 `_cancel` 标志，`_try_download` 在每个 chunk 写入前检查并中断，清理 `.part` 临时文件
 - 镜像源 404 等不可恢复错误**不内部重试**，直接切下一个 URL（避免浪费时间）
 
+#### `LaunchWorker(QThread)`
+
+一键启动 / 停止的耗时动作（有界探活最长到 `startup_timeout` 秒，绝不能放 UI 线程）。信号风格照 `DownloadWorker`（`main.py:3644`）：
+
+| 信号 | 类型 | 说明 |
+|------|------|------|
+| `started_ok` | `(str, str)` | `(key, console_url)`，启动成功且端口已在听 |
+| `failed` | `(str, str)` | `(key, reason)`，门控/端口/拉起/超时/取消等失败，原因可行动 |
+| `stopped` | `(str)` | `key`，已停止并释放端口 |
+| `need_force` | `(str, str)` | `(key, reason)`：一次"要不要强制结束"的**询问**，不是错误。刻意做成独立信号，免得控制标记混进给用户看的正文 |
+
+关键行为：
+- `run()` 兜 `LaunchCancelled`（取消只是停止"等"，进程在不在没人知道，文案据此说清）与所有 `Exception`（转 `failed`，不发空信号让卡片停在"进行中"）
+- `_dispatch()` 认不出的 action 也发 `failed` 出声
+- `cancel()` 由 `_sleep` 在 ServiceManager 每轮等待时检查——有界探活是唯一长耗时阶段，sleeper 本就是注入点，无需新参数即可中止
+- worker 以 `parent=self` 交卡片 Qt 对象树持有，`need_force` 换岗时两条线程短暂共存也不会把在跑的 worker 就地销毁
+
 ### 4.6 业务逻辑层
 
 #### `EnvManager`（静态工具类）
@@ -558,6 +590,22 @@ apply_active_version(comp, version)
 
 幂等机制：UNIX 系统下用 `marker_begin` / `marker_end` 包裹写入块，再次写入时只替换两标记之间的内容，不会重复堆积。
 
+#### 组件一键启动（业务层，规则 R5）
+
+生命周期层把"点启动 → 真能访问控制台"这件事做成一组**不含 Qt 对象、探针全可注入**的纯逻辑（行号会漂移，以函数名检索为准）：
+
+| 名称 | 位置（约） | 职责 |
+|------|-----------|------|
+| `LaunchSpec` | `main.py:2975` | 一个组件"怎么被拉起来"的描述符：`commands`（按 OS 的 argv 模板，占位 `{java}/{war}/{home}/{data_dir}/{port}/{log_file}`）、`stop_kind`（`pid` / `shutdown_command`）、`main_port` / `port_offsets` / `port_search_span`、`console_path` / `health_path`、`needs` / `min_java_major`、`data_dir_env`、`startup_timeout`、`risk_note` |
+| `LAUNCH_OF` / `LAUNCH_KEYS` | `main.py:3007` / `:3027` | **唯一登记处**；`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)` 统一赋值，构造处不手写。本期只有 `{"jenkins"}` |
+| `pick_free_cluster(base, offsets, span, is_free)` | `main.py:4510` | 端口簇选择：从主端口起在 `[base, base+span]` 内**升序**找"整簇所有端口同时空闲"的最小主端口，找不到返回 `None`（不做跨段随机挑） |
+| `resolve_java_home(comps)` | `main.py:4608` | `JAVA_HOME` **优先取本工具装的 JDK**，其次才退到环境变量；退到环境变量的值要校验目录真实存在 |
+| `build_launch_plan(comp, spec, java_home, port, log_file)` | `main.py:4638` | 展开 argv、注入 env（`JAVA_HOME` + `data_dir_env`）、拼 `console_url`；`java_home` 一律是 JDK 安装目录（home），不是 exe |
+| `load_running_map()` / `save_running_map()` | `main.py:4458` / `:4494` | `~/.env-tools/running.json`（本机进程事实，与 `config.json` 用户偏好分开）读写；坏 JSON / 缺文件一律当空表，字段畸形只丢该条记录；写盘走"临时文件 + `os.replace`"原子覆盖，`port`/`pid` 在读取侧显式 int 归一 |
+| `ServiceManager` | `main.py:4675` | 生命周期唯一入口：`status` / `adopt` / `reconcile`（只读 + 清僵尸，**绝不拉进程**）、`start`（门控 → 选端口簇 → 建 data 目录 → 重定向 stdout/stderr 到 `<data>/logs/byte-tools.out` → 有界轮次探活 → 写登记）、`stop`（Windows 只请示不自动强杀，超时 `need_force`）、`force_stop`（只在端口确认释放后才清登记）。探针 `is_listening`/`http_ok`/`process_alive`/`terminate` 全可注入 |
+
+> 语义要点：**端口是真相、PID 只是尽力而为地停止**；`pid_role ∈ {server, launcher, none}`，只有 `server` 且 PID 为正才允许 `_terminate_by_pid` 动手。`SERVICE_MANAGER`（`main.py:4902`）是卡片与主窗共用的单实例，避免多张卡片各持一套 `running.json` 读写口径。
+
 #### `extract_archive(archive, extract_to)`
 
 归档解压器，支持多种形态：
@@ -592,7 +640,7 @@ apply_active_version(comp, version)
 
 UI 组成（自上而下）：
 1. **顶部行**：组件名 `QLabel` + 状态胶囊 `QLabel`
-2. **中部行**：版本下拉框 `SearchableComboBox`（多版本组件里磁盘已装的条目带 `_installed_icon()` 画的绿色对勾）+ "下载并安装" + "配置环境变量" + "卸载" + "取消"按钮
+2. **中部行**：版本下拉框 `SearchableComboBox`（多版本组件里磁盘已装的条目带 `_installed_icon()` 画的绿色对勾）+ "下载并安装" + "配置环境变量" + "卸载" + "取消"按钮；**可启动组件（`component.launch is not None`，本期只有 Jenkins）**额外一排"启动" / "停止" / "打开控制台"按钮 + 一枚 `launch_label` 运行状态胶囊（"● 运行中 · 端口 8080" / "⚠ 上次运行的残留登记…"），不在登记表的组件这一排根本不创建
 3. **底部**：进度条 `QProgressBar`
 
 状态胶囊（`_detect_status` 设置，全程不执行外部命令；**多版本组件走另一套文案**）：
@@ -623,6 +671,12 @@ UI 组成（自上而下）：
 - `on_uninstall_clicked()` — 二次确认（`QMessageBox.question`）后调 `component.uninstall(cv.version)`，把中文摘要打进日志，再 `_refresh_installed_marks()` + `_detect_status()`。确认框正文的尾巴按 `multi_version` 分叉：多版本组件是"（只删除选中的这一个版本，其他已装版本不动；若删掉的正是当前生效版本，会自动切到剩余里版本号最高的那个）"，非多版本组件保持原有那句"（若所选版本与实际安装版本不一致，会以实际装着的目录为准）"逐字不变
 - `_configure_env(install_path)` — 写 `XXX_HOME` + 追加 PATH；Windows 用 `EnvManager.set_windows_user_env` + `append_windows_path`；UNIX 用 `set_unix_env` + `append_unix_path`
 - `on_cancel_clicked()` — 调 `worker.cancel()`
+- **一键启动相关**（判定全在 `ServiceManager`，卡片只做"读状态 → 摆按钮 → 把动作丢进线程"）：
+  - `_launch_status()` / `_refresh_launch_state()` — 只读地按端口实况刷新按钮与 `launch_label`（运行中→启动置灰、停止/打开控制台启用、**卸载锁死**；zombie→显示残留登记但启动仍可点），全程一次都不拉起进程；`_uninstall_locked_by_launch` 只在"运行"这条边上解冻卸载，不无条件点亮
+  - `on_start_clicked()` — 先弹确认（带 `spec.main_port` 与 `risk_note`），确认后起 `LaunchWorker("start", …, parent=self)`
+  - `on_stop_clicked()` / `_on_need_force()` — 停止；`need_force` 触发时弹一次"要强制结束吗"，**用户确认才起 `force_stop` worker**（不自动强杀）
+  - `on_console_clicked()` — `QDesktopServices.openUrl(登记的 console_url)`（用实际端口）
+  - `_on_launch_worker_done()` — 按 `sender()` 身份收尾（老 worker 的 `finished` 晚于新 worker 起跑时不误清刚起的 force_stop worker 引用）+ `deleteLater()`
 
 #### `DonateDialog(QDialog)`
 
@@ -662,6 +716,10 @@ UI 组成：
 - `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`
 - `_load_settings()` / `_save_settings()` — 启动时从 `CONFIG_FILE` 加载上次选中版本；`closeEvent` 时保存。保存是**合并写**：先读原文件、只替换 `selections` 段，`active`（生效版本登记表，见 4.6）原样保留，整体覆盖会把切换功能写的数据抹掉
 - `_apply_qss()` — 应用整张 QSS 样式表（含标题栏、卡片、下拉框、按钮、进度条、滚动条、日志区、状态栏）
+- **一键启动接线**（见规则 R5）：
+  - `current_components()` — 现取当前组件字典（`MainWindow.cards` → key），供卡片起 `LaunchWorker` 时传 `comps`；结果按进程缓存于 `_COMPONENTS_CACHE`（本期描述符运行时不变，故不失效）
+  - `_adopt_running()` — **在入口 `main()` 里调，不在 `__init__`**（`MainWindowAdopt` 用例钉死这条：构造真窗口会读并写用户 `running.json`）。整段 try/except 兜底：`reconcile` 清僵尸要回写 `~/.env-tools/running.json`，目录只读/被锁/磁盘满时只留一条 warn，绝不把工具挡在门外；识别完再遍历卡片 `_refresh_launch_state()` 重读实况。**只读 + 清僵尸，绝不拉进程**
+  - `_cancel_launch_workers()` / `closeEvent()` — 关窗前先 `findChildren(LaunchWorker)` 逐个 `cancel` 再统一 `wait`（顺序反了后一个要白等前一个超时），随后才立 `_closing` 旗、走原有的版本抓取线程收尾；关窗途中 `failed` 触发的 `_on_launch_failed` 看 `_closing` 旗早退，不弹会卡住退出的模态框
 
 ### 4.8 入口层
 
@@ -697,6 +755,7 @@ def main() -> int:
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
+| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、僵尸登记矩阵、`NoExecInvariant`（`status`/`adopt` 路径把 `Popen`/`_probe_version` 桩成一调用就抛）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（80 个用例，见 R5.6）。全量回归 9 套件之一 |
 
 #### `bt_multiversion_tests.py` 覆盖面
 
@@ -736,7 +795,8 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 QObject
 ├── QThread
 │   ├── DownloadWorker      # 流式下载
-│   └── VersionFetchWorker  # 版本抓取
+│   ├── VersionFetchWorker  # 版本抓取
+│   └── LaunchWorker        # 一键启动/停止（见规则 R5）
 └── QWidget
     ├── QMainWindow
     │   └── MainWindow      # 主窗口（无边框）
@@ -775,6 +835,15 @@ Component
 | `ComponentCard.btn_configure.clicked` | `ComponentCard.on_configure_clicked` | 用户点"配置环境变量" |
 | `ComponentCard.btn_cancel.clicked` | `ComponentCard.on_cancel_clicked` | 用户点"取消" |
 | `ComponentCard.version_combo.currentIndexChanged` | `ComponentCard._on_index_changed` | 下拉框选中变化 |
+| `ComponentCard.btn_start.clicked` | `ComponentCard.on_start_clicked` | 用户点"启动"（可启动组件才有，见 R5） |
+| `ComponentCard.btn_stop.clicked` | `ComponentCard.on_stop_clicked` | 用户点"停止" |
+| `ComponentCard.btn_console.clicked` | `ComponentCard.on_console_clicked` | 用户点"打开控制台" |
+| `LaunchWorker.started_ok` | `ComponentCard._on_launch_ok` | 启动成功且端口已在听（回填 console_url） |
+| `LaunchWorker.stopped` | `ComponentCard._on_launch_stopped` | 已停止并释放端口 |
+| `LaunchWorker.need_force` | `ComponentCard._on_need_force` | 停不下来，弹一次"要强制结束吗"（force_stop/stop 都接这条线） |
+| `LaunchWorker.failed` | `ComponentCard._on_launch_failed` | 门控/端口/拉起/超时/取消失败；`_closing` 时只记日志不弹模态 |
+| `LaunchWorker.finished` | `ComponentCard._on_launch_worker_done` | worker 收尾：按 `sender()` 身份交回引用 + `deleteLater` |
+| `main()` → `MainWindow._adopt_running()` | —（非信号，入口直接调） | 打开工具时认清本机在跑什么（只读 + 清僵尸） |
 
 ### 5.4 关键函数索引
 
@@ -922,6 +991,47 @@ on_uninstall_clicked()   # main.py:4995
 
 > 卸载目标定位（`resolve_uninstall_target`）与四步语义见 4.2 的方法说明；
 > `bt_multiversion_tests.py` 的覆盖面见 4.9（沙箱原则见 DEVELOPMENT.md R3.8，非多版本零影响护栏见 R3.9）。
+
+### 6.6 一键启动的数据流（规则 R5）
+
+> 落地状态如实描述：**框架与 Jenkins 一键启动已实现、有离线护栏（`bt_launch_tests.py` 80 例）守护**；
+> Windows 真机 `--yes` 演练尚未执行，spec §2.4 第 3、5 项仍无结论、`min_java_major` 维持 `None`。下述数据流是代码路径的静态描述，不代表已在真机跑通。
+
+```
+点"启动"（ComponentCard.on_start_clicked）
+  ├─ 弹确认框（spec.main_port + spec.risk_note）→ 用户 Yes
+  └─ LaunchWorker("start").start()          # 脱离 UI 线程，parent=self 交对象树持有
+       │
+       ▼  ServiceManager.start(comp, comps)  # 探针全可注入，测试不碰网络也不碰进程
+       ├─ 门控 launch_gate：没装 / JDK 不足 → StartResult(False,"gate",可行动原因)
+       ├─ pick_free_cluster：从 8080 起在 [8080, 8080+99] 升序找整簇空闲口，None → 失败并点名占用
+       ├─ resolve_java_home（优先本工具装的 JDK）+ build_launch_plan（展开 argv、注入 JAVA_HOME/JENKINS_HOME、拼 console_url）
+       ├─ 建 ~/.env-tools/jenkins-data/logs，把 stdout/stderr 重定向到 byte-tools.out
+       ├─ subprocess.Popen(argv, DETACHED…)  # 这是"启动"动作，唯一允许拉进程的地方
+       ├─ 有界轮次探活（每轮 sleeper(1.0)，最多 startup_timeout 轮）
+       │    ├─ 端口在听 → 写 running.json（RunRecord：port 是真相、pid_role=server）→ started_ok(key, console_url)
+       │    └─ 超时 → proc.terminate() 收尸（不留无主监听者）+ 带日志尾巴的 reason → failed
+       └─ 卡片收到 started_ok → _refresh_launch_state()：启动置灰、停止/打开控制台启用、卸载锁死
+
+打开工具（main() → MainWindow._adopt_running，不在 __init__）
+  └─ ServiceManager.reconcile：只 load_running_map + 端口探活
+       ├─ 端口在听 → "running"；登记在但端口没了 → "zombie" → 清该条登记回写
+       └─ 全程一次都不 Popen（NoExecInvariant 护栏钉死）；reconcile 失败只留一条 warn，不挡启动
+
+点"停止"（on_stop_clicked → LaunchWorker("stop")）
+  └─ ServiceManager.stop：Windows 端口在听时**只请示不自动强杀** → need_force 信号
+       ├─ 用户确认 → LaunchWorker("force_stop") → os.kill(登记的 server PID) → 端口确认释放才清登记
+       └─ 端口已空（进程早自己没了）→ 直接清登记算停好
+
+点"打开控制台"（on_console_clicked）
+  └─ QDesktopServices.openUrl(登记的 console_url)   # 用的是实际端口，不是默认 8080
+
+关窗（MainWindow.closeEvent）
+  └─ _cancel_launch_workers()：先全部 cancel 再统一 wait → 才走原有版本线程收尾
+```
+
+> 语义要点：**端口是真相、PID 只是尽力而为地停止**；`status/adopt/reconcile` 只读、绝不拉进程；
+> 停不下来只问人、未确认不强杀也不清登记；运行中禁止卸载。完整约束见 [DEVELOPMENT.md](./DEVELOPMENT.md) R5。
 
 ---
 
@@ -1340,6 +1450,14 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 - 现有三重防线：① `exec_name` 带扩展名（`startup.cmd` / `startup.sh`）避免同名异扩展命中；② `Component.version_probe=False`（Nacos / Seata / Kafka / RocketMQ / RabbitMQ）让探测只判定存在；③ `_probe_version` 遇到空 `version_args` 直接返回，不裸跑命令
 - 版本探测统一在 `VersionProbeWorker` 后台线程执行，且带 `CREATE_NO_WINDOW` + `stdin=DEVNULL` + 4 秒超时，既不弹控制台也不会卡 UI 线程
 - Kafka 在 Windows 上的可执行脚本位于 `bin/windows`（`bin` 下只有无扩展名的 shell 脚本），故其 `path_subdir` 按平台取 `bin/windows` / `bin`
+
+### 10.11 一键启动：状态检测与找回绝不执行启动脚本
+
+- 10.10 的"探测阶段绝不执行启动脚本"不变量，被一键启动扩成：**状态检测与找回（`status` / `adopt` / `reconcile` / `_adopt_running`）也绝不拉起进程**，只允许 `socket` 连端口 + `urllib` 取健康路径。唯一允许 `subprocess.Popen` 的地方是显式的 `start()` 启动动作。`bt_launch_tests.py` 的 `NoExecInvariant` 把 `Popen` / `_probe_version` 桩成"一调用就抛"来钉死这条
+- **端口是真相、PID 只是提示**：`running.json` 记录的 `port` 决定是否"运行中"；`pid_role ∈ {server, launcher, none}`，只有 `server` 且 PID 为正才允许终止，计划二的 Nacos/ActiveMQ（脚本自我后台化、PID 不可信）必须走正规 shutdown 脚本
+- **停不下来只问人**：Windows 上 `os.kill` 任何信号都是 `TerminateProcess`，所以 `stop()` 在 Windows 绝不动手、直接 `need_force` 请示；`force_stop` 也只在端口确认释放后才清登记
+- **真机验证仍欠**：本期 Windows `--launch jenkins --yes` 演练未执行（本机无 JDK/Jenkins），spec §2.4 第 3、5 项无结论、`min_java_major` 保持 `None`；`launch_gate` 因此只判"有没有 JDK"。macOS/Linux 分支代码写完但一律标为未验证
+- 详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R5 与设计文档 [docs/superpowers/specs/2026-10-05-one-click-launch-design.md](./docs/superpowers/specs/2026-10-05-one-click-launch-design.md)
 
 ---
 

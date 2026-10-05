@@ -3345,9 +3345,10 @@ def build_components() -> List[Component]:
 
     # ------------------ Jenkins ------------------
     # 按 R1 规则：URL 走国内镜像优先 + 末位官网回退（共 3 镜像 + 1 官网）
-    # Jenkins LTS 提供 jenkins.war 跨平台单文件，下载后用 `java -jar jenkins.war` 启动
+    # Jenkins LTS 提供 jenkins.war 跨平台单文件，可用 `java -jar jenkins.war` 启动
     # exec_name=None：jenkins.war 不是命令行可执行文件，detect 只能通过 PATH 找 jenkins 命令
-    # 本工具只做下载+配置环境变量，用户需自行用 java -jar 启动
+    # 本工具不止下载+配置环境变量：已登记进 LAUNCH_OF（规则 R5），卡片上有「启动 / 停止 / 打开控制台」
+    # 一键启动能力已实现且有离线护栏守护；Windows 真机验证尚未执行（本机无 JDK/Jenkins，需用户在场跑 --launch jenkins --yes）
     components.append(
         Component(
             key="jenkins",
@@ -3359,7 +3360,8 @@ def build_components() -> List[Component]:
             # 用户运行 Jenkins 需先装 JDK，这里通过 hint 提示
             unsupported_platform_hint=(
                 "Jenkins 通过 jenkins.war 单文件分发，运行需要先安装 JDK（本工具已支持 JDK 自动装配）。"
-                "下载完成后请用 `java -jar jenkins.war` 启动 Jenkins。"
+                "下载完成后点卡片上的「启动」按钮即可一键拉起、并从「打开控制台」进入 Jenkins 页面"
+                "（能力已实现且有离线回归守护；Windows 真机验证待用户在场执行，见 DEVELOPMENT.md 规则 R5）。"
             ),
             versions=[_jenkins_cv(v) for v in ("2.568.3", "2.555.3", "2.541.3")],
         )

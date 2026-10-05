@@ -21,6 +21,7 @@
 - [规则 R2：组件三类分组与界面 Tab](#规则-r2组件三类分组与界面-tab)
 - [规则 R3：组件多版本与生效版本切换](#规则-r3组件多版本与生效版本切换)
 - [规则 R4：一键脚本自举契约](#规则-r4一键脚本自举契约)
+- [规则 R5：组件一键启动契约](#规则-r5组件一键启动契约)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -710,9 +711,92 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 
 ---
 
+## 规则 R5：组件一键启动契约
+
+### R5.1 规则描述
+
+可启动组件（登记表 `LAUNCH_OF`）必须做到：**点启动就真的能访问控制台**；**端口是真相、PID 只是提示**；
+状态检测与找回**绝不执行启动脚本**；停止超时**只询问强制结束、不自动强杀**；运行中**禁止卸载**。
+
+本规则的落地状态要如实分层描述：框架与 Jenkins 一键启动**已实现且有离线护栏守护**，
+但**Windows 真机验证尚未执行**——本机无 JDK、无 Jenkins，`--launch jenkins --yes` 演练从未跑过，
+故 spec §2.4 第 3、5 项**仍无结论**。文档、README、卡片文案一律写成"已实现、离线护栏守护、真机待用户在场验证"，
+**绝不得写成已端到端验证**。
+
+### R5.2 适用范围
+
+- `LAUNCH_KEYS` 里的组件。当前为 `{"jenkins"}`，计划二再加 `activemq` / `nacos`。
+- 不在白名单的组件不得出现启动按钮，也不得被 `ServiceManager` 写入登记
+  （`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)`，不在登记表就是 `None`）。
+
+**计划一遗留 / 计划二待办**（此处是加下一个可启动组件时唯一要回看的清单，别再散落到别处）：
+
+- `force_stop` 在 Windows 上发的是信号 `9`，但 Windows 任何非 CTRL 信号都是 `TerminateProcess`，
+  诚实值应是 `15`（同一 API，只是退出码误导）——计划二接 shutdown 脚本后这条路径基本不再走。
+- 两条保留护栏尚未落地（本期不新增用例，见 R5.6）：
+  ① 从未登记过的"外来记录"能否在 `reconcile` 中存活（`save_running_map` 现会把畸形外来记录永久抹掉）；
+  ② 卡片被销毁时若 `LaunchWorker` 还在跑，等待其收尾（worker 现为卡片的 Qt 子对象，
+  这是 `closeEvent` 所防的那类 abort 的第二条入口）。
+- `getattr(self.window(), "_closing", False)` 只兜住了属性读，没兜住 `self.window()` 这次 Qt 调用本身。
+- `_COMPONENTS_CACHE` 为进程级常驻、从不失效（本期描述符运行时不变，可接受）。
+- `shutdown_command` 分支本期不可达、零覆盖；其占位符契约只喂 `port/home/data_dir`，
+  `{java}/{war}` 一类要计划二接线时补来源，否则 `format` 直接 `KeyError`。
+- 真机 `--yes` 演练，以及由此悬着的 spec §2.4 第 3、5 项与 `min_java_major` 回填。
+
+### R5.3 硬约束
+
+1. `LAUNCH_OF` 是唯一登记处；`build_components()` 末尾统一赋值，构造处不手写。
+2. `min_java_major` 只能填实测结论；未实测保持 `None`，门控退化为"有没有 JDK"（当前即为 `None`）。
+3. 端口选择走 `pick_free_cluster`：区间内升序、整簇端口同时空闲。
+4. `status/adopt/reconcile` 只允许 `socket` + `urllib`；出现 `Popen` / `_probe_version` 调用即视为回归。
+5. 脱离进程必须重定向 stdout/stderr 到组件 data 下（`~/.env-tools/<key>-data/logs/byte-tools.out`），
+   失败原因要带日志尾巴。
+6. 停不下来时返回 `need_force`，由界面问人；未确认不得强杀，也不得清登记
+   （`force_stop` 只在"端口确实释放"后才清登记）。
+7. `JAVA_HOME` 优先取本工具装的 JDK，其次才退到环境变量。
+
+### R5.4 失败处理
+
+- 没装 / JDK 不足：启动按钮禁用 + tooltip 说明缺什么，不做静默失败。
+- 端口簇被占且 `[默认端口, 默认端口+99]` 内找不到整簇空闲位：失败并点名"哪个口被谁占"。
+- 起了但 `startup_timeout` 内未监听：判启动失败，先 `proc.terminate()` 收尸不留无主监听者；
+  收尸失败把"进程可能仍在监听（PID …）"并进 `reason`。
+- 停止无响应：Windows 只请示不自动动手（`os.kill` 的任何信号在 Windows 都是强杀），POSIX 先 `terminate`、
+  超时才 `need_force` 交界面问人。
+- `_adopt_running` 整段 try/except 兜底：`~/.env-tools` 只读 / 被锁 / 磁盘满时只留一条 warn，绝不把工具打不开。
+
+### R5.5 新增一个可启动组件 checklist
+
+- [ ] 在 `LAUNCH_OF` 登记；三平台 `commands` 都非空（未在真机验证的分支要写明）
+- [ ] 决定端口策略：只命令行 flag（本期 jenkins）还是要回写配置文件
+      （回写必须锚定官方默认那一行 + 备份 + 幂等）
+- [ ] 决定 `stop_kind`：优先正规 shutdown 脚本；只有我们自己是服务进程时才用 `pid`
+- [ ] 补 `risk_note`（监听地址、默认凭据、首次向导）
+- [ ] 补表完整性用例 + 真机演练 `--launch <key>`（未跑真机前不得把 `min_java_major` 填成数字）
+
+### R5.6 护栏用例
+
+`bt_launch_tests.py`（80 条，全离线，不真起中间件）盯住：
+`LaunchSpecTable`（白名单恰为 `{jenkins}`、三平台命令非空、白名单外无 launch、
+`test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"）、`RunningMap`、
+`PortCluster`（整簇同空才可用）、`NoExecInvariant`（把 `subprocess.Popen` / `_probe_version` 桩成
+"一调用就抛"，跑完 `status` + `adopt` 全流程，钉死 R5.3 第 4 条）、`ZombieMatrix`、`LaunchPlan`
+（`JAVA_HOME` 优先自家、回退需校验、门控可行动）、`StartFlow`（重定向、端口平移、超时不留登记）、
+`StopFlow` / `TerminateByPidGuard`（非 server 角色 / 负 / None PID 绝不动手、Windows 先请示）、
+`LaunchWorkerSignals`（`need_force` 独立信号）、`CardLaunchUi`（运行中禁卸、worker 以 `parent=self` 交对象树、
+`stop`/`force_stop` 都接 `need_force`）、`MainWindowAdopt`（`_adopt_running` 在入口不在构造、closeEvent 先
+`_cancel_launch_workers`、reconcile 失败不阻断启动）。
+
+护栏非空性经变异自检确认：把 `ServiceManager.adopt` 改成调用一次 `subprocess.Popen` → `NoExecInvariant` 变红；
+把 `min_java_major` 填成 `17` → `test_min_java_major_is_none_until_measured` 变红。两条恢复后回绿。
+
+**保留（本期未实现）**：R5.2 记的两条外来记录存活 / 卡片销毁等待 worker 的用例。
+
+---
+
 ## 后续规则占位
 
-> 后续新增的开发规则以「规则 R5 / R6 / ...」形式追加到本文件，并在「规则索引」中登记。
+> 后续新增的开发规则以「规则 R6 / R7 / ...」形式追加到本文件，并在「规则索引」中登记。
 > 每条规则必须包含：规则描述、适用范围、实施指引、checklist 四节。
 
-- R5: _待定_
+- R6: _待定_
