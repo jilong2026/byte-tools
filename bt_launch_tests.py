@@ -737,5 +737,206 @@ class LaunchWorkerSignals(unittest.TestCase):
         self.assertIn("reboot", got[0])
 
 
+class CardLaunchUi(unittest.TestCase):
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig = main.RUNNING_FILE
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig)
+        # 下面两条用例会直接改模块单例的探针。不还原的话，"_is_listening 永远真"
+        # 会漏给同一进程里后跑的任何类 —— 别的用例就在猜这台机器有没有在听了。
+        self._orig_listen = main.SERVICE_MANAGER._is_listening
+        self.addCleanup(setattr, main.SERVICE_MANAGER, "_is_listening", self._orig_listen)
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        self.card = main.ComponentCard(comp, lambda msg, level: None)
+
+    def test_launch_buttons_exist_only_for_launchable_components(self):
+        self.assertTrue(hasattr(self.card, "btn_start"))
+        other = next(c for c in main.build_components() if c.key == "maven")
+        card2 = main.ComponentCard(other, lambda msg, level: None)
+        self.assertFalse(hasattr(card2, "btn_start"), "非白名单组件不许长出启动按钮")
+
+    def test_running_state_disables_start_and_enables_stop_and_console(self):
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="http://127.0.0.1:8080/", pid=1, pid_role="server",
+            started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
+        self.card._refresh_launch_state()
+        self.assertFalse(self.card.btn_start.isEnabled())
+        self.assertTrue(self.card.btn_stop.isEnabled())
+        self.assertTrue(self.card.btn_console.isEnabled())
+        self.assertIn("运行中", self.card.launch_label.text())
+        self.assertIn("8080", self.card.launch_label.text())
+
+    def test_launch_state_does_not_touch_the_existing_capsule(self):
+        """状态胶囊有 5 处写点（现 main.py:5565/5579/5719/5798/5810），
+        把运行状态挤进去会把既有胶囊逻辑搅浑，所以它只写自己那个 label。"""
+        before = self.card.status_label.text()
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.status_label.text(), before)
+        # 未运行那条只往 label 写空串，"挤没挤进胶囊"根本看不出来（变异自检发现的：
+        # 把两处 setText 都改成 status_label，这条用例照旧全绿）。运行态才是有力的一次。
+        self._mark_running()
+        before = self.card.status_label.text()
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.status_label.text(), before)
+        self.assertIn("运行中", self.card.launch_label.text())
+
+    def test_stopped_state_enables_start_and_disables_console(self):
+        main.save_running_map({})
+        self.card._refresh_launch_state()
+        self.assertTrue(self.card.btn_start.isEnabled())
+        self.assertFalse(self.card.btn_console.isEnabled())
+
+    def test_uninstall_is_blocked_while_running(self):
+        """spec §5：运行中禁止卸载，避免"边跑边删目录"。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="u", pid=1, pid_role="server", started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
+        self.card._refresh_launch_state()
+        self.assertFalse(self.card.btn_uninstall.isEnabled())
+        self.assertIn("先停止", self.card.btn_uninstall.toolTip())
+
+    # -- 以下用例是变异自检补的：按钮连线与互斥的第二道闸门在上面那些用例里不会暴露。
+
+    def _mark_running(self) -> None:
+        """把卡片摆成"运行中"：临时登记表里写一条 + 探针桩成恒听。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="http://127.0.0.1:8080/", pid=1, pid_role="server",
+            started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
+
+    def _stub_dialogs(self, answers):
+        """把 QMessageBox 换成只记录的替身：用例既不弹真窗，也不会误走删除动作。"""
+        yes, no = main.QMessageBox.Yes, main.QMessageBox.No
+        calls = []
+        pending = list(answers)
+
+        class SpyBox:
+            Yes, No = yes, no
+
+            @staticmethod
+            def question(*a, **k):
+                calls.append(("question", " ".join(str(x) for x in a[1:])))
+                return pending.pop(0) if pending else no
+
+            @staticmethod
+            def warning(*a, **k):
+                calls.append(("warning", " ".join(str(x) for x in a[1:])))
+
+        real = main.QMessageBox
+        main.QMessageBox = SpyBox
+        self.addCleanup(setattr, main, "QMessageBox", real)
+        return calls
+
+    def _stub_workers(self):
+        """LaunchWorker 换成不起线程的替身：只记录被创建的实例，信号由用例自己发。"""
+        created = []
+        real = main.LaunchWorker
+
+        class SpyWorker(main.LaunchWorker):
+            def start(self):
+                created.append(self)
+
+        main.LaunchWorker = SpyWorker
+        self.addCleanup(setattr, main, "LaunchWorker", real)
+        return created
+
+    def test_stop_and_force_stop_both_connect_need_force(self):
+        """need_force 是"停不下来只询问"的唯一入口（spec §5）。stop 与 force_stop
+        两条 worker 都要接上：漏一条，按钮就在"停止中"结束、用户既没被问也没结果。"""
+        self._mark_running()
+        created = self._stub_workers()
+        calls = self._stub_dialogs([main.QMessageBox.Yes, main.QMessageBox.No])
+        logs = []
+        self.card.log_cb = lambda level, msg: logs.append((level, msg))
+
+        self.card.on_stop_clicked()
+        self.assertEqual([w.action for w in created], ["stop"])
+        created[0].need_force.emit("jenkins", "端口 8080 仍在听，要强制结束吗？")
+        self.assertEqual([w.action for w in created], ["stop", "force_stop"],
+                         "stop 的 need_force 没接上就永远问不出这一步")
+        self.assertEqual([c[0] for c in calls], ["question"], "询问只该问一次")
+
+        # 同意强杀后起来的第二条 worker 同样要能再问：端口可能被别的进程占着。
+        created[1].need_force.emit("jenkins", "端口 8080 仍在监听，可能是别的进程占着。")
+        self.assertEqual([w.action for w in created], ["stop", "force_stop"],
+                         "force_stop 的 need_force 没接上就会静默结束")
+        self.assertEqual([c[0] for c in calls], ["question", "question"])
+        self.assertIn("未强制结束", " ".join(m for _l, m in logs))
+
+    def test_uninstall_slot_refuses_while_running(self):
+        """置灰可能被别的同步路径顶掉，所以 on_uninstall_clicked 里还要有一道闸门：
+        运行中连"确认卸载"的弹窗都不该出现。"""
+        self._mark_running()
+        calls = self._stub_dialogs([])
+        self.card.on_uninstall_clicked()
+        self.assertEqual([c for c in calls if c[0] == "question"], [],
+                         "运行中不许走到卸载二次确认")
+        warnings = [c for c in calls if c[0] == "warning"]
+        self.assertEqual(len(warnings), 1, "拒绝必须说清为什么")
+        self.assertIn("先停止", warnings[0][1])
+
+    def test_uninstall_lock_only_toggles_on_the_running_edge(self):
+        """刷新只在"运行中/刚停止"这条边上动卸载按钮。
+        未运行且从未锁过时一律设成可用，会顶掉 _detect_status 按"选中版本装没装"
+        算出的判定，给出一张未安装也能点卸载的卡片（承诺做不到的事）。"""
+        main.save_running_map({})
+        # 绕开 _detect_status 的包装器：判定按钮的从来就是 impl 那套逻辑。
+        self.card._detect_status_impl()
+        untouched_enabled = self.card.btn_uninstall.isEnabled()
+        untouched_tip = self.card.btn_uninstall.toolTip()
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.btn_uninstall.isEnabled(), untouched_enabled)
+        self.assertEqual(self.card.btn_uninstall.toolTip(), untouched_tip)
+
+        # 运行中 → 锁；停止后 → 解冻（spec §7 演练：运行中禁卸 → 停止后可卸）
+        self._mark_running()
+        self.card._refresh_launch_state()
+        self.assertFalse(self.card.btn_uninstall.isEnabled())
+        main.save_running_map({})
+        self.card._refresh_launch_state()
+        self.assertTrue(self.card.btn_uninstall.isEnabled())
+
+    def test_fresh_card_shows_running_state_without_a_manual_refresh(self):
+        """卡片建出来就得带运行态：_detect_status 有四条出口，刷新要挂在每条出口之后，
+        漏掉的话端口在听、卡片却显示"停着"，用户只能靠重启工具看出来。"""
+        self._mark_running()
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        card = main.ComponentCard(comp, lambda msg, level: None)
+        self.assertIn("运行中", card.launch_label.text())
+        self.assertTrue(card.btn_console.isEnabled())
+        self.assertFalse(card.btn_start.isEnabled())
+
+    def test_worker_signals_drive_the_card(self):
+        """started_ok / failed / stopped 三条连线是卡片唯一的"结果"入口：掉一条，
+        用户点完按钮只剩按钮自己变灰，日志里一句结果与归因都没有。"""
+        created = self._stub_workers()
+        calls = self._stub_dialogs([main.QMessageBox.Yes])
+        logs = []
+        self.card.log_cb = lambda level, msg: logs.append((level, msg))
+        spoken = lambda: " ".join(m for _l, m in logs)
+        dialogs = lambda kind: " ".join(c[1] for c in calls if c[0] == kind)
+
+        self.card.on_start_clicked()
+        self.assertEqual([w.action for w in created], ["start"], "确认启动后必须起线程")
+        created[0].started_ok.emit("jenkins", "http://127.0.0.1:8080/")
+        self.assertIn("http://127.0.0.1:8080/", spoken(), "started_ok 掉了就没有控制台地址")
+
+        created[0].failed.emit("jenkins", "8080 起 100 个端口内都没找到能整簇空闲的位置")
+        self.assertIn("100 个端口内都没找到", dialogs("warning"),
+                      "failed 掉了失败归因就看不见")
+
+        self.card.on_stop_clicked()
+        self.assertEqual([w.action for w in created], ["start", "stop"])
+        created[1].stopped.emit("jenkins")
+        self.assertIn("已停止", spoken(), "stopped 掉了卡片不会报告结果")
+
+
 if __name__ == "__main__":
     unittest.main()

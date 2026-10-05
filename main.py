@@ -4897,6 +4897,11 @@ class ServiceManager:
                           reason=f"端口 {rec.port} 仍在监听，可能是别的进程占着，不是本工具启动的那个。")
 
 
+# 卡片按钮要的是同一个登记/探针视图：多张卡片各持一个 ServiceManager 会把
+# per-key 门与 running.json 的读写拆成两套口径。
+SERVICE_MANAGER = ServiceManager()
+
+
 def load_active_map() -> Dict[str, str]:
     """读取"每个组件当前生效哪个版本"的登记表；文件缺失或损坏一律当空表。
 
@@ -5425,6 +5430,10 @@ class ComponentCard(QFrame):
         self._mv_installed_set: set = set()
         self._mv_buttons_ready: bool = False
         self._version_worker: Optional["VersionProbeWorker"] = None
+        # 卸载按钮是否被"运行中"锁过：只有锁过才允许在停止后解冻。
+        # 未运行时把 btn_uninstall 一律设成可用会顶掉 _detect_status 按"选中版本
+        # 装没装"算出的状态，给出一张未安装也能点卸载的卡片（做不到的承诺）。
+        self._uninstall_locked_by_launch: bool = False
 
         self.setObjectName("card")
         self.setFrameShape(QFrame.NoFrame)
@@ -5538,6 +5547,34 @@ class ComponentCard(QFrame):
         self.btn_uninstall.clicked.connect(self.on_uninstall_clicked)
         mid.addWidget(self.btn_uninstall)
 
+        # 启动相关按钮：只有登记了启动描述符的组件才有（LAUNCH_KEYS，本期只有 Jenkins）
+        self.launch_worker: Optional[LaunchWorker] = None
+        if self.component.launch is not None:
+            self.btn_start = QPushButton("启动")
+            self.btn_start.setObjectName("primaryBtn")
+            self.btn_start.setCursor(QCursor(Qt.PointingHandCursor))
+            self.btn_start.setFixedHeight(34)
+            self.btn_start.clicked.connect(self.on_start_clicked)
+            mid.addWidget(self.btn_start)
+
+            self.btn_stop = QPushButton("停止")
+            self.btn_stop.setFixedHeight(34)
+            self.btn_stop.clicked.connect(self.on_stop_clicked)
+            self.btn_stop.setEnabled(False)
+            mid.addWidget(self.btn_stop)
+
+            self.btn_console = QPushButton("打开控制台")
+            self.btn_console.setFixedHeight(34)
+            self.btn_console.clicked.connect(self.on_console_clicked)
+            self.btn_console.setEnabled(False)
+            mid.addWidget(self.btn_console)
+
+            # 运行状态自己一个小 label：status_label 已有 5 处写点，挤进去会把
+            # 多版本胶囊 / 系统安装 那套判定搅浑（R3.9 要求非目标组件零影响）。
+            self.launch_label = QLabel("")
+            self.launch_label.setObjectName("launchLabel")
+            mid.addWidget(self.launch_label)
+
         mid.addStretch(1)  # 右侧留空，避免下拉框被拉伸
         root.addLayout(mid)
 
@@ -5551,6 +5588,103 @@ class ComponentCard(QFrame):
     # ------------------------------------------------------------------
     def _log(self, level: str, msg: str) -> None:
         self.log_cb(level, f"[{self.component.display_name}] {msg}")
+
+    # ------------------------------------------------------------------
+    # 一键启动：卡片只负责"读状态 → 摆按钮 → 把动作丢进线程"，判定全在 ServiceManager。
+    def _launch_status(self):
+        return SERVICE_MANAGER.status(self.component.key, self.component)
+
+    def _refresh_launch_state(self) -> None:
+        """按端口实况刷新按钮与运行状态 label（不碰 status_label 那枚状态胶囊）。
+        本方法只读，一次都不许拉起进程。"""
+        if self.component.launch is None:
+            return
+        st = self._launch_status()
+        running = st.state == "running"
+        self.btn_start.setEnabled(not running and self.launch_worker is None)
+        self.btn_stop.setEnabled(running)
+        self.btn_console.setEnabled(running)
+        if running:
+            self.launch_label.setText(f"● 运行中 · 端口 {st.record.port}")
+            # 运行中禁止卸载：边跑边删目录会把正在写的日志和数据留在半删状态
+            self.btn_uninstall.setEnabled(False)
+            self.btn_uninstall.setToolTip("请先停止运行中的 %s 再卸载" % self.component.display_name)
+            self._uninstall_locked_by_launch = True
+        else:
+            self.launch_label.setText("")
+            # 只解冻自己被锁过的那次：卸载按钮的可用性本来由 _detect_status /
+            # _sync_action_buttons 按"选中版本装没装"判定，无条件点亮会给出
+            # 一张未安装也能点卸载的卡片。
+            if self._uninstall_locked_by_launch:
+                self._uninstall_locked_by_launch = False
+                self.btn_uninstall.setEnabled(True)
+                self.btn_uninstall.setToolTip("删除已安装的版本、清理 XXX_HOME 与 PATH")
+
+    def on_start_clicked(self) -> None:
+        spec = self.component.launch
+        reply = QMessageBox.question(
+            self, "确认启动 %s" % self.component.display_name,
+            "端口：%d（被占用时会自动往后找空闲口）\n%s\n\n确认启动？"
+            % (spec.main_port, spec.risk_note),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            return
+        self.btn_start.setEnabled(False)
+        self.launch_worker = LaunchWorker("start", self.component,
+                                          MainWindow.current_components(), SERVICE_MANAGER)
+        self.launch_worker.started_ok.connect(self._on_launch_ok)
+        self.launch_worker.failed.connect(self._on_launch_failed)
+        self.launch_worker.finished.connect(self._on_launch_worker_done)
+        self.launch_worker.start()
+
+    def _on_launch_ok(self, key: str, console_url: str) -> None:
+        self._log("info", f"已启动，控制台：{console_url}")
+        self._refresh_launch_state()
+
+    def _on_launch_failed(self, key: str, reason: str) -> None:
+        self._log("error", f"操作失败：{reason}")
+        QMessageBox.warning(self, "操作失败", reason)
+        self._refresh_launch_state()
+
+    def _on_need_force(self, key: str, reason: str) -> None:
+        """停止超时/无法优雅结束：问一次，不自己决定强杀（spec §5）。"""
+        if QMessageBox.question(self, "需要强制结束", reason,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) != QMessageBox.Yes:
+            self._log("warn", "未强制结束，进程仍在运行。")
+            return
+        self.launch_worker = LaunchWorker("force_stop", self.component,
+                                          MainWindow.current_components(), SERVICE_MANAGER)
+        self.launch_worker.stopped.connect(self._on_launch_stopped)
+        self.launch_worker.failed.connect(self._on_launch_failed)
+        self.launch_worker.need_force.connect(self._on_need_force)
+        self.launch_worker.finished.connect(self._on_launch_worker_done)
+        self.launch_worker.start()
+
+    def _on_launch_stopped(self, key: str) -> None:
+        self._log("info", "已停止。")
+        self._refresh_launch_state()
+
+    def _on_launch_worker_done(self) -> None:
+        self.launch_worker = None
+        self._refresh_launch_state()
+
+    def on_stop_clicked(self) -> None:
+        self.btn_stop.setEnabled(False)
+        self.launch_worker = LaunchWorker("stop", self.component,
+                                          MainWindow.current_components(), SERVICE_MANAGER)
+        self.launch_worker.stopped.connect(self._on_launch_stopped)
+        self.launch_worker.failed.connect(self._on_launch_failed)
+        # 这条线不能省：停不下来时 need_force 就是"问一次"的唯一入口，
+        # 漏接了按钮会直接停在"停止中"结束、用户既没被问也没结果。
+        self.launch_worker.need_force.connect(self._on_need_force)
+        self.launch_worker.finished.connect(self._on_launch_worker_done)
+        self.launch_worker.start()
+
+    def on_console_clicked(self) -> None:
+        st = self._launch_status()
+        if st.record is not None:
+            QDesktopServices.openUrl(QUrl(st.record.console_url))
 
     # ------------------------------------------------------------------
     def _render_status_label(self) -> None:
@@ -5667,6 +5801,16 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _detect_status(self) -> None:
+        """检测组件状态，并在每条出口后刷新一遍运行态。
+
+        _detect_status_impl 有四条出口（多版本胶囊 / 已配置 / 已下载 / 未安装），把
+        `_refresh_launch_state()` 写在物理末尾只会覆盖最后那条；包一层才能保证
+        "每次重探状态都顺带把启动/停止/卸载按钮对齐端口实况"。
+        """
+        self._detect_status_impl()
+        self._refresh_launch_state()
+
+    def _detect_status_impl(self) -> None:
         """检测该组件当前是否已安装、已配置。
 
         - 若系统 PATH 或 XXX_HOME 已能找到可执行文件，则视为「已配置」，禁用
@@ -6122,6 +6266,15 @@ class ComponentCard(QFrame):
 
         卸载是不可逆操作，所以先弹 QMessageBox.question 确认；用户点 Yes 才执行。
         """
+        # spec §5 运行中禁止卸载。按钮置灰是第一道，这里是第二道：置灰状态可能被
+        # 其它同步路径顶掉，而"边跑边删目录"删掉的正是服务进程正在写的日志与数据。
+        if self.component.launch is not None and \
+                SERVICE_MANAGER.status(self.component.key, self.component).state == "running":
+            reason = "请先停止运行中的 %s 再卸载" % self.component.display_name
+            self._log("warn", reason)
+            QMessageBox.warning(self, "无法卸载", reason)
+            self._refresh_launch_state()
+            return
         cv = self._current_version()
         # 二次确认：卸载会删除本地目录、清理环境变量与 PATH，不可逆
         # 确认框尾巴按组件是否多版本分叉：多版本现在只动选中的那个版本，
@@ -6509,6 +6662,16 @@ class DonateDialog(QDialog):
 # 主窗口（无边框自定义标题栏）
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
+    _COMPONENTS_CACHE: Dict[str, "Component"] = {}
+
+    @staticmethod
+    def current_components() -> Dict[str, "Component"]:
+        """只读的组件表：卡片的启动/停止要用别的组件（needs 判定），
+        但不该每张卡片自己再 build_components() 一次。"""
+        if not MainWindow._COMPONENTS_CACHE:
+            MainWindow._COMPONENTS_CACHE = {c.key: c for c in build_components()}
+        return MainWindow._COMPONENTS_CACHE
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
