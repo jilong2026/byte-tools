@@ -1916,11 +1916,19 @@ git commit -m "feat(ui): 组件卡片启动/停止/打开控制台按钮，运�
 class MainWindowAdopt(unittest.TestCase):
     """这一层的用例一律不构造真 MainWindow：`MainWindow.__init__` 会建 26 张卡片、
     起版本探测线程，把宿主机网络和 Qt 生命周期都拖进来。用 `__new__` 拿到一个未初始化的实例、
-    只补这个方法真正用到的成员，才是本任务这一层的可测形状。"""
+    只补这个方法真正用到的成员，才是本任务这一层的可测形状。
+
+    控制器已在 offscreen 下实测过这个形状：`MainWindow.__new__` 出来的对象可以正常赋 Python 属性
+    （`_append_log`、`cards`、甚至**遮蔽** `findChildren`），`current_components()` 这种 staticmethod
+    也能通过它调用；但凡碰真的 Qt 方法（如未遮蔽的 `findChildren`）就抛
+    `RuntimeError: '__init__' method of object's base class not called`。
+    所以 `_cancel_launch_workers` 用注入的 findChildren 测；`closeEvent` 本身测不了（要调 super），
+    它只有"调一次 _cancel_launch_workers 再交给 Qt"这一行，如实说明即可，不要为了测它去构造真窗口。"""
 
     def bare_win(self, logs):
         win = main.MainWindow.__new__(main.MainWindow)
         win._append_log = lambda level, msg: logs.append((level, msg))
+        win.cards = []          # _adopt_running 收尾要遍历卡片重读实况；没卡片也得有个空表
         return win
 
     def setUp(self):
@@ -1969,6 +1977,23 @@ class MainWindowAdopt(unittest.TestCase):
         self.assertEqual([m for _, m in logs], ["检测到 jenkins 正在运行（端口 8123）"])
         self.assertIn("jenkins", main.load_running_map(), "在跑的登记不许被清掉")
 
+    def test_adopt_running_re_syncs_every_card_after_cleaning(self):
+        """_adopt_running 会把僵尸登记删掉，而卡片可能在它跑之前就已经把"残留登记"画出来了。
+        不清一遍卡片就会在窗口里留一句假警告，直到用户碰别的什么东西才刷新。"""
+        refreshed = []
+
+        class FakeCard:
+            def _refresh_launch_state(self):
+                refreshed.append(True)
+
+        main.SERVICE_MANAGER = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": False,
+            http_ok=lambda u, timeout=2.0: False, process_alive=lambda pid: False)
+        win = self.bare_win([])
+        win.cards = [FakeCard(), FakeCard(), FakeCard()]
+        win._adopt_running()
+        self.assertEqual(len(refreshed), 3, "认清本机之后每张卡片都要重读一次实况")
+
     def test_close_cancels_then_waits_every_in_flight_worker(self):
         """Task 9 的 cancel 落点：关窗口时先给每个在跑的 worker 一次体面退出，
         不是把线程连同 QThread 一起扔了（cancel 只停止"等端口"，不动别人的进程）。"""
@@ -2005,6 +2030,10 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
         for key, st in states.items():
             if st.state == "running":
                 self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
+        # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
+        # 否则窗口里会留一句已经没有依据的"残留登记"。
+        for card in self.cards:
+            card._refresh_launch_state()
 
     def _cancel_launch_workers(self) -> int:
         """关窗口前让在跑的启动/停止线程体面收尾：只取消"还在等端口"，不动被管理的进程。
@@ -2026,7 +2055,7 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 75 tests ... OK`
+Expected: `Ran 76 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
