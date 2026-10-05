@@ -2131,7 +2131,11 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     comps = {c.key: c for c in main.build_components()}
     comp = comps[comp_key]
     if not apply:
-        print(f"[dry-run] 将启动 {comp.display_name}，随后停止；数据留在 {comp.install_dir(comp.versions[0].version)}")
+        # 数据目录要说准：spec §0 决策 3 定的是"数据与版本目录分离"，
+        # JENKINS_HOME 在 CONFIG_DIR/<key>-data，不在版本目录里。
+        data = main.CONFIG_DIR / f"{comp.key}-data"
+        print(f"[dry-run] 将启动 {comp.display_name}，随后停止；"
+              f"程序目录 {comp.install_dir(comp.versions[0].version)}，数据目录 {data}")
         return 0
     res = main.SERVICE_MANAGER.start(comp, comps)
     if not res.ok:
