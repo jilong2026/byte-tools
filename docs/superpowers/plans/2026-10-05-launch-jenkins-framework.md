@@ -1886,10 +1886,12 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 71 tests ... OK`
+Expected: `Ran 72 tests ... OK`
 （不是本任务正文里那 5 条：初稿的 62 与"未测的接线要补用例"这条要求不能同时成立。
-实现者补 5 条守护用例到 67，评审轮又补 4 条（QThread 两条删除窗口 ×2、`_sync_action_buttons` 锁、
-zombie 可见性）到 71。后续任务的预期数已按 71 起算。）
+实现者补 5 条守护用例到 67，评审轮补 4 条（QThread 两条删除窗口 ×2、`_sync_action_buttons` 锁、
+zombie 可见性）到 71，复核轮再补 1 条"当前 worker 结束要把引用交回"到 72 ——
+那一条是同一处代码的另一半：把 `launch_worker = None` 整行删掉，前 71 条仍然全绿。
+后续任务的预期数已按 72 起算。）
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -2055,7 +2057,7 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 76 tests ... OK`
+Expected: `Ran 77 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
