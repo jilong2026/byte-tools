@@ -459,6 +459,11 @@ class StopFlow(unittest.TestCase):
         self._orig = main.RUNNING_FILE
         main.RUNNING_FILE = Path(self.dir.name) / "running.json"
         self.addCleanup(setattr, main, "RUNNING_FILE", self._orig)
+        # 钉住 OS：不钉的话同一批用例会因宿主是 Windows 还是 Linux 走两条不同分支，
+        # 结果取决于跑测试的机器（和 Task 7 的 JAVA_HOME 问题同类）。
+        self._orig_os = main.CURRENT_OS
+        main.CURRENT_OS = "Linux"
+        self.addCleanup(setattr, main, "CURRENT_OS", self._orig_os)
         self.comps = {c.key: c for c in main.build_components()}
         self.comp = self.comps["jenkins"]
         main.save_running_map({"jenkins": main.RunRecord(
@@ -497,6 +502,34 @@ class StopFlow(unittest.TestCase):
         self.assertTrue(mgr.force_stop("jenkins").ok)
         self.assertEqual(main.load_running_map(), {})
 
+    def test_force_stop_rechecks_before_blaming_other_process(self):
+        """终止调用返回 ≠ 监听 socket 已关闭：复查窗口里端口才释放要判成功并清登记，
+        rounds 耗尽仍在听才归因"别的进程占着"并保留登记（评审 Important #3）。"""
+        rec = main.load_running_map()["jenkins"]
+        seq = [True, True, False]
+
+        def releases_late(port, host="127.0.0.1"):
+            return seq.pop(0) if seq else False
+
+        mgr = main.ServiceManager(is_listening=releases_late,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda r: None)
+        res = mgr.force_stop("jenkins", sleeper=lambda s: None, rounds=3)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(main.load_running_map(), {}, "复查窗口里端口释放就该判成功并清登记")
+
+        # 全程仍监听：杀完探一次会把"我们刚杀的"误报成别人占着；有界复查耗尽后才归因，且不清登记
+        main.save_running_map({"jenkins": rec})
+        mgr2 = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                   http_ok=lambda u, timeout=2.0: False,
+                                   process_alive=lambda pid: False,
+                                   terminate=lambda r: None)
+        res2 = mgr2.force_stop("jenkins", sleeper=lambda s: None, rounds=3)
+        self.assertFalse(res2.ok)
+        self.assertIn("别的进程", res2.reason)
+        self.assertIn("jenkins", main.load_running_map(), "rounds 耗尽仍监听时不许清登记")
+
     def test_stop_without_record_is_harmless(self):
         main.save_running_map({})
         mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
@@ -518,6 +551,21 @@ class StopFlow(unittest.TestCase):
         res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
         self.assertTrue(res.ok, res.reason)
         self.assertEqual(killed, [(43210, 15)])
+
+    def test_windows_pid_stop_asks_before_killing(self):
+        """Windows 路线专用：os.kill 的任何信号值在 Windows 上都是 TerminateProcess，
+        也就是"强杀"本身。spec §5 要求超时只询问、不自动强杀，所以停止的第一步不许动手。"""
+        main.CURRENT_OS = "Windows"
+        killed = []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda rec: killed.append(rec.pid))
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertTrue(res.need_force)
+        self.assertEqual(killed, [], "Windows 上停止第一步不许杀进程")
+        self.assertIn("jenkins", main.load_running_map())
 
 
 class TerminateByPidGuard(unittest.TestCase):
@@ -544,6 +592,12 @@ class TerminateByPidGuard(unittest.TestCase):
 
     def test_zero_pid_is_never_killed(self):
         main.ServiceManager._terminate_by_pid(self.rec("server", pid=0))
+        self.assertEqual(self.kills, [])
+
+    def test_negative_pid_is_never_killed(self):
+        """os.kill(-1, …) 在 POSIX 上是"发给所有进程"，登记被手改成负数时绝不能往下传。"""
+        main.ServiceManager._terminate_by_pid(self.rec("server", pid=-1))
+        main.ServiceManager._terminate_by_pid(self.rec("server", pid=None))
         self.assertEqual(self.kills, [])
 
 
