@@ -51,6 +51,21 @@ class LaunchSpecTable(unittest.TestCase):
         """spec §2.4 第 5 项实测前禁止填数字，门控只能退化成"有没有 JDK"。"""
         self.assertIsNone(self.comps["jenkins"].launch.min_java_major)
 
+    def test_plan_two_fields_default_to_plan_one_behaviour(self):
+        """新字段必须带默认值且默认就是计划一 Jenkins 的既有行为，
+        这样 Jenkins 的登记不用改一个字——本期不该动它。"""
+        spec = main.LAUNCH_OF["jenkins"]
+        self.assertEqual(spec.port_writeback, "cli_only")
+        self.assertEqual(tuple(spec.extra_ports), ())
+        self.assertEqual(spec.extra_env, {})
+
+    def test_port_writeback_values_are_the_three_the_code_handles(self):
+        # 拼错一个值就会在运行时走"未知策略"分支静默不改端口，所以取值域要在表层钉住。
+        # 本期实际用到 cli_only / cli_flag / conf_copy 三个；shutdown_command 之类不属于本字段。
+        allowed = {"cli_only", "cli_flag", "conf_copy"}
+        self.assertTrue(set(main.PORT_WRITEBACKS) == allowed,
+                        f"策略取值域漂移：{main.PORT_WRITEBACKS}")
+
 
 class RunningMap(unittest.TestCase):
     def setUp(self):

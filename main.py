@@ -2970,11 +2970,15 @@ COMPONENT_CATEGORY_OF = {
 # 排除服务型组件（mysql/tomcat/nacos/es/…）：多版本的真矛盾是端口与数据目录，不是环境变量。
 MULTI_VERSION_KEYS = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
 
+# 端口策略取值域。写成一个常量而不是靠文档列举，是因为取值写错不会报错、
+# 只会静默走"不改端口"分支——那正是 §5 要避免的"假装安全地改了配置"。
+PORT_WRITEBACKS = ("cli_only", "cli_flag", "conf_copy")
+
 
 @dataclass
 class LaunchSpec:
-    """一个组件"怎么被拉起来"的描述符。本期只有 cli 改端口一种端口策略，
-    配置回写（property_file）留给计划二，故此处不提供该字段。"""
+    """一个组件"怎么被拉起来"的描述符。端口策略见 port_writeback 三种取值；
+    厂商官方文件在任何策略下都不被修改（conf_copy 写的是 data 目录里的副本）。"""
 
     # 按 OS 键的启动 argv 模板。允许这些占位符：
     #   {java} {war} {home} {data_dir} {port} {log_file}
@@ -3000,6 +3004,18 @@ class LaunchSpec:
     data_dir_env: Optional[str] = None
     # 拉起后多久内必须开始监听，超时判启动失败。
     startup_timeout: int = 120
+    # 端口策略（spec 计划二 §3.1）：
+    #   cli_only  —— 只有命令行 flag 能改端口（Jenkins），不碰任何文件
+    #   cli_flag  —— 端口作为命令行参数透传给厂商脚本（Nacos --server.port），不碰任何文件
+    #   conf_copy —— 把官方 conf 整目录拷进 data 目录，端口只写这份副本（ActiveMQ）
+    # 取值域见 PORT_WRITEBACKS；写错不会报错，只会静默不改端口，所以有 §Task1 的取值域用例。
+    port_writeback: str = "cli_only"
+    # 独立基准端口：与主口没有固定偏移、需要各自找空的口（ActiveMQ 的 61616）。
+    # 派生口（Nacos 的 9848/9849）不放这里，走 port_offsets。
+    extra_ports: tuple = ()
+    # 额外注入的环境变量。值支持 {home} {data_dir} {conf_dir} {port} 占位，
+    # 因为 ActiveMQ 的 ACTIVEMQ_CONF/DATA 要等端口定了、副本建好了才写得出最终值。
+    extra_env: Dict[str, str] = field(default_factory=dict)
     # 启动确认弹窗里的风险说明文本（监听地址、默认凭据一类）。
     risk_note: str = ""
 
