@@ -3,6 +3,8 @@
 用法（在项目根目录）：
     .venv/Scripts/python.exe bt_real_machine_drill.py            # 只体检，不改动任何东西
     .venv/Scripts/python.exe bt_real_machine_drill.py --yes      # 真演练：切到另一个已装版本，再切回来
+    .venv/Scripts/python.exe bt_real_machine_drill.py --launch <key>            # 组件启动演练：只打印将做什么
+    .venv/Scripts/python.exe bt_real_machine_drill.py --launch <key> --yes      # 真启动→查控制台→真停止
 
 为什么要有这个脚本：单元测试能证明逻辑自洽，证明不了 Windows 真的照办。
 2026-09-30 那次就是教训——注册表写对了、`composed_env()` 复验也通过了，
@@ -24,6 +26,7 @@ import tempfile
 import time
 
 APPLY_FLAG = "--yes" in sys.argv   # 必须在清 argv 之前取，否则演练模式永远进不去
+LAUNCH_KEY = sys.argv[sys.argv.index("--launch") + 1] if "--launch" in sys.argv else None
 sys.argv = [sys.argv[0]]           # 别让 main.py 的 argparse/入口看到本脚本的参数
 import main                        # noqa: E402
 
@@ -228,5 +231,47 @@ def main_drill(apply: bool) -> int:
     return 0 if ok else 1
 
 
+def launch_drill(comp_key: str, apply: bool) -> int:
+    """三层判据（沿用本脚本既有风格）：拉得起 → 端口在听且控制台给 2xx → 停得干净。
+
+    单元测试证明的是逻辑对，这一层证明真机器上真能跑（R3.16 的教训）。
+    """
+    comps = {c.key: c for c in main.build_components()}
+    if comp_key not in comps:
+        # 传错 key 要当场死，绝不静默走回原来的 bun 演练路径。
+        print(f"演练失败：--launch 收到不认识的 key：{comp_key}，"
+              f"可选：{sorted(comps)}")
+        return 1
+    comp = comps[comp_key]
+    if not apply:
+        # 数据目录要说准：spec §0 决策 3 定的是"数据与版本目录分离"，
+        # JENKINS_HOME 在 CONFIG_DIR/<key>-data，不在版本目录里。
+        data = main.CONFIG_DIR / f"{comp.key}-data"
+        print(f"[dry-run] 将启动 {comp.display_name}，随后停止；"
+              f"程序目录 {comp.install_dir(comp.versions[0].version)}，数据目录 {data}")
+        return 0
+    res = main.SERVICE_MANAGER.start(comp, comps)
+    if not res.ok:
+        print("启动失败：", res.reason)
+        return 1
+    rec = res.record
+    got = main.http_ok(rec.console_url.rstrip("/") + "/login")
+    print(f"[1/3] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
+    stop = main.SERVICE_MANAGER.stop(comp, comps)
+    if not stop.ok and stop.need_force:
+        # Windows 上 stop 第一步只请示、不动手（Task 8 裁定 1）。演练里这一票由脚本替
+        # 用户点"是"，否则一条按设计走通的路径会被判成失败。
+        print("[2/3] 停止需要确认，演练按「是」继续：", stop.reason)
+        stop = main.SERVICE_MANAGER.force_stop(rec.key)
+    left = main.load_running_map()
+    print(f"[2/3] 停止 ok={stop.ok} 需强制={stop.need_force} reason={stop.reason}")
+    print(f"[3/3] 登记残留={list(left)}")
+    if not stop.ok or rec.key in left:
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
+    if LAUNCH_KEY is not None:
+        raise SystemExit(launch_drill(LAUNCH_KEY, APPLY_FLAG))
     raise SystemExit(main_drill(APPLY_FLAG))

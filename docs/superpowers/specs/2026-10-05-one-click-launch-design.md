@@ -60,6 +60,16 @@
 5. Jenkins 要求的 JDK 最低大版本。
 6. ActiveMQ broker 传输端口 61616 的正规回写点在哪（`conf/activemq.xml` 的 `transportConnectors`？本期未实测，因此**第一批不自动平移该端口**，只在它被占时按 §5 的失败语义报告）。
 
+#### 2.4.1 演练记录（2026-10-05，Task 12）
+
+- 已完成：`bt_real_machine_drill.py` 新增 `--launch <key> [--yes]` 三层判据入口（拉得起 → 控制台可达 → `登记残留=[]`）。
+  dry-run 已在本机真跑通：只打印将做什么，退出码 0，无 java 进程、无 `~/.env-tools/running.json`、无任何目录新增。
+- 第 3、5 项：**仍无结论**。判据要靠 `--yes` 真机执行，而本机未装 JDK 与 Jenkins（`~/.env-tools` 仅有
+  config.json / powershell / python），真跑会走镜像下载 ~200MB、写用户环境变量与 PATH、创建 `jenkins-data`
+  并在 8080 起活服务——需用户在场授权后执行。故 `LAUNCH_OF["jenkins"].min_java_major` 维持 `None`，
+  等实测结论回填，不许先写数字。
+- 第 1、2、4、6 项：属 Nacos / ActiveMQ（计划二范围），本次演练入口只接了白名单内的 jenkins，未触及，状态不变。
+
 ## 3. 架构与分层
 
 全部落在 `main.py` 内（保持单文件形态），按现有约定分四层：
