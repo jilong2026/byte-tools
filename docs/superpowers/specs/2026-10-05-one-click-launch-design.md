@@ -53,12 +53,25 @@
 
 ### 2.4 待真机验证清单（Windows 验收时必须有结论，不许写成事实）
 
+> **2026-10-05 计划二开工前更新：** 第 1、2、6 项已由"下载真包、只读文件"的探针给出结论（不必起服务），
+> 第 3、4、5 项仍需真机。逐项状态见下，结论正文在
+> `2026-10-05-launch-activemq-nacos-design.md` §2；本节保留原问题描述以免丢上下文。
+
 1. `nacos/bin/startup.cmd` 里 `%COMMAND%` 展开后的实际拉起方式（是否 `start /b javaw`、是否留窗口）。
+   → **已定**：Windows 是前台直跑 java（`:92` 拼命令、`:95` 执行，无 `start /b`）；自我后台化只在 `startup.sh`。
 2. Nacos 2.3.2 控制台路径是 `/nacos` 还是根路径；gRPC offset 的确切属性名。
+   → **半定**：`conf/application.properties` 里**没有任何 gRPC 端口属性**，9848/9849 由 `server.port` 派生；
+   控制台路径仍未证实（白名单里有 `/` 与 `/console-ui/public/**`，无 `/nacos` 前缀 → 倾向根路径），归计划二 A3 实测。
 3. Jenkins `--httpPort` / `--httpListenAddress` 的实际生效性，以及初始管理员密码文件的确切落点。
+   → **未动**：仍无结论（见 §2.4.1）。
 4. Windows 下 `bin/activemq.bat` 能否在不装服务的前提下正常起，以及它是否会弹独立窗口。
+   → **未证**：文件层只能看到 `:99` 是前台 java 行。归计划二 A5。
 5. Jenkins 要求的 JDK 最低大版本。
+   → **未动**：`min_java_major` 仍为 `None`。
 6. ActiveMQ broker 传输端口 61616 的正规回写点在哪（`conf/activemq.xml` 的 `transportConnectors`？本期未实测，因此**第一批不自动平移该端口**，只在它被占时按 §5 的失败语义报告）。
+   → **已定并作废本条决定**：回写点是 `conf/activemq.xml:178` 那一条 `transportConnector`（单行可锚定），
+   且它与 8161 **无固定偏移关系**，不属于 `port_offsets` 模型 → 计划二新增 `extra_ports` 并**做平移**
+   （理由：能改却只改一半会造出"控制台起了、客户端连不上、界面却显示运行中"的半成功状态）。
 
 #### 2.4.1 演练记录（2026-10-05，Task 12）
 
