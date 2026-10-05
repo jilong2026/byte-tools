@@ -452,5 +452,100 @@ class StartFlow(unittest.TestCase):
         self.assertEqual(main.load_running_map()["jenkins"].port, 8081)
 
 
+class StopFlow(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig = main.RUNNING_FILE
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig)
+        self.comps = {c.key: c for c in main.build_components()}
+        self.comp = self.comps["jenkins"]
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="2.568.3", home="/h", data_dir="/d", port=8080,
+            console_url="http://127.0.0.1:8080/", pid=43210, pid_role="server",
+            started_at=0.0, launcher_cmd=["java"])})
+
+    def test_jenkins_stop_uses_pid_terminate_and_drops_record(self):
+        killed = []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: killed.append(rec.pid))
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(killed, [43210])
+        self.assertEqual(main.load_running_map(), {})
+
+    def test_stuck_process_asks_forced_and_keeps_record(self):
+        """超时不许自动强杀：必须返回 need_force，由界面问人（spec §5）。"""
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda rec: None)
+        res = mgr.stop(self.comp, self.comps, deadline=0.0, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertTrue(res.need_force)
+        self.assertIn("强制", res.reason)
+        self.assertIn("jenkins", main.load_running_map(), "没停成就保留登记，别把进程变孤儿")
+
+    def test_force_stop_clears_record_when_port_releases(self):
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: None)
+        self.assertTrue(mgr.force_stop("jenkins").ok)
+        self.assertEqual(main.load_running_map(), {})
+
+    def test_stop_without_record_is_harmless(self):
+        main.save_running_map({})
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False, terminate=lambda rec: None)
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertIn("没有本工具的启动登记", res.reason)
+
+    def test_stop_defaults_to_killing_the_registered_server_pid(self):
+        """不注入 terminate 时，stop() 必须真的落到 _terminate_by_pid —— 那是生产默认路径。"""
+        killed = []
+        orig = main.os.kill
+        main.os.kill = lambda pid, sig: killed.append((pid, sig))
+        self.addCleanup(setattr, main.os, "kill", orig)
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(killed, [(43210, 15)])
+
+
+class TerminateByPidGuard(unittest.TestCase):
+    """默认收尸器：只杀我们登记为 server 的 PID，别的一律不动。"""
+
+    def setUp(self):
+        self.kills = []
+        self._kill = main.os.kill
+        self.addCleanup(setattr, main.os, "kill", self._kill)
+        main.os.kill = lambda pid, sig: self.kills.append((pid, sig))
+
+    def rec(self, role, pid=43210):
+        return main.RunRecord(key="jenkins", version="2.568.3", home="/h", data_dir="/d",
+                              port=8080, console_url="http://127.0.0.1:8080/",
+                              pid=pid, pid_role=role, started_at=0.0, launcher_cmd=["java"])
+
+    def test_server_pid_gets_sigterm(self):
+        main.ServiceManager._terminate_by_pid(self.rec("server"))
+        self.assertEqual(self.kills, [(43210, 15)])
+
+    def test_launcher_pid_is_never_killed(self):
+        main.ServiceManager._terminate_by_pid(self.rec("launcher"))
+        self.assertEqual(self.kills, [], "PID 不可信时不许动手（spec §2）")
+
+    def test_zero_pid_is_never_killed(self):
+        main.ServiceManager._terminate_by_pid(self.rec("server", pid=0))
+        self.assertEqual(self.kills, [])
+
+
 if __name__ == "__main__":
     unittest.main()

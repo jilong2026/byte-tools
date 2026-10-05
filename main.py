@@ -4591,14 +4591,35 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
                       console_url=f"http://127.0.0.1:{port}{spec.console_path}")
 
 
+@dataclass
+class StopResult:
+    ok: bool
+    need_force: bool = False
+    reason: str = ""
+
+
 class ServiceManager:
     """本机进程生命周期的唯一入口。探针全部可注入，测试因此不碰网络也不碰进程。"""
 
     def __init__(self, is_listening=port_is_listening, http_ok=http_ok,
-                 process_alive=process_is_alive):
+                 process_alive=process_is_alive, terminate=None):
         self._is_listening = is_listening
         self._http_ok = http_ok
         self._process_alive = process_alive
+        self._terminate = terminate or self._terminate_by_pid
+
+    @staticmethod
+    def _terminate_by_pid(rec: RunRecord) -> None:
+        """只结束我们自己登记过的 PID。
+
+        spec §2 说明 Nacos / ActiveMQ 的 PID 不可信，所以计划二必须走正规
+        shutdown 脚本；本期 Jenkins 我们就是服务进程，terminate 才成立。"""
+        if rec.pid_role != "server" or not rec.pid:
+            return
+        try:
+            os.kill(rec.pid, 15)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
 
     def status(self, key: str, comp: Component,
                records: Optional[Dict[str, RunRecord]] = None) -> LaunchStatus:
@@ -4730,6 +4751,53 @@ class ServiceManager:
         except OSError:
             return "（日志还读不到）"
         return " / ".join(data[-lines:]) if data else "（日志为空）"
+
+    def stop(self, comp: Component, comps: Dict[str, Component],
+             deadline: float = 30.0, sleeper=time.sleep) -> StopResult:
+        rec = load_running_map().get(comp.key)
+        if rec is None:
+            return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
+        spec = comp.launch
+        if spec.stop_kind == "shutdown_command" and spec.shutdown_commands.get(CURRENT_OS):
+            argv = [t.format(port=rec.port, home=rec.home) for t in spec.shutdown_commands[CURRENT_OS]]
+            try:
+                subprocess.run(argv, cwd=rec.home, timeout=20,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        else:
+            self._terminate(rec)
+
+        left = deadline
+        while left > 0:
+            if not self._is_listening(rec.port):
+                records = load_running_map()
+                records.pop(comp.key, None)
+                save_running_map(records)
+                return StopResult(True, reason=f"{comp.display_name} 已停止，端口 {rec.port} 已释放。")
+            sleeper(1.0)
+            left -= 1.0
+        return StopResult(False, need_force=True,
+                          reason=(f"{comp.display_name} 在 {int(deadline)} 秒内没停下来（端口 {rec.port} 仍在听）。"
+                                  f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
+
+    def force_stop(self, key: str) -> StopResult:
+        """用户明确同意后的强制结束。仍然只在"端口确实释放"时才清登记。"""
+        rec = load_running_map().get(key)
+        if rec is None:
+            return StopResult(False, reason="没有登记记录")
+        if self._process_alive(rec.pid) and rec.pid_role == "server":
+            try:
+                os.kill(rec.pid, 9)
+            except OSError:
+                pass
+        if self._is_listening(rec.port):
+            return StopResult(False, need_force=True,
+                              reason=f"端口 {rec.port} 仍在监听，可能是别的进程占着，不是本工具启动的那个。")
+        records = load_running_map()
+        records.pop(key, None)
+        save_running_map(records)
+        return StopResult(True, reason="已强制结束并释放端口。")
 
 
 def load_active_map() -> Dict[str, str]:
