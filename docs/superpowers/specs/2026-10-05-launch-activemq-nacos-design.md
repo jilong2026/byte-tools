@@ -331,12 +331,27 @@ risk_note           = 控制台默认账号 admin/admin（conf/users.properties 
 
 ### 8.3 基线
 
-现有 9 套件 / 347 用例必须继续全绿（`bt_multiversion_tests.py` 需 `PYTHONIOENCODING=utf-8`，既有债）。
+现有 9 套件 / 396 用例必须继续全绿（`bt_multiversion_tests.py` 需 `PYTHONIOENCODING=utf-8`，既有债）。
 CI 与发布流程一律不跑真启动。
+
+本期实测（2026-10-05，`bt_launch_tests.py` 129 例）：
+`CardLaunchUi` 20、`ConfCopyWriteback` 7、`HealthProbe` 4、`LaunchPlan` 6、`LaunchSpecTable` 16、
+`LaunchWorkerSignals` 7、`MainWindowAdopt` 7、`NetstatParse` 6、`NoExecInvariant` 3、`PortCluster` 6、
+`PortPlanning` 8、`RunningMap` 10、`StartFlow` 7、`StopFlow` 14、`TerminateByPidGuard` 4、`ZombieMatrix` 4。
 
 ---
 
 ## 9. 验收标准（计划二）
+
+> **收口状态（离线部分已完成，真机部分未开始）：** 第 6 项已离线收口，第 5 项**部分**收口 ——
+> `bt_launch_tests.py` **129 例**全绿（原 9 套件 396 例无回归）；
+> 全程未修改任何厂商官方文件（`test_conf_copy_writes_only_into_the_copy` 直接比对官方文件字节未变）。
+> 但第 5 项的"逐条经变异自检确认非空"**尚未达成**：四处变异里三处如期变红，
+> 第四处（把 `prepare_ports` 的 `conf_copy` 分支改成忽略回写失败）**改完 129 条仍全绿**——
+> "回写失败 → 拒绝拉起"这条接缝没有用例，详见 [DEVELOPMENT.md](../../../DEVELOPMENT.md) R5.6 的记录与补法。
+> **第 1、2、3、4 项全部依赖真机，`--launch jenkins|nacos|activemq --yes` 一次都没跑过（需用户在场），
+> §8.2 的 A1–A7 与 §2.4 各项仍无结论。** 文档、README、卡片文案一律保持
+> "已实现 / 离线护栏守护 / 真机待用户在场验证"三层，**不得写成已端到端验证**。
 
 1. Windows 上 ActiveMQ、Nacos 各完成一次：点启动 → 卡片"运行中 · 实际端口簇" → 打开控制台拿到登录页 →
    停止 → **整簇端口释放** → 数据/副本位置被告知。

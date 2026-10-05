@@ -596,15 +596,28 @@ apply_active_version(comp, version)
 
 | 名称 | 位置（约） | 职责 |
 |------|-----------|------|
-| `LaunchSpec` | `main.py:2975` | 一个组件"怎么被拉起来"的描述符：`commands`（按 OS 的 argv 模板，占位 `{java}/{war}/{home}/{data_dir}/{port}/{log_file}`）、`stop_kind`（`pid` / `shutdown_command`）、`main_port` / `port_offsets` / `port_search_span`、`console_path` / `health_path`、`needs` / `min_java_major`、`data_dir_env`、`startup_timeout`、`risk_note` |
-| `LAUNCH_OF` / `LAUNCH_KEYS` | `main.py:3007` / `:3027` | **唯一登记处**；`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)` 统一赋值，构造处不手写。本期只有 `{"jenkins"}` |
-| `pick_free_cluster(base, offsets, span, is_free)` | `main.py:4510` | 端口簇选择：从主端口起在 `[base, base+span]` 内**升序**找"整簇所有端口同时空闲"的最小主端口，找不到返回 `None`（不做跨段随机挑） |
-| `resolve_java_home(comps)` | `main.py:4608` | `JAVA_HOME` **优先取本工具装的 JDK**，其次才退到环境变量；退到环境变量的值要校验目录真实存在 |
-| `build_launch_plan(comp, spec, java_home, port, log_file)` | `main.py:4638` | 展开 argv、注入 env（`JAVA_HOME` + `data_dir_env`）、拼 `console_url`；`java_home` 一律是 JDK 安装目录（home），不是 exe |
-| `load_running_map()` / `save_running_map()` | `main.py:4458` / `:4494` | `~/.env-tools/running.json`（本机进程事实，与 `config.json` 用户偏好分开）读写；坏 JSON / 缺文件一律当空表，字段畸形只丢该条记录；写盘走"临时文件 + `os.replace`"原子覆盖，`port`/`pid` 在读取侧显式 int 归一 |
-| `ServiceManager` | `main.py:4675` | 生命周期唯一入口：`status` / `adopt` / `reconcile`（只读 + 清僵尸，**绝不拉进程**）、`start`（门控 → 选端口簇 → 建 data 目录 → 重定向 stdout/stderr 到 `<data>/logs/byte-tools.out` → 有界轮次探活 → 写登记）、`stop`（Windows 只请示不自动强杀，超时 `need_force`）、`force_stop`（只在端口确认释放后才清登记）。探针 `is_listening`/`http_ok`/`process_alive`/`terminate` 全可注入 |
+| `LaunchSpec` | `main.py:2985` | 一个组件"怎么被拉起来"的描述符：`commands`（按 OS 的 argv 模板，占位 `{java}/{war}/{home}/{data_dir}/{conf_dir}/{port}/{log_file}`）、`stop_kind`（`pid` / `shutdown_command` / `port_lookup`）、`main_port` / `port_offsets` / `extra_ports` / `port_search_span`、`port_writeback`（`cli_only` / `cli_flag` / `conf_copy`）、`extra_env`、`console_path` / `health_path`、`needs` / `min_java_major`、`data_dir_env`、`startup_timeout`、`risk_note` / `data_note` |
+| `LAUNCH_OF` / `LAUNCH_KEYS` | `main.py:3034` / `:3116` | **唯一登记处**；`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)` 统一赋值，构造处不手写。当前为 `{jenkins, activemq, nacos}` |
+| `pick_free_cluster(base, offsets, span, is_free)` | `main.py:4639` | 端口簇选择：从主端口起在 `[base, base+span]` 内**升序**找"整簇所有端口同时空闲"的最小主端口，找不到返回 `None`（不做跨段随机挑） |
+| `parse_netstat_listeners(text)` | `main.py:4665` | 解析 Windows `netstat -ano` 输出 → `{端口: {PID, …}}`。容错：表头/空行/`IPv6`/`(netstat)` 后缀/`Foreign` 状态都跳过；只收 LISTENING |
+| `netstat_listener_pids(ports)` | `main.py:4713` | 调一次 netstat 并只保留要的端口 → `{端口: 唯一 PID}`；同口多 PID（归属有歧义）时**不给结果**。**只在 `force_stop` 用**，检测路径绝不调它（`NoExecInvariant` 钉死） |
+| `_pick_unique_pids(table, ports)` | `main.py:4706` | 从解析表里取"唯一且存在"的归属；长度 != 1 直接不返回 —— 宁可不杀，也不按进程名乱杀 |
+| `prepare_conf_copy(src, dst)` | `main.py:4745` | 把官方 `conf` **整目录**拷到 `~/.env-tools/<key>-data/conf`。已有副本即权威：只回报"副本里缺的相对路径清单"，不自动合并、不覆盖 |
+| `set_property_line(path, key, value)` | `main.py:4786` | 幂等改 `.properties` 的一行：首次改动留一次 `.bak`；已是目标值就不写文件。锚不到那一行 → 返回 `(False, 指名文件+行+手工改法)` |
+| `set_openwire_port(path, port)` | `main.py:4810` | 只改 `activemq.xml` 里**带 `name="openwire"` 属性**的 `transportConnector`（该属性是锚点）；被注释掉或找不到同样拒改 |
+| `conf_targets(data_dir)` | `main.py:4739` | ActiveMQ 的 conf 副本三件套路径：`conf/` 目录、`jetty-spring.properties`、`activemq.xml` |
+| `choose_ports(spec, is_free)` | `main.py:4854` | 统一选端口：主口+派生口走 `pick_free_cluster` 整簇平移；独立口（`extra_ports`）各自从**自己的基准**另找。独立口找不到位 → 整次失败并指名是哪个口（半成功比不启动更坏） |
+| `prepare_ports(comp, spec, plan, data_dir)` | `main.py:4876` | 端口回写闸门，返回 `(能否继续拉起, 失败原因, 提示行)`。`cli_only`/`cli_flag` 直接放行不碰文件；`conf_copy` 建副本 + 改两处端口。**回写必须在 spawn 之前完成**，失败必须阻止拉起 |
+| `vendor_log_tails(data_dir, home, key)` | `main.py:4918` | 启动超时时把厂商自己的日志（`activemq.log` / `start.out`）尾巴并进 `reason`，按 `VENDOR_LOG_CANDIDATES` 表找而不是猜 |
+| `resolve_java_home(comps)` | `main.py:5012` | `JAVA_HOME` **优先取本工具装的 JDK**，其次才退到环境变量；退到环境变量的值要校验目录真实存在 |
+| `build_launch_plan(comp, spec, java_home, port, log_file)` | `main.py:5042` | 展开 argv、注入 env（`JAVA_HOME` + `data_dir_env` + `extra_env`，值支持 `{home}/{data_dir}/{conf_dir}/{port}`）、拼 `console_url`；`java_home` 一律是 JDK 安装目录（home），不是 exe |
+| `load_running_map()` / `save_running_map()` | `main.py:4578` / `:4623` | `~/.env-tools/running.json`（本机进程事实，与 `config.json` 用户偏好分开）读写；坏 JSON / 缺文件一律当空表，字段畸形只丢该条记录；写盘走"临时文件 + `os.replace`"原子覆盖。`ports` 缺省 `()` 由**加载侧**归一为 `(port,)` —— 新字段没有默认值会让旧记录整批被静默丢弃 |
+| `ServiceManager` | `main.py:5084` | 生命周期唯一入口：`status` / `adopt` / `reconcile`（只读 + 清僵尸，**绝不拉进程**）、`start`（门控 → `choose_ports` → `prepare_ports` 回写闸门 → 建 data 目录 → 重定向 stdout/stderr 到 `<data>/logs/byte-tools.out` → 有界轮次**整簇**探活 → 写登记）、`stop`（Windows 或 `port_lookup` 都只请示不自动强杀，超时 `need_force`）、`force_stop`（`pid_role=server` 才按登记 PID，否则按**端口反查**得到的唯一非自有 PID；**只在整簇端口确认释放后才清登记**）。探针 `is_listening`/`http_ok`/`process_alive`/`terminate`/`_lookup_pids` 全可注入 |
 
-> 语义要点：**端口是真相、PID 只是尽力而为地停止**；`pid_role ∈ {server, launcher, none}`，只有 `server` 且 PID 为正才允许 `_terminate_by_pid` 动手。`SERVICE_MANAGER`（`main.py:4902`）是卡片与主窗共用的单实例，避免多张卡片各持一套 `running.json` 读写口径。
+> 语义要点：**端口是真相、PID 只是尽力而为地停止**；`pid_role ∈ {server, launcher, none}`。`status/adopt/reconcile` 的
+> "运行中"判定走整簇监听（`tuple(rec.ports) or (rec.port,)`）—— Nacos 主口在听、gRPC 9848 掉了是**半死**，
+> 显示成运行中会让用户以为客户端连得上。端口反查是一次 netstat 调用，**只允许出现在 `force_stop`**。
+> `SERVICE_MANAGER`（`main.py:5369`）是卡片与主窗共用的单实例，避免多张卡片各持一套 `running.json` 读写口径。
 
 #### `extract_archive(archive, extract_to)`
 
@@ -755,7 +768,9 @@ def main() -> int:
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
-| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、僵尸登记矩阵、`NoExecInvariant`（`status`/`adopt` 路径把 `Popen`/`_probe_version` 桩成一调用就抛）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（80 个用例，见 R5.6）。全量回归 9 套件之一 |
+| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（129 个用例，见 R5.6）。全量回归 9 套件之一。**注意有一条已知空护栏**：
+把 `prepare_ports` 改成"回写失败也照样放行"时 129 条仍全绿 —— "回写失败 → 拒绝拉起"缺用例，
+详见 DEVELOPMENT.md R5.6 |
 
 #### `bt_multiversion_tests.py` 覆盖面
 
@@ -994,8 +1009,11 @@ on_uninstall_clicked()   # main.py:4995
 
 ### 6.6 一键启动的数据流（规则 R5）
 
-> 落地状态如实描述：**框架与 Jenkins 一键启动已实现、有离线护栏（`bt_launch_tests.py` 80 例）守护**；
-> Windows 真机 `--yes` 演练尚未执行，spec §2.4 第 3、5 项仍无结论、`min_java_major` 维持 `None`。下述数据流是代码路径的静态描述，不代表已在真机跑通。
+> 落地状态如实描述：**框架与 Jenkins / ActiveMQ / Nacos 三件的一键启动已实现、有离线护栏
+> （`bt_launch_tests.py` 129 例）守护**；Windows 真机 `--launch jenkins|nacos|activemq --yes`
+> **一次都没跑过**，计划一 spec §2.4 第 3、5 项与计划二 spec §8.2 的 A1–A7 全部仍无结论、
+> `min_java_major` 维持 `None`、`console_path`/`health_path` 两个新组件仍为推测值。
+> 下述数据流是代码路径的静态描述，**不代表已在真机跑通**。
 
 ```
 点"启动"（ComponentCard.on_start_clicked）
@@ -1004,24 +1022,34 @@ on_uninstall_clicked()   # main.py:4995
        │
        ▼  ServiceManager.start(comp, comps)  # 探针全可注入，测试不碰网络也不碰进程
        ├─ 门控 launch_gate：没装 / JDK 不足 → StartResult(False,"gate",可行动原因)
-       ├─ pick_free_cluster：从 8080 起在 [8080, 8080+99] 升序找整簇空闲口，None → 失败并点名占用
+       ├─ choose_ports(spec)：主口+派生口整簇平移（pick_free_cluster）+ 独立口各找自己的基准
+       │    └─ 任一口找不到位 → StartResult(False,"port",指名是哪个口)
        ├─ resolve_java_home（优先本工具装的 JDK）+ build_launch_plan（展开 argv、注入 JAVA_HOME/JENKINS_HOME、拼 console_url）
-       ├─ 建 ~/.env-tools/jenkins-data/logs，把 stdout/stderr 重定向到 byte-tools.out
+       ├─ prepare_ports(...)：端口回写闸门，必须在 spawn 之前完成
+       │    ├─ cli_only / cli_flag → 直接放行，一个文件都不碰
+       │    └─ conf_copy → 官方 conf 整目录拷进 ~/.env-tools/<key>-data/conf，只改这份副本
+       │         └─ 锚不到官方默认那一行 → StartResult(False,"writeback",指名改哪一行)，不 spawn
+       ├─ 建 ~/.env-tools/<key>-data/logs，把 stdout/stderr 重定向到 byte-tools.out
        ├─ subprocess.Popen(argv, DETACHED…)  # 这是"启动"动作，唯一允许拉进程的地方
        ├─ 有界轮次探活（每轮 sleeper(1.0)，最多 startup_timeout 轮）
-       │    ├─ 端口在听 → 写 running.json（RunRecord：port 是真相、pid_role=server）→ started_ok(key, console_url)
-       │    └─ 超时 → proc.terminate() 收尸（不留无主监听者）+ 带日志尾巴的 reason → failed
+       │    ├─ **整簇端口都在听** → 写 running.json（RunRecord：ports 整簇、port 是真相、pid_role=server/launcher）
+       │    │     → started_ok(key, console_url, notes)   # notes 带"端口写在哪份文件里"
+       │    └─ 超时 → proc.terminate() 收尸（不留无主监听者）+ 厂商日志尾巴的 reason → failed
        └─ 卡片收到 started_ok → _refresh_launch_state()：启动置灰、停止/打开控制台启用、卸载锁死
 
 打开工具（main() → MainWindow._adopt_running，不在 __init__）
-  └─ ServiceManager.reconcile：只 load_running_map + 端口探活
-       ├─ 端口在听 → "running"；登记在但端口没了 → "zombie" → 清该条登记回写
-       └─ 全程一次都不 Popen（NoExecInvariant 护栏钉死）；reconcile 失败只留一条 warn，不挡启动
+  └─ ServiceManager.reconcile：只 load_running_map + 整簇端口探活
+       ├─ 整簇都在听 → "running"；登记在但簇里任一口没了 → "zombie" → 清该条登记回写
+       └─ 全程一次都不 Popen、也不查端口归属表（NoExecInvariant 钉死）；reconcile 失败只留一条 warn，不挡启动
 
 点"停止"（on_stop_clicked → LaunchWorker("stop")）
-  └─ ServiceManager.stop：Windows 端口在听时**只请示不自动强杀** → need_force 信号
-       ├─ 用户确认 → LaunchWorker("force_stop") → os.kill(登记的 server PID) → 端口确认释放才清登记
-       └─ 端口已空（进程早自己没了）→ 直接清登记算停好
+  └─ ServiceManager.stop：先按**整簇**探活（整簇都空 → 直接清登记算停好）
+       ├─ Windows(pid) 或 port_lookup → 只请示不自动强杀 → need_force 信号
+       └─ 用户确认 → LaunchWorker("force_stop")
+            ├─ **端口反查**（stop_kind=port_lookup 时多出的一步，见下）
+            ├─ 三重闸：有我们的登记 + 不是我们自己 + 用户已确认
+            │    └─ 归属有歧义（同口多 PID）或指向我们自己 → 一个都不杀，当场说清为什么并返回
+            └─ os.kill → 整簇端口确认释放才清登记
 
 点"打开控制台"（on_console_clicked）
   └─ QDesktopServices.openUrl(登记的 console_url)   # 用的是实际端口，不是默认 8080
@@ -1030,8 +1058,17 @@ on_uninstall_clicked()   # main.py:4995
   └─ _cancel_launch_workers()：先全部 cancel 再统一 wait → 才走原有版本线程收尾
 ```
 
+> **端口反查是停止路径上多出的一步**：`jenkins` 的 PID 就是服务进程，按登记 PID 停即可；
+> 但 Nacos / ActiveMQ 的启动脚本会自我后台化，登记的 PID 是包装脚本而不是服务进程
+> （`pid_role=launcher`），厂商自带的关闭脚本按进程名强杀又会误伤本机同名实例。
+> 因此 `force_stop` 在"登记 PID 不可信"时走 `netstat -ano` 反查端口归属，再经三重闸才动手。
+> **反查绝不出现在检测路径**：它是一次进程外调用，出现在 `status/adopt/reconcile` 就等于从后门放掉
+> "状态检测绝不执行进程"，由 `NoExecInvariant` 的正反两条用例同时钉住。
+
 > 语义要点：**端口是真相、PID 只是尽力而为地停止**；`status/adopt/reconcile` 只读、绝不拉进程；
-> 停不下来只问人、未确认不强杀也不清登记；运行中禁止卸载。完整约束见 [DEVELOPMENT.md](./DEVELOPMENT.md) R5。
+> "运行中"必须整簇都在听（只判主口会把半死的 Nacos 报成运行中）；停不下来只问人、未确认不强杀也不清登记；
+> 运行中禁止卸载；端口回写只写 `~/.env-tools/<key>-data` 下的副本，厂商官方文件一个字节不动。
+> 完整约束见 [DEVELOPMENT.md](./DEVELOPMENT.md) R5。
 
 ---
 
@@ -1454,10 +1491,26 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 ### 10.11 一键启动：状态检测与找回绝不执行启动脚本
 
 - 10.10 的"探测阶段绝不执行启动脚本"不变量，被一键启动扩成：**状态检测与找回（`status` / `adopt` / `reconcile` / `_adopt_running`）也绝不拉起进程**，只允许 `socket` 连端口 + `urllib` 取健康路径。唯一允许 `subprocess.Popen` 的地方是显式的 `start()` 启动动作。`bt_launch_tests.py` 的 `NoExecInvariant` 把 `Popen` / `_probe_version` 桩成"一调用就抛"来钉死这条
-- **端口是真相、PID 只是提示**：`running.json` 记录的 `port` 决定是否"运行中"；`pid_role ∈ {server, launcher, none}`，只有 `server` 且 PID 为正才允许终止，计划二的 Nacos/ActiveMQ（脚本自我后台化、PID 不可信）不走厂商 shutdown 脚本，而是 `stop_kind="port_lookup"` 的端口反查——Nacos 的 `shutdown.cmd` 按进程名 `taskkill /F` 会误伤本机其它同名实例，ActiveMQ 的 `stop` 经 JAAS/JMX 且受 conf 副本影响；反查只允许出现在 `stop` / `force_stop` 路径，动手前必须过三重闸（有我们的登记 + 不是我们自己 + 用户已确认强制结束）
-- **停不下来只问人**：Windows 上 `os.kill` 任何信号都是 `TerminateProcess`，所以 `stop()` 在 Windows 绝不动手、直接 `need_force` 请示；`force_stop` 也只在端口确认释放后才清登记
-- **真机验证仍欠**：本期 Windows `--launch jenkins --yes` 演练未执行（本机无 JDK/Jenkins），spec §2.4 第 3、5 项无结论、`min_java_major` 保持 `None`；`launch_gate` 因此只判"有没有 JDK"。macOS/Linux 分支代码写完但一律标为未验证
-- 详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R5 与设计文档 [docs/superpowers/specs/2026-10-05-one-click-launch-design.md](./docs/superpowers/specs/2026-10-05-one-click-launch-design.md)
+- **端口反查也不许进检测路径**：计划二新增的 `netstat_listener_pids`（一次 `netstat -ano`）是进程外调用，
+  出现在 `status/adopt/reconcile` 就等于从后门放掉上面那条不变量。两条用例同时钉住：
+  正向 `test_detection_paths_never_consult_the_port_owner_table`（检测路径零调用）+
+  **反向** `test_force_stop_actually_consults_it`（`force_stop` 必须调一次，且查的是整簇端口）
+  —— 没有反向断言，"不许调用"可以靠把调用删干净白赢
+- **端口是真相、PID 只是提示**：`running.json` 记录的端口**簇**（`ports`，缺省由加载侧按 `(port,)` 归一）决定是否"运行中"，
+  只判主口会把"主口在听、gRPC 9848 掉了"的半死 Nacos 报成运行中；`pid_role ∈ {server, launcher, none}`，
+  只有 `server` 且 PID 为正才允许按登记 PID 终止。计划二的 Nacos/ActiveMQ（脚本自我后台化、PID 不可信）
+  不走厂商 shutdown 脚本，而是 `stop_kind="port_lookup"` 的端口反查——Nacos 的 `shutdown.cmd` 按进程名
+  `taskkill /F` 会误伤本机其它同名实例，ActiveMQ 的 `stop` 经 JAAS/JMX 且受 conf 副本影响；
+  反查只允许出现在 `stop` / `force_stop` 路径，动手前必须过三重闸（有我们的登记 + 不是我们自己 +
+  用户已确认强制结束），归属有歧义（同口多 PID）时宁可不杀
+- **端口回写只写副本**：`port_writeback="conf_copy"` 把官方 `conf` 整目录拷进 `~/.env-tools/<key>-data/conf`，
+  端口只写这份副本，**厂商官方文件在任何策略下都不被修改**；锚不到官方默认那一行就**拒改并指名要改哪一行**，
+  不许猜用户的改法。回写失败必须**阻止拉起**（改了配置却没起进程比"没启动"更难归因）
+- **停不下来只问人**：Windows 上 `os.kill` 任何信号都是 `TerminateProcess`，所以 `stop()` 在 Windows 绝不动手、直接 `need_force` 请示；`force_stop` 也只在**整簇**端口确认释放后才清登记
+- **真机验证仍欠**：`--launch jenkins|nacos|activemq --yes` **一次都没跑过**（需用户在场），
+  计划一 spec §2.4 第 3、5 项与计划二 spec §8.2 的 A1–A7 全部无结论、`min_java_major` 保持 `None`、
+  两个新组件的 `console_path` / `health_path` 仍是推测值。macOS/Linux 分支代码写完但一律标为未验证
+- 详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R5 与设计文档 [docs/superpowers/specs/2026-10-05-launch-activemq-nacos-design.md](./docs/superpowers/specs/2026-10-05-launch-activemq-nacos-design.md)
 
 ---
 

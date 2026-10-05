@@ -718,18 +718,27 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 可启动组件（登记表 `LAUNCH_OF`）必须做到：**点启动就真的能访问控制台**；**端口是真相、PID 只是提示**；
 状态检测与找回**绝不执行启动脚本**；停止超时**只询问强制结束、不自动强杀**；运行中**禁止卸载**。
 
-本规则的落地状态要如实分层描述：框架与 Jenkins 一键启动**已实现且有离线护栏守护**，
-但**Windows 真机验证尚未执行**——本机无 JDK、无 Jenkins，`--launch jenkins --yes` 演练从未跑过，
-故 spec §2.4 第 3、5 项**仍无结论**。文档、README、卡片文案一律写成"已实现、离线护栏守护、真机待用户在场验证"，
-**绝不得写成已端到端验证**。
+本规则的落地状态要如实分层描述：框架与 Jenkins / ActiveMQ / Nacos 三件的一键启动**已实现且有离线护栏守护**，
+但**Windows 真机验证尚未执行**——`--launch jenkins|nacos|activemq --yes` 一次都没跑过（需用户在场），
+故计划一 spec §2.4 第 3、5 项与计划二 spec §8.2 的 A1–A7 **全部仍无结论**。文档、README、卡片文案一律写成
+"已实现、离线护栏守护、真机待用户在场验证"，**绝不得写成已端到端验证**。
 
 ### R5.2 适用范围
 
-- `LAUNCH_KEYS` 里的组件。当前为 `{"jenkins"}`，计划二再加 `activemq` / `nacos`。
+- `LAUNCH_KEYS` 里的组件。当前为 `{"jenkins", "activemq", "nacos"}`。
 - 不在白名单的组件不得出现启动按钮，也不得被 `ServiceManager` 写入登记
   （`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)`，不在登记表就是 `None`）。
 
-**计划一遗留 / 计划二待办**（此处是加下一个可启动组件时唯一要回看的清单，别再散落到别处）：
+**本期已兑现**（这两条不再是回看项）：
+
+- `RunRecord` 新增字段必须带默认值 —— **已做**，见 R5.3 第 8 条与 R5.6 的 `NetstatParse`。
+  `ports` 缺省 `()`、归一化放在加载侧（`load_running_map()` 见到 `()` 就按 `(port,)` 补），
+  留了旧格式迁移用例；默认值不是可选性，它决定旧 `running.json` 会不会被整批静默清空。
+- 端口簇/独立口的表达 —— **已做**，见 R5.3 第 8 条。派生口 `port_offsets`、独立口 `extra_ports`，
+  由 `choose_ports` 统一选、`prepare_ports` 统一回写。
+
+**计划一遗留 / 计划二待办**（此处是加下一个可启动组件时唯一要回看的清单，别再散落到别处。
+下面这份就是全集）：
 
 - `force_stop` 在 Windows 上发的是信号 `9`，但 Windows 任何非 CTRL 信号都是 `TerminateProcess`，
   诚实值应是 `15`（同一 API，只是退出码误导）——计划二接 shutdown 脚本后这条路径基本不再走。
@@ -738,13 +747,19 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
   **没测到**的是两种边界 —— ① 外来记录字段畸形（缺字段 / 类型归一失败）时，`load_running_map` 会丢掉它，
   随后任何一次"有僵尸要清"的写盘就把它**永久抹掉**；② "jenkins 是僵尸 + 同时存在外来记录"
   这一交汇下写盘是否保住外来记录（按代码构造是对的，但没有用例）。计划二加组件前先补这两条。
+- `running.json` 读写**没有跨进程 advisory lock**，GUI 与演练脚本并跑时最后写的那一方会覆盖前一方。
+  计划二把登记面从 1 个组件扩到 3 个、Nacos 还多两个 gRPC 派生口，并发撞上的概率明显上升
+  —— 下一个组件接入前必须回看这一条。
 - 卡片被销毁时若 `LaunchWorker` 还在跑，没有等待其收尾的用例（worker 现为卡片的 Qt 子对象，
   这是 `closeEvent` 所防的那类 abort 的第二条入口）。当前正常流程不销毁卡片（卡片只在 `__init__` 建一次，
   搜索只做 `setParent` 搬移且 `self.cards` 持有 Python 引用），所以本期不可达 —— 但计划二若加"重建卡片"就要补。
 - `_COMPONENTS_CACHE` 为进程级常驻、从不失效（本期描述符运行时不变，可接受）。
 - `shutdown_command` 分支本期不可达、零覆盖；其占位符契约只喂 `port/home/data_dir`，
   `{java}/{war}` 一类要计划二接线时补来源，否则 `format` 直接 `KeyError`。
-- 真机 `--yes` 演练，以及由此悬着的 spec §2.4 第 3、5 项与 `min_java_major` 回填。
+- `launch_label` 的样式没有 QSS 规则，主题切换后可能与卡片底色撞色（显示层问题，不影响判定）。
+- 测试里仍有 `"8080"` 字面量散落（夹具与断言中），加新组件时要逐处泛化，否则换端口即假失败。
+- 真机 `--yes` 演练，以及由此悬着的计划一 spec §2.4 第 3、5 项、计划二 spec §8.2 的 A1–A7
+  与 `min_java_major` 回填。
 
 ### R5.3 硬约束
 
@@ -757,41 +772,71 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 6. 停不下来时返回 `need_force`，由界面问人；未确认不得强杀，也不得清登记
    （`force_stop` 只在"端口确实释放"后才清登记）。
 7. `JAVA_HOME` 优先取本工具装的 JDK，其次才退到环境变量。
+8. 端口簇的三种角色分开表达：派生口走 `port_offsets`（跟主口位移），独立口走 `extra_ports`
+   （自己的基准），"运行中"必须整簇都在听；只判主口会把半死的 Nacos 报成运行中。
+9. 端口回写只允许写 `~/.env-tools/<key>-data` 下的副本；厂商官方文件在任何策略下都不被修改。
+   锚不到官方默认那一行时**拒改并指名要改哪一行**，不许猜用户的改法。
 
 ### R5.4 失败处理
 
 - 没装 / JDK 不足：启动按钮禁用 + tooltip 说明缺什么，不做静默失败。
-- 端口簇被占且 `[默认端口, 默认端口+99]` 内找不到整簇空闲位：失败并点名"哪个口被谁占"。
-- 起了但 `startup_timeout` 内未监听：判启动失败，先 `proc.terminate()` 收尸不留无主监听者；
+- 端口簇被占且 `[默认端口, 默认端口+99]` 内找不到整簇空闲位：失败并点名"哪个口被谁占"；
+  独立口（`extra_ports`）找不到位时要单独点名是哪个口，不许混进"端口不够"这种含混话。
+- 端口回写（`conf_copy`）锚不到官方默认那一行、或改写失败：**拒绝拉起**并在 `reason` 里指名改哪个文件哪一行 ——
+  改了配置却没起进程、或起进程时配置没生效，两边状态对不上比"没启动"更难归因。
+- 起了但 `startup_timeout` 内**整簇端口**未监听：判启动失败，先 `proc.terminate()` 收尸不留无主监听者；
   收尸失败把"进程可能仍在监听（PID …）"并进 `reason`。
 - 停止无响应：Windows 只请示不自动动手（`os.kill` 的任何信号在 Windows 都是强杀），POSIX 先 `terminate`、
   超时才 `need_force` 交界面问人。
+- `port_lookup` 停止时端口反查给出的是"同口多 PID"（归属有歧义）或"就是我们自己"：
+  **一个进程都不许杀**，当场把"为什么没动手"说清并返回，登记保留 —— 把我们的不作为说成别人的错是不允许的。
 - `_adopt_running` 整段 try/except 兜底：`~/.env-tools` 只读 / 被锁 / 磁盘满时只留一条 warn，绝不把工具打不开。
 
 ### R5.5 新增一个可启动组件 checklist
 
 - [ ] 在 `LAUNCH_OF` 登记；三平台 `commands` 都非空（未在真机验证的分支要写明）
-- [ ] 决定端口策略：只命令行 flag（本期 jenkins）还是要回写配置文件
-      （回写必须锚定官方默认那一行 + 备份 + 幂等）
-- [ ] 决定 `stop_kind`：优先正规 shutdown 脚本；只有我们自己是服务进程时才用 `pid`
-- [ ] 补 `risk_note`（监听地址、默认凭据、首次向导）
+- [ ] 决定端口策略（`port_writeback`）：`cli_only`（只有命令行 flag）/ `cli_flag`（命令行透传，不碰文件）/
+      `conf_copy`（回写 `~/.env-tools/<key>-data` 下的副本 —— 必须锚定官方默认那一行 + 备份 + 幂等，
+      **官方文件一个字节不动**；锚不到就拒改并指名要改哪一行）
+- [ ] 决定端口角色：哪些口走 `port_offsets`（跟主口平移）、哪些走 `extra_ports`（自己的基准）
+- [ ] 决定 `stop_kind`：`pid`（只有我们自己是服务进程时）/ `port_lookup`（PID 不可信、走端口反查，
+      只请示不强杀）/ `shutdown_command`（有正规关闭脚本）
+- [ ] 补 `risk_note`（监听地址、默认凭据、首次向导）与 `data_note`（卸载时数据去哪儿，必须点名）
 - [ ] 补表完整性用例 + 真机演练 `--launch <key>`（未跑真机前不得把 `min_java_major` 填成数字）
 
 ### R5.6 护栏用例
 
-`bt_launch_tests.py`（80 条，全离线，不真起中间件）盯住：
-`LaunchSpecTable`（白名单恰为 `{jenkins}`、三平台命令非空、白名单外无 launch、
-`test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"）、`RunningMap`、
+`bt_launch_tests.py`（129 条，全离线，不真起中间件）盯住：
+`LaunchSpecTable`（白名单恰为 `{jenkins, activemq, nacos}`、三平台命令非空、白名单外无 launch、
+`test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"、`test_plan_two_fields_default_to_plan_one_behaviour`
+钉住"计划二新字段的默认值就是计划一既有行为"）、`RunningMap`（含旧格式记录缺 `ports` 的加载侧归一）、
 `PortCluster`（整簇同空才可用）、`NoExecInvariant`（把 `subprocess.Popen` / `_probe_version` 桩成
-"一调用就抛"，跑完 `status` + `adopt` 全流程，钉死 R5.3 第 4 条）、`ZombieMatrix`、`LaunchPlan`
+"一调用就抛"，跑完 `status` + `adopt` 全流程，钉死 R5.3 第 4 条；**并含反向断言**：
+`test_detection_paths_never_consult_the_port_owner_table` 钉住端口反查（一次 netstat 调用）
+不许出现在检测路径，而 `test_force_stop_actually_consults_it` 反过来钉住 `force_stop` **确实**会调用它 ——
+没有这条反向断言，"不许调用"可以靠把调用删干净白赢）、`ZombieMatrix`、`LaunchPlan`
 （`JAVA_HOME` 优先自家、回退需校验、门控可行动）、`StartFlow`（重定向、端口平移、超时不留登记）、
-`StopFlow` / `TerminateByPidGuard`（非 server 角色 / 负 / None PID 绝不动手、Windows 先请示）、
-`LaunchWorkerSignals`（`need_force` 独立信号）、`CardLaunchUi`（运行中禁卸、worker 以 `parent=self` 交对象树、
-`stop`/`force_stop` 都接 `need_force`）、`MainWindowAdopt`（`_adopt_running` 在入口不在构造、closeEvent 先
-`_cancel_launch_workers`、reconcile 失败不阻断启动）。
+`StopFlow` / `TerminateByPidGuard`（非 server 角色 / 负 / None PID 绝不动手、Windows 先请示、
+归属歧义时报"无候选"而不是乱杀）、`LaunchWorkerSignals`（`need_force` 独立信号）、`CardLaunchUi`
+（运行中禁卸、worker 以 `parent=self` 交对象树、`stop`/`force_stop` 都接 `need_force`）、`MainWindowAdopt`
+（`_adopt_running` 在入口不在构造、closeEvent 先 `_cancel_launch_workers`、reconcile 失败不阻断启动）、
+`NetstatParse`（netstat 文本解析，含中文表头与 IPv6）、`ConfCopyWriteback`（conf 整目录副本幂等、
+只动目标行、锚不到就拒改并指名）、`PortPlanning`（`port_offsets` 跟主口平移、`extra_ports` 各自找自己的基准、
+失败原因指名是哪个口）。
 
-护栏非空性经变异自检确认：把 `ServiceManager.adopt` 改成调用一次 `subprocess.Popen` → `NoExecInvariant` 变红；
-把 `min_java_major` 填成 `17` → `test_min_java_major_is_none_until_measured` 变红。两条恢复后回绿。
+护栏非空性经变异自检确认（三处已验红，一处**查出是空的**）：
+把 `ServiceManager.status` 改回只看 `rec.port` → `test_running_requires_the_whole_cluster_to_be_listening` 变红；
+把 `_pick_unique_pids` 改成取 `next(iter(...))` 不判长度 → `test_ambiguous_owner_is_reported_as_no_candidate` 变红；
+把 `netstat_listener_pids` 调用挪进 `status()` → `test_detection_paths_never_consult_the_port_owner_table` 变红。
+全部恢复后 129 条回绿。
+
+> **已查出的空护栏（计划二 Task 11 变异自检第 3 项暴露，尚未补）**：把 `prepare_ports` 的 `conf_copy` 分支
+> 改成"忽略回写失败、照样返回 True"时，**129 条仍然全绿**。原因是现有用例只分别钉住了两端 ——
+> `ConfCopyWriteback` 钉 `set_property_line` / `set_openwire_port` 单独调用时会拒改，
+> `StartFlow.test_start_carries_the_conf_copy_notice_to_the_card` 把 `prepare_ports` 整个桩成成功，
+> **"回写失败 → `start()` 拒绝 spawn、不留登记" 这条接缝一条用例都没有**。
+> 补法：`StartFlow` 里加一条把 `prepare_ports` 桩成 `(False, "锚不到…", [])`，
+> 断言 `res.ok` 为假、`state == "writeback"`、且 `self.spawned == []`（一个进程都没起）。
 
 **保留（本期未实现）**：R5.2 记的两条边界 —— 畸形外来记录被写盘抹掉、卡片销毁等待 worker。
 （"形状完好的外来记录能在 `reconcile` 后存活"**已经有用例**了：`test_foreign_key_record_survives_reconcile`，
