@@ -865,7 +865,11 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ## 接新组件的流程与经验
 
-新增「一键启动」组件前**必读** `docs/ONBOARDING_NEW_COMPONENT.md`——
+**要写需求时看 `docs/HOW-TO-REQUEST-COMPONENT-LAUNCH.md`** —— 那是需求说明书模板 +
+关键名词对照表（`LaunchSpec` / `端口簇` / `结束占用者` / `pid_role` / `三重闸` 等），
+照着它说能省掉一轮返工。
+
+实现前**必读** `docs/ONBOARDING_NEW_COMPONENT.md`——
 它记录了 Jenkins / Nacos / ActiveMQ 三次实战里「不这样就真的出过问题」的每一条，
 附本机可复现的证据。核心一句话：
 
