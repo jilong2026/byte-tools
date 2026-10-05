@@ -768,9 +768,7 @@ def main() -> int:
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
-| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（129 个用例，见 R5.6）。全量回归 9 套件之一。**注意有一条已知空护栏**：
-把 `prepare_ports` 改成"回写失败也照样放行"时 129 条仍全绿 —— "回写失败 → 拒绝拉起"缺用例，
-详见 DEVELOPMENT.md R5.6 |
+| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（130 个用例，见 R5.6）。全量回归 9 套件之一 |
 
 #### `bt_multiversion_tests.py` 覆盖面
 
@@ -1010,7 +1008,7 @@ on_uninstall_clicked()   # main.py:4995
 ### 6.6 一键启动的数据流（规则 R5）
 
 > 落地状态如实描述：**框架与 Jenkins / ActiveMQ / Nacos 三件的一键启动已实现、有离线护栏
-> （`bt_launch_tests.py` 129 例）守护**；Windows 真机 `--launch jenkins|nacos|activemq --yes`
+> （`bt_launch_tests.py` 130 例）守护**；Windows 真机 `--launch jenkins|nacos|activemq --yes`
 > **一次都没跑过**，计划一 spec §2.4 第 3、5 项与计划二 spec §8.2 的 A1–A7 全部仍无结论、
 > `min_java_major` 维持 `None`、`console_path`/`health_path` 两个新组件仍为推测值。
 > 下述数据流是代码路径的静态描述，**不代表已在真机跑通**。

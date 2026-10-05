@@ -1878,6 +1878,66 @@ class PortPlanning(unittest.TestCase):
             self.assertEqual((home / "conf" / "jetty-spring.properties").read_text(encoding="utf-8"),
                              "jetty.http.port=8161\n", "官方文件被动了")
 
+    def test_start_refuses_to_spawn_when_writeback_fails(self):
+        """回写失败必须拦住 spawn：配置没改成新端口就把进程拉起来，用户会看到一个
+        "运行中"却连在旧端口上的服务，而界面上写的是刚选的新端口 —— 两边状态对不上
+        比"没启动"更难归因。
+
+        这条钉的是 R5.3 第 9 条（回写只写副本、锚不到就拒改）的**后果**那一半：
+        之前 prepare_ports 的失败分支各自有用例（Task 6 的 cli/锚不上），
+        但"start() 拿到 False 之后怎么办"没有任何用例。
+        变异自检把`if not ok: return StartResult(False, "writeback", why, notes=notes)`
+        整个删掉时，全套 129 条依然全绿 —— 护栏是空的。"""
+        comp = self.comp()
+        s = self.spec(port_writeback="conf_copy", extra_ports=())
+        s.main_port, s.port_offsets = 8161, ()
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, ignore_errors=True))
+        (home / "conf").mkdir(parents=True)
+        # 官方 conf 故意不含 jetty.http.port 这一行 → set_property_line 锚不到 → 拒改
+        (home / "conf" / "jetty-spring.properties").write_text(
+            "# 端口被用户注释掉了\n", encoding="utf-8")
+        comp.versions = [comp.versions[0]]
+        orig_install, comp.install_dir = comp.install_dir, (lambda v: home)
+        self.addCleanup(setattr, comp, "install_dir", orig_install)
+
+        ok, why, notes = main.prepare_ports(
+            comp, s, main.PortPlan(main=8161), Path(tempfile.mkdtemp()))
+        self.assertFalse(ok, "锚不到就该拒改")
+        self.assertIn("jetty.http.port", why, "拒改必须指名要改哪一行")
+
+        # 同一失败经 start() 落地：不许 spawn、不许留登记、状态叫 writeback。
+        # 注意 data_dir 由 start() 自己推导成 CONFIG_DIR/<key>-data，所以必须先把
+        # CONFIG_DIR 指到 temp 里，再造出"副本里锚不到 jetty.http.port"的状态。
+        with tempfile.TemporaryDirectory() as td:
+            orig_cfg, orig_run = main.CONFIG_DIR, main.RUNNING_FILE
+            main.CONFIG_DIR = Path(td)
+            main.RUNNING_FILE = Path(td) / "running.json"
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg)
+            self.addCleanup(setattr, main, "RUNNING_FILE", orig_run)
+            # 官方 conf 不含该行 → 副本建出来后 set_property_line 锚不到 → 拒改
+            data = Path(td) / f"{comp.key}-data"
+            (data / "conf").mkdir(parents=True)
+            (data / "conf" / "jetty-spring.properties").write_text(
+                "# 端口那行被注释掉了\n", encoding="utf-8")
+            spawned = []
+            orig_popen = main.subprocess.Popen
+            main.subprocess.Popen = lambda argv, **kw: spawned.append(argv)
+            self.addCleanup(setattr, main.subprocess, "Popen", orig_popen)
+            mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                      http_ok=lambda u, timeout=2.0: True,
+                                      process_alive=lambda pid: True)
+            # start() 读的是 comp.launch，不是我们手搓的 spec —— 必须挂上去，
+            # 否则它拿 jenkins 原有的 cli_only 走早退分支，这条用例会静默测不到东西。
+            orig_launch, comp.launch = comp.launch, s
+            self.addCleanup(setattr, comp, "launch", orig_launch)
+            res = mgr.start(comp, {comp.key: comp}, sleeper=lambda s: None)
+        self.assertFalse(res.ok, "回写失败却判启动成功 = 运行中但连在旧端口上")
+        self.assertEqual(res.state, "writeback", f"实际 state={res.state}，reason={res.reason}")
+        self.assertIn("jetty.http.port", res.reason, "失败原因必须指名要改哪一行")
+        self.assertEqual(spawned, [], "回写失败仍拉起了进程：配置与实际端口必然对不上")
+        self.assertEqual(main.load_running_map(), {}, "启动失败不许留登记")
+
     def test_timeout_reason_reaches_for_the_vendor_log(self):
         """厂商把报错写在自家文件里，只给我们自己那份重定向文件的尾巴，
         用户就看到"起不来"三个字而不知道去看哪。"""

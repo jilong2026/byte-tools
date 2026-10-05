@@ -806,7 +806,7 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 
 ### R5.6 护栏用例
 
-`bt_launch_tests.py`（129 条，全离线，不真起中间件）盯住：
+`bt_launch_tests.py`（130 条，全离线，不真起中间件）盯住：
 `LaunchSpecTable`（白名单恰为 `{jenkins, activemq, nacos}`、三平台命令非空、白名单外无 launch、
 `test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"、`test_plan_two_fields_default_to_plan_one_behaviour`
 钉住"计划二新字段的默认值就是计划一既有行为"）、`RunningMap`（含旧格式记录缺 `ports` 的加载侧归一）、
@@ -827,16 +827,21 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 护栏非空性经变异自检确认（三处已验红，一处**查出是空的**）：
 把 `ServiceManager.status` 改回只看 `rec.port` → `test_running_requires_the_whole_cluster_to_be_listening` 变红；
 把 `_pick_unique_pids` 改成取 `next(iter(...))` 不判长度 → `test_ambiguous_owner_is_reported_as_no_candidate` 变红；
-把 `netstat_listener_pids` 调用挪进 `status()` → `test_detection_paths_never_consult_the_port_owner_table` 变红。
-全部恢复后 129 条回绿。
+把 `netstat_listener_pids` 调用挪进 `status()` → `test_detection_paths_never_consult_the_port_owner_table` 变红；
+把 `start()` 里的 `if not ok: return StartResult(False, "writeback", ...)` 整段删掉 →
+`test_start_refuses_to_spawn_when_writeback_fails` 变红。
+全部恢复后 130 条回绿。
 
-> **已查出的空护栏（计划二 Task 11 变异自检第 3 项暴露，尚未补）**：把 `prepare_ports` 的 `conf_copy` 分支
-> 改成"忽略回写失败、照样返回 True"时，**129 条仍然全绿**。原因是现有用例只分别钉住了两端 ——
+> 这条护栏是 Task 11 变异自检第 3 项查出来并当场补上的（补之前是空护栏：把 `prepare_ports`
+> 的 `conf_copy` 分支改成"忽略回写失败、照样返回 True"时 129 条全绿）。原因是原有用例只分别钉住两端 ——
 > `ConfCopyWriteback` 钉 `set_property_line` / `set_openwire_port` 单独调用时会拒改，
 > `StartFlow.test_start_carries_the_conf_copy_notice_to_the_card` 把 `prepare_ports` 整个桩成成功，
-> **"回写失败 → `start()` 拒绝 spawn、不留登记" 这条接缝一条用例都没有**。
-> 补法：`StartFlow` 里加一条把 `prepare_ports` 桩成 `(False, "锚不到…", [])`，
-> 断言 `res.ok` 为假、`state == "writeback"`、且 `self.spawned == []`（一个进程都没起）。
+> **"回写失败 → `start()` 拒绝 spawn、不留登记" 这条接缝谁也没钉**。
+> 现由 `PortPlanning.test_start_refuses_to_spawn_when_writeback_fails` 守住，它走真实 `start()`：
+> 官方 conf 缺 `jetty.http.port` 行 → 副本锚不到 → 断言 `state == "writeback"`、
+> 原因里指名要改哪一行、`Popen` 一次都没被调用、`running.json` 无残留。
+> 写这条用例时踩到的坑：`start()` 读的是 `comp.launch` 而非传入的 spec，
+> 忘把 spec 挂到 `comp.launch` 上就会走 jenkins 原有的 `cli_only` 早退分支、用例静默测不到东西。
 
 **保留（本期未实现）**：R5.2 记的两条边界 —— 畸形外来记录被写盘抹掉、卡片销毁等待 worker。
 （"形状完好的外来记录能在 `reconcile` 后存活"**已经有用例**了：`test_foreign_key_record_survives_reconcile`，
