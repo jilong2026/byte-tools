@@ -111,8 +111,15 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
     # 实测「全网无大陆镜像」/「默认清单离线构造」的组件，按 R1.1 走登记例外
     #   kubectl：DaoCloud 反代是唯一大陆源
     #   mongodb / postgresql：fastdl / EDB 无人镜像，只有官方源
-    #   jdk：默认清单不许联网，镜像要等「刷新版本」时列目录才能拿到确切文件名
-    SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 0}
+    #   jdk：2026-10-06 从 0 改成 2 —— 原注释写的是"默认清单不许联网，镜像要等
+    #     刷新版本时列目录才能拿到确切文件名"。这话对，但结论下得太早：
+    #     当时的做法是只留 api.adoptium.net，而它会 302 到 github.com，
+    #     本机实测 JDK 21/17 直接 ConnectTimeout（只有 8 通）——
+    #     也就是**离线状态下装 JDK 21 必然失败**，而 21 恰是最主流的版本。
+    #     改法：镜像目录结构是固定的（/<major>/jdk/<arch>/<os>/），
+    #     把实测采集到的确切文件名写进离线清单（_JDK_OFFLINE_FILES），
+    #     官方 API 退到末位兜底。现在南大 + 清华都可用，14.6 / 13.5 MB/s。
+    SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2}
 
     def test_counts(self):
         for key, comp in COMPS.items():

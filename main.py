@@ -873,6 +873,54 @@ def _adoptium_jdk_url(version: str, dead: Optional[set] = None,
     return out
 
 
+# 离线兜底用的镜像文件名（2026-10-06 实测采集，_collect_jdk_files.py）。
+# 键是大版本，值是 {镜像标识: 文件名}。文件名含具体补丁号 —— 镜像同步哪个就用哪个，
+# 不猜：猜错了会 404，而 404 在离线清单里没有任何补救机会（没有"再刷新一次"的时机）。
+_JDK_OFFLINE_FILES: Dict[str, Dict[str, str]] = {
+    "21": {"nju":   "OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+           "tuna":  "OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip"},
+    "17": {"nju":   "OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip",
+           "tuna":  "OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip"},
+    "11": {"nju":   "OpenJDK11U-jdk_x64_windows_hotspot_11.0.32.1_1.zip",
+           "tuna":  "OpenJDK11U-jdk_x64_windows_hotspot_11.0.32.1_1.zip"},
+    "8":  {"nju":   "OpenJDK8U-jdk_x64_windows_hotspot_8u504b01.zip",
+           "tuna":  "OpenJDK8U-jdk_x64_windows_hotspot_8u504b01.zip"},
+}
+
+
+def _adoptium_offline_urls(version: str,
+                           files: Dict[str, str]) -> Dict[str, List[str]]:
+    """离线清单用的 JDK 地址：镜像在前（实测速度排序），官方 API 末位兜底。
+
+    入参 version: str大版本号，如 "21"
+    入参 files:   Dict[镜像标识, 文件名]，来自 _JDK_OFFLINE_FILES
+
+    与 _adoptium_jdk_url 的区别：那个要联网解析镜像目录（启动时不做，卡 UI），
+    这个只用写死的文件名 —— build_components() 在程序启动时调用，绝不能联网。
+    代价是补丁号会过期（镜像同步了更新的版本时仍下这个）；换来的是**离线能下**，
+    而 JDK 21 走官方 API 在国内根本连不上 —— 没有镜像就完全装不了。
+    """
+    api = "https://api.adoptium.net/v3/binary/latest"
+    mirrors: List[str] = []
+    # 按 2026-10-06 实测速度排（nju 14.6 / tuna 13.5 MB/s；17 上 nju 14.6 vs
+    # tuna 4.9，差距更明显）。**不调整 _ADOPTIUM_LAYOUTS 本身** —— 那个还被
+    # 联网刷新路径（_adoptium_mirror_urls）共用，动它会改刷新行为，超出本次范围。
+    for base_name, sub in sorted(_ADOPTIUM_LAYOUTS, key=lambda x: x[0] != "nju"):
+        fname = files.get(base_name)
+        if not fname:
+            continue
+        arch, os_dir, _ext = _adoptium_dirs()[CURRENT_OS]
+        mirrors.append(f"{_mb(base_name)[0]}{sub}/{version}/jdk/{arch}/{os_dir}/{fname}")
+
+    out: Dict[str, List[str]] = {}
+    for os_key, (arch, os_dir, _ext) in _adoptium_dirs().items():
+        #镜像文件名是按本机平台实测的，只对本机成立；其它平台退回官方 API。
+        # 猜别的平台的文件名等于给一个必然 404 的 URL，没有意义。
+        official = f"{api}/{version}/ga/{os_dir}/{arch}/jdk/hotspot/normal/eclipse"
+        out[os_key] = (mirrors if os_key == CURRENT_OS else []) + [official]
+    return out
+
+
 def _maven_urls(v: str) -> Dict[str, List[str]]:
     """
     Maven 下载 URL 列表（R1 多源）：Apache 布局镜像在前，archive.apache.org 末位。
@@ -3238,8 +3286,20 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="java",
             version_args=["-version"],
+            #离线清单必须给**确定路径**，不能只留 api.adoptium.net。
+            #
+            # 2026-10-06 实测：那个 API 会 302 到 github.com，本机 21/17 两个大版本
+            # 直接 ConnectTimeout，只有 8 能通 —— 也就是说离线状态下装 JDK 21 必然失败，
+            # 而 JDK 21 恰恰是最主流的版本。真实用户会栽在这，不是测试环境问题。
+            #
+            # 清华/南大的 Adoptium 目录结构是固定的（/<major>/jdk/<arch>/<os>/），
+            # 文件名实测采集（_collect_jdk_files.py），两个站四个版本全都有、
+            # 速度 4.9~14.6 MB/s。所以离线直接写镜像路径，官方 API 退到末位兜底。
+            #
+            # 版本刷新（fetch_jdk_versions）走 _adoptium_jdk_url 的联网解析，
+            # 会拿到更新的补丁号 —— 这里的文件名只是离线兜底，不是最新。
             versions=[
-                _cv(v, _adoptium_jdk_url(v, resolve_mirrors=False))
+                _cv(v, _adoptium_offline_urls(v, _JDK_OFFLINE_FILES.get(v, {})))
                 for v in ("21", "17", "11", "8")
             ],
         )
