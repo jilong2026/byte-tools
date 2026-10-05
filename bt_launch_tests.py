@@ -27,9 +27,10 @@ class LaunchSpecTable(unittest.TestCase):
     def setUp(self):
         self.comps = {c.key: c for c in main.build_components()}
 
-    def test_launch_keys_are_exactly_jenkins(self):
-        self.assertEqual(main.LAUNCH_KEYS, {"jenkins"},
-                         "计划一启动白名单只有 jenkins，扩白名单属计划二")
+    def test_launch_keys_are_exactly_this_batch(self):
+        self.assertEqual(main.LAUNCH_KEYS, {"jenkins", "nacos"},
+                         "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
+        self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
     def test_every_launch_key_is_a_known_category_component(self):
         for key in main.LAUNCH_KEYS:
@@ -79,6 +80,35 @@ class LaunchSpecTable(unittest.TestCase):
         self.assertEqual(spec.stop_kind, "port_lookup")
         self.assertNotIn("pid_role", spec.__dataclass_fields__,
                          "pid_role 只能由 stop_kind 推导，不许在描述符上再存一份")
+
+    def test_nacos_registered_as_the_plan_two_shape(self):
+        s = main.LAUNCH_OF["nacos"]
+        self.assertEqual(s.main_port, 8848)
+        self.assertEqual(tuple(s.port_offsets), (1000, 1001))
+        self.assertEqual(tuple(s.extra_ports), (), "Nacos 的 gRPC 口是派生的，不是独立基准")
+        self.assertEqual(s.port_writeback, "cli_flag")
+        self.assertEqual(s.stop_kind, "port_lookup")
+        self.assertEqual(s.needs, ("jdk",))
+        self.assertEqual(s.min_java_major, 8)     # 证据：nacos-server.jar 内 Nacos.class class major 52
+        self.assertEqual(s.startup_timeout, 90)
+        self.assertTrue(s.risk_note, "默认无鉴权 + 账号 nacos/nacos 必须写在风险说明里")
+
+    def test_nacos_command_carries_mode_and_port_as_separate_argv_items(self):
+        """-m standalone 必须是独立的两段，--server.port 必须带选中端口：
+        startup.cmd 用 `for %%a in (%*)` 按空格分词，拼成一个字符串就全碎。"""
+        argv = main.LAUNCH_OF["nacos"].commands["Windows"]
+        self.assertIn("-m", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "standalone",
+                         "默认是 cluster（-Xms2g 且要 cluster.conf），不强制 standalone 起不来")
+        self.assertTrue(any(a.startswith("--server.port={port}") for a in argv),
+                        "端口要靠命令行透传，这是 Nacos 不回写任何文件的依据")
+
+    def test_nacos_registration_does_not_need_java_home_on_the_command_line(self):
+        """startup.cmd 硬要 %JAVA_HOME%\\bin\\java.exe，所以 JAVA_HOME 必须是环境变量注入
+        而不是把 java 路径拼进 argv —— 我们跑的是厂商脚本，脚本自己找 java。"""
+        argv = main.LAUNCH_OF["nacos"].commands["Windows"]
+        self.assertFalse(any("{java}" in a for a in argv))
+        self.assertTrue(argv[0].endswith("startup.cmd") or argv[0].endswith("startup.sh"))
 
 
 class RunningMap(unittest.TestCase):
@@ -382,14 +412,18 @@ class ZombieMatrix(unittest.TestCase):
         self.assertEqual(calls, [], "空表不该去探任何端口")
 
     def test_foreign_key_record_survives_reconcile(self):
-        """登记里出现本期不认识的可启动组件（计划二加的），不许被误删。"""
-        other = main.RunRecord(key="nacos", version="2.3.2", home="/h", data_dir="/d",
-                               port=8848, console_url="http://127.0.0.1:8848/",
+        """登记里出现本期不认识的可启动组件（计划三才会加的），不许被误删。
+
+        样本用 rabbitmq 而不是 nacos：nacos 在计划二 Task 8 进了白名单，
+        拿它当"不认识"的样本会让本用例在 Task 8 之后就变成"已登记组件要被接管"，
+        那不是它要钉的东西。reconcile 只遍历 LAUNCH_KEYS，所以任何未登记 key 都一样。"""
+        other = main.RunRecord(key="rabbitmq", version="3.12.0", home="/h", data_dir="/d",
+                               port=5672, console_url="",
                                pid=1, pid_role="none", started_at=0.0, launcher_cmd=[])
-        main.save_running_map({"nacos": other})
+        main.save_running_map({"rabbitmq": other})
         st = self.mgr(listening=True, alive=True).reconcile(self.comps)
-        self.assertNotIn("nacos", st, "没登记的组件不该被本工具接管")
-        self.assertIn("nacos", main.load_running_map())
+        self.assertNotIn("rabbitmq", st, "没登记的组件不该被本工具接管")
+        self.assertIn("rabbitmq", main.load_running_map())
 
 
 class LaunchPlan(unittest.TestCase):

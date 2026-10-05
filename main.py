@@ -3045,6 +3045,34 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "只想本机访问的话，把命令里的监听地址改成 127.0.0.1 再启动。"
         ),
     ),
+    "nacos": LaunchSpec(
+        # 实测（2026-10-05，nacos-server-2.3.2）：startup.cmd 的 %COMMAND% 是前台 java，
+        # 末尾带 %* → --server.port 直接透传给 Spring Boot，优先级高于 application.properties，
+        # 所以 Nacos 一个文件都不改。-p 是 embedded storage，不是端口，别写错。
+        commands={"Windows": ["{home}/bin/startup.cmd", "-m", "standalone",
+                              "--server.port={port}"],
+                  "Linux": ["{home}/bin/startup.sh", "-m", "standalone",
+                            "--server.port={port}"],
+                  "Darwin": ["{home}/bin/startup.sh", "-m", "standalone",
+                             "--server.port={port}"]},
+        stop_kind="port_lookup",
+        main_port=8848,
+        port_offsets=(1000, 1001),      # gRPC 口由 server.port 派生（包内无对应属性可回写）
+        port_search_span=99,
+        port_writeback="cli_flag",      # 计划二的代码片段漏了这行：--server.port 就是 cli_flag
+        console_path="/",                # 待真机 A3 确认；先按包内白名单形状（含 / 无 /nacos）取根
+        health_path=None,
+        needs=("jdk",),
+        min_java_major=8,
+        data_dir_env=None,               # 厂商无外移开关：-Dnacos.home 固定在安装目录内
+        startup_timeout=90,
+        risk_note=(
+            "Nacos 默认监听 0.0.0.0（对局域网开放），默认未开启鉴权，"
+            "控制台默认账号 nacos/nacos。"
+            "运行数据（derby）落在安装目录内的 data/ 下：卸载组件会连带删除它，"
+            "这一点与 Jenkins 不同（Jenkins 的数据在 ~/.env-tools 下，卸载后保留）。"
+        ),
+    ),
 }
 
 LAUNCH_KEYS = set(LAUNCH_OF)
