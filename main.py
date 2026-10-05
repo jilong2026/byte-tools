@@ -4638,10 +4638,27 @@ def save_running_map(records: Dict[str, RunRecord]) -> None:
 
 
 def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
-    """本机这个口是否空闲。connect_ex != 0 即没人连得上 = 空闲。"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.3)
-        return s.connect_ex((host, port)) != 0
+    """本机这个口是否空闲。**判据是"能不能自己绑上"，不是"能不能连上"。**
+
+    原来是 `connect_ex != 0`（能不能连上）。那只能证明"没人接受连接"，
+    证不了"没人占着这个口"：真机 2026-10-06 实测到只绑在 `[::]:8848`
+    （IPv6 通配）时，`connect_ex(("127.0.0.1", 8848))` 照样返回非 0 →
+    判定"空闲" → 于是选了 8848 → 厂商脚本按 0.0.0.0 绑端口时撞上
+    `Port 8848 was already in use`，用户看到的是"启动失败"。
+
+    改成亲自 bind 一次：绑不上（OSError）就是有人占着。这与"我们要做的事"
+    完全同构 —— 我们也是要 bind 这个口起服务，问它"能不能绑"才是对的问法。
+    SO_REUSEADDR 不给：Windows 上它允许抢占 TIME_WAIT 状态的端口，
+    那正是我们要避开的"刚停完还没释放干净"的场景。
+    """
+    for family, addr in ((socket.AF_INET, (host, port)),
+                         (socket.AF_INET6, ("::1", port))):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.bind(addr)
+        except OSError:
+            return False
+    return True
 
 
 def pick_free_cluster(base_port: int, offsets: tuple = (), span: int = 99,

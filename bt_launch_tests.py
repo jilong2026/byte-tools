@@ -313,6 +313,46 @@ class PortCluster(unittest.TestCase):
         self.assertIn(9000, seen)
         self.assertIn(10000, seen)
 
+    def test_port_is_free_asks_whether_we_can_bind_not_whether_we_can_connect(self):
+        """端口空闲的判据必须是"能不能自己绑上"，不能是"能不能连上"。
+
+        真机 2026-10-06 查出来的：原实现是 `connect_ex != 0`（能不能连上），
+        那只能证明"没人接受连接"，证不了"没人占着这个口"。只绑在 `[::]:8848`
+        （IPv6 通配）时，`connect_ex(("127.0.0.1", 8848))` 照样返回非 0 →
+        判定"空闲" → 于是选了 8848 → 厂商脚本按 0.0.0.0 绑端口时撞上
+        `Port 8848 was already in use`，用户看到的是"启动失败"。
+
+        问"能不能绑"才与"我们要做的事"同构 —— 我们也是要 bind 这个口起服务。
+        """
+        # 找一个当前空闲的高位口
+        port = 45999
+        while not main.port_is_free(port) and port < 46050:
+            port += 1
+        self.assertTrue(main.port_is_free(port), f"{port} 应当是空闲的")
+
+        # IPv4 监听占住 → 必须判占用
+        v4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            v4.bind(("127.0.0.1", port))
+            v4.listen(1)
+            self.assertFalse(main.port_is_free(port), "IPv4 已在监听，却判成空闲")
+        finally:
+            v4.close()
+
+        # IPv6 独占（不设双栈）占住 → 也必须判占用。
+        # 这条是原实现漏掉的那一半：connect_ex 走 IPv4，连不上 IPv6 独占的口。
+        v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            v6.bind(("::1", port))
+            v6.listen(1)
+            self.assertFalse(main.port_is_free(port),
+                             "IPv6 独占监听时IPv4 连不上，被误判成空闲")
+        except OSError:
+            self.skipTest("本机 IPv6 不可用，跳过")     # 禁了 IPv6 的机器
+        finally:
+            v6.close()
+
 
 class HealthProbe(unittest.TestCase):
     def test_port_is_listening_sees_a_real_listener(self):
