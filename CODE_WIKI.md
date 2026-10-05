@@ -173,7 +173,7 @@
 
 ```
 byte-tools/
-├── main.py                  # 主程序（含 UI 与全部逻辑，6149 行 / 274759 字节，2026-09-29 实测）
+├── main.py                  # 主程序（含 UI 与全部逻辑，7692 行 / 358401 字节，2026-10-05 实测）
 ├── requirements.txt         # Python 依赖清单（PySide6、requests）
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI

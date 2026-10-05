@@ -267,7 +267,10 @@ def launch_drill(comp_key: str, apply: bool) -> int:
         print("启动失败：", res.reason)
         return 1
     rec = res.record
-    got = main.http_ok(rec.console_url.rstrip("/") + "/login")
+    # 健康路径取自 LaunchSpec.health_path，不在这里硬编码 "/login"：
+    # 账本裁定 F3 说这个字段留着就是给演练层当判据用的，写死就等于计划二一换组件即错。
+    health = comp.launch.health_path or "/"
+    got = main.http_ok(rec.console_url.rstrip("/") + health)
     print(f"[1/3] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
     stop = main.SERVICE_MANAGER.stop(comp, comps)
     if not stop.ok and stop.need_force:

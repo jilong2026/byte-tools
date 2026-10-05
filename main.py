@@ -5657,7 +5657,13 @@ class ComponentCard(QFrame):
     def _on_launch_failed(self, key: str, reason: str) -> None:
         # 关窗链路里 cancel 触发的 failed 可能在退出途中投递进来；模态框自己转事件循环，
         # 会把关窗卡住。只看顶层窗口（closeEvent 已立的 _closing 旗）是不是正在关。
-        if getattr(self.window(), "_closing", False):
+        # try 包的是 self.window() 这次 Qt 调用本身：顶层 C++ 对象先没了它会抛 RuntimeError，
+        # 而那时候连"记一条日志"的机会都没有 —— 那正是本方法要避免的静默失败。
+        try:
+            closing = getattr(self.window(), "_closing", False)
+        except Exception:
+            closing = True
+        if closing:
             self._log("warn", f"操作未完成（窗口正在关闭）：{reason}")
             return
         self._log("error", f"操作失败：{reason}")

@@ -1056,6 +1056,18 @@ class CardLaunchUi(unittest.TestCase):
         self.card.window = lambda: FakeWin()   # 遮蔽 Qt 的 window()，只影响 Python 侧调用
         self.card._on_launch_failed("jenkins", "已取消等待")
         self.assertEqual(calls, [], "窗口正在关闭时不许弹模态\"操作失败\"")
+
+        # 另一半：顶层 C++ 对象先没了的话，`self.window()` 这次调用自己就抛 RuntimeError。
+        # 必须兜住 —— 否则退出的最后一条线索变成槽函数里的未捕获异常。
+        logs.clear()
+
+        def _boom():
+            raise RuntimeError("__init__ method of object's base class not called")
+        self.card.window = _boom
+        self.card._on_launch_failed("jenkins", "已取消等待")   # 不许抛出来
+        self.assertEqual(calls, [], "window() 都读不到时更不许弹框")
+        self.assertEqual([lvl for lvl, _ in logs], ["warn"],
+                         "读不到窗口要按\"正在关闭\"处理并留下日志，而不是静默或崩")
         self.assertEqual(logs, [("warn", "[Jenkins] 操作未完成（窗口正在关闭）：已取消等待")],
                          "不弹框也要在日志里留一句去向")
 

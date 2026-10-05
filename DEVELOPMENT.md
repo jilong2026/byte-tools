@@ -733,11 +733,14 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 
 - `force_stop` 在 Windows 上发的是信号 `9`，但 Windows 任何非 CTRL 信号都是 `TerminateProcess`，
   诚实值应是 `15`（同一 API，只是退出码误导）——计划二接 shutdown 脚本后这条路径基本不再走。
-- 两条保留护栏尚未落地（本期不新增用例，见 R5.6）：
-  ① 从未登记过的"外来记录"能否在 `reconcile` 中存活（`save_running_map` 现会把畸形外来记录永久抹掉）；
-  ② 卡片被销毁时若 `LaunchWorker` 还在跑，等待其收尾（worker 现为卡片的 Qt 子对象，
-  这是 `closeEvent` 所防的那类 abort 的第二条入口）。
-- `getattr(self.window(), "_closing", False)` 只兜住了属性读，没兜住 `self.window()` 这次 Qt 调用本身。
+- 外来记录的存活**只覆盖了一半**：`ZombieMatrix.test_foreign_key_record_survives_reconcile`
+  已钉住"形状完好的外来记录（如计划二的 nacos）在 `reconcile` 后仍在文件里"；
+  **没测到**的是两种边界 —— ① 外来记录字段畸形（缺字段 / 类型归一失败）时，`load_running_map` 会丢掉它，
+  随后任何一次"有僵尸要清"的写盘就把它**永久抹掉**；② "jenkins 是僵尸 + 同时存在外来记录"
+  这一交汇下写盘是否保住外来记录（按代码构造是对的，但没有用例）。计划二加组件前先补这两条。
+- 卡片被销毁时若 `LaunchWorker` 还在跑，没有等待其收尾的用例（worker 现为卡片的 Qt 子对象，
+  这是 `closeEvent` 所防的那类 abort 的第二条入口）。当前正常流程不销毁卡片（卡片只在 `__init__` 建一次，
+  搜索只做 `setParent` 搬移且 `self.cards` 持有 Python 引用），所以本期不可达 —— 但计划二若加"重建卡片"就要补。
 - `_COMPONENTS_CACHE` 为进程级常驻、从不失效（本期描述符运行时不变，可接受）。
 - `shutdown_command` 分支本期不可达、零覆盖；其占位符契约只喂 `port/home/data_dir`，
   `{java}/{war}` 一类要计划二接线时补来源，否则 `format` 直接 `KeyError`。
@@ -790,7 +793,9 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 护栏非空性经变异自检确认：把 `ServiceManager.adopt` 改成调用一次 `subprocess.Popen` → `NoExecInvariant` 变红；
 把 `min_java_major` 填成 `17` → `test_min_java_major_is_none_until_measured` 变红。两条恢复后回绿。
 
-**保留（本期未实现）**：R5.2 记的两条外来记录存活 / 卡片销毁等待 worker 的用例。
+**保留（本期未实现）**：R5.2 记的两条边界 —— 畸形外来记录被写盘抹掉、卡片销毁等待 worker。
+（"形状完好的外来记录能在 `reconcile` 后存活"**已经有用例**了：`test_foreign_key_record_survives_reconcile`，
+整枝评审指出本节原先把它误列成待办 —— 这份清单是加下一个组件时唯一要回看的地方，写错比不写更贵。）
 
 ---
 
