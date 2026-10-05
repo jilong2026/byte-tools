@@ -412,7 +412,9 @@ def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
     return _pick_unique_pids(parse_netstat_listeners(done.stdout or ""), ports)
 ```
 
-`main.py` 顶部若尚未导入 `Sequence`，从 `typing` 补进既有的 `from typing import …` 一行（`Dict`, `List`, `Optional`, `Sequence`, `Tuple` 一并核对）。**不要新开 import 行。**
+`main.py` 第 38 行现有 `from typing import Callable, Dict, List, Optional, Tuple` —— 本任务的代码用到
+**`Sequence` 和 `Set` 两个都没导的名字**，把它们补进这一行（按字母序就近插），**不要新开 import 行**。
+（少补一个就是 import 阶段 `NameError`，整个工具起不来。）
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -573,7 +575,9 @@ Expected: FAIL，`module 'main' has no attribute 'prepare_conf_copy'`
 AMQ_CONSOLE_FILE = "jetty-spring.properties"
 AMQ_CONSOLE_KEY = "jetty.http.port"
 AMQ_BROKER_FILE = "activemq.xml"
-_PORT_TAIL_RE = re.compile(r"(uri=\"[a-z]+://[^\":]+:)(\d+)(\?)")
+# 注意用的是 _re 而不是 re：main.py 里正則只在 1959 行以 `import re as _re` 引入过，
+# 模块里没有裸 `re` 这个名字 —— 写 re.compile 会在 import 阶段就 NameError。
+_PORT_TAIL_RE = _re.compile(r"(uri=\"[a-z]+://[^\":]+:)(\d+)(\?)")
 
 
 def conf_targets(data_dir: Path) -> Tuple[Path, Path, Path]:
