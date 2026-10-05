@@ -2,6 +2,7 @@
 import json
 import os
 import platform as _platform
+import socket
 import sys
 import tempfile
 import unittest
@@ -91,6 +92,27 @@ class RunningMap(unittest.TestCase):
         main.RUNNING_FILE.write_text(json.dumps(data), encoding="utf-8")
         self.assertEqual(main.load_running_map(), {})
 
+    def test_int_like_numeric_fields_are_coerced_at_load(self):
+        """Task 2 复盘裁决：手改的 running.json 会把端口存成 "80480" 这类字符串，
+        不归一就会让字符串流进后续每一次端口探测——状态判定整条失效。"""
+        main.save_running_map({"jenkins": self.make(port=80480)})
+        data = json.loads(main.RUNNING_FILE.read_text(encoding="utf-8"))
+        data["jenkins"].update(port="80480", pid="4242", started_at="1.5")
+        main.RUNNING_FILE.write_text(json.dumps(data), encoding="utf-8")
+        got = main.load_running_map()
+        self.assertEqual(got["jenkins"].port, 80480)
+        self.assertIsInstance(got["jenkins"].port, int)
+        self.assertIsInstance(got["jenkins"].pid, int)
+        self.assertEqual(got["jenkins"].started_at, 1.5)
+
+    def test_unconvertible_port_drops_record_like_bad_pid_role(self):
+        """转不动的 port 与坏 pid_role 同一政策：整条按不可信记录丢弃。"""
+        main.save_running_map({"jenkins": self.make()})
+        data = json.loads(main.RUNNING_FILE.read_text(encoding="utf-8"))
+        data["jenkins"]["port"] = "http"
+        main.RUNNING_FILE.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(main.load_running_map(), {})
+
 
 class PortCluster(unittest.TestCase):
     def probe(self, taken):
@@ -127,6 +149,67 @@ class PortCluster(unittest.TestCase):
         main.pick_free_cluster(9000, (1000,), 2, lambda p, host="127.0.0.1": (seen.append(p) or True))
         self.assertIn(9000, seen)
         self.assertIn(10000, seen)
+
+
+class HealthProbe(unittest.TestCase):
+    def test_port_is_listening_sees_a_real_listener(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        port = srv.getsockname()[1]
+        self.assertTrue(main.port_is_listening(port, "127.0.0.1"))
+        srv.close()
+        self.assertFalse(main.port_is_listening(port, "127.0.0.1"),
+                         "关掉监听后必须认成没在听，否则僵尸判定形同虚设")
+
+    def test_http_ok_accepts_2xx_and_3xx_only(self):
+        for code, want in ((200, True), (302, True), (401, True), (404, False), (500, False)):
+            with self.subTest(code=code):
+                fake = lambda url, timeout=2.0: code
+                self.assertEqual(main._http_status_with(fake, "http://x"), want)
+
+    def test_http_ok_is_false_on_any_error(self):
+        def boom(url, timeout=2.0):
+            raise OSError("connection refused")
+        self.assertFalse(main._http_status_with(boom, "http://x"))
+
+    def test_process_alive_rejects_non_positive_pid(self):
+        self.assertFalse(main.process_is_alive(0))
+        self.assertFalse(main.process_is_alive(-1))
+
+
+class NoExecInvariant(unittest.TestCase):
+    """spec §6：状态检测与找回过程一次都不许拉起进程。
+
+    手法照 bt_startup_tests.py 的 PROBE_CHILD：把"起进程"的入口全部换成一调用就炸，
+    然后跑完只读路径。这条用例是整套设计最需要长期守住的东西。"""
+
+    def setUp(self):
+        self._popen = main.subprocess.Popen
+        self._probe = main._probe_version
+        def _boom(*_a, **_k):
+            raise AssertionError("状态检测路径里不得调用 Popen / _probe_version")
+        main.subprocess.Popen = _boom
+        main._probe_version = _boom
+        self.addCleanup(setattr, main.subprocess, "Popen", self._popen)
+        self.addCleanup(setattr, main, "_probe_version", self._probe)
+
+    def test_status_and_adopt_never_spawn(self):
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda url, timeout=2.0: True,
+                                  process_alive=lambda pid: True)
+        comps = {c.key: c for c in main.build_components()}
+        with tempfile.TemporaryDirectory() as td:
+            rec = main.RunRecord(key="jenkins", version="2.568.3", home=td, data_dir=td,
+                                 port=8080, console_url="http://127.0.0.1:8080/",
+                                 pid=4242, pid_role="server", started_at=0.0,
+                                 launcher_cmd=["java"])
+            main.save_running_map({"jenkins": rec})
+            self.assertEqual(mgr.status("jenkins", comps["jenkins"]).state, "running")
+            self.assertEqual(list(mgr.adopt(comps))[0].state, "running")
+            main.save_running_map({})
+            self.assertEqual(mgr.status("jenkins", comps["jenkins"]).state, "not_installed_or_stopped")
 
 
 if __name__ == "__main__":

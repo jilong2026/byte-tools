@@ -30,6 +30,8 @@ import sys
 import tarfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -4399,6 +4401,15 @@ def load_running_map() -> Dict[str, RunRecord]:
             continue
         if rec.pid_role not in ("server", "launcher", "none"):
             continue
+        # Task 2 复盘裁决：手改的 running.json 常把端口存成 "80480" 这类字符串，
+        # 不在这儿归一就会让字符串一路流进后续每一次端口探测。数字字段读侧归一成
+        # int/float；转不动的（如 port="http"）与坏 pid_role 同一政策——整条丢弃。
+        try:
+            rec.port = int(rec.port)
+            rec.pid = int(rec.pid)
+            rec.started_at = float(rec.started_at)
+        except (TypeError, ValueError):
+            continue
         out[rec.key] = rec
     return out
 
@@ -4430,6 +4441,100 @@ def pick_free_cluster(base_port: int, offsets: tuple = (), span: int = 99,
         if all(is_free(candidate + off) for off in all_offsets):
             return candidate
     return None
+
+
+def port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
+    """端口是否有人在听。connect_ex == 0 才算有人。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
+
+
+def _http_status_with(fetch, url: str) -> bool:
+    """把"发请求"抽成注入点，测试才能完全不碰网络。2xx/3xx/401 都算服务活着：
+    Jenkins 的 /login 在未初始化时会给 200，而根路径可能 403，401 说明服务在、只是要认证。"""
+    try:
+        return fetch(url) in (200, 201, 202, 204, 301, 302, 303, 307, 401)
+    except Exception:
+        return False
+
+
+def _http_fetch_status(url: str, timeout: float = 2.0) -> int:
+    req = urllib.request.Request(url, headers=dict(HTTP_UA))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return getattr(resp, "status", 200)
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def http_ok(url: str, timeout: float = 2.0) -> bool:
+    return _http_status_with(lambda u: _http_fetch_status(u, timeout), url)
+
+
+def process_is_alive(pid: int) -> bool:
+    """PID 是否还在。**注意这是提示不是真相**：spec §4 定的是端口在听才算运行中。"""
+    if not pid or pid <= 0:
+        return False
+    if CURRENT_OS == "Windows":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        still_alive = 259
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return True          # 打不开句柄：权限不足，不能断定它死了
+        try:
+            code = ctypes.c_ulong()
+            if k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return code.value == still_alive
+            return True
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@dataclass
+class LaunchStatus:
+    """组件当前运行状态。state 取值：
+    not_installed_or_stopped / running / zombie（登记在但端口不在听了）"""
+    state: str
+    record: Optional[RunRecord] = None
+    reason: str = ""
+
+
+class ServiceManager:
+    """本机进程生命周期的唯一入口。探针全部可注入，测试因此不碰网络也不碰进程。"""
+
+    def __init__(self, is_listening=port_is_listening, http_ok=http_ok,
+                 process_alive=process_is_alive):
+        self._is_listening = is_listening
+        self._http_ok = http_ok
+        self._process_alive = process_alive
+
+    def status(self, key: str, comp: Component,
+               records: Optional[Dict[str, RunRecord]] = None) -> LaunchStatus:
+        if getattr(comp, "launch", None) is None:
+            return LaunchStatus("not_installed_or_stopped")
+        rec = (records if records is not None else load_running_map()).get(key)
+        if rec is None:
+            return LaunchStatus("not_installed_or_stopped")
+        if not self._is_listening(rec.port):
+            return LaunchStatus("zombie", rec,
+                                f"登记的进程已不在监听 {rec.port}")
+        return LaunchStatus("running", rec)
+
+    def adopt(self, comps: Dict[str, Component]) -> List[LaunchStatus]:
+        """打开工具时对每个可启动组件做一次只读认定。绝不拉起进程。"""
+        records = load_running_map()
+        return [self.status(k, c, records) for k, c in comps.items()
+                if getattr(c, "launch", None) is not None]
 
 
 def load_active_map() -> Dict[str, str]:
