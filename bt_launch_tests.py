@@ -352,5 +352,94 @@ class LaunchPlan(unittest.TestCase):
         self.assertEqual(plan.console_url, "http://127.0.0.1:8123/")
 
 
+class StartFlow(unittest.TestCase):
+    """真进程一律打桩：拉起 Popen 的调用参数是本期最容易出错的地方。"""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig_file, self._orig_dir = main.RUNNING_FILE, main.CONFIG_DIR
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        main.CONFIG_DIR = Path(self.dir.name)
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        self.comps = {c.key: c for c in main.build_components()}
+        self.comp = self.comps["jenkins"]
+        # 造一个"已安装"的样子
+        home = self.comp.install_dir(self.comp.versions[0].version)
+        (home / "data").mkdir(parents=True, exist_ok=True)
+        (home / "jenkins.war").write_bytes(b"x")
+        self.spawned = []
+
+        class FakePopen:
+            def __init__(self, argv, **kw):
+                pass
+        self._popen = main.subprocess.Popen
+
+        def fake_popen(argv, **kw):
+            self.spawned.append((list(argv), kw))
+            class P:
+                pid = 43210
+                returncode = None
+                def poll(self):
+                    return None
+            return P()
+        main.subprocess.Popen = fake_popen
+        self.addCleanup(setattr, main.subprocess, "Popen", self._popen)
+
+    def mgr(self, listening_after=1):
+        """第 listening_after 次探活开始说"在听了"，模拟服务起来要几秒。"""
+        box = {"n": 0}
+        def is_listening(port, host="127.0.0.1"):
+            box["n"] += 1
+            return box["n"] > listening_after
+        return main.ServiceManager(is_listening=is_listening,
+                                   http_ok=lambda u, timeout=2.0: True,
+                                   process_alive=lambda pid: True)
+
+    def test_gate_blocks_without_jdk(self):
+        orig = main.resolve_java_home
+        main.resolve_java_home = lambda comps: None
+        self.addCleanup(setattr, main, "resolve_java_home", orig)
+        res = self.mgr().start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertIn("JDK", res.reason)
+        self.assertEqual(self.spawned, [], "门控没过就不该拉起任何进程")
+
+    def test_happy_path_writes_record_and_detaches(self):
+        res = self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        argv, kw = self.spawned[0]
+        rec = main.load_running_map()["jenkins"]
+        self.assertIn(f"--httpPort={rec.port}", argv, "端口必须真的传进命令行")
+        self.assertTrue(rec.console_url.endswith(f":{rec.port}/"))
+        self.assertTrue(kw.get("start_new_session") or kw.get("creationflags"),
+                        "必须按脱离进程拉起（DETACHED_PROCESS / start_new_session）")
+        self.assertIn("stdout", kw)
+        self.assertEqual(rec.pid, 43210)
+        self.assertEqual(rec.pid_role, "server", "Jenkins 我们就是服务进程（spec §4）")
+
+    def test_times_out_without_listening_and_leaves_no_record(self):
+        res = self.mgr(listening_after=10 ** 6).start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertIn("未监听", res.reason)
+        self.assertEqual(main.load_running_map(), {}, "启动失败不许留登记")
+
+    def test_second_start_is_refused_while_running(self):
+        self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
+        res = self.mgr(listening_after=0).start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertIn("已在运行", res.reason)
+        self.assertEqual(len(self.spawned), 1, "重复启动必须被拒")
+
+    def test_frees_port_by_shifting_cluster_when_8080_taken(self):
+        orig = main.port_is_free
+        main.port_is_free = lambda port, host="127.0.0.1": port != 8080
+        self.addCleanup(setattr, main, "port_is_free", orig)
+        res = self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(main.load_running_map()["jenkins"].port, 8081)
+
+
 if __name__ == "__main__":
     unittest.main()

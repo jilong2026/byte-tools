@@ -606,6 +606,9 @@ class DetectResult:
 
 # 静默执行外部命令用的常量（提前取好，避免依赖 subprocess 属性被替换的场景）
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+# DETACHED_PROCESS 在部分 Python 上缺失，按 0x00000008 兜底（Task 7 裁决：
+# 统一用这个常量，别在表达式里混两种写法）。
+DETACH_FLAGS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
 STDIN_DEVNULL = getattr(subprocess, "DEVNULL", -3)
 
 
@@ -4519,6 +4522,15 @@ class LaunchPlan:
     console_url: str
 
 
+@dataclass
+class StartResult:
+    ok: bool
+    state: str            # "running" / "gate" / "port" / "timeout" / "spawn"
+    reason: str = ""
+    record: Optional[RunRecord] = None
+    console_url: str = ""
+
+
 def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
     """优先用本工具装的 JDK；没有再退到 JAVA_HOME 环境变量。
 
@@ -4631,6 +4643,92 @@ class ServiceManager:
         if dirty:
             save_running_map(records)
         return out
+
+    def start(self, comp: Component, comps: Dict[str, Component],
+              sleeper=time.sleep) -> StartResult:
+        spec = getattr(comp, "launch", None)
+        if spec is None:
+            return StartResult(False, "gate", "本工具暂不支持启动该组件")
+        existing = load_running_map().get(comp.key)
+        if existing and self._is_listening(existing.port):
+            return StartResult(False, "gate",
+                               f"{comp.display_name} 已在运行（端口 {existing.port}）",
+                               record=existing, console_url=existing.console_url)
+
+        java_home = resolve_java_home(comps)
+        ok, reason = launch_gate(comp, spec, java_home)
+        if not ok:
+            return StartResult(False, "gate", reason)
+
+        base = spec.main_port
+        # is_free 显式按名字传，不靠默认值绑定：默认参数在 def 时就把函数绑死了，
+        # 测试 patch main.port_is_free 会失效（Task 7 的端口平移用例正是靠它）。
+        port = pick_free_cluster(base, spec.port_offsets, spec.port_search_span,
+                                 is_free=port_is_free)
+        if port is None:
+            return StartResult(False, "port",
+                               f"{base} 起 {spec.port_search_span + 1} 个端口内都没找到"
+                               f"能整簇空闲的位置，先关掉占用 {base} 的程序再试。")
+
+        data_dir = CONFIG_DIR / f"{comp.key}-data"
+        log_file = data_dir / "logs" / "byte-tools.out"
+        ensure_dir(log_file.parent)
+        plan = build_launch_plan(comp, spec, java_home, port, log_file)
+
+        # 重定向句柄在 Popen 把它交给子进程后立刻由父进程关掉（with 退出）：
+        # Windows 上父进程留着一个打开的日志句柄，既漏句柄又会让临时目录删不掉；
+        # 子进程拿到的是 CreateProcess 复制过去的一份，关自己这份不影响它。
+        with open(plan.log_file, "ab", buffering=0) as log_fh:
+            popen_kw = dict(cwd=str(plan.cwd), env=plan.env,
+                            stdout=log_fh,
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+            if CURRENT_OS == "Windows":
+                popen_kw["creationflags"] = DETACH_FLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
+                if CREATE_NO_WINDOW:
+                    popen_kw["creationflags"] |= CREATE_NO_WINDOW
+            else:
+                popen_kw["start_new_session"] = True
+
+            try:
+                proc = subprocess.Popen(plan.argv, **popen_kw)
+            except OSError as exc:
+                return StartResult(False, "spawn", f"拉起失败：{exc}")
+
+        # 有界探活：按"每轮 sleeper(1.0) 至多 startup_timeout 轮"计数而不是纯墙钟
+        # deadline —— deadline 写法在 sleeper 被替换成 no-op 时会退化成烧 CPU 的
+        # 忙等（提交信息钉的就是"有界探活后才登记"）。真实运行里每轮睡 1 秒，
+        # 语义等价于 startup_timeout 秒内未监听即放弃。
+        for _ in range(max(1, int(spec.startup_timeout))):
+            if self._is_listening(port):
+                rec = RunRecord(key=comp.key, version=comp.versions[0].version,
+                                home=str(plan.cwd), data_dir=plan.env.get(spec.data_dir_env, ""),
+                                port=port, console_url=plan.console_url,
+                                pid=proc.pid,
+                                pid_role="server" if spec.stop_kind == "pid" else "launcher",
+                                started_at=time.time(), launcher_cmd=list(plan.argv))
+                records = load_running_map()
+                records[comp.key] = rec
+                save_running_map(records)
+                return StartResult(True, "running", record=rec, console_url=plan.console_url)
+            sleeper(1.0)
+
+        # 超时：把刚拉起的进程收掉，不留一个"没人登记的监听者"
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return StartResult(False, "timeout",
+                           f"{spec.startup_timeout} 秒内 {port} 未监听。"
+                           f"启动输出见 {plan.log_file}，末尾内容：{self._tail(plan.log_file)}")
+
+    @staticmethod
+    def _tail(path: Path, lines: int = 8) -> str:
+        """失败归因要能直接看见（spec §5）：读日志末尾几行，读不到就说读不到。"""
+        try:
+            data = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return "（日志还读不到）"
+        return " / ".join(data[-lines:]) if data else "（日志为空）"
 
 
 def load_active_map() -> Dict[str, str]:
