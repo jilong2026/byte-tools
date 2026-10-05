@@ -62,23 +62,98 @@
 
 | 组件 | 端口 | 关键难点 | 是否要写配置 |
 |------|------|---------|-------------|
+| **rocketmq** | 9876/10909/10911 | **已实测通过**（见下）；停止必须走端口反查；`~/store` 数据目录 | 不用改（端口不在主 conf 里） |
 | **mysql** | 3306 | 首次要初始化数据目录（`--initialize-insecure`）、Windows 服务 vs 前台进程 | 要（端口写进 our.cnf 副本） |
 | **postgresql** | 5432 | `initdb` 初始化、密码写在 `.pgpass` | 要 |
 | **mongodb** | 27017 | 需要 `--dbpath`，数据目录结构简单 | 要 |
 | **elasticsearch** | 9200 | 必须设 `discovery.type: single-node` 否则起不来；ES8+ 默认开安全认证 | 要（改副本） |
 | **rabbitmq** | 5672/15672 | 依赖 Erlang，Windows 版还要装 Erlang 运行时 | 要 |
 
-**共同点**：都需要 `port_writeback` + conf 副本 + 首次初始化流程。
+**共同点**：都需要处理首次初始化/ 数据目录，且大多要 conf 副本。
 按 `docs/HOW-TO-REQUEST-COMPONENT-LAUNCH.md` 的模板提需求时把这几条写清。
+**rocketmq 是其中最省事的一个**（不需要 ZooKeeper，5.x 自带 namesrv）。
 
-## C 档：能做但要特别小心端口与依赖顺序
+## rocketmq 5.3.1 —— 已实测通过（2026-10-06），**但实测推翻了我原来的两条判断**
 
-| 组件 | 端口 | 风险 |
-|------|------|------|
-| **kafka** | 9092(+ 派生) | 强依赖 ZooKeeper（**新版本已废弃 KRaft 模式**，需确认版本）；端口写进 `server.properties` |
-| **rocketmq** | 9876/10911/10909 | 三个端口都是对外协议，不能平移；要设 `brokerIP1` |
-| **pulsar** | 8080/6650/6651 | 端口与Tomcat 撞；standalone 模式启动慢（实测过） |
-| **seata** | 8091/9848/9849 | 依赖注册中心（ nacos/eureka），**单独起stop 没有意义** |
+包 86MB（解包后目录名 `rocketmq-all-5.3.1-bin-release`）。实测结论：
+
+| 事项 | 实测值 |
+|------|--------|
+| 启动 namesrv | `bin\mqnamesrv.cmd` → **9876 监听** |
+| 启动 broker | `bin\mqbroker.cmd` → **10909/ 10911 / 10912 三个端口同时监听** |
+| broker 注册 | `bin\mqadmin.cmd clusterList -n 127.0.0.1:9876` 退出码 0，日志确认 `boot success` |
+| 停止 | `bin\mqshutdown.cmd broker` / `namesrv` |
+| 依赖 | **JDK 17+**（脚本里 `if %JAVA_MAJOR_VERSION% lss 17` 分叉）、硬编码 `-Xms2g -Xmx2g` |
+| `pid_role` | `server`（PID 93748/ 75312 直接就是监听进程） |
+
+### 坑一：**入口脚本分两级，用错必炸**
+
+-❌ `bin\runbroker.cmd` —— **不能用**。它末尾是 `%*` 纯透传，**不设 `ROCKETMQ_HOME`**，
+  而 `BrokerStartup` 靠 `ROCKETMQ_HOME` 找 `conf/broker.conf`
+  → `SystemConfigFileHelper.loadConfig` 抛 `FileNotFoundException`，broker 起不来。
+- ✅ `bin\mqbroker.cmd` —— **正确入口**。它开头检查 `ROCKETMQ_HOME`
+  （没设就 `EXIT /B 1`），再调 `runbroker.cmd` 并补上 `-Drmq.logback...`。
+
+**通用教训**：厂商目录里 `mq*.cmd`（一级入口，做环境检查）与 `run*.cmd`
+（二级脚本，假设环境已就绪）**不是一回事**。要选**带环境变量检查的那个**。
+（同ActiveMQ：`activemq.bat console` 里的 `console` 根本不是 task。）
+
+### 坑二：`mqshutdown.cmd` **报"Done!"但根本没停掉** ⚠️
+
+实测输出：
+
+```
+killing broker
+Done!
+find:鈥楤rokerStartup鈥: No such file or directory   ← stderr 里有这行
+```
+
+**退出码 0、打印 `Done!`，但 10909/10911 仍在监听，进程还活着** ——
+最后是我自己 `kill` 掉的。原因：**它按进程名 `find`，找不到**（我的 broker 是
+用 `cmd /c mqbroker.cmd` 起的，进程名对不上它的预期）。
+
+→ 结论：**RocketMQ 的停止不能信 `mqshutdown.cmd`，必须走端口反查 + 结束进程**
+（我们框架里的 `stop_kind=port_lookup` + `evict_port_occupant`，正好覆盖）。
+
+### 坑三：**端口根本不在 `broker.conf` 里**
+
+`conf/broker.conf` **0 处`listenPort`**（我实测grep 过），只有集群/角色/刷盘策略。
+端口是**代码里的默认值**（只有 `conf/container/*.conf` 那些容器模板里才出现 `listenPort`）。
+
+→ **我原先在分档表里写「端口写进 broker.conf」是错的**。
+实际要么用默认端口、要么改容器模板那种 conf，**不是主 conf**。
+好消息是端口不改就不需要 `port_writeback`。
+
+###坑四：消息数据落在 **`~/store`**，不在安装目录
+
+实测 broker boot 后 `~/store` 生成 37MB（`commitlog/ consumequeue/ checkpoint/ timerwheel/`）。
+与 `data_note` 写的一致。**多版本并存时必须给每个版本分开设 `storePathRoot`**，
+否则两个 broker 抢同一个目录 —— 这点要写进 `data_note`。
+
+### 启动耗时与内存
+
+broker 起来约 **25-30 秒**（比 nacos/activemq 慢），`startup_timeout` 要给够。
+脚本里默认 `-Xms2g -Xmx2g`，机器内存小的话得能覆盖。
+
+### 结论
+
+**能做，且值得做**（比 kafka 省事得多 —— **不需要 ZooKeeper**，
+5.x 已是自带 namesrv 的架构，kafka 还要单独管 zk）。
+建议从 C 档提到 **B 档偏上**：实测已通，剩下的是套 `LAUNCH_OF` 登记 + 护栏，
+主要工作量在「停止走端口反查」和 `data_note` 讲清 `~/store`。
+
+## C 档：能做，端口/依赖有坑（**未实测**，按厂商惯例推的）
+
+| 组件 | 端口 | 待核实的风险 |
+|------|------|-------------|
+| **kafka** | 9092 | **强依赖 ZooKeeper**（5.x 已切KRaft，要确认本项目那几个版本用哪种模式）；端口在 `server.properties` |
+| **pulsar** | 8080/6650/6651 | 8080 撞 Tomcat；standalone 启动慢（之前实测过就绪耗时）；数据在 `pulsar/standalone/data` |
+| **seata** | 8091/9848/9849 | **依赖注册中心**（nacos/eureka），单独起停意义有限 |
+
+**注意 kafka 的复杂度被低估了**：要管 zookeeper + broker 两个进程、两套端口。
+rocketmq 对应的是「一个 namesrv + 一个 broker」，少一半。
+
+---
 
 ## D 档：不适合做「启动/停止」—— 建议跳过
 
@@ -93,14 +168,13 @@
 
 ---
 
-## 我的建议：分三批做
+## 我的建议：分批做（按「已实测程度」排）
 
-1. **第一批**：nginx（**已实测通过，只差写代码**）→ tomcat。
-   nginx 这轮已经把启动/停止/pid_role/端口探活全部实测清楚了，
-   剩下的是套 `LAUNCH_OF` 登记 + 护栏。
-   这一批的价值是**验证我这套起停框架对"非 Java 中间件"也成立**
-   —— 现在三个已接入组件全是 Java 系。
-2. **第二批**：mysql、elasticsearch —— 覆盖面最广（几乎人人要），
+1. **第一批（最省事，实测已通）**：**rocketmq**、**nginx**
+   - rocketmq 实测已通，剩 `LAUNCH_OF` 登记 + 护栏；且它**不需要 ZooKeeper**
+   - nginx 实测已通，且能验证框架对**非 Java 中间件**也成立
+     （现在三个已接入组件全是 Java 系）
+2. **第二批（覆盖面最广）**：tomcat、mysql、elasticsearch ——
    能顺带把「首次初始化」和「conf 副本」这两个模式跑通。
 3. **第三批（看你需要）**：postgresql、mongodb、rabbitmq、kafka。
 
@@ -108,13 +182,17 @@
 
 ## 必须说清的诚实边界
 
-**已实测的只有 nginx（2026-10-06）**；已接入并实测过的是 Nacos / ActiveMQ / Jenkins。
-**B / C 档的端口、配置键名、启动命令全是按厂商惯例推的，本机没装过、没跑过。**
+**已实测的：nginx、rocketmq**（2026-10-06 本机跑通）；
+已接入并实测过的是 Nacos / ActiveMQ / Jenkins。
+**B档剩余（mysql/postgresql/mongodb/elasticsearch/rabbitmq）与整个 C 档
+的端口、配置键名、启动命令全是按厂商惯例推的，本机没装过、没跑过。**
 
 按本项目铁律「不这样就真的出过问题」，这些必须**打开包 grep + 跑一次厂商命令**核实：
-历史上我凭白名单推断过 Nacos 的控制台路径，实测是 `/nacos` 而不是我"推"的那个；
-ActiveMQ 的 `activemq.bat console` 里`console` 根本不是 task，传错会**以退出码 0 静默退出**。
+
+- 凭白名单推断过 Nacos 控制台路径，实测是 `/nacos` 而非推断的那个；
+- ActiveMQ 的 `activemq.bat console` 里`console` 不是 task，传错会**以退出码 0 静默退出**；
+- **rocketmq 实测又推翻了我两条判断**：端口根本不在 `broker.conf` 里；
+  `mqshutdown.cmd` 打印 `Done!` 但**根本没停掉**。
+  ——**「按惯例推」的错误率比我以为的高，而且错得理直气壮。**
 
 **所以下一批接入的第一步永远是实测**，本文档随实测进展更新。
-已知会踩的具体坑（`discovery.type` 的键名、`--initialize-insecure` 的参数、
-Kafka 是否已切KRaft）都标在对应行的「关键难点」里。
