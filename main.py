@@ -102,6 +102,7 @@ APP_NAME = "字节-开发环境与工具自动安装"
 GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+RUNNING_FILE = CONFIG_DIR / "running.json"      # 本机进程事实，与用户偏好分开（设计 §3）
 
 # 当前操作系统标识与 CPU 架构：刻意不用 platform.system() / platform.machine()。
 # 那两个函数内部会走 platform.uname() -> win32_ver() -> 一次 WMI 查询，而 WINMGMT
@@ -4348,6 +4349,66 @@ def _atomic_write_config(data: Dict[str, object]) -> None:
     tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, CONFIG_FILE)
+
+
+@dataclass
+class RunRecord:
+    """一条运行登记。
+
+    pid_role 是显式字段而不是省略约定：spec §2 实测到 Nacos / ActiveMQ 的启动脚本
+    会自己后台化，脚本返回的 PID 几秒后就不是服务进程了。把"这个 PID 是什么身份"
+    写下来，才不至于以后有人拿 launcher 的 PID 判生死。
+    """
+
+    key: str
+    version: str
+    home: str
+    data_dir: str
+    port: int
+    console_url: str
+    pid: int
+    pid_role: str            # "server" | "launcher" | "none"
+    started_at: float
+    launcher_cmd: List[str]
+
+    def to_dict(self) -> Dict[str, object]:
+        return dict(self.__dict__)
+
+
+def load_running_map() -> Dict[str, RunRecord]:
+    """读取运行登记表。文件缺失、JSON 坏了、记录缺字段，一律当空表。
+
+    这里"宽容"是有意的：running.json 删了只是重新发现一遍本机进程，
+    而让它把整个界面搞崩、或者据此去动进程，代价完全不成比例。"""
+    if not RUNNING_FILE.exists():
+        return {}
+    try:
+        data = json.loads(RUNNING_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: Dict[str, RunRecord] = {}
+    for item in data.values():
+        if not isinstance(item, dict):
+            continue
+        try:
+            rec = RunRecord(**item)
+        except (TypeError, KeyError):
+            continue
+        if rec.pid_role not in ("server", "launcher", "none"):
+            continue
+        out[rec.key] = rec
+    return out
+
+
+def save_running_map(records: Dict[str, RunRecord]) -> None:
+    """running.json 的唯一落盘出口，照 _atomic_write_config 的临时文件 + os.replace。"""
+    ensure_dir(RUNNING_FILE.parent)
+    payload = {rec.key: rec.to_dict() for rec in records.values()}
+    tmp = RUNNING_FILE.with_name(RUNNING_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, RUNNING_FILE)
 
 
 def load_active_map() -> Dict[str, str]:
