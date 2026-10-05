@@ -26,7 +26,13 @@ import tempfile
 import time
 
 APPLY_FLAG = "--yes" in sys.argv   # 必须在清 argv 之前取，否则演练模式永远进不去
-LAUNCH_KEY = sys.argv[sys.argv.index("--launch") + 1] if "--launch" in sys.argv else None
+if "--launch" in sys.argv:
+    _i = sys.argv.index("--launch") + 1
+    # 敲了 --launch 却忘了给 key：给空串，让它落到下面"不认识的 key"那条中文报错，
+    # 而不是在这里抛 IndexError 糊用户一脸堆栈。
+    LAUNCH_KEY = sys.argv[_i] if _i < len(sys.argv) else ""
+else:
+    LAUNCH_KEY = None
 sys.argv = [sys.argv[0]]           # 别让 main.py 的 argparse/入口看到本脚本的参数
 import main                        # noqa: E402
 
