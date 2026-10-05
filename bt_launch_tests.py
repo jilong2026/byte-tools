@@ -217,5 +217,60 @@ class NoExecInvariant(unittest.TestCase):
             self.assertEqual(mgr.status("jenkins", comps["jenkins"]).state, "not_installed_or_stopped")
 
 
+class ZombieMatrix(unittest.TestCase):
+    """spec §5：PID 死 / PID 活端口不在 / 端口在听但 PID 不符 / 坏 JSON，
+    四种情形都不许触发任何进程动作。"""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig = main.RUNNING_FILE
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig)
+        self.comps = {c.key: c for c in main.build_components()}
+        self.rec = main.RunRecord(key="jenkins", version="2.568.3", home="/h",
+                                  data_dir="/d", port=8080,
+                                  console_url="http://127.0.0.1:8080/",
+                                  pid=4242, pid_role="server", started_at=0.0,
+                                  launcher_cmd=["java"])
+
+    def mgr(self, listening, alive):
+        return main.ServiceManager(is_listening=lambda p, host="127.0.0.1": listening,
+                                   http_ok=lambda u, timeout=2.0: listening,
+                                   process_alive=lambda pid: alive)
+
+    def test_pid_dead_but_port_listening_is_still_running(self):
+        """端口是真相。PID 判不出来（权限不足）时不该误报停止。"""
+        main.save_running_map({"jenkins": self.rec})
+        st = self.mgr(listening=True, alive=False).reconcile(self.comps)
+        self.assertEqual(st["jenkins"].state, "running")
+        self.assertEqual(main.load_running_map().get("jenkins").port, 8080)
+
+    def test_pid_alive_but_port_free_is_zombie_and_record_dropped(self):
+        main.save_running_map({"jenkins": self.rec})
+        st = self.mgr(listening=False, alive=True).reconcile(self.comps)
+        self.assertEqual(st["jenkins"].state, "not_installed_or_stopped")
+        self.assertEqual(main.load_running_map(), {}, "僵尸登记必须清掉")
+
+    def test_broken_json_yields_empty_and_touches_nothing(self):
+        main.RUNNING_FILE.write_text("{", encoding="utf-8")
+        calls = []
+        mgr = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": calls.append(p) or True,
+            http_ok=lambda u, timeout=2.0: True, process_alive=lambda pid: calls.append(pid) or True)
+        self.assertEqual(mgr.reconcile(self.comps), {})
+        self.assertEqual(calls, [], "空表不该去探任何端口")
+
+    def test_foreign_key_record_survives_reconcile(self):
+        """登记里出现本期不认识的可启动组件（计划二加的），不许被误删。"""
+        other = main.RunRecord(key="nacos", version="2.3.2", home="/h", data_dir="/d",
+                               port=8848, console_url="http://127.0.0.1:8848/",
+                               pid=1, pid_role="none", started_at=0.0, launcher_cmd=[])
+        main.save_running_map({"nacos": other})
+        st = self.mgr(listening=True, alive=True).reconcile(self.comps)
+        self.assertNotIn("nacos", st, "没登记的组件不该被本工具接管")
+        self.assertIn("nacos", main.load_running_map())
+
+
 if __name__ == "__main__":
     unittest.main()

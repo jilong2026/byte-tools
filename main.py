@@ -4536,6 +4536,32 @@ class ServiceManager:
         return [self.status(k, c, records) for k, c in comps.items()
                 if getattr(c, "launch", None) is not None]
 
+    def reconcile(self, comps: Dict[str, Component]) -> Dict[str, LaunchStatus]:
+        """一次性认定 + 清僵尸：只处理 LAUNCH_KEYS 里的组件。
+
+        计划二会往登记表加组件，届时旧登记不该被本期代码删掉，
+        所以这里按"认得的 key"过滤，而不是清全部文件。"""
+        records = load_running_map()
+        out: Dict[str, LaunchStatus] = {}
+        dirty = False
+        for key in LAUNCH_KEYS:
+            comp = comps.get(key)
+            if comp is None or getattr(comp, "launch", None) is None:
+                continue
+            if key not in records:
+                continue          # 没有登记的 key 不是"待认定"的东西：卡片自己的
+                                  # status() 会答"未运行"，reconcile 只负责把有过登记的
+                                  # 一条条判完，返回集因此可以为空（用例钉的就是这个）
+            st = self.status(key, comp, records)
+            if st.state == "zombie":
+                records.pop(key, None)
+                dirty = True
+                st = LaunchStatus("not_installed_or_stopped")
+            out[key] = st
+        if dirty:
+            save_running_map(records)
+        return out
+
 
 def load_active_map() -> Dict[str, str]:
     """读取"每个组件当前生效哪个版本"的登记表；文件缺失或损坏一律当空表。
