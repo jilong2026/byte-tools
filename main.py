@@ -4610,6 +4610,113 @@ def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
     return _pick_unique_pids(parse_netstat_listeners(done.stdout or ""), ports)
 
 
+# ActiveMQ 回写的两个锚点，全部来自 2026-10-05 真包实测（spec 计划二 §2.1）。
+# 写成常量是为了"锚不上"时的报错能指名道姓，而不是泛泛一句"配置不认识"。
+AMQ_CONSOLE_FILE = "jetty-spring.properties"
+AMQ_CONSOLE_KEY = "jetty.http.port"
+AMQ_BROKER_FILE = "activemq.xml"
+# 注意用的是 _re 而不是 re：main.py 里正則只在 1959 行以 `import re as _re` 引入过，
+# 模块里没有裸 `re` 这个名字 —— 写 re.compile 会在 import 阶段就 NameError。
+_PORT_TAIL_RE = _re.compile(r"(uri=\"[a-z]+://[^\":]+:)(\d+)(\?)")
+
+
+def conf_targets(data_dir: Path) -> Tuple[Path, Path, Path]:
+    """副本根目录、控制台端口文件、broker 传输口文件。三处共用一份定义。"""
+    conf = data_dir / "conf"
+    return conf, conf / AMQ_CONSOLE_FILE, conf / AMQ_BROKER_FILE
+
+
+def prepare_conf_copy(src: Path, dst: Path) -> Tuple[str, List[str]]:
+    """建立/核对 ActiveMQ 的配置副本，返回 ("created"|"exists", 差异文件列表)。
+
+    整目录拷贝而不是只拷两个端口文件：实测 conf/login.config 里的 JAAS 用的是
+    相对文件名（users.properties / groups.properties，由 activemq.conf 解析），
+    拷不全的话控制台鉴权会静默失效。
+    副本一旦存在就是权威：不覆盖、不自动补，只把"官方有、副本没有"的文件名报出来——
+    补哪些、用什么内容补，等于猜厂商的升级意图。"""
+    if not dst.exists():
+        ensure_dir(dst)
+    else:
+        present = {p.relative_to(dst).as_posix()
+                   for p in dst.rglob("*") if p.is_file()}
+        missing = sorted(p.relative_to(src).as_posix()
+                         for p in src.rglob("*") if p.is_file()
+                         and p.relative_to(src).as_posix() not in present)
+        return "exists", missing
+    created: List[str] = []
+    for f in sorted(p for p in src.rglob("*") if p.is_file()):
+        rel = f.relative_to(src)
+        target = dst / rel
+        ensure_dir(target.parent)
+        shutil.copy2(f, target)
+        created.append(rel.as_posix())
+    return "created", created
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """照 running.json 那套临时文件 + os.replace：写一半崩了不留半截配置。"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    os.replace(tmp, path)
+
+
+def _backup_once(path: Path) -> None:
+    """只在首次改动前留一份 .bak；第二次改不留 .bak.bak，那是噪音。"""
+    bak = path.with_name(path.name + ".bak")
+    if not bak.exists():
+        shutil.copy2(path, bak)
+
+
+def set_property_line(path: Path, key: str, value: str) -> Tuple[bool, str]:
+    """把 properties 文件里的 `key=<旧值>` 改成 `key=<新值>`，锚不到就拒改。
+
+    幂等靠读出来判断：已经是目标值就一个字都不写（不改 mtime、不多备份），
+    这样反复点启动不会刷出一堆 .bak。只认"行首正好是 key="的形状——
+    用户手加空格或行尾注释时我们不猜他的写法，明确拒绝并告诉他改哪一行。"""
+    want = f"{key}={value}"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as exc:
+        return False, f"读不到 {path.name}：{exc}"
+    if any(line.rstrip("\r\n") == want for line in lines):
+        return True, ""
+    hits = [n for n, line in enumerate(lines) if line.startswith(f"{key}=")]
+    if not hits:
+        return False, (f"{path.name} 里找不到 {key}= 这一行（官方默认写法被改过）。"
+                       f"请手工把该文件里的 {key} 改成 {value} 后再启动。")
+    n = hits[0]
+    lines[n] = want + "\n"
+    _backup_once(path)
+    _atomic_write(path, "".join(lines))
+    return True, ""
+
+
+def set_openwire_port(path: Path, port: int) -> Tuple[bool, str]:
+    """改 activemq.xml 里 name="openwire" 那一行的端口，只动 uri 里的数字。"""
+    target = f"uri=\"tcp://0.0.0.0:{port}?"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"读不到 {path.name}：{exc}"
+    lines = text.splitlines(keepends=True)
+    hits = [n for n, line in enumerate(lines) if "name=\"openwire\"" in line
+            and "<!--" not in line]
+    if not hits:
+        return False, (f"{path.name} 里找不到可改的 openwire transportConnector 行"
+                       f"（被注释掉或写法不是默认那样）。请手工把 broker 端口改成 {port}。")
+    n = hits[0]
+    if target in lines[n]:
+        return True, ""                                   # 已经是目标值
+    new, cnt = _PORT_TAIL_RE.subn(lambda m: f"{m.group(1)}{port}{m.group(3)}", lines[n], count=1)
+    if cnt != 1:
+        return False, (f"{path.name} 第 {n + 1} 行的 uri 写法不认识，不敢改。"
+                       f"请手工把 openwire 端口改成 {port}。")
+    lines[n] = new
+    _backup_once(path)
+    _atomic_write(path, "".join(lines))
+    return True, ""
+
+
 def _http_status_with(fetch, url: str) -> bool:
     """把"发请求"抽成注入点，测试才能完全不碰网络。2xx/3xx/401 都算服务活着：
     Jenkins 的 /login 在未初始化时会给 200，而根路径可能 403，401 说明服务在、只是要认证。"""

@@ -1336,5 +1336,117 @@ class NetstatParse(unittest.TestCase):
         self.assertEqual(main._pick_unique_pids(table, (8848,)), {8848: 12345})
 
 
+class ConfCopyWriteback(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.src = Path(self.dir.name) / "official-conf"
+        self.dst = Path(self.dir.name) / "data" / "conf"
+        (self.src / "jetty").mkdir(parents=True)
+        # ↓ 三行是 6.3.2 真包原文（conf/jetty-spring.properties:35、conf/activemq.xml:178、
+        #   conf/login.config 的 JAAS 相对文件名）。改这三行等于改结论，要先去重新实测。
+        (self.src / "jetty-spring.properties").write_text(
+            "# some header\njetty.http.port=8161\njetty.ssl.port=8443\n", encoding="utf-8")
+        (self.src / "activemq.xml").write_text(
+            '      <transportConnectors>\n'
+            '        <transportConnector name="openwire" '
+            'uri="tcp://0.0.0.0:61616?maximumConnections=1000&amp;'
+            'wireFormat.maxFrameSize=10485760"/>\n'
+            '      </transportConnectors>\n', encoding="utf-8")
+        (self.src / "login.config").write_text(
+            'org.apache.activemq.jaas.PropertiesLoginModule required\n'
+            '    org.apache.activemq.jaas.properties.user="users.properties"\n'
+            '    org.apache.activemq.jaas.properties.group="groups.properties";\n',
+            encoding="utf-8")
+        (self.src / "jetty" / "jetty-http.xml").write_text(
+            '    <Set name="port"><Property name="jetty.http.port" default="8080" /></Set>\n',
+            encoding="utf-8")
+        (self.src / "users.properties").write_text("admin=admin\n", encoding="utf-8")
+        # 副本在这里就建好：下面除了"建立副本"本身那条用例，其余都是拿"已有副本"做前提。
+        # （漏了这一步的用例不会红在断言上，而红在"读不到文件"上——那是假失败。）
+        main.prepare_conf_copy(self.src, self.dst)
+
+    def test_whole_directory_is_copied_not_single_files(self):
+        """必须整目录：实测 conf/login.config 里 JAAS 用的是相对文件名
+        （users.properties / groups.properties，由 activemq.conf 解析），
+        只拷两个端口文件会让控制台鉴权静默失效——报"起来了但登不进去"。"""
+        fresh = Path(self.dir.name) / "fresh-copy"      # 用没建过的目标，才看得到 created 分支
+        state, new = main.prepare_conf_copy(self.src, fresh)
+        self.assertEqual(state, "created")
+        self.assertTrue(new, "首次拷贝要报出建了哪些文件")
+        for rel in ("jetty-spring.properties", "activemq.xml", "login.config",
+                    "users.properties", "jetty/jetty-http.xml"):
+            self.assertTrue((fresh / rel).exists(), f"副本缺 {rel}")
+        self.assertIn("jetty/jetty-http.xml", new, "子目录没被算进相对路径清单里")
+
+    def test_existing_copy_is_authoritative_and_only_reported(self):
+        """副本一旦建立就是权威：换版本带来的新文件只点名、不自动补、不覆盖。
+        补哪几个、用什么内容补，等于猜厂商升级意图。"""
+        main.prepare_conf_copy(self.src, self.dst)
+        (self.dst / "jetty-spring.properties").write_text(
+            "jetty.http.port=9999\n", encoding="utf-8")        # 用户/我们改过
+        (self.src / "brand-new-defaults.properties").write_text("x=1\n", encoding="utf-8")
+        before = (self.dst / "jetty-spring.properties").read_text(encoding="utf-8")
+
+        state, missing = main.prepare_conf_copy(self.src, self.dst)
+        self.assertEqual(state, "exists")
+        self.assertEqual(missing, ["brand-new-defaults.properties"])
+        self.assertEqual((self.dst / "jetty-spring.properties").read_text(encoding="utf-8"),
+                         before, "已存在的副本文件被覆盖了")
+
+    def test_property_line_moves_only_the_target_line(self):
+        ok, why = main.set_property_line(self.dst / "jetty-spring.properties",
+                                         "jetty.http.port", "8261")
+        self.assertTrue(ok, why)
+        txt = (self.dst / "jetty-spring.properties").read_text(encoding="utf-8")
+        self.assertIn("jetty.http.port=8261", txt)
+        self.assertIn("jetty.ssl.port=8443", txt, "无关行被顺手改了")
+        self.assertIn("# some header", txt)
+
+    def test_writeback_is_idempotent_and_backs_up_only_on_first_change(self):
+        target = self.dst / "jetty-spring.properties"
+        main.prepare_conf_copy(self.src, self.dst)
+        self.assertTrue(main.set_property_line(target, "jetty.http.port", "8261")[0])
+        bak = target.with_name(target.name + ".bak")
+        self.assertTrue(bak.exists(), "首次改动必须留一次备份")
+        stamp = target.stat().st_mtime_ns
+        content = target.read_text(encoding="utf-8")
+
+        self.assertTrue(main.set_property_line(target, "jetty.http.port", "8261")[0])
+        self.assertEqual(target.read_text(encoding="utf-8"), content, "第二次改动了文件")
+        self.assertEqual(target.stat().st_mtime_ns, stamp,
+                         "已是目标值还写文件：反复点启动会刷出一堆备份、白改 mtime")
+
+    def test_unanchorable_line_is_refused_with_actionable_reason(self):
+        """锚不到那行就拒改（§5 的有边界退回），且原因必须说清改哪个文件哪一行——
+        只报"配置有问题"就是 R4 第 6 条禁止的"你自己去弄"。"""
+        target = self.dst / "jetty-spring.properties"
+        target.write_text("jetty.http.port =  8161   # 用户手加了空格和行尾注释\n",
+                          encoding="utf-8")
+        ok, why = main.set_property_line(target, "jetty.http.port", "8261")
+        self.assertFalse(ok)
+        self.assertIn("jetty-spring.properties", why)
+        self.assertIn("jetty.http.port", why)
+        self.assertIn("手工", why)
+
+    def test_openwire_port_line_is_the_one_with_the_name_attribute(self):
+        ok, why = main.set_openwire_port(self.dst / "activemq.xml", 61716)
+        self.assertTrue(ok, why)
+        txt = (self.dst / "activemq.xml").read_text(encoding="utf-8")
+        self.assertIn("tcp://0.0.0.0:61716?", txt)
+        self.assertIn("maximumConnections=1000", txt, "&amp; 之后的部分被吃掉了")
+        self.assertNotIn("61616", txt)
+
+    def test_openwire_refuses_when_amq_default_is_commented_or_absent(self):
+        target = self.dst / "activemq.xml"
+        target.write_text('      <transportConnectors>\n'
+                          '        <!-- <transportConnector name="openwire" uri="tcp://0.0.0.0:61616?"/ -->\n'
+                          '      </transportConnectors>\n', encoding="utf-8")
+        ok, why = main.set_openwire_port(target, 61716)
+        self.assertFalse(ok)
+        self.assertIn("activemq.xml", why)
+        self.assertIn("openwire", why)
+
+
 if __name__ == "__main__":
     unittest.main()
