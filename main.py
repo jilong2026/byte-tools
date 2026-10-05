@@ -698,7 +698,14 @@ GH_ACCELERATORS: List[str] = [
 
 # 故障转移参数（避免魔法数字）
 DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
-DOWNLOAD_TIMEOUT = 30         # 单 URL 下载连接超时（秒）
+# 下载超时用 (连接, 读取) 二元组，不能用单值。
+# 真机 2026-10-06 实测踩过：requests 的 timeout 传单值时它**同时**是连接超时和读超时，
+# 30 秒的读上限会把大包打死 —— jdk(190MB) / gradle(130MB) / postgresql(110MB) /
+# elasticsearch(600MB) 这些全都"所有下载源均不可用"，而实测那些源 curl 探测全是HTTP 200。
+# 源没问题，是读超时太短：慢速下载时两次读之间很容易超过 30 秒。
+# 读取超时给足（单次读 60 秒），连接仍保持短（10 秒，探测到不通就快速切下一个源）。
+DOWNLOAD_CONNECT_TIMEOUT = 10
+DOWNLOAD_READ_TIMEOUT = 60
 DOWNLOAD_RETRY_PER_URL = 2    # 单 URL 内重试次数
 # 关窗时等抓取线程收尾的总预算（秒）。抓取线程最长按一个在途请求的超时返回
 # （DOWNLOAD_PROBE_TIMEOUT * 2 = 10s），这里留 2s 余量。
@@ -3811,7 +3818,10 @@ class DownloadWorker(QThread):
         返回: bool      是否成功；响应体小于 DOWNLOAD_MIN_VALID_BYTES
                         或短于声明的 Content-Length 时判定该源失败，换下一个源
         """
-        with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT,
+        # (连接, 读取) 二元组：连接 10 秒（不通就快速换源）、读取 60 秒
+        # （大包慢速下载时两次读之间可能超过 30 秒，单值超时会把 jdk/gradle 这类打死）。
+        timeout = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT)
+        with requests.get(url, stream=True, timeout=timeout,
                           allow_redirects=True, headers=HTTP_UA) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length", 0))

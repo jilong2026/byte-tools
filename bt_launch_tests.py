@@ -2451,7 +2451,15 @@ class PortPlanning(unittest.TestCase):
             main.RUNNING_FILE = Path(td) / "running.json"
             self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg)
             self.addCleanup(setattr, main, "RUNNING_FILE", orig_run)
-            # 官方 conf 不含该行 → 副本建出来后 set_property_line 锚不到 → 拒改
+            # 官方 conf 不含该行 → 副本建出来后 set_property_line 锚不到 → 拒改。
+            # 还得先把"已装"这件事做实：launch_gate 会检查"磁盘上装了没有"，
+            # 一个版本目录都没有时它先拦下来说"请先下载并安装"，就轮不到 prepare_ports 了
+            # （2026-10-06 真机测试时才发现这条用例的前提已经不成立）。
+            home = Path(td) / comp.key / f"{comp.key}-{s.main_port}"
+            (home / "bin").mkdir(parents=True)
+            orig_install = comp.install_dir
+            comp.install_dir = lambda v, _h=home: _h
+            self.addCleanup(setattr, comp, "install_dir", orig_install)
             data = Path(td) / f"{comp.key}-data"
             (data / "conf").mkdir(parents=True)
             (data / "conf" / "jetty-spring.properties").write_text(
