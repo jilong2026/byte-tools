@@ -6293,6 +6293,32 @@ class ComponentCard(QFrame):
         本方法只读，一次都不许拉起进程。"""
         if self.component.launch is None:
             return
+        try:
+            self._refresh_launch_state_impl()
+        finally:
+            # 状态一变就通知主窗重算 Tab 上的运行标记 `●`。放在 finally 里：
+            # 刷新过程中抛异常时标记也不该留在旧值上。
+            self._notify_tabs_running_changed()
+
+    def _notify_tabs_running_changed(self) -> None:
+        """告诉主窗"本卡片是否在运行"变了，好去刷新 Tab 标题上的 `●`。
+
+        用 getattr 逐层探：卡片可能在窗口还没建完时就被刷新（构造期测试），
+        那时主窗上还没有 _mark_running_tabs，直接跳过而不是炸掉整个刷新。
+        """
+        try:
+            win = self.window()
+        except Exception:       # 顶层 C++ 对象已销毁（关窗途中）
+            return
+        mark = getattr(win, "_mark_running_tabs", None)
+        if mark is None:
+            return
+        try:
+            mark()
+        except Exception:       # 主窗可能正处在关窗流程里，标记刷不上不影响功能
+            pass
+
+    def _refresh_launch_state_impl(self) -> None:
         st = self._launch_status()
         running = st.state == "running"
         self.btn_start.setEnabled(not running and self.launch_worker is None)
@@ -6324,10 +6350,18 @@ class ComponentCard(QFrame):
 
     def on_start_clicked(self) -> None:
         spec = self.component.launch
+        # 端口提示必须与实际行为一致。2026-10-06 起策略是"不平移、被占就结束占用者"，
+        # 这里原来还写着"被占用时会自动往后找空闲口"—— 确认框里说假话比不说更糟：
+        # 用户以为端口会变，于是按自己的预期去连那个并不存在的端口。
+        port_line = f"端口：{spec.main_port}"
+        if spec.port_offsets:
+            port_line += f"（派生口 {', '.join(str(spec.main_port + int(o)) for o in spec.port_offsets)}）"
+        if spec.extra_ports:
+            port_line += f"；独立口 {', '.join(str(p) for p in spec.extra_ports)}"
+        port_line += "\n（端口被占用时会结束占用它的进程，不会自动换端口）"
         reply = QMessageBox.question(
             self, "确认启动 %s" % self.component.display_name,
-            "端口：%d（被占用时会自动往后找空闲口）\n%s\n\n确认启动？"
-            % (spec.main_port, spec.risk_note),
+            "%s\n%s\n\n确认启动？" % (port_line, spec.risk_note),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if reply != QMessageBox.Yes:
             return
@@ -6346,6 +6380,13 @@ class ComponentCard(QFrame):
     def _on_launch_ok(self, key: str, console_url: str) -> None:
         self._log("info", f"已启动，控制台：{console_url}")
         self._refresh_launch_state()
+        # 明说停止按钮在哪：2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。
+        # 查下来按钮一直好着（可见可用、文本"停止"、旁边 label 显示"● 运行中 · 端口 8848"），
+        # 但启动成功后只写一句"已启动，控制台：…"，用户不确定"停止"这个按钮出现了没有
+        # ——尤其卡片上同时有"卸载"按钮，两者挨在一起，容易看成没变。
+        # 所以直接点名：停止按钮就在这张卡片上、按钮文字是什么。
+        self._log("info", f"「停止」按钮已出现在这张卡片上（现在可用），"
+                          f"再点一次可结束运行中的 {self.component.display_name}。")
 
     def _on_launch_notes(self, key: str, notes: list) -> None:
         """端口准备的告警逐条进组件日志。吞掉的话，用户之后想找"端口改在哪份文件里"
@@ -7614,6 +7655,9 @@ class MainWindow(QMainWindow):
         self.cards: List[ComponentCard] = []
         self._tab_cards: List[List[ComponentCard]] = []
         self._tab_layouts: list = []
+        # Tab 标题的"干净"形态（分类名 + 组件数）。运行标记 `●` 是叠在它上面的，
+        # 搜索/退出搜索会重设标题，所以必须留着底稿，不能靠 tabText() 反推。
+        self._tab_base_titles: List[str] = []
         self.tabs = QTabWidget()
         self.tabs.setObjectName("compTabs")
         self.tabs.setDocumentMode(True)
@@ -7635,7 +7679,9 @@ class MainWindow(QMainWindow):
                 tab_cards.append(card)
             cards_layout.addStretch(1)
             scroll.setWidget(cards_wrap)
-            self.tabs.addTab(scroll, f"{cat_name}（{len(comps)}）")
+            base_title = f"{cat_name}（{len(comps)}）"
+            self.tabs.addTab(scroll, base_title)
+            self._tab_base_titles.append(base_title)
             self._tab_cards.append(tab_cards)
             self._tab_layouts.append(cards_layout)
 
@@ -7812,11 +7858,64 @@ class MainWindow(QMainWindow):
                 if layout.indexOf(card) == -1:
                     layout.insertWidget(j, card)
                 card.setVisible(True)
-        # Tab 标题恢复成「分类（总数）」
-        for idx, cat_name in enumerate(COMPONENT_CATEGORIES):
-            self.tabs.setTabText(idx, f"{cat_name}（{len(self._tab_cards[idx])}）")
+        # Tab 标题恢复成「分类（总数）」，并重新标出哪些页有组件在运行
+        self._mark_running_tabs()
         # 清掉结果面板里残留的分类小标题
         self._clear_results_layout()
+
+    def _mark_running_tabs(self) -> None:
+        """Tab 标题后标 `●` 表示"这一页有组件在运行"，清空搜索/退出搜索时都要重算。
+
+        2026-10-06 用户反馈"启动了 nacos，没看到停止选项"—— 按钮一直是好的，
+        但三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「开发软件」、Jenkins 在「其它软件」），
+        界面默认停在「开发环境」。用户在自己的启动页上找不到刚才那个卡片。
+        标题上挂个 `●`，无论停在哪一页都能一眼看出"有东西在跑，去那页找"。
+        """
+        tabs = getattr(self, "tabs", None)
+        if tabs is None:                      # 构造期/测试用的半成品窗口：没有 Tab 就没什么可标
+            return
+        base_titles = getattr(self, "_tab_base_titles", [])
+        tab_cards = getattr(self, "_tab_cards", [])
+        for idx in range(tabs.count()):
+            base = base_titles[idx] if idx < len(base_titles) else tabs.tabText(idx)
+            cards = tab_cards[idx] if idx < len(tab_cards) else []
+            running = any(hasattr(c, "btn_stop") and c.btn_stop.isEnabled()
+                          for c in cards)
+            tabs.setTabText(idx, f"{base}{'  ●' if running else ''}")
+
+    def _reveal_running_tabs(self) -> None:
+        """有组件在运行时，若它不在当前 Tab，就把 Tab 切过去并说清是哪一页。
+
+        2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。查下来按钮一直是好的
+        （btn_stop 可见可用、文本"停止"、label 显示"● 运行中 · 端口 8848"），
+        真正的原因是**三个启动组件分在两个 Tab**：
+        Jenkins 在「其它软件」（Tab2），Nacos/ActiveMQ 在「开发软件」（Tab1），
+        而界面默认停在 Tab0「开发环境」。用户自然找不到自己刚启动的那个卡片。
+
+        这不是"找不到按钮"，是"服务跑着却看不见"——比按钮缺失更容易让人以为没启动成功。
+        所以这里主动跳页+ 点名在日志里说清，不指望用户自己 Tab 翻一遍。
+        """
+        self._mark_running_tabs()
+        tabs = getattr(self, "tabs", None)
+        layouts = getattr(self, "_tab_layouts", None)
+        if tabs is None or not layouts:
+            return
+        for card in self.cards:
+            if not hasattr(card, "btn_start"):
+                continue
+            if not card.btn_stop.isEnabled():
+                continue                     # 没在运行，不用跳
+            idx = next((n for n, li in enumerate(layouts) if li.indexOf(card) != -1), -1)
+            if idx >= 0 and idx != tabs.currentIndex():
+                tabs.setCurrentIndex(idx)
+                base = self._tab_base_titles[idx] if idx < len(self._tab_base_titles) \
+                    else tabs.tabText(idx)
+                self._append_log(
+                    "info",
+                    f"已切换到「{base.split('（')[0]}」页："
+                    f"{card.component.display_name} 正在运行，"
+                    f"它的「停止」按钮在这一页（端口 {card._launch_status().record.port}）。")
+                return                      # 一次只跳一个，避免连翻多页
 
     def _build_unified(self, q: str) -> None:
         """把命中的组件按分类归并进统一结果列表（带分类小标题）。"""
@@ -8362,6 +8461,13 @@ class MainWindow(QMainWindow):
                 card._refresh_launch_state()
         except Exception as exc:
             self._append_log("warn", f"认清本机运行状态失败（不影响使用）：{exc}")
+        # Tab 上的运行标记与自动跳页放在 try 之外：它们纯属界面便利，
+        # 失败也不该让日志里多出一条"认清本机运行状态失败"——
+        # 那句话会让用户以为状态识别出了问题，排查方向全错（2026-10-06 踩过）。
+        try:
+            self._reveal_running_tabs()
+        except Exception as exc:
+            self._append_log("warn", f"标记运行中的页面失败（不影响使用）：{exc}")
 
     def _cancel_launch_workers(self) -> int:
         """关窗口前让在跑的启动/停止线程体面收尾：只取消"还在等端口"，不动被管理的进程。

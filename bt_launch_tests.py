@@ -2434,5 +2434,102 @@ class EvictGuard(unittest.TestCase):
         self.assertIn("自己", why, f"拒绝理由要说清是「自己」：{why}")
         self.assertEqual(killed, [], "绝不能对自己 os.kill")
 
+
+class RunningTabMarker(unittest.TestCase):
+    """「有组件在运行的页面要能被看见」—— 2026-10-06 用户反馈的根因。
+
+    用户报「启动了 nacos，没看到停止选项」。查下来按钮一直好着：btn_stop 可见、
+    可用、文本"停止"，旁边的 label 也写着"● 运行中 · 端口 8848"。
+    真正原因是**三个启动组件分在两个 Tab**（Nacos/ActiveMQ 在「开发软件」、
+    Jenkins 在「其它软件」），而界面默认停在「开发环境」。
+    用户在自己的启动页上找不到刚启动的那个卡片，于是以为停止按钮不存在。
+
+    这类问题的性质是「服务跑着却看不见」，比按钮真的缺失更容易误导人
+    （他会以为启动没成功，然后去重复启动）。所以：
+    ① Tab 标题上标 `●`，停在任何一页都能看出"有东西在跑，去那页找"；
+    ② 打开工具时自动跳到那一页，并在日志里点名"停止按钮在这一页"。
+
+    这里必须构造真 MainWindow：`MainWindowAdopt` 用 `__new__` 造假窗口，
+    没有真的 QTabWidget，标不出标题。
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self._orig_file, self._orig_dir = main.RUNNING_FILE, main.CONFIG_DIR
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        main.CONFIG_DIR = Path(self.dir.name)
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        # 端口探测桩成"全在听"，让 status() 判成 running（不真起进程）
+        self._orig_listen = main.SERVICE_MANAGER._is_listening
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
+        self.addCleanup(setattr, main.SERVICE_MANAGER, "_is_listening",
+                        self._orig_listen)
+
+    def _win_with_nacos_running(self):
+        """造一个"nacos 正在运行"的真窗口，返回 (窗口, 日志列表)。"""
+        comps = {c.key: c for c in main.build_components()}
+        main.save_running_map({"nacos": main.RunRecord(
+            key="nacos", version="2.3.2", home="/h", data_dir="",
+            port=8848, console_url="http://127.0.0.1:8848/nacos",
+            pid=43210, pid_role="launcher", started_at=0.0,
+            launcher_cmd=["startup.cmd"], ports=(8848, 9848, 9849))})
+        win = main.MainWindow()
+        logs = []
+        win._append_log = lambda level, msg: logs.append(msg)
+        win.show()
+        self.app.processEvents()
+        return win, logs
+
+    def test_tab_of_a_running_component_is_marked_and_jumped_to(self):
+        win, logs = self._win_with_nacos_running()
+        self.addCleanup(win.close)
+        titles_before = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+        self.assertNotIn("●", "".join(titles_before),
+                         "还没跑就标了运行标记")
+
+        win._adopt_running()
+        self.app.processEvents()
+
+        titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+        nacos_tab = next(n for n, li in enumerate(win._tab_layouts)
+                         if li.indexOf(next(c for c in win.cards
+                                            if c.component.key == "nacos")) != -1)
+        self.assertIn("●", titles[nacos_tab],
+                      f"运行中的那一页没标 ●：{titles}")
+        self.assertEqual(win.tabs.currentIndex(), nacos_tab,
+                         "打开工具时应自动跳到运行中的那一页")
+        joined = "\n".join(logs)
+        self.assertIn("停止", joined,
+                      f"日志必须点名停止按钮在哪：{logs}")
+        self.assertIn("8848", joined, f"日志要点名端口：{logs}")
+
+    def test_mark_survives_switching_to_another_tab(self):
+        """手动切到别的页后，`●` 标记不能消失 —— 它是"去那页找"的唯一线索。"""
+        win, _ = self._win_with_nacos_running()
+        self.addCleanup(win.close)
+        win._adopt_running()
+        self.app.processEvents()
+        nacos_tab = win.tabs.currentIndex()
+        other = (nacos_tab + 1) % win.tabs.count()
+        win.tabs.setCurrentIndex(other)
+        self.app.processEvents()
+        titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+        self.assertIn("●", titles[nacos_tab],
+                      f"切页后运行标记被抹掉了：{titles}")
+
+    def test_no_marker_when_nothing_is_running(self):
+        """没有组件在跑时不能挂 `●` —— 满屏标记等于没有标记。"""
+        comps = {c.key: c for c in main.build_components()}
+        main.save_running_map({})
+        win = main.MainWindow()
+        self.addCleanup(win.close)
+        win._mark_running_tabs()
+        titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+        self.assertNotIn("●", "".join(titles), f"没有在跑却标了：{titles}")
+
+
 if __name__ == "__main__":
     unittest.main()
