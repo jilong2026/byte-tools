@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -4409,6 +4410,26 @@ def save_running_map(records: Dict[str, RunRecord]) -> None:
     tmp = RUNNING_FILE.with_name(RUNNING_FILE.name + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, RUNNING_FILE)
+
+
+def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
+    """本机这个口是否空闲。connect_ex != 0 即没人连得上 = 空闲。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) != 0
+
+
+def pick_free_cluster(base_port: int, offsets: tuple = (), span: int = 99,
+                      is_free=port_is_free) -> Optional[int]:
+    """在 [base_port, base_port + span] 内升序找“整簇同时空闲”的最小主端口；找不到返回 None。
+
+    规则写死成“最小 + 整簇”，是为了让界面显示的端口可复现：随机挑会让同一个环境
+    两次启动落在不同口上，故障归因和文档都没法写（设计 §4）。"""
+    all_offsets = tuple(dict.fromkeys((0,) + tuple(offsets)))
+    for candidate in range(base_port, base_port + span + 1):
+        if all(is_free(candidate + off) for off in all_offsets):
+            return candidate
+    return None
 
 
 def load_active_map() -> Dict[str, str]:

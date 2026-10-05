@@ -92,5 +92,42 @@ class RunningMap(unittest.TestCase):
         self.assertEqual(main.load_running_map(), {})
 
 
+class PortCluster(unittest.TestCase):
+    def probe(self, taken):
+        """造一个假探针：只有不在 taken 里的口算空。"""
+        return lambda port, host="127.0.0.1": port not in taken
+
+    def test_default_when_everything_free(self):
+        self.assertEqual(main.pick_free_cluster(8080, (), 99, self.probe(set())), 8080)
+
+    def test_shifts_up_one_by_one_within_span(self):
+        got = main.pick_free_cluster(8080, (), 99, self.probe({8080, 8081}))
+        self.assertEqual(got, 8082, "应从主端口起升序找第一个空闲口，不是随机挑")
+
+    def test_cluster_must_be_free_together(self):
+        """派生端口（Nacos 的 gRPC offset 那类）任一被占，整簇都算不可用。"""
+        # 主端口 8848-8853 全空，但每个候选的派生端口里都被占一个：
+        # 整簇必须一起可用，所以一个都不能选出来。
+        taken = set(range(9848, 9854))
+        got = main.pick_free_cluster(8848, (0, 1000, 1001), 5, self.probe(taken))
+        self.assertEqual(got, None, "整簇平移后仍撞车时不许硬选，返回 None 走失败语义")
+
+    def test_cluster_finds_next_clean_base(self):
+        # 8848 本身被占，且 9849-9857 把候选 8849..8857 的派生端口逐个堵死，
+        # 第一个整簇干净的只能是 8858。
+        taken = {8848, *range(9849, 9858)}
+        got = main.pick_free_cluster(8848, (0, 1000, 1001), 10, self.probe(taken))
+        self.assertEqual(got, 8858, f"应找到整簇都空的 8858，实际 {got}")
+
+    def test_span_exhausted_returns_none(self):
+        self.assertEqual(main.pick_free_cluster(8080, (), 3, lambda p, host="127.0.0.1": False), None)
+
+    def test_offsets_include_base_itself(self):
+        seen = []
+        main.pick_free_cluster(9000, (1000,), 2, lambda p, host="127.0.0.1": (seen.append(p) or True))
+        self.assertIn(9000, seen)
+        self.assertIn(10000, seen)
+
+
 if __name__ == "__main__":
     unittest.main()
