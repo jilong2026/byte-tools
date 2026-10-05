@@ -35,7 +35,7 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
 
@@ -4564,6 +4564,46 @@ def port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex((host, port)) == 0
+
+
+def parse_netstat_listeners(text: str) -> Dict[int, Set[int]]:
+    """把 `netstat -ano` 的文本解析成 {端口: {PID, …}}，只认 LISTENING 行。
+
+    按列形状定位、不按表头：中文 Windows 的表头是本地化的
+    （"协议 本地地址 外部地址 状态 PID"），而状态值不翻译（仍是 LISTENING）。
+    任何依赖表头文字的写法在中文系统上会整体失灵。"""
+    out: Dict[int, Set[int]] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or not parts[0].upper().startswith("TCP"):
+            continue
+        if parts[-2].upper() != "LISTENING":
+            continue
+        try:
+            port = int(parts[-4].rsplit(":", 1)[-1])   # [::]:8848 取最后一段
+            pid = int(parts[-1])
+        except ValueError:
+            continue
+        out.setdefault(port, set()).add(pid)
+    return out
+
+
+def _pick_unique_pids(table: Dict[int, Set[int]],
+                      ports: Sequence[int]) -> Dict[int, int]:
+    """只保留"归属唯一"的端口。两个 PID 同听一口时宁可不动手——
+    误杀的代价远大于这次停不掉。"""
+    return {p: next(iter(table[p])) for p in ports if len(table.get(p, ())) == 1}
+
+
+def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
+    """端口 → 唯一监听 PID。**这是子进程调用，只许出现在 stop/force_stop 路径**；
+    出现在 status/adopt/reconcile 里就等于从后门放掉"状态检测绝不执行进程"。"""
+    try:
+        done = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=10,
+                              text=True, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return _pick_unique_pids(parse_netstat_listeners(done.stdout or ""), ports)
 
 
 def _http_status_with(fetch, url: str) -> bool:

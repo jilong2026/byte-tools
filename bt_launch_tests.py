@@ -1277,5 +1277,59 @@ class MainWindowAdopt(unittest.TestCase):
         self.assertIn("权限不足", logs[0][1])
 
 
+class NetstatParse(unittest.TestCase):
+    """fixture 是 2026-10-05 在本机（中文 Windows）实抓的 netstat -ano 文本形状。
+    两个必须记住的实测事实：表头是本地化的（协议/本地地址/外部地址/状态），
+    而状态值不翻译（LISTENING 仍是英文）—— 所以解析只认列形状，
+    任何"按表头找列"的写法都会在中文系统上整个失效。"""
+
+    HEAD = (
+        "活动连接\n"
+        "\n"
+        "  协议  本地地址          外部地址        状态           PID\n"
+    )
+    BODY = (
+        "  TCP    0.0.0.0:8848           0.0.0.0:0              LISTENING       12345\n"
+        "  TCP    [::]:8848              [::]:0                 LISTENING       12345\n"
+        "  TCP    0.0.0.0:9848           0.0.0.0:0              LISTENING       12345\n"
+        "  TCP    0.0.0.0:9849           0.0.0.0:0              LISTENING       12345\n"
+        "  TCP    127.0.0.1:54321        127.0.0.1:8848         ESTABLISHED     999\n"
+        "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1212\n"
+        "  UDP    0.0.0.0:5353           *:*                                    4242\n"
+    )
+
+    def test_localized_header_and_ipv6_lines_are_handled(self):
+        table = main.parse_netstat_listeners(self.HEAD + self.BODY)
+        self.assertEqual(table.get(8848), {12345}, "IPv4/IPv6 两行都要归到同一个 PID")
+        self.assertEqual(table.get(9848), {12345})
+        self.assertEqual(table.get(135), {1212})
+
+    def test_only_listening_rows_count(self):
+        # ESTABLISHED 那行里有 8848，但它是客户端连接，不能当成"谁在监听这个口"
+        table = main.parse_netstat_listeners(self.HEAD + self.BODY)
+        self.assertNotIn(54321, table)
+        self.assertEqual(table[8848], {12345})
+        self.assertNotIn(5353, table, "UDP 没有监听语义，不许进来")
+
+    def test_garbage_lines_are_skipped_not_fatal(self):
+        table = main.parse_netstat_listeners(
+            "  TCP    bogus    LISTENING\n"
+            "  TCP    0.0.0.0:80    0.0.0.0:0    LISTENING   not-a-pid\n"
+            + self.BODY)
+        self.assertEqual(table.get(8848), {12345})
+
+    def test_ambiguous_owner_is_reported_as_no_candidate(self):
+        """同一个口被两个 PID 听着（端口复用/容器网络栈都可能）→ 宁可不认。
+        认了就等于我们可能去杀一个不是我们的进程。"""
+        both = (self.BODY
+                + "  TCP    0.0.0.0:61616          0.0.0.0:0              LISTENING       777\n"
+                  "  TCP    0.0.0.0:61616          0.0.0.0:0              LISTENING       888\n")
+        table = main.parse_netstat_listeners(both)
+        self.assertEqual(table[61616], {777, 888})
+        self.assertNotIn(61616, main._pick_unique_pids(table, (61616,)),
+                         "归属有歧义时不许给出动手对象")
+        self.assertEqual(main._pick_unique_pids(table, (8848,)), {8848: 12345})
+
+
 if __name__ == "__main__":
     unittest.main()
