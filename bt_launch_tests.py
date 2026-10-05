@@ -20,6 +20,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import main  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402  读下拉框的 DecorationRole（绿勾）要用
 from PySide6.QtWidgets import QApplication  # noqa: E402  要构造 QThread 子类得有 QApplication
 
 
@@ -860,8 +861,70 @@ class StopFlow(unittest.TestCase):
                                    terminate=lambda r: None)
         res2 = mgr2.force_stop("jenkins", sleeper=lambda s: None, rounds=3)
         self.assertFalse(res2.ok)
-        self.assertIn("别的进程", res2.reason)
+        # 这个夹具 process_alive 恒假 → 一个进程都没杀成 → 归因是"可能是别人占着"。
+        # （真实场景里杀成了却还在听走的是另一条分支，见
+        #test_force_stop_blames_its_own_kill_when_the_port_does_not_release）
+        self.assertIn("别的程序占着", res2.reason)
         self.assertIn("jenkins", main.load_running_map(), "rounds 耗尽仍监听时不许清登记")
+
+    def test_force_stop_blames_its_own_kill_when_the_port_does_not_release(self):
+        """杀成了但端口没在复查窗口内释放 → 归因必须说"我们已经动过手了"。
+
+        真机2026-10-06 查出来的缺陷：原来 force_stop 杀完**立刻**进复查循环，
+        rounds 小时循环体只跑一次就判"还在听"，把一次成功的强杀报成
+        "可能是别的进程占着"——而端口随后就释放了。于是用户看到的是
+        "停止按钮点了没用、进程也没了、登记还留着"。
+
+        这条钉住两件事：
+        ①杀过 → 归因里必须出现被杀的 PID，不能说成"别的进程占着"；
+        ② 复查必须在"杀"之后留出窗口 —— 由 test_force_stop_waits_for_the_port_after_killing
+           单独钉住时序。
+        """
+        rec = self.rec(ports=(8080,))
+        main.save_running_map({"jenkins": rec})
+        killed = []
+        orig_kill = main.os.kill
+        main.os.kill = lambda pid, sig: killed.append(pid)
+        self.addCleanup(setattr, main.os, "kill", orig_kill)
+        # 进程"活着"所以我们确实动手了，但端口永远不释放
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda r: None)
+        res = mgr.force_stop("jenkins", sleeper=lambda s: None, rounds=2)
+        self.assertFalse(res.ok)
+        self.assertEqual(killed, [rec.pid], "进程活着就该按登记 PID 强杀")
+        self.assertIn(str(rec.pid), res.reason,
+                      "归因里必须点名我们杀过的 PID，不能推给'别的进程'")
+        self.assertNotIn("别的程序占着", res.reason,
+                         "我们确实动过手，不该说成是别人的锅")
+        self.assertIn("jenkins", main.load_running_map(), "端口没释放就不许清登记")
+
+    def test_force_stop_waits_for_the_port_after_killing(self):
+        """杀完必须给进程一个退出窗口：JVM 收到信号后要几百毫秒才松开监听 socket。
+
+        这条用"先杀、隔一轮才松口"的探针把时序钉死：杀之前的那一次探活必然是"在听"，
+        所以只要实现是"杀完立刻探一次"，rounds=2 也必然判失败。
+        """
+        rec = self.rec(ports=(8080,))
+        main.save_running_map({"jenkins": rec})
+        box = {"n": 0}
+
+        def releases_after_kill(port, host="127.0.0.1"):
+            box["n"] += 1
+            return box["n"] <= 2          # 杀之后前两次探活都还在听，第三次才释放
+
+        orig_kill = main.os.kill
+        main.os.kill = lambda pid, sig: None
+        self.addCleanup(setattr, main.os, "kill", orig_kill)
+        mgr = main.ServiceManager(is_listening=releases_after_kill,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda r: None)
+        res = mgr.force_stop("jenkins", sleeper=lambda s: None, rounds=5)
+        self.assertTrue(res.ok, f"端口在复查窗口内释放了却判失败：{res.reason}")
+        self.assertNotIn("jenkins", main.load_running_map(),
+                         "端口释放了就要清登记")
 
     def test_stop_without_record_is_harmless(self):
         main.save_running_map({})
@@ -1176,6 +1239,115 @@ class CardLaunchUi(unittest.TestCase):
         other = next(c for c in main.build_components() if c.key == "maven")
         card2 = main.ComponentCard(other, lambda msg, level: None)
         self.assertFalse(hasattr(card2, "btn_start"), "非白名单组件不许长出启动按钮")
+
+    def _installed_icon_state(self, card):
+        """把 combo 每一项的DecorationRole 读成"有没有勾"的布尔列表。"""
+        out = []
+        for i in range(card.version_combo.count()):
+            data = card.version_combo.itemData(i, Qt.DecorationRole)
+            out.append(data is not None and not data.isNull())
+        return out
+
+    def test_green_check_marks_every_installed_version_not_just_multi_version(self):
+        """下拉框里的绿勾要标出"这个版本装在磁盘上"，**不分组件是否多版本**。
+
+        真机 2026-10-06 查出来的：`_refresh_installed_marks` 开头对
+        `multi_version=False` 直接 return，理由是"它们没有版本并存的概念"——
+        但下拉框里照样列了具体版本（tomcat 9 / nginx 1.26），用户装完一个版本后
+        那个版本就该被标出来。实测结果是 python 有勾、jenkins / nacos / activemq /
+        powershell 全都没有，恰好是 multi_version 的分界线。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            # 造一个"装了 6.3.2、候选还有 5.18.4"的非多版本组件
+            comp = next(c for c in main.build_components() if c.key == "activemq")
+            comp.multi_version = False
+            home = Path(td) / "activemq" / "activemq-6.3.2"
+            home.mkdir(parents=True)
+            (home / "bin").mkdir()
+            orig_cfg, main.CONFIG_DIR = main.CONFIG_DIR, Path(td)
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg)
+            card = main.ComponentCard(comp, lambda msg, level: None)
+            card._refresh_installed_marks()
+            marks = self._installed_icon_state(card)
+            labels = [card.version_combo.itemText(i) for i in range(card.version_combo.count())]
+            self.assertTrue(any(marks), f"已装版本没有绿勾：{list(zip(labels, marks))}")
+            idx = labels.index("6.3.2")
+            self.assertTrue(marks[idx], "装了的 6.3.2 反而没有绿勾")
+            for i, lab in enumerate(labels):
+                if lab != "6.3.2":
+                    self.assertFalse(marks[i], f"没装的 {lab} 不该有绿勾")
+
+    def test_combo_defaults_to_an_installed_version_not_the_first_candidate(self):
+        """下拉框默认选中**已安装的版本**，不是候选清单第一项。
+
+        真机 2026-10-06：jenkins 候选是 2.568.3/2.555.3/2.541.3，磁盘上装的是 2.580.1
+        （不在候选里）。无条件选第一项会让界面停在一个没装的版本上——绿勾看着是空的、
+        点"配置环境变量"/"卸载"会对着不存在的目录动手，而启动走
+        `resolve_launch_version()` 找的是另一个版本，两边对不上。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            comp = next(c for c in main.build_components() if c.key == "activemq")
+            home = Path(td) / "activemq" / "activemq-6.3.2"
+            home.mkdir(parents=True)
+            orig_cfg, main.CONFIG_DIR = main.CONFIG_DIR, Path(td)
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg)
+            card = main.ComponentCard(comp, lambda msg, level: None)
+            labels = [card.version_combo.itemText(i) for i in range(card.version_combo.count())]
+            self.assertIn("6.3.2", labels, "已装版本没被合成进下拉框（该有的绿勾标不出来）")
+            self.assertEqual(card.version_combo.currentText(), "6.3.2",
+                             f"默认选中的不是已装版本，而是 {card.version_combo.currentText()!r}")
+
+    def test_combo_synthesises_installed_version_missing_from_candidates(self):
+        """已装但不在候选清单里的版本必须被合成进下拉框（否则无处标绿勾）。"""
+        with tempfile.TemporaryDirectory() as td:
+            comp = next(c for c in main.build_components() if c.key == "jenkins")
+            home = Path(td) / "jenkins" / "jenkins-9.9.9"
+            home.mkdir(parents=True)
+            orig_cfg, main.CONFIG_DIR = main.CONFIG_DIR, Path(td)
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg)
+            card = main.ComponentCard(comp, lambda msg, level: None)
+            labels = [card.version_combo.itemText(i) for i in range(card.version_combo.count())]
+            self.assertIn("9.9.9", labels,
+                          "装了 9.9.9 却在候选清单里找不到 —— 用户会以为没装成功")
+            marks = self._installed_icon_state(card)
+            self.assertTrue(marks[labels.index("9.9.9")], "合成进来的已装版本没有绿勾")
+
+    def test_settings_restore_will_not_select_a_version_that_is_not_installed(self):
+        """config.json 里存的旧选择若已不可用，不许盲目采纳。
+
+        真机2026-10-06：jenkins 的 selections 里存着 2.568.3（已从候选清单消失、
+        也没装），恢复它会把界面按在一个死版本上，盖掉真正装着的 2.580.1。
+        """
+        win = None
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "jenkins" / "jenkins-2.580.1"
+            home.mkdir(parents=True)
+            orig_cfg_dir, orig_cfg_file = main.CONFIG_DIR, main.CONFIG_FILE
+            main.CONFIG_DIR = Path(td)
+            main.CONFIG_FILE = Path(td) / "config.json"
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg_dir)
+            self.addCleanup(setattr, main, "CONFIG_FILE", orig_cfg_file)
+            main.CONFIG_FILE.write_text(
+                '{"selections": {"jenkins": "2.568.3"}}', encoding="utf-8")
+            try:
+                win = main.MainWindow()
+                card = next(c for c in win.cards if c.component.key == "jenkins")
+                self.assertEqual(card.version_combo.currentText(), "2.580.1",
+                                 "恢复了一个没装的旧选择，盖掉了已装版本")
+            finally:
+                if win is not None:
+                    win.close()
+                    win.deleteLater()
+                    del win
+
+    def test_green_check_survives_a_version_switch(self):
+        """挂勾不许改条目文本 —— 文本是版本反查的唯一键，加「✓」会让选版/卸载/配置全错位。"""
+        before = [self.card.version_combo.itemText(i)
+                  for i in range(self.card.version_combo.count())]
+        self.card._refresh_installed_marks()
+        after = [self.card.version_combo.itemText(i)
+                 for i in range(self.card.version_combo.count())]
+        self.assertEqual(before, after, "挂勾动了条目文本")
 
     def test_running_state_disables_start_and_enables_stop_and_console(self):
         main.save_running_map({"jenkins": main.RunRecord(

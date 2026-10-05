@@ -5362,14 +5362,19 @@ class ServiceManager:
         if rec is None:
             return StopResult(False, reason="没有登记记录")
         ports = tuple(rec.ports) or (rec.port,)
-        still = [p for p in ports if self._is_listening(p)]
-        if still:
-            owners = self._lookup_pids(tuple(still))
+        # 记录"动手前就在听的口"。判失败时要说清是"我们杀完它还在听"还是
+        # "本来就在听且我们没动手"——两者的归因完全不同，不能混成一句
+        # "可能是别的进程占着"（真机2026-10-06实测就踩过这个坑，见下）。
+        live_before = [p for p in ports if self._is_listening(p)]
+        killed: List[int] = []
+        if live_before:
+            owners = self._lookup_pids(tuple(live_before))
             mine = {p: pid for p, pid in owners.items() if pid != os.getpid()}
             if rec.pid_role == "server":
                 if self._process_alive(rec.pid):
                     try:
                         os.kill(rec.pid, 9)
+                        killed.append(rec.pid)
                     except OSError:
                         pass
             elif mine:
@@ -5380,6 +5385,7 @@ class ServiceManager:
                 for pid in sorted(set(mine.values())):
                     try:
                         os.kill(pid, 9)
+                        killed.append(pid)
                     except OSError:
                         pass
             else:
@@ -5388,12 +5394,15 @@ class ServiceManager:
                 # 用户拿到的就是"端口还在听，可能是别人占着"——把我们的不作为说成别人的错。
                 return StopResult(False, need_force=True,
                                   reason=(f"没有找到可以安全强制结束的进程：端口 "
-                                          f"{'/'.join(str(p) for p in still)} 仍在听，"
+                                          f"{'/'.join(str(p) for p in live_before)} 仍在听，"
                                           f"但端口反查没有给出唯一归属（或给出的就是我们自己）。"
                                           f"已放弃强制结束，登记保留，不动任何进程。"))
-        # 终止调用返回 ≠ 监听 socket 已关闭：给一个有界复查窗口，
-        # 否则刚被我们杀掉的进程会被误报成"别的进程占着端口"。按整簇复查：
-        # 主口掉了、gRPC 还在听不算停干净。
+        # 终止调用返回 ≠ 监听 socket 已关闭。**必须先给进程一个退出窗口再开始复查**——
+        # 真机 2026-10-06 实测：JVM 收到 TerminateProcess 后要几百毫秒到几秒才真正松开
+        # 监听 socket。原来"杀完立刻进复查循环"，rounds=1 时循环体只跑一次就判"还在听"，
+        # 于是一次成功的强杀被报成"可能是别的进程占着端口"——而端口其实随后就释放了，
+        # 登记却被留了下来（用户看到的就是"停止按钮点了没用"）。
+        # 与 start() 同一套"有界轮次"约定：每轮 sleeper(1.0) 后复查，最少探一次。
         for _ in range(max(1, int(rounds))):
             if not any(self._is_listening(p) for p in ports):
                 records = load_running_map()
@@ -5402,9 +5411,18 @@ class ServiceManager:
                 return StopResult(True, reason="已强制结束并释放端口。")
             sleeper(1.0)
         left = [p for p in ports if self._is_listening(p)]
+        # 归因要分清两种"还在听"：我们杀过 → 大概率是进程还没退出完；
+        # 没杀过（kill 抛了 OSError 或 pid 本就不活）→ 才可能是别人占着。
+        if killed and set(left) & set(live_before):
+            return StopResult(False, need_force=True,
+                              reason=(f"已向进程 {'/'.join(str(p) for p in killed)} 发出强制结束，"
+                                      f"但端口 {'/'.join(str(p) for p in left)} 在 "
+                                      f"{max(1, int(rounds))} 秒内仍未释放。"
+                                      f"该进程可能在做长耗时收尾；再点一次强制结束，"
+                                      f"或先确认它是否还占着资源。"))
         return StopResult(False, need_force=True,
                           reason=f"端口 {'/'.join(str(p) for p in left)} 仍在监听，"
-                                 f"可能是别的进程占着，不是本工具启动的那个。")
+                                 f"本次没有成功结束任何进程，可能是别的程序占着这个端口。")
 
 
 # 卡片按钮要的是同一个登记/探针视图：多张卡片各持一个 ServiceManager 会把
@@ -6525,11 +6543,16 @@ class ComponentCard(QFrame):
         必须合成是因为在线清单只保留近期版本（2026-09-30 真机：bun 清单里已无 1.4.1，
         磁盘上却装着），否则会出现"胶囊说已装 2 个版本、下拉框里只有 1 个能选"——
         那个版本切不了也卸不掉。合成项没有下载 URL，但"已装即置灰安装按钮"正好兜住。
-        只对多版本组件合成：其余 19 个组件的清单逐字不变（R3.9）。
+
+        **所有组件都合成，不再只对多版本组件**（2026-10-06 改）。原先非多版本组件
+        直接 return 候选清单，但它们的清单同样会落后于实际安装版本：jenkins 候选是
+        2.568.3/2.555.3/2.541.3，磁盘上装的是 2.580.1—— 不合成的话那个已装版本
+        在下拉框里根本不存在，用户看到的是"装了东西但下拉框里没有它、也没有绿勾"，
+        而启动走 `resolve_launch_version()` 会去找已装的那个，两边对不上。
+        R3.9 那句"非多版本组件清单逐字不变"约束的是**不能凭空造版本**，
+        不是"不许把真装了的版本显示出来"—— 后者正是本条要修的。
         """
         result = list(self.component.versions)
-        if not self.component.multi_version:
-            return result
         known = {cv.version for cv in result}
         extras = [v for v, _p in installed_versions(self.component) if v not in known]
         for ver in extras:
@@ -6549,11 +6572,14 @@ class ComponentCard(QFrame):
         为什么不写成文本前缀：下拉框条目文本是版本反查的唯一键（_current_version /
         repopulate(preferred=…) 都按 currentText 匹配），加「✓」会让选版、安装、
         卸载与配置保存全部错位。图标是纯装饰数据，不参与任何反查。
-        非多版本组件（mysql/tomcat/…）没有"版本并存"的概念，一律不挂，
-        也不能顺手给它写 DecorationRole —— 保持"完全没挂过"的原始数据状态。
+
+        **所有组件都挂，不分multi_version**（2026-10-06 改）。原先这里对
+        `multi_version=False` 的组件直接 return，理由是"它们没有版本并存的概念"——
+        但下拉框里照样列了具体版本（如 tomcat 9 / nginx 1.26），用户装完一个版本后
+        那个版本就该被标出来，否则"我装的是哪个"只能靠记忆。实测：python 有勾而
+        jenkins / nacos / activemq / powershell 全都没有，正是这个 return 造成的。
+        `multi_version` 只管"能不能多版本并存"（R3 语义），不该管"要不要显示已装"。
         """
-        if not self.component.multi_version:
-            return
         versions = self._combo_version_list()
         # F4 护栏：下面的循环按 enumerate(versions) 的行号往 combo 写数据，前提是
         # 行数与下拉框清单 1:1。哪天有调用点在改清单的同时没重灌 combo（搜索过滤、
@@ -6577,7 +6603,18 @@ class ComponentCard(QFrame):
         if self.version_combo.count() == 0:
             self.version_combo.blockSignals(True)
             self.version_combo.addItems(labels)
-            self.version_combo.setCurrentIndex(0)
+            # 默认选中**已安装的那个**，不是清单第一项（真机 2026-10-06 查出来的）。
+            # 离线候选清单会落后于实际安装版本：jenkins 候选首位 2.568.3、实装 2.580.1，
+            # 无条件选第一项会让下拉框停在一个没装的版本上——绿勾全是空的、
+            # 点"配置环境变量"或"卸载"会对着不存在的目录动手。
+            # 找不到任何已装版本时才退回第一项（首装场景就该选清单首位）。
+            idx = 0
+            installed = {v for v, _p in installed_versions(self.component)}
+            for i, cv in enumerate(self._combo_version_list()):
+                if cv.version in installed:
+                    idx = i
+                    break
+            self.version_combo.setCurrentIndex(idx)
             self.version_combo.blockSignals(False)
             self.version_combo._committed_text = self.version_combo.currentText()
             self._refresh_installed_marks()
@@ -8098,10 +8135,20 @@ class MainWindow(QMainWindow):
             selections = data.get("selections", {})
             for card in self.cards:
                 v = selections.get(card.component.key)
-                if v:
-                    idx = card.version_combo.findText(v)
-                    if idx >= 0:
-                        card.version_combo.setCurrentIndex(idx)
+                if not v:
+                    continue
+                idx = card.version_combo.findText(v)
+                if idx < 0:
+                    continue
+                # 存过的版本可能已经不在下拉框里了（在线清单只留近期版本，
+                # 而离线默认清单会滞后于实际安装版本）。盲目采纳的话，
+                # 界面会停在一个既没装、也点不下来的版本上——jenkins 的
+                # 2.568.3 就是这么来的：它已从清单消失，装着的 2.580.1 反而被顶掉。
+                # 这种情况下保留 _reload_combo_items 挑的"已安装版本"更符合直觉。
+                installed = {v for v, _p in installed_versions(card.component)}
+                if v not in installed:
+                    continue
+                card.version_combo.setCurrentIndex(idx)
         except Exception:
             pass
 

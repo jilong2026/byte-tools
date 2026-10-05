@@ -959,15 +959,30 @@ class InstalledCheckIcon(EnvSandbox):
         for label in ("11", "8"):
             self.assertEqual(self._mark(combo, combo.findText(label)), False, label)
 
-    def test_non_multi_version_component_gets_no_icons(self):
+    def test_non_multi_version_component_also_gets_icons(self):
+        """非多版本组件**也要**挂已装图标（2026-10-06 改）。
+
+        原来是 `test_non_multi_version_component_gets_no_icons`，断言"提前返回、
+        压根不写 DecorationRole"。那守的是**实现手段**（靠 `if not multi_version:
+        return` 提前返回），不是目的 —— 目的是"已装的版本要标出来"。
+        真机 2026-10-06 的表现：python 有勾，jenkins / nacos / activemq / powershell
+        全都没有，恰好是 `multi_version` 的分界线；用户报"很多组件装完不显示绿勾"。
+
+        `multi_version` 管的是"能不能多版本并存"（R3 语义），不该管"要不要显示已装"。
+        注意 `make_component` 会把传入的每个版本都在磁盘上造出来，所以这里 MYSQL_ALL
+        全是"已装"、全该有勾；另有一个没传的版本用来验"没装的必须是没有勾"。
+        逐项都必须是明确的布尔值而不是 None —— None 是"没查过"，False 是"查了，没装"。
+        """
         comp = self.make_component("mysql", *self.MYSQL_ALL)
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         combo = card.version_combo
         self.assertEqual(combo.count(), len(self.MYSQL_ALL))
         card._refresh_installed_marks()
         for i in range(combo.count()):
-            # 是 None 而不是 False：非多版本组件走的是提前返回，压根不该写 DecorationRole
-            self.assertIsNone(self._mark(combo, i), combo.itemText(i))
+            label = combo.itemText(i)
+            # make_component 已为 MYSQL_ALL 的每个版本造了 bin 目录 → 都算已装
+            self.assertIsNotNone(self._mark(combo, i), label + "：没有查过装没装")
+            self.assertIs(self._mark(combo, i), True, label + "：磁盘上有目录，该有勾")
 
     def test_marks_refresh_after_reloading_versions(self):
         # 抓取线程回填版本列表会 clear()+addItems() 重建条目，勾必须跟着重建
@@ -2358,15 +2373,41 @@ class InstalledVersionNotInCatalog(EnvSandbox):
         self.assertEqual(items, [v.version for v in comp.versions],
                          "清单里本来就有的版本，顺序与内容都不该变")
 
-    def test_non_multi_version_components_are_not_synthesised(self):
+    def test_synthesised_entries_only_come_from_disk_not_invented(self):
+        """合成项只允许来自**磁盘上真装了**的版本，不许凭空造。
+
+        本测试类的主旨（见类 docstring）就是"磁盘上装着但清单里没有的版本必须出现在
+        下拉框里"。原先末尾还有一条 `test_non_multi_version_components_are_not_synthesised`
+        断言非多版本组件压根不合成 —— 那是用"实现手段"（`if not multi_version: return`）
+        表达"不许凭空造版本"，两者被绑在了一起。
+
+        2026-10-06 放开后，jenkins 候选是 2.568.3 而实装 2.580.1：不合成的话那个已装版本
+        在下拉框里根本不存在，用户看到的是"装了东西但列表里没有它、也没有绿勾"，
+        而启动走 `resolve_launch_version()` 找的是另一个版本，两边对不上。
+
+        现在这条用例把两半都守住：
+        ① 已装但不在候选里的 → **必须**出现在下拉框（R3.9 真正的目的没丢）；
+        ② 只声明、磁盘上没装的 → **不许**出现（"不许凭空造"这半个约束也没丢）。
+        """
         self.as_windows()
-        comp = self.make_component("tomcat", "9.9.9")
+        # 候选清单里只有 9.9.9，磁盘上什么都没有 → 下拉框就只有 9.9.9，不许多出别的
+        comp = self.make_component("tomcat")   # 不传版本 = 先造出空的候选清单
+        comp.versions = [main.ComponentVersion(version="9.9.9", url_map={}, archive_map={})]
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         self.enable_detect()
         main.ComponentCard.probe_calls = []
         card._detect_status()
-        self.assertNotIn("9.9.9", self._items(card),
-                         "非多版本组件的下拉框清单逐字不变（R3.9）")
+        self.assertEqual(self._items(card), ["9.9.9"],
+                         "候选清单里有、磁盘上没装的版本照常显示，但不许凭空多出别的")
+
+        # 磁盘上装了一个候选清单里没有的 8.0.28 → 必须被合成进下拉框（否则无处标绿勾）
+        (comp.install_dir("8.0.28") / "bin").mkdir(parents=True, exist_ok=True)
+        card2 = main.ComponentCard(comp, lambda lvl, msg: None)
+        self.enable_detect()
+        main.ComponentCard.probe_calls = []
+        card2._detect_status()
+        self.assertIn("8.0.28", self._items(card2),
+                      "磁盘上装了的版本必须出现在下拉框里，否则无处标绿勾")
 
 
 class StaleTerminalNotice(EnvSandbox):
