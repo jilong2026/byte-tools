@@ -1465,7 +1465,7 @@ git commit -m "feat(launch): stop/force_stop —— 超时只询问强制结束�
 
 **Interfaces:**
 - Consumes: `ServiceManager.start/stop/force_stop`、`Component`
-- Produces: `class LaunchWorker(QThread)`，信号 `started_ok(str, str)`（key, console_url）、`failed(str, str)`（key, reason）、`stopped(str)`；构造参数 `(action, comp, comps, mgr)`，`action ∈ {"start","stop","force_stop"}`；`cancel()` 经 `_sleep` 注入点真能中止等待（Task 11 的 `closeEvent` 要用）；模块级 `LaunchCancelled`
+- Produces: `class LaunchWorker(QThread)`，信号 `started_ok(str, str)`（key, console_url）、`failed(str, str)`（key, reason）、`stopped(str)`、`need_force(str, str)`（key, reason，"要不要强制结束"的一次询问）；构造参数 `(action, comp, comps, mgr)`，`action ∈ {"start","stop","force_stop"}`；`cancel()` 经 `_sleep` 注入点真能中止等待（Task 11 的 `closeEvent` 要用）；模块级 `LaunchCancelled`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1565,6 +1565,7 @@ class LaunchWorker(QThread):
     started_ok = Signal(str, str)
     failed = Signal(str, str)
     stopped = Signal(str)
+    need_force = Signal(str, str)   # (key, reason)：一次"要不要强制结束"的询问，不是错误
 
     def __init__(self, action: str, comp: Component,
                  comps: Dict[str, Component], mgr: "ServiceManager", parent=None):
@@ -1597,12 +1598,18 @@ class LaunchWorker(QThread):
             self._emit_stop(res)
         elif self.action == "force_stop":
             self._emit_stop(self.mgr.force_stop(self.comp.key, sleeper=self._sleep))
+        else:
+            # 认不出的 action 必须出声：静默返回就是"线程跑完却一个信号都没发"，
+            # 卡片会永远停在"进行中" —— 正是下面 run() 兜底要防的那类故障。
+            self.failed.emit(self.comp.key, f"{self.comp.display_name} 不支持的操作：{self.action}")
 
     def _emit_stop(self, res: "StopResult") -> None:
         if res.ok:
             self.stopped.emit(self.comp.key)
         elif res.need_force:
-            self.failed.emit(self.comp.key, "__need_force__\t" + res.reason)
+            # 询问走独立信号：混在 failed 的正文里，卡片一时忘了拆前缀，
+            # 就会把控制标记当错误正文显示给用户。
+            self.need_force.emit(self.comp.key, res.reason)
         else:
             self.failed.emit(self.comp.key, res.reason)
 
@@ -1618,7 +1625,9 @@ class LaunchWorker(QThread):
             self.failed.emit(self.comp.key, f"{self.comp.display_name} 操作过程出错：{exc}")
 ```
 
-`__need_force__\t` 前缀是"要求界面问一次强制结束"的信号载荷约定，Task 10 在卡片侧解析；不要改成新增信号，避免多一条要接的线。
+`need_force` 是独立信号，不是 `failed` 正文里的前缀标记（计划初稿用的是 `__need_force__\t` 前缀，
+Task 9 评审后由控制器改判）：那条约定要求卡片必须记得先拆前缀，忘了就把控制标记当错误显示出来；
+多一条要接的线换来的正是"忘了接也不会显示错东西"。Task 10 连 `need_force` 弹询问框。
 
 `cancel()` 必须真的有用（计划初稿里 `_cancelled` 没人读，是死字段）：Task 11 的 `MainWindow.closeEvent`
 要对在跑的 worker 先 `cancel()` 再 `wait()`，否则窗口关了线程还在探端口。上面那条 `_sleep` 就是这条链的落点。
@@ -1627,7 +1636,7 @@ class LaunchWorker(QThread):
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 54 tests ... OK`
+Expected: `Ran 57 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1799,23 +1808,24 @@ SERVICE_MANAGER = ServiceManager()
         self._refresh_launch_state()
 
     def _on_launch_failed(self, key: str, reason: str) -> None:
-        if reason.startswith("__need_force__\t"):
-            detail = reason.split("\t", 1)[1]
-            if QMessageBox.question(self, "需要强制结束", detail + "\n\n强制结束吗？",
-                                    QMessageBox.Yes | QMessageBox.No,
-                                    QMessageBox.No) == QMessageBox.Yes:
-                self.launch_worker = LaunchWorker("force_stop", self.component,
-                                                  MainWindow.current_components(), SERVICE_MANAGER)
-                self.launch_worker.stopped.connect(self._on_launch_stopped)
-                self.launch_worker.failed.connect(self._on_launch_failed)
-                self.launch_worker.finished.connect(self._on_launch_worker_done)
-                self.launch_worker.start()
-            else:
-                self._log("warn", "未强制结束，进程仍在运行。")
-            return
-        self._log("error", f"启动失败：{reason}")
-        QMessageBox.warning(self, "启动失败", reason)
+        self._log("error", f"操作失败：{reason}")
+        QMessageBox.warning(self, "操作失败", reason)
         self._refresh_launch_state()
+
+    def _on_need_force(self, key: str, reason: str) -> None:
+        """停止超时/无法优雅结束：问一次，不自己决定强杀（spec §5）。"""
+        if QMessageBox.question(self, "需要强制结束", reason,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) != QMessageBox.Yes:
+            self._log("warn", "未强制结束，进程仍在运行。")
+            return
+        self.launch_worker = LaunchWorker("force_stop", self.component,
+                                          MainWindow.current_components(), SERVICE_MANAGER)
+        self.launch_worker.stopped.connect(self._on_launch_stopped)
+        self.launch_worker.failed.connect(self._on_launch_failed)
+        self.launch_worker.need_force.connect(self._on_need_force)
+        self.launch_worker.finished.connect(self._on_launch_worker_done)
+        self.launch_worker.start()
 
     def _on_launch_stopped(self, key: str) -> None:
         self._log("info", "已停止。")
@@ -1831,6 +1841,9 @@ SERVICE_MANAGER = ServiceManager()
                                           MainWindow.current_components(), SERVICE_MANAGER)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
+        # 这条线不能省：停不下来时 need_force 就是"问一次"的唯一入口，
+        # 漏接了按钮会直接停在"停止中"结束、用户既没被问也没结果。
+        self.launch_worker.need_force.connect(self._on_need_force)
         self.launch_worker.finished.connect(self._on_launch_worker_done)
         self.launch_worker.start()
 
@@ -1847,7 +1860,7 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 59 tests ... OK`
+Expected: `Ran 62 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1930,7 +1943,7 @@ Expected: FAIL，`no attribute 'current_components'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 61 tests ... OK`
+Expected: `Ran 64 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1974,6 +1987,11 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     got = main.http_ok(rec.console_url.rstrip("/") + "/login")
     print(f"[1/3] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
     stop = main.SERVICE_MANAGER.stop(comp, comps)
+    if not stop.ok and stop.need_force:
+        # Windows 上 stop 第一步只请示、不动手（Task 8 裁定 1）。演练里这一票由脚本替
+        # 用户点"是"，否则一条按设计走通的路径会被判成失败。
+        print("[2/3] 停止需要确认，演练按「是」继续：", stop.reason)
+        stop = main.SERVICE_MANAGER.force_stop(rec.key)
     left = main.load_running_map()
     print(f"[2/3] 停止 ok={stop.ok} 需强制={stop.need_force} reason={stop.reason}")
     print(f"[3/3] 登记残留={list(left)}")
