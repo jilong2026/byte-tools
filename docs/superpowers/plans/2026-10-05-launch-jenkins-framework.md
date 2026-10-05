@@ -370,12 +370,16 @@ class PortCluster(unittest.TestCase):
 
     def test_cluster_must_be_free_together(self):
         """派生端口（Nacos 的 gRPC offset 那类）任一被占，整簇都算不可用。"""
-        taken = {8849}                      # 9848 = 8848 + 1000 空，但 8849 被占
+        # 主端口 8848-8853 全空，但每个候选的派生端口里都被占一个：
+        # 整簇必须一起可用，所以一个都不能选出来。
+        taken = set(range(9848, 9854))
         got = main.pick_free_cluster(8848, (0, 1000, 1001), 5, self.probe(taken))
         self.assertEqual(got, None, "整簇平移后仍撞车时不许硬选，返回 None 走失败语义")
 
     def test_cluster_finds_next_clean_base(self):
-        taken = {8848, 8848 + 1001}
+        # 8848 本身被占，且 9849-9857 把候选 8849..8857 的派生端口逐个堵死，
+        # 第一个整簇干净的只能是 8858。
+        taken = {8848, *range(9849, 9858)}
         got = main.pick_free_cluster(8848, (0, 1000, 1001), 10, self.probe(taken))
         self.assertEqual(got, 8858, f"应找到整簇都空的 8858，实际 {got}")
 
