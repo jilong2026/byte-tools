@@ -21,7 +21,7 @@
 | D4 | 拉起方式：**跑厂商脚本**，登记的 PID 按 launcher 处理；不复制厂商 java argv | 避免把厂商 JVM 参数/插件路径焊进我们代码 |
 | D5 | ActiveMQ 端口：首次启动把官方 `conf` **整目录拷进 data 目录**，回写只改这份副本 | 厂商官方外部配置机制（`ACTIVEMQ_CONF`） |
 | D6 | ActiveMQ 的 61616 走新增的 `extra_ports` 独立基准，**不再**沿用计划一"不平移"的决定 | 实测找到一个可锚定单行（§2.4） |
-| D7 | 停止不用厂商脚本，改用**端口反查 PID + 三重闸**（只允许出现在 stop/force 路径） | 厂商 `shutdown.cmd` 按进程名 `taskkill /F`，会杀到用户自己起的实例 |
+| D7 | 停止不用厂商脚本，改用**端口反查 PID + 三重闸**（只允许出现在 stop/force 路径）；落为 `stop_kind="port_lookup"`（§3.5） | 厂商 `shutdown.cmd` 按进程名 `taskkill /F`，会杀到用户自己起的实例 |
 
 ---
 
@@ -164,6 +164,19 @@ port_writeback ∈ { "cli_flag", "conf_copy", "cli_only" }
 要么走 WMI（禁用）、要么再发一次子进程调用；为一个 PID 复用窗口付这个代价不值。
 残余情形是"我们登记的子进程已退出、其 PID 被复用、而我们恰好按端口查到它"，兜住它的是第 1、3 闸，不是时间戳。
 
+### 3.5 `stop_kind` 增第三个值：`port_lookup`
+
+计划一的取值是 `"pid"`（Jenkins：我们就是服务进程）与 `"shutdown_command"`（预留）。
+本期两个组件**都不属于第二种**：Nacos 的 `shutdown.cmd` 按进程名 `taskkill /F`（§2.2 末条），
+ActiveMQ 的 `stop` 要经 JAAS/JMX 且受 conf 副本影响。所以新增 `port_lookup`，含义是
+"**我们没有可靠的厂商停止手段，停止 = §3.4 的端口反查 + 三重闸**"。
+
+顺带一条避免重复设计：计划一的 `start()` 已按 `pid_role = "server" if stop_kind == "pid" else "launcher"`
+推导角色，`port_lookup` 天然落到 `launcher` → **不要再为这件事给 `LaunchSpec` 加 `pid_role` 字段**，
+两个来源迟早漂移。
+
+`shutdown_command` 这个值本期无人使用，保留不删：它是将来接真正带优雅关闭的组件时的位置。
+
 ---
 
 ## 4. 组件登记（具体取值）
@@ -177,7 +190,7 @@ main_port           = 8848
 port_offsets        = (1000, 1001)        # 9848/9849 派生（待 §9 A4 实测确认）
 extra_ports         = ()
 port_writeback      = cli_flag
-stop_kind           = shutdown_command    # 但按 D7 不执行厂商脚本，见 §6
+stop_kind           = port_lookup         # 见 §3.5：厂商停止脚本不可用，停止只走端口反查
 pid_role            = launcher            # 我们的直接子进程是 cmd.exe
 console_path        = "/"                 # 待 §9 A3 确认（"/" vs "/nacos"）
 health_path         = None                # 待 A3 回填；判活按簇做 TCP（三口全听才算运行中）
@@ -201,7 +214,7 @@ main_port           = 8161
 port_offsets        = ()
 extra_ports         = (61616,)            # 独立基准，同 span 内升序找空
 port_writeback      = conf_copy
-stop_kind           = shutdown_command    # 同上，不执行厂商脚本
+stop_kind           = port_lookup         # 同 Nacos：厂商停止手段不用（理由见 §2.2 末条与 §3.5）
 pid_role            = launcher
 console_path        = "/admin"            # 待 §9 A3 实测确认
 health_path         = None
