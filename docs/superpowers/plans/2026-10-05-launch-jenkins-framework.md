@@ -2087,7 +2087,7 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 78 tests ... OK`
+Expected: `Ran 80 tests ... OK`（评审轮 78 → 修复轮 +2：启动兜底一条、关窗不弹模态一条）
 
 **控制器记下的两条待补守护（本任务未实现，交给整枝最终评审那一轮统一处理，不要在这儿假装做过）：**
 - 外来登记在 `reconcile` 后仍然存活，目前只由"文件字节没变"间接证明 —— 缺一条正面断言
