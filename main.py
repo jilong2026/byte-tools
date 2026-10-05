@@ -3674,6 +3674,10 @@ class LaunchWorker(QThread):
     failed = Signal(str, str)       # (key, reason)
     stopped = Signal(str)           # key
     need_force = Signal(str, str)   # (key, reason)：一次"要不要强制结束"的询问，不是错误
+    # (key, [提示行…])：端口准备阶段的告警，成功与失败都有话要说。
+    # 单独一条信号而不是塞进 reason：reason 是给人看的报错文案，
+    # 而"已在 data 建立配置副本、此后端口只写这份副本"是成功时也得知道的事实。
+    notes = Signal(str, list)
 
     def __init__(self, action: str, comp: Component,
                  comps: Dict[str, Component], mgr: "ServiceManager", parent=None):
@@ -3697,6 +3701,8 @@ class LaunchWorker(QThread):
     def _dispatch(self) -> None:
         if self.action == "start":
             res = self.mgr.start(self.comp, self.comps, sleeper=self._sleep)
+            if res.notes:
+                self.notes.emit(self.comp.key, list(res.notes))
             if res.ok:
                 self.started_ok.emit(self.comp.key, res.console_url)
             else:
@@ -4717,6 +4723,100 @@ def set_openwire_port(path: Path, port: int) -> Tuple[bool, str]:
     return True, ""
 
 
+@dataclass
+class PortPlan:
+    """一次启动最终要用的端口。三种角色分开存，是因为它们的平移规则根本不同：
+    派生口跟着主口走，独立口有自己的基准。合成一个 tuple 存就不区分得开了。"""
+    main: int = 0
+    derived: Tuple[int, ...] = ()
+    extras: Tuple[int, ...] = ()
+
+    @property
+    def all_ports(self) -> Tuple[int, ...]:
+        # main 为 0 表示"没规划成功"，这时必须返回空簇，不能返回 (0,)：
+        # 失败路径返回的 PortPlan() 会被start() 拿去做登记与探活，
+        # 把端口 0 登记进去等于凭空造一个"占用中的端口 0"。
+        if not self.main:
+            return ()
+        return (self.main,) + tuple(self.derived) + tuple(self.extras)
+
+
+def choose_ports(spec: LaunchSpec, is_free=port_is_free) -> Tuple[PortPlan, str]:
+    """选端口：主口+派生口整簇同空（平移规则沿用计划一定死的"最小 + 整簇"），
+    独立口（extra_ports）各自按自己的基准另找——它们与主口没有固定偏移，
+    塞进 port_offsets 会静默写错端口。"""
+    base = pick_free_cluster(spec.main_port, spec.port_offsets, spec.port_search_span,
+                             is_free=is_free)
+    if base is None:
+        return PortPlan(), (f"{spec.main_port} 起 {spec.port_search_span + 1} 个端口内"
+                            f"都找不到整簇空闲的位置（含派生口 "
+                            f"{[spec.main_port + o for o in spec.port_offsets]}）。")
+    derived = tuple(base + int(o) for o in spec.port_offsets)
+    extras: List[int] = []
+    for extra_base in spec.extra_ports:
+        hit = pick_free_cluster(int(extra_base), (), spec.port_search_span, is_free=is_free)
+        if hit is None:
+            # 半成功比不启动更坏：控制台起来了、客户端连不上，界面还显示"运行中"。
+            return PortPlan(), (f"端口 {extra_base}（组件的另一个必要端口）在 "
+                                f"{spec.port_search_span + 1} 个端口内也找不到空闲位置。")
+        extras.append(hit)
+    return PortPlan(main=base, derived=derived, extras=tuple(extras)), ""
+
+
+def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
+                  data_dir: Path) -> Tuple[bool, str, List[str]]:
+    """端口准备。返回 (能否继续拉起, 失败原因, 要转成日志告知用户的提示行)。
+
+    回写一定发生在拉起之前：改了配置却没起进程、或起进程时配置没生效，
+    两边状态对不上时比"没启动"更难归因 —— 所以失败必须阻止 spawn。"""
+    if spec.port_writeback in ("cli_only", "cli_flag"):
+        # cli_flag的端口靠命令行透传（Nacos：startup.cmd 的 %* 会把它交给 java），
+        # 不碰文件。两种策略都在这里直接返回，不该留下任何文件。
+        return True, "", []
+    if spec.port_writeback != "conf_copy":
+        return False, (f"{comp.display_name} 的端口策略 {spec.port_writeback!r} 不认识，"
+                       f"已放弃启动（不会去猜该怎么改配置）。"), []
+    src = comp.install_dir(comp.versions[0].version) / "conf"
+    conf, console_file, broker_file = conf_targets(data_dir)
+    notes: List[str] = []
+    state, diff = prepare_conf_copy(src, conf)
+    if state == "created":
+        notes.append(f"已在 {conf} 建立 {comp.display_name} 配置副本，"
+                     f"此后端口改动只写这份副本（官方文件不受影响）。")
+    elif diff:
+        notes.append(f"官方 conf 里有 {len(diff)} 个文件是副本没有的（多半是版本升级带来的）："
+                     f"{', '.join(diff[:5])}。本工具不自动合并，需要时删掉副本目录让它重建。")
+    ok, why = set_property_line(console_file, AMQ_CONSOLE_KEY, str(plan.main))
+    if not ok:
+        return False, why, notes
+    for port in plan.extras:
+        ok, why = set_openwire_port(broker_file, port)
+        if not ok:
+            return False, why, notes
+    return True, "", notes
+
+
+# 厂商日志的候选位置（spec 计划二 §7 实测清单）。写成表而不是猜：
+# 找不到文件是常态（首次启动、Windows 下 Nacos 就没有 start.out），
+# 那种情况要明说"还没生成"，让用户知道去哪儿看，而不是给一句空报错。
+VENDOR_LOG_CANDIDATES = {
+    "activemq": ("data/activemq.log", "data/activemq.dump"),
+    "nacos": ("logs/start.out",),
+}
+
+
+def vendor_log_tails(data_dir: Path, home: Path, key: str, lines: int = 8) -> str:
+    """把该组件厂商日志的尾巴拼成一句可读文本。没有文件就回"（厂商日志尚未生成）"。"""
+    chunks = []
+    for rel in VENDOR_LOG_CANDIDATES.get(key, ()):
+        for base in (data_dir, home):
+            p = base / rel
+            if p.exists():
+                chunks.append(f"{rel}: {ServiceManager._tail(p, lines)}")
+                break
+    return " / ".join(chunks) or "（厂商日志尚未生成）"
+
+
 def _http_status_with(fetch, url: str) -> bool:
     """把"发请求"抽成注入点，测试才能完全不碰网络。2xx/3xx/401 都算服务活着：
     Jenkins 的 /login 在未初始化时会给 200，而根路径可能 403，401 说明服务在、只是要认证。"""
@@ -4789,10 +4889,14 @@ class LaunchPlan:
 @dataclass
 class StartResult:
     ok: bool
-    state: str            # "running" / "gate" / "port" / "timeout" / "spawn"
+    state: str            # "running" / "gate" / "port" / "writeback" / "timeout" / "spawn"
     reason: str = ""
     record: Optional[RunRecord] = None
     console_url: str = ""
+    # 端口准备阶段要转告用户的提示行（如"已在 data 建立配置副本"）。
+    # 之所以不塞进 reason：reason 是失败原因，成功时也要让用户知道端口写去了哪份文件；
+    # 带默认值是为了让计划一既有构造处零改动。
+    notes: List[str] = field(default_factory=list)
 
 
 def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
@@ -4847,9 +4951,14 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
         "war": str(war),
         "home": str(home),
         "data_dir": str(data_dir),
+        "conf_dir": str(data_dir / "conf"),
         "port": str(port),
         "log_file": str(log_file),
     }
+    # 计划二的额外 env（ActiveMQ 的 ACTIVEMQ_CONF/DATA 走这条路；
+    # 它两个值都要等端口定了、副本建好了才写得出最终值，所以在计划阶段拼）。
+    for name, template in (spec.extra_env or {}).items():
+        env[name] = template.format(**mapping)
     argv = [t.format(**mapping) for t in spec.commands[CURRENT_OS]]
     return LaunchPlan(argv=argv, env=env, cwd=home, log_file=log_file,
                       console_url=f"http://127.0.0.1:{port}{spec.console_path}")
@@ -4949,17 +5058,19 @@ class ServiceManager:
         base = spec.main_port
         # is_free 显式按名字传，不靠默认值绑定：默认参数在 def 时就把函数绑死了，
         # 测试 patch main.port_is_free 会失效（Task 7 的端口平移用例正是靠它）。
-        port = pick_free_cluster(base, spec.port_offsets, spec.port_search_span,
-                                 is_free=port_is_free)
-        if port is None:
-            return StartResult(False, "port",
-                               f"{base} 起 {spec.port_search_span + 1} 个端口内都没找到"
-                               f"能整簇空闲的位置，先关掉占用 {base} 的程序再试。")
+        port_plan, why = choose_ports(spec, is_free=port_is_free)
+        if not port_plan.main:
+            return StartResult(False, "port", why)
 
         data_dir = CONFIG_DIR / f"{comp.key}-data"
         log_file = data_dir / "logs" / "byte-tools.out"
         ensure_dir(log_file.parent)
-        plan = build_launch_plan(comp, spec, java_home, port, log_file)
+        # 端口回写必须在 spawn 之前做完：改了配置却没起进程、或起进程时配置没生效，
+        # 两边状态对不上时比"没启动"更难归因。
+        ok, why, notes = prepare_ports(comp, spec, port_plan, data_dir)
+        if not ok:
+            return StartResult(False, "writeback", why, notes=notes)
+        plan = build_launch_plan(comp, spec, java_home, port_plan.main, log_file)
 
         # 重定向句柄在 Popen 把它交给子进程后立刻由父进程关掉（with 退出）：
         # Windows 上父进程留着一个打开的日志句柄，既漏句柄又会让临时目录删不掉；
@@ -4985,28 +5096,36 @@ class ServiceManager:
         # 忙等（提交信息钉的就是"有界探活后才登记"）。真实运行里每轮睡 1 秒，
         # 语义等价于 startup_timeout 秒内未监听即放弃。
         for _ in range(max(1, int(spec.startup_timeout))):
-            if self._is_listening(port):
+            # 整簇都要在听才算起来：Nacos 的 gRPC 9848/9849 与 ActiveMQ 的 broker 口
+            # 没起来时控制台能开、客户端连不上，只探主口会登记成一个"半死"的运行中。
+            if all(self._is_listening(p) for p in port_plan.all_ports):
                 rec = RunRecord(key=comp.key, version=comp.versions[0].version,
                                 home=str(plan.cwd), data_dir=plan.env.get(spec.data_dir_env, ""),
-                                port=port, console_url=plan.console_url,
+                                port=port_plan.main, console_url=plan.console_url,
                                 pid=proc.pid,
                                 pid_role="server" if spec.stop_kind == "pid" else "launcher",
-                                started_at=time.time(), launcher_cmd=list(plan.argv))
+                                started_at=time.time(), launcher_cmd=list(plan.argv),
+                                ports=port_plan.all_ports)
                 records = load_running_map()
                 records[comp.key] = rec
                 save_running_map(records)
-                return StartResult(True, "running", record=rec, console_url=plan.console_url)
+                return StartResult(True, "running", record=rec,
+                                   console_url=plan.console_url, notes=notes)
             sleeper(1.0)
 
         # 超时：把刚拉起的进程收掉，不留一个"没人登记的监听者"
-        reason = (f"{spec.startup_timeout} 秒内 {port} 未监听。"
-                  f"启动输出见 {plan.log_file}，末尾内容：{self._tail(plan.log_file)}")
+        reason = (f"{spec.startup_timeout} 秒内端口 "
+                  f"{'/'.join(str(p) for p in port_plan.all_ports)} 未监听"
+                  f"（需要全部端口都在听）。启动输出见 {plan.log_file}，"
+                  f"末尾内容：{self._tail(plan.log_file)}"
+                  f"；{comp.display_name} 自身日志："
+                  f"{vendor_log_tails(data_dir, plan.cwd, comp.key)}")
         try:
             proc.terminate()
         except OSError as exc:
             # 收尸失败必须出声：这个进程恰恰不在 running.json 里（spec §5）
             reason += f"；进程可能仍在监听（PID {proc.pid}，收尸失败：{exc}）"
-        return StartResult(False, "timeout", reason)
+        return StartResult(False, "timeout", reason, notes=notes)
 
     @staticmethod
     def _tail(path: Path, lines: int = 8) -> str:
@@ -5835,12 +5954,19 @@ class ComponentCard(QFrame):
                                           parent=self)
         self.launch_worker.started_ok.connect(self._on_launch_ok)
         self.launch_worker.failed.connect(self._on_launch_failed)
+        self.launch_worker.notes.connect(self._on_launch_notes)
         self.launch_worker.finished.connect(self._on_launch_worker_done)
         self.launch_worker.start()
 
     def _on_launch_ok(self, key: str, console_url: str) -> None:
         self._log("info", f"已启动，控制台：{console_url}")
         self._refresh_launch_state()
+
+    def _on_launch_notes(self, key: str, notes: list) -> None:
+        """端口准备的告警逐条进组件日志。吞掉的话，用户之后想找"端口改在哪份文件里"
+        只能自己猜 —— R4 第 6 条禁止的写法。"""
+        for line in notes:
+            self._log("warn", line)
 
     def _on_launch_failed(self, key: str, reason: str) -> None:
         # 关窗链路里 cancel 触发的 failed 可能在退出途中投递进来；模态框自己转事件循环，

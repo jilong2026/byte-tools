@@ -1,4 +1,5 @@
-"""一键启动护栏（离线）。设计文档见 docs/superpowers/specs/2026-10-05-one-click-launch-design.md"""
+"""一键启动护栏（离线）。设计文档见docs/superpowers/specs/2026-10-05-one-click-launch-design.md"""
+import copy
 import json
 import os
 import platform as _platform
@@ -521,6 +522,37 @@ class StartFlow(unittest.TestCase):
         res = self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
         self.assertTrue(res.ok, res.reason)
         self.assertEqual(main.load_running_map()["jenkins"].port, 8081)
+
+    def test_start_carries_the_conf_copy_notice_to_the_card(self):
+        """副本建立/差异文件这两句必须跟着 StartResult 回到卡片，由卡片写进组件日志。
+        吞掉的话，用户之后想找"端口改在哪份文件里"就只能自己猜——R4 第 6 条禁止的写法。"""
+        orig = main.prepare_ports
+        main.prepare_ports = lambda *a, **k: (True, "", ["已在 data 目录建立配置副本"])
+        self.addCleanup(setattr, main, "prepare_ports", orig)
+        mgr = self.mgr(listening_after=1)     # StartFlow 既有工厂：第 1 次探活后"在听"
+        res = mgr.start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(res.notes, ["已在 data 目录建立配置副本"],
+                         "start() 没把 prepare_ports 的告警行带出来")
+
+    def test_start_probes_the_whole_port_cluster_not_just_the_main_port(self):
+        """派生口（Nacos gRPC 9848/9849）没在听时必须判超时，不能登记成"运行中"。
+
+        Jenkins 没有派生口，所以这条用一个临时挂上 port_offsets 的 spec 走同一条 start()：
+        探针只对主口说"在听"、对派生口说"没在听"。写成只探主口的话这条会绿，
+        而Nacos 会起来一个"控制台能开、客户端连不上"的半死进程（spec §7）。"""
+        spec = copy.copy(self.comp.launch)
+        spec.port_offsets = (1000, 1001)
+        orig_launch, self.comp.launch = self.comp.launch, spec
+        self.addCleanup(setattr, self.comp, "launch", orig_launch)
+        # 主口 8080 之外的所有口都答"没在听"：主口在听、两个派生口不在
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": p == 8080,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True)
+        res = mgr.start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok, "派生口没监听却判成功 = 登记了一个半死的运行中")
+        self.assertEqual(res.state, "timeout")
+        self.assertEqual(main.load_running_map(), {}, "启动失败不许留登记")
 
 
 class StopFlow(unittest.TestCase):
@@ -1446,6 +1478,119 @@ class ConfCopyWriteback(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("activemq.xml", why)
         self.assertIn("openwire", why)
+
+
+class PortPlanning(unittest.TestCase):
+    def spec(self, **kw):
+        base = dict(commands={os_name: ["x"] for os_name in ("Windows", "Linux", "Darwin")},
+                    main_port=8848, port_offsets=(1000, 1001))
+        base.update(kw)
+        return main.LaunchSpec(**base)
+
+    def comp(self):
+        return next(c for c in main.build_components() if c.key == "jenkins")
+
+    def test_all_free_takes_the_declared_defaults(self):
+        plan, why = main.choose_ports(self.spec(), is_free=lambda p, host="127.0.0.1": True)
+        self.assertEqual(why, "")
+        self.assertEqual(plan.all_ports, (8848, 9848, 9849))
+
+    def test_derived_ports_move_with_the_main_port(self):
+        """派生口（Nacos gRPC）跟着主口走：主口平移到 8850，9848 系也要变成 9850 系。
+        这条是"整簇一起可用"规则的另一半，写错就会起来一个半死的 Nacos。
+
+        占用集 {8848, 9848, 9849} 之下正确答案是 8850 而不是 8849：8849 这一簇是
+        {8849, 9849, 9850}，而 9849 已被占 —— 主口自己空着不算数。
+        （计划一 Task 3 就栽过这类"占用集算错"的夹具上，这次把推导写在这里。）"""
+        taken = {8848, 9848, 9849}
+        plan, why = main.choose_ports(self.spec(),
+                                      is_free=lambda p, host="127.0.0.1": p not in taken)
+        self.assertEqual((plan.main, plan.all_ports), (8850, (8850, 9850, 9851)), why)
+
+    def test_extra_ports_search_their_own_base(self):
+        """独立口（ActiveMQ 61616）与 8161 没有固定偏移关系：控制台口平移到 8162 时，
+        broker 口仍应从 61616 自己的基准起找，不是 61617。"""
+        s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,))
+        taken = {8161}
+        plan, why = main.choose_ports(s, is_free=lambda p, host="127.0.0.1": p not in taken)
+        self.assertEqual((plan.main, plan.extras, plan.all_ports),
+                         (8162, (61616,), (8162, 61616)), why)
+
+    def test_failure_names_the_port_that_had_no_room(self):
+        """失败原因里必须指名是哪个口找不到位置；只说"端口不够"等于把用户打发去自己查。"""
+        s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,),
+                      port_search_span=3)
+        taken = {61616, 61617, 61618, 61619}
+        plan, why = main.choose_ports(s, is_free=lambda p, host="127.0.0.1": p not in taken)
+        self.assertEqual(plan.all_ports, ())
+        self.assertIn("61616", why)
+
+    def test_build_plan_injects_conf_dir_and_extra_env(self):
+        """extra_env 的占位符必须能拿到 conf_dir/data_dir：ActiveMQ 的 ACTIVEMQ_CONF
+        指向副本、ACTIVEMQ_DATA 指向 data，两者都是端口定了、副本建好之后才写得出的值。"""
+        comp = self.comp()
+        s = self.spec(extra_env={"ACTIVEMQ_CONF": "{conf_dir}", "ACTIVEMQ_DATA": "{data_dir}"})
+        with tempfile.TemporaryDirectory() as td:
+            orig, main.CONFIG_DIR = main.CONFIG_DIR, Path(td)
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig)
+            plan = main.build_launch_plan(comp, s, r"C:\jdk", 8848,
+                                          Path(td) / "logs" / "byte-tools.out")
+        self.assertEqual(plan.env["ACTIVEMQ_CONF"], str(Path(td) / "jenkins-data" / "conf"))
+        self.assertEqual(plan.env["ACTIVEMQ_DATA"], str(Path(td) / "jenkins-data"))
+
+    def test_conf_copy_prepare_touches_no_file_for_cli_strategies(self):
+        for strategy in ("cli_only", "cli_flag"):
+            with self.subTest(strategy=strategy):
+                with tempfile.TemporaryDirectory() as td:
+                    ok, why, notes = main.prepare_ports(
+                        self.comp(), self.spec(port_writeback=strategy),
+                        main.PortPlan(main=8848, derived=(9848, 9849)), Path(td))
+                self.assertTrue(ok, why)
+                self.assertEqual(list(Path(td).rglob("*")), [],
+                                 f"{strategy} 不该写任何文件：Nacos 的端口走命令行透传")
+
+    def test_conf_copy_writes_only_into_the_copy(self):
+        """conf_copy 的回写只发生在 data/conf 里，官方目录一个字节不动。
+        fixture 是 6.3.2 真包原文的两行（spec 计划二 §2.1）。"""
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            (home / "conf").mkdir(parents=True)
+            (home / "conf" / "jetty-spring.properties").write_text(
+                "jetty.http.port=8161\n", encoding="utf-8")
+            (home / "conf" / "activemq.xml").write_text(
+                '  <transportConnector name="openwire" '
+                'uri="tcp://0.0.0.0:61616?maximumConnections=1000"/>\n', encoding="utf-8")
+            data = Path(td) / "data"
+            comp = self.comp()
+            comp.versions = [comp.versions[0]]
+            s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,),
+                          port_writeback="conf_copy")
+            orig_install, comp.install_dir = comp.install_dir, (lambda v: home)
+            self.addCleanup(setattr, comp, "install_dir", orig_install)
+
+            ok, why, notes = main.prepare_ports(
+                comp, s, main.PortPlan(main=8162, extras=(61716,)), data)
+            self.assertTrue(ok, why)
+            copy = (data / "conf")
+            self.assertIn("jetty.http.port=8162",
+                      (copy / "jetty-spring.properties").read_text(encoding="utf-8"))
+            self.assertIn("0.0.0.0:61716",
+                          (copy / "activemq.xml").read_text(encoding="utf-8"))
+            self.assertEqual((home / "conf" / "jetty-spring.properties").read_text(encoding="utf-8"),
+                             "jetty.http.port=8161\n", "官方文件被动了")
+
+    def test_timeout_reason_reaches_for_the_vendor_log(self):
+        """厂商把报错写在自家文件里，只给我们自己那份重定向文件的尾巴，
+        用户就看到"起不来"三个字而不知道去看哪。"""
+        with tempfile.TemporaryDirectory() as td:
+            data = Path(td)
+            (data / "data").mkdir()
+            (data / "data" / "activemq.log").write_text(
+                "Caused by: java.lang.OutOfMemoryError\n", encoding="utf-8")
+            out = main.vendor_log_tails(data, data, "activemq")
+            self.assertIn("OutOfMemoryError", out)
+            self.assertIn("activemq.log", out)
+            self.assertIn("尚未生成", main.vendor_log_tails(data, data, "nacos"))
 
 
 if __name__ == "__main__":
