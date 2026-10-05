@@ -3635,6 +3635,75 @@ class DownloadWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# 启动/停止线程层（详见设计文档 §3 线程层）
+# ---------------------------------------------------------------------------
+class LaunchCancelled(Exception):
+    """用户取消等待。不是故障，只是"别再替我盯着端口了"。"""
+
+
+class LaunchWorker(QThread):
+    """启动/停止的耗时动作。有界探活最长能到 startup_timeout 秒，
+    绝不能放在 UI 线程里 —— 这正是 DownloadWorker 走线程的同一个理由。"""
+
+    started_ok = Signal(str, str)   # (key, console_url)
+    failed = Signal(str, str)       # (key, reason)
+    stopped = Signal(str)           # key
+
+    def __init__(self, action: str, comp: Component,
+                 comps: Dict[str, Component], mgr: "ServiceManager", parent=None):
+        super().__init__(parent)
+        self.action = action
+        self.comp = comp
+        self.comps = comps
+        self.mgr = mgr
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def _sleep(self, seconds: float) -> None:
+        """取消检查挂在 ServiceManager 的每轮等待上 —— 有界探活是唯一长耗时阶段，
+        而它的 sleeper 本来就是注入点，所以不用给它加新参数就能中止。"""
+        if self._cancelled:
+            raise LaunchCancelled()
+        time.sleep(seconds)
+
+    def _dispatch(self) -> None:
+        if self.action == "start":
+            res = self.mgr.start(self.comp, self.comps, sleeper=self._sleep)
+            if res.ok:
+                self.started_ok.emit(self.comp.key, res.console_url)
+            else:
+                self.failed.emit(self.comp.key, res.reason)
+        elif self.action == "stop":
+            res = self.mgr.stop(self.comp, self.comps, sleeper=self._sleep)
+            self._emit_stop(res)
+        elif self.action == "force_stop":
+            self._emit_stop(self.mgr.force_stop(self.comp.key, sleeper=self._sleep))
+
+    def _emit_stop(self, res: "StopResult") -> None:
+        # __need_force__\t 前缀是"要求界面问一次强制结束"的载荷约定，Task 10 在卡片侧解析；
+        # 不新增信号，免得多加一条要接的线。
+        if res.ok:
+            self.stopped.emit(self.comp.key)
+        elif res.need_force:
+            self.failed.emit(self.comp.key, "__need_force__\t" + res.reason)
+        else:
+            self.failed.emit(self.comp.key, res.reason)
+
+    def run(self) -> None:
+        try:
+            self._dispatch()
+        except LaunchCancelled:
+            # 取消只是停止"等"，进程还在不在没人知道 —— 这话必须说清，
+            # 否则用户以为取消等于停住了。
+            self.failed.emit(self.comp.key,
+                             "已取消等待。进程可能仍在启动中，稍后看状态或再点停止。")
+        except Exception as exc:
+            self.failed.emit(self.comp.key, f"{self.comp.display_name} 操作过程出错：{exc}")
+
+
+# ---------------------------------------------------------------------------
 # 环境变量处理
 # ---------------------------------------------------------------------------
 # WM_SETTINGCHANGE 与 SendMessageTimeout 的常量（Windows 外壳通知）

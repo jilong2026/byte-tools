@@ -5,6 +5,7 @@ import platform as _platform
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import main  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402  要构造 QThread 子类得有 QApplication
 
 
 class LaunchSpecTable(unittest.TestCase):
@@ -613,6 +615,79 @@ class TerminateByPidGuard(unittest.TestCase):
         main.ServiceManager._terminate_by_pid(self.rec("server", pid=-1))
         main.ServiceManager._terminate_by_pid(self.rec("server", pid=None))
         self.assertEqual(self.kills, [])
+
+
+class LaunchWorkerSignals(unittest.TestCase):
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def test_start_action_emits_started_ok(self):
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        comps = {c.key: c for c in [comp]}
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True)
+        rec = main.RunRecord(key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+                             console_url="http://127.0.0.1:8080/", pid=1,
+                             pid_role="server", started_at=0.0, launcher_cmd=[])
+        mgr.start = lambda c, cs, sleeper=time.sleep: main.StartResult(
+            True, "running", record=rec, console_url=rec.console_url)
+        w = main.LaunchWorker("start", comp, comps, mgr)
+        got = []
+        w.started_ok.connect(lambda k, u: got.append((k, u)))
+        w._dispatch()      # 不起线程，直接跑分派逻辑：线程本身不是本用例要验的东西
+        self.assertEqual(got, [("jenkins", "http://127.0.0.1:8080/")])
+
+    def test_failed_reason_is_emitted_not_swallowed(self):
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+        mgr.start = lambda c, cs, sleeper=time.sleep: main.StartResult(False, "gate", "需要先装 JDK")
+        w = main.LaunchWorker("start", comp, {comp.key: comp}, mgr)
+        got = []
+        w.failed.connect(lambda k, r: got.append(r))
+        w._dispatch()
+        self.assertEqual(got, ["需要先装 JDK"])
+
+    def test_unexpected_exception_becomes_failed_not_a_silent_thread(self):
+        """start() 会真的动文件系统（建日志目录、开文件、写 running.json），
+        这些抛出来说明环境不对。run() 若不接住，线程静默死掉，卡片上的按钮就永远
+        停在"进行中"，用户什么也看不见 —— spec §5 要求失败必须可归因。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+
+        def boom(c, cs, sleeper=time.sleep):
+            raise OSError("磁盘只读")
+        mgr.start = boom
+        w = main.LaunchWorker("start", comp, {comp.key: comp}, mgr)
+        got = []
+        w.failed.connect(lambda k, r: got.append(r))
+        w.run()                     # 走 run()，验的正是线程入口包不包异常
+        self.assertEqual(len(got), 1, "异常必须转成一次 failed，不许静默")
+        self.assertIn("磁盘只读", got[0])
+
+    def test_cancel_stops_waiting_without_pretending_the_process_stopped(self):
+        """取消只是"别再盯着端口了"，进程可能还在起来 —— 这句话必须原样传给界面。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+
+        def slow_start(c, cs, sleeper=time.sleep):
+            while True:              # 模拟"一直没监听"：每轮把控制权交给 sleeper
+                sleeper(1.0)
+        mgr.start = slow_start
+        w = main.LaunchWorker("start", comp, {comp.key: comp}, mgr)
+        w.cancel()                   # 先取消再跑，第一轮 sleeper 就走取消分支，不会真死循环
+        got = []
+        w.failed.connect(lambda k, r: got.append(r))
+        w.run()
+        self.assertEqual(len(got), 1, "取消同样要给一条说明，不许静默结束线程")
+        self.assertIn("已取消", got[0])
+        self.assertIn("可能仍在启动", got[0])
 
 
 if __name__ == "__main__":
