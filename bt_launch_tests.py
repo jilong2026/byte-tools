@@ -28,7 +28,7 @@ class LaunchSpecTable(unittest.TestCase):
         self.comps = {c.key: c for c in main.build_components()}
 
     def test_launch_keys_are_exactly_this_batch(self):
-        self.assertEqual(main.LAUNCH_KEYS, {"jenkins", "nacos"},
+        self.assertEqual(main.LAUNCH_KEYS, {"jenkins", "nacos", "activemq"},
                          "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
         self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
@@ -109,6 +109,38 @@ class LaunchSpecTable(unittest.TestCase):
         argv = main.LAUNCH_OF["nacos"].commands["Windows"]
         self.assertFalse(any("{java}" in a for a in argv))
         self.assertTrue(argv[0].endswith("startup.cmd") or argv[0].endswith("startup.sh"))
+
+    def test_activemq_registered_with_two_independent_ports(self):
+        s = main.LAUNCH_OF["activemq"]
+        self.assertEqual(s.main_port, 8161)
+        self.assertEqual(tuple(s.port_offsets), ())
+        self.assertEqual(tuple(s.extra_ports), (61616,),
+                         "61616 与 8161 没有固定偏移，必须走独立基准（spec 计划二 D6）")
+        self.assertEqual(s.port_writeback, "conf_copy")
+        self.assertEqual(s.stop_kind, "port_lookup")
+        self.assertEqual(s.min_java_major, 17)   # 证据：bin/activemq.jar class major 61
+        self.assertEqual(s.startup_timeout, 60)
+
+    def test_activemq_env_points_at_the_copy_and_the_data_dir(self):
+        """厂商机制实测：bin/activemq.bat 显式传 -Dactivemq.conf / -Dactivemq.data，
+        且这俩变量"未设才回落到安装目录"——所以注入 env 就够，不必碰官方文件。"""
+        env = main.LAUNCH_OF["activemq"].extra_env
+        self.assertEqual(env.get("ACTIVEMQ_CONF"), "{conf_dir}")
+        self.assertEqual(env.get("ACTIVEMQ_DATA"), "{data_dir}")
+
+    def test_activemq_uses_the_bat_not_the_service_wrapper(self):
+        """win64/activemq.bat 是 wrapper.exe -c wrapper.conf（服务包装器），
+        与"不注册系统服务"冲突，不许出现在登记里。"""
+        argv = main.LAUNCH_OF["activemq"].commands["Windows"]
+        self.assertIn("bin/activemq.bat", argv[0])
+        self.assertNotIn("win64", argv[0])
+        self.assertEqual(argv[1], "console")
+
+    def test_data_note_is_required_for_plan_two_components(self):
+        """计划一的"停止后数据保留"承诺对 Nacos 不成立（derby 在版本目录里）。
+        不写 data_note 就等于在卸载确认里说假话。"""
+        for key in ("nacos", "activemq"):
+            self.assertTrue(main.LAUNCH_OF[key].data_note, f"{key} 必须说明数据去处")
 
 
 class RunningMap(unittest.TestCase):
@@ -1365,6 +1397,22 @@ class CardLaunchUi(unittest.TestCase):
                          "读不到窗口要按\"正在关闭\"处理并留下日志，而不是静默或崩")
         self.assertEqual(logs, [("warn", "[Jenkins] 操作未完成（窗口正在关闭）：已取消等待")],
                          "不弹框也要在日志里留一句去向")
+
+    def test_uninstall_confirm_text_carries_the_data_note(self):
+        """卸载确认必须把"数据去哪儿了"写进去。计划一只说了"删除已安装版本 + 清环境变量"，
+        那句话对 Nacos 是半句真话（它的 derby 在版本目录里，会跟着一起没）。
+        抽成纯函数是为了这条断言真能跑到文案，而不是只检查字段有没有填。"""
+        for key, needle in (("nacos", "安装目录"), ("activemq", "activemq-data")):
+            comp = next(c for c in main.build_components() if c.key == key)
+            text = main.uninstall_confirm_text(comp)
+            self.assertIn(needle, text, f"{key} 的卸载确认没讲清数据去处")
+            self.assertIn(comp.display_name, text)
+
+    def test_uninstall_confirm_text_keeps_plan_one_wording_for_jenkins(self):
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        text = main.uninstall_confirm_text(comp)
+        self.assertIn("jenkins-data", text,
+                      "Jenkins 的数据在 ~/.env-tools 下、卸载后保留——这句话不能因为本期改动而丢")
 
 
 class MainWindowAdopt(unittest.TestCase):

@@ -3025,6 +3025,10 @@ class LaunchSpec:
     extra_env: Dict[str, str] = field(default_factory=dict)
     # 启动确认弹窗里的风险说明文本（监听地址、默认凭据一类）。
     risk_note: str = ""
+    # 卸载确认里必须显示的数据去处。Nacos 的 derby 在版本目录内（卸载即连带删除），
+    # ActiveMQ 的数据与 conf 副本在 ~/.env-tools 下（卸载后保留）——
+    # 一句"数据会被清理"含混带过就是拿计划一的承诺说假话。
+    data_note: str = ""
 
 
 LAUNCH_OF: Dict[str, LaunchSpec] = {
@@ -3044,6 +3048,8 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "初始管理员密码在 JENKINS_HOME 的 secrets 目录下。"
             "只想本机访问的话，把命令里的监听地址改成 127.0.0.1 再启动。"
         ),
+        data_note=("任务、插件与配置都在 ~/.env-tools/jenkins-data 下，卸载只删版本目录、"
+                   "这份数据会保留；要彻底清理请手动删除该目录。"),
     ),
     "nacos": LaunchSpec(
         # 实测（2026-10-05，nacos-server-2.3.2）：startup.cmd 的 %COMMAND% 是前台 java，
@@ -3072,6 +3078,38 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "运行数据（derby）落在安装目录内的 data/ 下：卸载组件会连带删除它，"
             "这一点与 Jenkins 不同（Jenkins 的数据在 ~/.env-tools 下，卸载后保留）。"
         ),
+        data_note=("运行数据（derby）在安装目录内的 data/ 下，卸载会连带删除；"
+                   "要保留数据请先把它复制到 ~/.env-tools 之外。"),
+    ),
+    "activemq": LaunchSpec(
+        # 实测（2026-10-05，apache-activemq-6.3.2）：
+        #   控制台口 conf/jetty-spring.properties:35 jetty.http.port=8161
+        #   broker 口  conf/activemq.xml:178        name="openwire" tcp://0.0.0.0:61616
+        #   bin/activemq.bat:74/76 "未设才默认" + :99 传 -Dactivemq.conf/-Dactivemq.data
+        # 所以端口只写 data 目录里的 conf 副本，官方目录零改动。
+        commands={"Windows": ["{home}/bin/activemq.bat", "console"],
+                  "Linux": ["{home}/bin/activemq", "console"],
+                  "Darwin": ["{home}/bin/activemq", "console"]},
+        stop_kind="port_lookup",
+        main_port=8161,
+        port_offsets=(),
+        extra_ports=(61616,),
+        port_search_span=99,
+        port_writeback="conf_copy",     # 计划给的片段漏了这行，缺了会退回 cli_only（端口根本改不动）
+        extra_env={"ACTIVEMQ_CONF": "{conf_dir}", "ACTIVEMQ_DATA": "{data_dir}"},
+        console_path="/admin",           # 待真机 A3 确认
+        health_path=None,
+        needs=("jdk",),
+        min_java_major=17,
+        data_dir_env=None,
+        startup_timeout=60,
+        risk_note=(
+            "ActiveMQ 默认监听 0.0.0.0，Web 控制台默认账号 admin/admin"
+            "（conf/users.properties 实测）。首次启动会在 ~/.env-tools/activemq-data/conf"
+            "建立配置副本，此后副本是权威：换版本不会自动合并厂商新增默认项。"
+        ),
+        data_note=("数据与配置副本在 ~/.env-tools/activemq-data（含 conf 副本、broker 存储与日志），"
+                   "卸载只删版本目录，这份会保留；要彻底清理请手动删除该目录。"),
     ),
 }
 
@@ -3573,6 +3611,19 @@ def build_components() -> List[Component]:
         comp.multi_version = comp.key in MULTI_VERSION_KEYS    # 新增：不在白名单就是 False
         comp.launch = LAUNCH_OF.get(comp.key)                     # 新增：不在登记表就是 None
     return components
+
+
+def uninstall_confirm_text(comp: Component) -> str:
+    """卸载确认的正文。数据去处必须写明且按组件区分：
+    Jenkins 的数据在 ~/.env-tools/jenkins-data、卸载后保留；
+    Nacos 的 derby 在版本目录里、会跟着一起删；ActiveMQ 两者都有（副本 + 存储在 ~/.env-tools 下）。
+    一句含混的"数据会被清理"对其中任何一个都是假话。"""
+    text = f"删除 {comp.display_name} 已安装的版本，并清理它的环境变量与 PATH 条目。"
+    note = getattr(comp.launch, "data_note", "") if getattr(comp, "launch", None) else ""
+    if not note:
+        # 不可启动的组件没有 launch 描述符，退回计划一那句既有说法（保留原措辞，别改口径）
+        note = "本工具只会删除它自己管理的安装目录，不会碰你手工放到别处的文件。"
+    return text + note
 
 
 # ---------------------------------------------------------------------------
@@ -6730,7 +6781,9 @@ class ComponentCard(QFrame):
             self._refresh_launch_state()
             return
         cv = self._current_version()
-        # 二次确认：卸载会删除本地目录、清理环境变量与 PATH，不可逆
+        # 二次确认：卸载会删除本地目录、清理环境变量与 PATH，不可逆。
+        # 正文（"删哪些" + "数据去哪儿"）由纯函数 uninstall_confirm_text 统一拼，
+        # 后者按组件区分数据去处 —— 计划一那句对 Nacos 是半句真话。
         # 确认框尾巴按组件是否多版本分叉：多版本现在只动选中的那个版本，
         # 旧的"以实际装着的目录为准"在多选并存场景下会变成假话；
         # 非多版本组件的原文逐字保持不变。
@@ -6743,9 +6796,7 @@ class ComponentCard(QFrame):
             "确认卸载",
             f"确定要卸载 {self.component.display_name} {cv.version} 吗？\n\n"
             f"将执行以下操作：\n"
-            f"  · 删除安装目录\n"
-            f"  · 清理环境变量 {self.component.env_var or '（无）'}\n"
-            f"  · 清理 PATH 中属于本组件安装目录的条目\n\n"
+            f"{uninstall_confirm_text(self.component)}\n\n"
             f"{tail}",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
