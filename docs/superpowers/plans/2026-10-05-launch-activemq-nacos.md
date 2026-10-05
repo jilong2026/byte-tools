@@ -34,7 +34,7 @@
 | 文件 | 责任 | 本期动作 |
 |---|---|---|
 | `main.py` | 唯一产品文件 | 改：`LaunchSpec`（+3 字段）、`LAUNCH_OF`（+2 登记）、`RunRecord`/`load_running_map`（`ports` 与归一化）、新增 `parse_netstat_listeners` / `pids_listening_on`、新增 conf 副本与回写三函数、`ServiceManager.status/reconcile/start/stop/force_stop` 改按簇、`build_launch_plan` 按 `port_writeback` 分派、卡片簇文案与卸载告知 |
-| `bt_launch_tests.py` | 一键启动离线护栏（现 80 用例） | 追加 6 个测试类，本期结束约 118 用例（数字按实际数出来写报告，不许凑） |
+| `bt_launch_tests.py` | 一键启动离线护栏（现 80 用例） | 追加 6 个测试类，本期结束约 124 用例（数字按实际数出来写报告，不许凑） |
 | `bt_real_machine_drill.py` | 真机演练 | 扩 `launch_drill`：按簇判据 + A1–A7 记录 |
 | `DEVELOPMENT.md` | 规则 R5 | 更新 R5.2/R5.3/R5.6（本期把多条"待办"变成"已做"） |
 | `CODE_WIKI.md` / `README*.md` | 文档 | 补两个组件、簇语义、端口释放判据 |
@@ -143,15 +143,15 @@ git commit -m "feat(launch): LaunchSpec 增端口策略、独立端口与额外�
     def test_stop_kind_values_are_declared(self):
         self.assertEqual(set(main.STOP_KINDS), {"pid", "shutdown_command", "port_lookup"})
 
-    def test_port_lookup_is_not_a_pid_kill_route_and_pid_role_is_derived(self):
-        """pid_role 由 stop_kind 推导（计划一 start() 的既有写法），
-        port_lookup 必须落到 launcher —— 别再给 LaunchSpec 加 pid_role 字段，
-        两个来源迟早会漂。"""
+    def test_port_lookup_is_not_a_pid_kill_route(self):
+        """port_lookup 不是 pid：登记的 PID 是包装脚本，杀它服务照常在听。
+        同时钉住"别给 LaunchSpec 加 pid_role 字段"—— 那个身份只能由 stop_kind
+        在 start() 里推导，两处来源迟早会漂。"""
         spec = main.LaunchSpec(commands={"Windows": []}, stop_kind="port_lookup",
                                main_port=8161)
-        self.assertNotEqual(spec.stop_kind, "pid")
-        self.assertEqual(
-            "server" if spec.stop_kind == "pid" else "launcher", "launcher")
+        self.assertEqual(spec.stop_kind, "port_lookup")
+        self.assertNotIn("pid_role", spec.__dataclass_fields__,
+                         "pid_role 只能由 stop_kind 推导，不许在描述符上再存一份")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -188,7 +188,7 @@ Expected: `Ran 84 tests ... OK`
 
 ```bash
 git add main.py bt_launch_tests.py
-git commit -m "feat(launch): stop_kind 立 port_lookup，把"没有厂商停止手段"写成显式取值"
+git commit -m "feat(launch): stop_kind 立 port_lookup，把「没有厂商停止手段」写成显式取值"
 ```
 ---
 
@@ -700,6 +700,11 @@ git commit -m "feat(launch): ActiveMQ 配置副本与端口幂等回写，锚不
   - `@dataclass PortPlan(main: int, derived: Tuple[int, ...] = (), extras: Tuple[int, ...] = ())`，属性 `all_ports -> Tuple[int, ...]`（主口 + 派生 + 独立，顺序固定成这样）
   - `choose_ports(spec: LaunchSpec, is_free=port_is_free) -> Tuple[PortPlan, str]` —— 成功 `(plan, "")`，失败 `(PortPlan(), "指名原因")`
   - `prepare_ports(comp, spec, plan: PortPlan, data_dir: Path) -> Tuple[bool, str, List[str]]` —— `(ok, 失败原因, 提示给用户的告警行)`
+  - `StartResult.notes: List[str] = field(default_factory=list)` —— **带默认值**，计划一既有构造处零改动。
+    `start()` 把 `prepare_ports` 的告警行放这儿，卡片成功槽逐条 `_log("warn", …)` 出去。
+    （为什么不能吞：ServiceManager 没有日志入口，`_log` 是 `ComponentCard` 上的方法；
+    而"已在 data 目录建立配置副本，此后端口只写这份副本""官方 conf 有 N 个文件副本没有"
+    这两条正是用户之后找不到端口改动该去哪儿看的去向。吞掉就等于 R4 禁止的"你自己去弄"。）
   - `start()` 写入的 `RunRecord.ports` = `plan.all_ports`
 
 - [ ] **Step 1: 写失败测试**
@@ -807,6 +812,30 @@ class PortPlanning(unittest.TestCase):
         return next(c for c in main.build_components() if c.key == "jenkins")
 ```
 
+**同时往 `StartFlow`（不是 `PortPlanning`）追加一条用例**——`prepare_ports` 的告警行会不会被吞，
+只有走 `start()` 这条路才看得出来：
+
+```python
+    def test_start_carries_the_conf_copy_notice_to_the_card(self):
+        """副本建立/差异文件这两句必须跟着 StartResult 回到卡片，由卡片写进组件日志。
+        吞掉的话，用户之后想找"端口改在哪份文件里"就只能自己猜——R4 第 6 条禁止的写法。"""
+        notes = []
+        orig = main.prepare_ports
+        main.prepare_ports = lambda *a, **k: (True, "", ["已在 data 目录建立配置副本"])
+        self.addCleanup(setattr, main, "prepare_ports", orig)
+        mgr = self.mgr()                        # StartFlow 既有工厂：第 1 次探活后"在听"
+        res = mgr.start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        notes.extend(res.notes)
+        self.assertEqual(notes, ["已在 data 目录建立配置副本"],
+                         "start() 没把 prepare_ports 的告警行带出来")
+```
+
+> 执行说明：`StartFlow` 里构造 `ServiceManager` 的既有写法若与上面 `self.mgr(listening=True)`
+> 不一致，**照 `StartFlow` 现有用例的写法建 mgr**，别新造工厂；`self.comp` / `self.comps` 同理用现有夹具。
+> 这条用例的本体只有"notes 从 `prepare_ports` 一路到 `StartResult.notes`"这一件事。
+
+
 > 执行说明：上面 `PortPlanning` 里两个方法用到 `self.comp()`，它定义在最后 —— Python 不关心方法定义顺序，**别为了"看起来顺"把它挪到类外**（挪出去就变成模块级函数，`self.comp()` 会 `TypeError`）。
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -827,6 +856,11 @@ class PortPlan:
 
     @property
     def all_ports(self) -> Tuple[int, ...]:
+        # main 为 0 表示"没规划成功"，这时必须返回空簇，不能返回 (0,)：
+        # 失败路径返回的 PortPlan() 会被 start() 写进 StartResult 的判断里，
+        # 而 Task 6 的失败用例钉的就是 `plan.all_ports == ()`。
+        if not self.main:
+            return ()
         return (self.main,) + tuple(self.derived) + tuple(self.extras)
 
 
@@ -886,7 +920,9 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
     return True, "", notes
 ```
 
-`build_launch_plan` 内：在 `mapping` 里加 `"conf_dir": str(data_dir / "conf")`，并在 `if spec.data_dir_env:` 之后追加：
+`build_launch_plan` 内：在 `mapping = { … }` 这个字典字面量里加一项 `"conf_dir": str(data_dir / "conf")`；
+然后**在 `mapping` 定义之后**（不是 `if spec.data_dir_env:` 之后——那块在 mapping 之前，放那儿会 `NameError`）、
+`argv = […]` 之前追加：
 
 ```python
     # 计划二的额外 env（ActiveMQ 的 ACTIVEMQ_CONF/DATA 走这条路；
@@ -895,7 +931,13 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
         env[name] = template.format(**mapping)
 ```
 
-`ServiceManager.start()` 里把"选端口"那一段换成 `choose_ports`，并在 `build_launch_plan` **之前**插一步 `prepare_ports`；失败时返回 `StartResult(False, "writeback", why)`。`RunRecord(...)` 的构造处加 `ports=plan.all_ports`。`state` 字段注释同步补上 `"writeback"`。
+`ServiceManager.start()` 里把"选端口"那一段换成
+`plan, why = choose_ports(spec, is_free=port_is_free)`
+—— **`is_free` 必须显式按名字传**，和计划一原地同款理由：默认参数在 `def` 时就绑死了函数，
+StartFlow 那两个"端口平移"用例是 patch `main.port_is_free` 来打桩的，不显式传就测不到（这条计划一注释里写过，别退回去）。
+失败时返回 `StartResult(False, "port", why)`（沿用既有 `"port"` 状态，端口找不到就是端口问题）。
+并在 `build_launch_plan` **之前**插一步 `prepare_ports`；失败时返回 `StartResult(False, "writeback", why)`（`note` 里的告警行逐条 `_log` 出去，别吞）。
+`RunRecord(...)` 的构造处加 `ports=plan.all_ports`。`state` 字段注释同步补上 `"writeback"`。
 
 **Step 3b：超时归因要能翻厂商自己的日志（spec 计划二 §7 那一行）**
 
@@ -953,7 +995,7 @@ def vendor_log_tails(data_dir: Path, home: Path, key: str, lines: int = 8) -> st
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 106 tests ... OK`，且 `StartFlow` 既有用例（端口平移、超时不留登记）仍全绿
+Expected: `Ran 107 tests ... OK`，且 `StartFlow` 既有用例（端口平移、超时不留登记）仍全绿
 
 - [ ] **Step 5: 提交（实现者自己执行；不 push、不 merge、不打 tag）**
 
@@ -968,7 +1010,8 @@ git commit -m "feat(launch): 端口规划区分派生口与独立口，配置回
 
 **Files:**
 - Modify: `main.py`（`ServiceManager.__init__` / `status` / `stop` / `force_stop`）
-- Test: `bt_launch_tests.py`（`StatusProbe`、`StopFlow` 内追加；`NoExecInvariant` 扩展）
+- Test: `bt_launch_tests.py`（`StopFlow` 内追加 —— 两条 status/簇用例也用 `StopFlow` 的 `self.comp` 夹具，
+  仓库里**没有** `StatusProbe` 这个类，别去寻它；`NoExecInvariant` 扩展）
 
 **Interfaces:**
 - Consumes: `rec.ports`（Task 3）、`netstat_listener_pids` / `_pick_unique_pids`（Task 4）、`PortPlan.all_ports`
@@ -1098,6 +1141,7 @@ git commit -m "feat(launch): 端口规划区分派生口与独立口，配置回
 >     self.lookup_comp.key = "nacos"                  # 只用于本地夹具：登记 key 与 spec 对齐
 >     self.lookup_comp.launch = self.lookup_spec
 >     self.comps["nacos"] = self.lookup_comp
+>     self.comp_nacos = self.lookup_comp              # 用例里写的是 self.comp_nacos
 >
 >     def nacos_rec(self, ports=(8848, 9848, 9849)):
 >         """launcher 角色的三口簇登记：登记的 PID 是包装脚本，不是服务进程。"""
@@ -1113,9 +1157,44 @@ git commit -m "feat(launch): 端口规划区分派生口与独立口，配置回
 >                               ports=ports)
 > ```
 >
-> 上面用例里的 `self.comp_nacos` / `self.comp` 分别就是 `self.lookup_comp` 与 `StopFlow` 已有的
-> `self.comp`；`self.comp` 那两处 `status()` 用例走的是显式传入的 records，不落盘，因此不受
-> 新登记的 key 影响。**不要改动计划一已有断言**（Jenkins 的 `pid` 路线必须仍然原样绿）。
+> `NoExecInvariant` 是**另一个**测试类，拿不到上面这些夹具，照它自己的风格补同样的两样东西：
+> `nacos_rec()`（原样复制）+ 一个本地 comps：
+>
+> ```python
+>     def nacos_comps(self):
+>         """本任务跑在 Task 8 登记 nacos 之前，`build_components()` 里没有 nacos，
+>         所以照 StopFlow 的办法用 jenkins 的组件本地造一个 key=nacos、launch=port_lookup 的描述符。"""
+>         comps = {c.key: c for c in main.build_components()}
+>         comp = comps["jenkins"]
+>         comp.key = "nacos"
+>         comp.launch = main.LaunchSpec(
+>             commands={os_name: ["{home}/bin/startup.cmd"]
+>                       for os_name in ("Windows", "Linux", "Darwin")},
+>             stop_kind="port_lookup", main_port=8848, port_offsets=(1000, 1001))
+>         comps["nacos"] = comp
+>         return comps
+> ```
+>
+> 把两条新用例里的 `comps = {c.key: c for c in main.build_components()}` 换成
+> `comps = self.nacos_comps()` —— `adopt()` / `reconcile()` 只认 comps 里存在的 key，
+> 本任务时点 `build_components()` 里根本没有 nacos，不换就是 `KeyError`（比"测不到"更糟）。
+>
+> 上面用例里出现的 `self.comp` 就是 `StopFlow` 已有的 `self.comp`（jenkins）；两条 status 用例走的是
+> 显式传入的 records，不落盘，因此不受新登记的 key 影响。**不要改动计划一已有断言**
+> （Jenkins 的 `pid` 路线必须仍然原样绿）。
+>
+> **还有一件必须做对的事：`force_stop("nacos", …)` / `stop(self.comp_nacos, …)` 这些用例动手前，
+> `running.json` 里得先有那条 nacos 登记。**`StopFlow.setUp` 只存了 jenkins，而
+> 既有 `test_force_stop_clears_record_when_port_releases` 断言的是"停完 `load_running_map() == {}`"，
+> 所以**不许**把 nacos 记录塞进 `setUp`（那会把既有断言弄红）。每条新用例自己在开头写：
+>
+> ```python
+>         main.save_running_map({"nacos": self.nacos_rec()})
+> ```
+>
+> （`test_port_lookup_role_asks_before_any_kill` 里 `mgr.stop(self.comp_nacos, self.comps, …)` 同理，
+> 它读的就是这条登记。`NoExecInvariant` 的两条新用例本来就自己 `save_running_map`，照旧。）
+
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1163,7 +1242,11 @@ Expected: FAIL，`ServiceManager.__init__() got unexpected keyword 'lookup_pids'
                 return StopResult(True, reason=f"{comp.display_name} 已经不在监听 "
                                               f"{'/'.join(str(p) for p in ports)}，登记已清。")
             if spec.stop_kind != "port_lookup":
-                return StopResult(False, need_force=True, reason=(... 计划一原文 ...))
+                return StopResult(False, need_force=True,
+                                  reason=(f"{comp.display_name}（端口 {rec.port}）在 Windows 上只能直接终止进程，"
+                                          f"这会打断正在进行的任务、可能丢未落盘的配置。要强制结束吗？"))
+                                          # ↑ 计划一 main.py 里这段 Windows 文案逐字保留，一个字都别改；
+                                          #   StopFlow 的既有断言（"强制" in reason）钉的就是它。
             return StopResult(False, need_force=True,
                               reason=(f"{comp.display_name}（端口 "
                                       f"{'/'.join(str(p) for p in ports)}）没有可用的优雅停止手段："
@@ -1196,6 +1279,15 @@ Expected: FAIL，`ServiceManager.__init__() got unexpected keyword 'lookup_pids'
                         os.kill(pid, 9)
                     except OSError:
                         pass
+            elif rec.pid_role != "server":
+                # 端口反查没给出"唯一、且不是我们自己"的对象 → 一个都不许杀。
+                # 这里必须当场把"为什么没动手"说清并返回：只往下走复查循环，
+                # 用户拿到的就是"端口还在听，可能是别人占着"——把我们的不作为说成别人的错。
+                return StopResult(False, need_force=True,
+                                  reason=(f"没有找到可以安全强制结束的进程：端口 "
+                                          f"{'/'.join(str(p) for p in still)} 仍在听，"
+                                          f"但端口反查没有给出唯一归属（或给出的就是我们自己）。"
+                                          f"已放弃强制结束，登记保留，不动任何进程。"))
 ```
 
 并把复查从"单口"改成"整簇"（现有有界轮次保留）：
@@ -1214,7 +1306,7 @@ Expected: FAIL，`ServiceManager.__init__() got unexpected keyword 'lookup_pids'
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 114 tests ... OK`；计划一的 `StopFlow` 既有用例仍全绿（Jenkins 走 `pid`，不受新分支影响）
+Expected: `Ran 115 tests ... OK`；计划一的 `StopFlow` 既有用例仍全绿（Jenkins 走 `pid`，不受新分支影响）
 
 - [ ] **Step 5: 提交（实现者自己执行；不 push、不 merge、不打 tag）**
 
@@ -1326,7 +1418,7 @@ Expected: FAIL，`KeyError: 'nacos'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 117 tests ... OK`；`StatusProbe`/`ZombieMatrix`/`StartFlow` 等既有用例不得被改动来迁就新组件
+Expected: `Ran 118 tests ... OK`；`ZombieMatrix`/`StartFlow`/`CardLaunchUi` 等既有用例不得被改动来迁就新组件
 
 - [ ] **Step 5: 提交（实现者自己执行；不 push、不 merge、不打 tag）**
 
@@ -1486,7 +1578,7 @@ Jenkins 也要有 `data_note`（否则新用例断言的 `jenkins-data` 无处�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 123 tests ... OK`
+Expected: `Ran 124 tests ... OK`
 
 - [ ] **Step 5: 提交（实现者自己执行；不 push、不 merge、不打 tag）**
 
@@ -1514,6 +1606,9 @@ git commit -m "feat(launch): ActiveMQ 接入启动登记，卸载确认按组件
 的既有处理，改动要保住它。
 
 - [ ] **Step 2: 把三层判据扩成四条，并按簇复查**
+
+四行的编号改成 `[1/4]`…`[4/4]`（1 启动、2 停止前/后按簇体检、3 强制确认、4 登记残留）。
+**中间的 `if not stop.ok and stop.need_force:` 那段"脚本替用户点是"的原样保留**，只是它下面加一次按簇复查：
 
 ```python
     def cluster_state(ports, label):
@@ -1545,12 +1640,12 @@ git commit -m "feat(launch): ActiveMQ 接入启动登记，卸载确认按组件
     print("\n--- 计划二待验证项（只有 --yes 真跑才有结论）---")
     print("A1 整簇端口是否随停止一起释放：", "PASS" if not live_after else "FAIL")
     print("A2 实际监听集合是否等于登记的簇：", list(live_before or []), "登记为", list(rec_ports))
-    print("A3 控制台路径：", console_url, "可达=", got)
+    print("A3 控制台路径：", rec.console_url, "可达=", got)
     print("A4 Nacos --server.port 是否压过 application.properties：",
           "若主口实测端口 == 我们指定的端口 → PASS（否则 Nacos 要改走 conf_copy，回补设计）")
     print("A5 ActiveMQ console 是否前台不弹独立窗："
           "（人工确认任务管理器里 java.exe 数量与窗口）")
-    print("A6 -Djetty.http.port 能否压过 conf：本期未尝试，保持"未验证"")
+    print("A6 -Djetty.http.port 能否压过 conf：本期未尝试，保持「未验证」")
     print("A7 结论请回写两份 spec：计划一 §2.4 第 2、4 项；计划二 §8.2")
 ```
 
@@ -1589,14 +1684,13 @@ git commit -m "test(drill): 启动演练判据扩到端口簇，并记录计划�
 - `RunRecord` 新增字段必须带默认值（Task 3 兑现，并留了旧格式迁移用例）；
 - 端口簇/独立口的表达（Task 1、6 的 `port_offsets` + `extra_ports`）。
 
-**没做、必须原样留在待办里的**：
-- 畸形外来记录被 `save_running_map` 抹掉（本期只处理了"旧格式缺字段"，没处理"外来记录形状不对"）；
+**没做、必须原样留在待办里的**（本期一条都没兑现，措辞别改成"已做"）：
+- 畸形外来记录被 `save_running_map` 抹掉 —— 本期只处理了"旧格式缺字段"，没处理"外来记录形状不对"；
 - `force_stop` 在 Windows 发 9 而非 15（同 API，仅退出码误导）；
-- 跨进程 advisory lock —— 并把"现在三个组件、Nacos 还多两个 gRPC 口，GUI 与演练脚本并跑更容易撞"写进去；
-- 卡片销毁等待在跑 worker、`_COMPONENTS_CACHE` 不失效、`launch_label` 无 QSS、测试里 `"8080"` 字面量泛化。
-- `force_stop` 在 Windows 发 9 而非 15 → 本期仍不改（同 API，仅退出码误导），保留待办；
-- 跨进程 advisory lock → 本期仍不做，保留待办，并把"Nacos + ActiveMQ + Jenkins 三口并跑时更容易撞"写进去；
-- 卡片销毁等待 worker、`_COMPONENTS_CACHE` 不失效、`launch_label` 样式 → 保留。
+- 跨进程 advisory lock —— 补一句"现在三个组件、Nacos 还多两个 gRPC 口，GUI 与演练脚本并跑更容易撞"；
+- 卡片销毁时等待在跑的 worker、`_COMPONENTS_CACHE` 不失效、`launch_label` 无 QSS、测试里 `"8080"` 字面量泛化。
+
+（上面这份就是 R5.2 待办的全集，不要在同一段里再列第二遍——重复清单会让人以为有两批待办。）
 新增 R5.3 第 8、9 条：
 
 ```markdown
@@ -1647,7 +1741,7 @@ git commit -m "docs: R5 兑现条目与两条新硬约束、CODE_WIKI/README 同
 
 1. Windows 上 ActiveMQ、Nacos 各完成一次真机演练（§8.2 A1–A7 有结论并回写两份 spec）；
    在此之前，文档与文案一律保持"已实现 / 离线护栏守护 / 真机待用户在场验证"三层，**不得写成已端到端验证**。
-2. 离线：`bt_launch_tests.py` 全绿（约 123 用例，按实际数出来写进文档），四处变异自检各自红过。
+2. 离线：`bt_launch_tests.py` 全绿（约 124 用例，按实际数出来写进文档），四处变异自检各自红过。
 3. 原 9 套件无回归。
 4. 演练干跑判据通过：`--launch nacos|activemq|jenkins` 只打印将做什么、退出 0、无新进程、无新目录、无 `running.json`。
 5. 全程未修改任何厂商官方文件（Task 6/9 的"官方文件一个字节不动"用例是这条的证据）。
