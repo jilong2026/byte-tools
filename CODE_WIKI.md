@@ -1454,7 +1454,7 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 ### 10.11 一键启动：状态检测与找回绝不执行启动脚本
 
 - 10.10 的"探测阶段绝不执行启动脚本"不变量，被一键启动扩成：**状态检测与找回（`status` / `adopt` / `reconcile` / `_adopt_running`）也绝不拉起进程**，只允许 `socket` 连端口 + `urllib` 取健康路径。唯一允许 `subprocess.Popen` 的地方是显式的 `start()` 启动动作。`bt_launch_tests.py` 的 `NoExecInvariant` 把 `Popen` / `_probe_version` 桩成"一调用就抛"来钉死这条
-- **端口是真相、PID 只是提示**：`running.json` 记录的 `port` 决定是否"运行中"；`pid_role ∈ {server, launcher, none}`，只有 `server` 且 PID 为正才允许终止，计划二的 Nacos/ActiveMQ（脚本自我后台化、PID 不可信）必须走正规 shutdown 脚本
+- **端口是真相、PID 只是提示**：`running.json` 记录的 `port` 决定是否"运行中"；`pid_role ∈ {server, launcher, none}`，只有 `server` 且 PID 为正才允许终止，计划二的 Nacos/ActiveMQ（脚本自我后台化、PID 不可信）不走厂商 shutdown 脚本，而是 `stop_kind="port_lookup"` 的端口反查——Nacos 的 `shutdown.cmd` 按进程名 `taskkill /F` 会误伤本机其它同名实例，ActiveMQ 的 `stop` 经 JAAS/JMX 且受 conf 副本影响；反查只允许出现在 `stop` / `force_stop` 路径，动手前必须过三重闸（有我们的登记 + 不是我们自己 + 用户已确认强制结束）
 - **停不下来只问人**：Windows 上 `os.kill` 任何信号都是 `TerminateProcess`，所以 `stop()` 在 Windows 绝不动手、直接 `need_force` 请示；`force_stop` 也只在端口确认释放后才清登记
 - **真机验证仍欠**：本期 Windows `--launch jenkins --yes` 演练未执行（本机无 JDK/Jenkins），spec §2.4 第 3、5 项无结论、`min_java_major` 保持 `None`；`launch_gate` 因此只判"有没有 JDK"。macOS/Linux 分支代码写完但一律标为未验证
 - 详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R5 与设计文档 [docs/superpowers/specs/2026-10-05-one-click-launch-design.md](./docs/superpowers/specs/2026-10-05-one-click-launch-design.md)
