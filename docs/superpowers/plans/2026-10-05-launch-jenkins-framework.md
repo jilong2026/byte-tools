@@ -2012,6 +2012,17 @@ class MainWindowAdopt(unittest.TestCase):
         self.assertEqual(win._cancel_launch_workers(), 2)
         self.assertEqual(done, ["cancel", "cancel", ("wait", 2000), ("wait", 2000)],
                          "必须先全部 cancel 再 wait，否则第二个 worker 要白等第一个的超时")
+
+    def test_adopt_runs_at_the_entry_point_not_in_the_constructor(self):
+        """接线位置的守护：`bt_component_category_tests.py:90` 与 `bt_multiversion_tests.py:820`
+        会直接构造真 MainWindow（只停掉联网抓版本）。而 `_adopt_running` 要读并写用户的
+        `running.json`、还要对真实端口发探测 —— 挂进 `__init__` 就是让两个不相干的单元测试
+        去改用户机器上的运行登记。Task 4 的 NoExecInvariant 已经漏写过一次（6a80c84 才收掉）。"""
+        import inspect
+        self.assertIn("_adopt_running", inspect.getsource(main.main),
+                      "生产入口没接认清运行状态的步骤")
+        self.assertNotIn("_adopt_running", inspect.getsource(main.MainWindow.__init__),
+                         "__init__ 里做这件事会被所有构造窗口的测试继承")
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2052,12 +2063,26 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
         super().closeEvent(event)
 ```
 
-在 `MainWindow.__init__` 建完卡片之后调用一次 `self._adopt_running()`，并把每个卡口的 `_refresh_launch_state()` 接进去（卡片在 `__init__` 末尾自己会调，`_detect_status` 已含）。
+接线**不要放在 `MainWindow.__init__`**，放在生产入口 `main()` 里 `win = MainWindow()` 之后、`win.show()` 之前
+（现 `main.py:7643`）：
+
+```python
+    win = MainWindow()
+    win._adopt_running()      # 认清本机在跑什么；不放在 __init__，理由见下
+    win.show()
+```
+
+理由不是风格：`_adopt_running()` 会**读并写** `~/.env-tools/running.json`，还会对真实端口发 socket 探测。
+`bt_component_category_tests.py:90` 和 `bt_multiversion_tests.py:820` 两套既有测试是直接
+`main.MainWindow()` 构造真窗口的（只停了联网抓版本）—— 挂在 `__init__` 上，就等于让两个不相干的
+单元测试去改用户机器上的运行登记。本计划的 Task 4 已经踩过一次同类的盘（`NoExecInvariant` 写出过
+用户真实的 `running.json`，提交 `6a80c84` 才收掉），不要再踩第二次。
+因此本任务补一条静态守护用例钉住这个接线位置。
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 77 tests ... OK`
+Expected: `Ran 78 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
