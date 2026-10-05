@@ -567,6 +567,20 @@ class StopFlow(unittest.TestCase):
         self.assertEqual(killed, [], "Windows 上停止第一步不许杀进程")
         self.assertIn("jenkins", main.load_running_map())
 
+    def test_windows_stop_cleans_stale_record_without_scaring(self):
+        """登记还在、端口其实早空了（进程自己死掉过）：Windows 路线要按"已经停了"处理，
+        不许回一句"这会打断正在进行的任务，要强制结束吗" —— 端口才是真相（spec §4）。"""
+        main.CURRENT_OS = "Windows"
+        killed = []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: killed.append(rec.pid))
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(killed, [], "没在监听就不该走到强杀")
+        self.assertEqual(main.load_running_map(), {})
+
 
 class TerminateByPidGuard(unittest.TestCase):
     """默认收尸器：只杀我们登记为 server 的 PID，别的一律不动。"""

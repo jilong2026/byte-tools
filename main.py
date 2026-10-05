@@ -4760,9 +4760,8 @@ class ServiceManager:
             return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
         spec = comp.launch
         if spec.stop_kind == "shutdown_command" and spec.shutdown_commands.get(CURRENT_OS):
-            # 占位符契约（本期不可达分支，计划二才接线）：只认这三个键，
-            # 和 RunRecord 有的字段一一对应；{java}/{war}/{data_dir} 之类要用的话，
-            # 得先在这里补上来源，否则 format 直接 KeyError。
+            # 占位符契约（本期不可达分支，计划二才接线）：这里只喂得出处在 RunRecord 上的三个键，
+            # {java}/{war} 这类要另外补来源，否则 format 直接 KeyError。
             argv = [t.format(port=rec.port, home=rec.home, data_dir=rec.data_dir)
                     for t in spec.shutdown_commands[CURRENT_OS]]
             try:
@@ -4771,6 +4770,13 @@ class ServiceManager:
             except (OSError, subprocess.TimeoutExpired):
                 pass
         elif CURRENT_OS == "Windows":
+            # 端口是真相：进程早就自己没了，就别拿"会打断任务"去吓用户，清登记算它停好了。
+            if not self._is_listening(rec.port):
+                records = load_running_map()
+                records.pop(comp.key, None)
+                save_running_map(records)
+                return StopResult(True,
+                                  reason=f"{comp.display_name} 已经不在监听端口 {rec.port}，登记已清。")
             # Windows 上 os.kill 的任何信号值都是 TerminateProcess —— 那就是强杀本身，
             # 没有"先礼貌停一下"这一步。spec §5 定的是"超时只询问、不自动强杀"，
             # 所以这里绝不动手，直接把决定交给用户（确认后走 force_stop）。
