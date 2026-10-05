@@ -1043,5 +1043,115 @@ class CardLaunchUi(unittest.TestCase):
         self.assertFalse(self.card.btn_start.isEnabled())
 
 
+class MainWindowAdopt(unittest.TestCase):
+    """这一层的用例一律不构造真 MainWindow：`MainWindow.__init__` 会建 26 张卡片、
+    起版本探测线程，把宿主机网络和 Qt 生命周期都拖进来。用 `__new__` 拿到一个未初始化的实例、
+    只补这个方法真正用到的成员，才是本任务这一层的可测形状。
+
+    控制器已在 offscreen 下实测过这个形状：`MainWindow.__new__` 出来的对象可以正常赋 Python 属性
+    （`_append_log`、`cards`、甚至**遮蔽** `findChildren`），`current_components()` 这种 staticmethod
+    也能通过它调用；但凡碰真的 Qt 方法（如未遮蔽的 `findChildren`）就抛
+    `RuntimeError: '__init__' method of object's base class not called`。
+    所以 `_cancel_launch_workers` 用注入的 findChildren 测；`closeEvent` 本身测不了（要调 super），
+    它只有"调一次 _cancel_launch_workers 再交给 Qt"这一行，如实说明即可，不要为了测它去构造真窗口。"""
+
+    def bare_win(self, logs):
+        win = main.MainWindow.__new__(main.MainWindow)
+        win._append_log = lambda level, msg: logs.append((level, msg))
+        win.cards = []          # _adopt_running 收尾要遍历卡片重读实况；没卡片也得有个空表
+        return win
+
+    def setUp(self):
+        self.calls = []
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig_file = main.RUNNING_FILE
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
+        self._orig_mgr = main.SERVICE_MANAGER
+        self.addCleanup(setattr, main, "SERVICE_MANAGER", self._orig_mgr)
+        # 找回路径"绝不执行进程"要有牙齿：任何 Popen 都要留下证据
+        self._orig_popen = main.subprocess.Popen
+        main.subprocess.Popen = lambda *a, **k: self.calls.append(a)
+        self.addCleanup(setattr, main.subprocess, "Popen", self._orig_popen)
+
+    def test_current_components_covers_whitelist(self):
+        got = main.MainWindow.current_components()
+        self.assertTrue(main.LAUNCH_KEYS.issubset(set(got)), "启动白名单组件必须能在卡片间互相看见（needs 判定要用）")
+
+    def test_adopt_running_drops_zombies_without_touching_processes(self):
+        """僵尸（登记在、端口没在听）必须被清掉，而且整个过程一次进程都不许起。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="u", pid=1, pid_role="server", started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": False,
+            http_ok=lambda u, timeout=2.0: False, process_alive=lambda pid: True)
+        logs = []
+        self.bare_win(logs)._adopt_running()
+        self.assertEqual(main.load_running_map(), {})
+        self.assertEqual(self.calls, [], "找回过程拉起了进程")
+        self.assertEqual(logs, [], '僵尸不该被报成"检测到正在运行"')
+
+    def test_adopt_running_reports_what_it_found_running(self):
+        """开工具时如果 Jenkins 还在跑，日志要认出它 —— 这是"关掉了再打开也认得"那条判据。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8123,
+            console_url="http://127.0.0.1:8123/", pid=1, pid_role="server",
+            started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": True,
+            http_ok=lambda u, timeout=2.0: True, process_alive=lambda pid: True)
+        logs = []
+        self.bare_win(logs)._adopt_running()
+        self.assertEqual([m for _, m in logs], ["检测到 jenkins 正在运行（端口 8123）"])
+        self.assertIn("jenkins", main.load_running_map(), "在跑的登记不许被清掉")
+
+    def test_adopt_running_re_syncs_every_card_after_cleaning(self):
+        """_adopt_running 会把僵尸登记删掉，而卡片可能在它跑之前就已经把"残留登记"画出来了。
+        不清一遍卡片就会在窗口里留一句假警告，直到用户碰别的什么东西才刷新。"""
+        refreshed = []
+
+        class FakeCard:
+            def _refresh_launch_state(self):
+                refreshed.append(True)
+
+        main.SERVICE_MANAGER = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": False,
+            http_ok=lambda u, timeout=2.0: False, process_alive=lambda pid: False)
+        win = self.bare_win([])
+        win.cards = [FakeCard(), FakeCard(), FakeCard()]
+        win._adopt_running()
+        self.assertEqual(len(refreshed), 3, "认清本机之后每张卡片都要重读一次实况")
+
+    def test_close_cancels_then_waits_every_in_flight_worker(self):
+        """Task 9 的 cancel 落点：关窗口时先给每个在跑的 worker 一次体面退出，
+        不是把线程连同 QThread 一起扔了（cancel 只停止"等端口"，不动别人的进程）。"""
+        done = []
+
+        class FakeWorker:
+            def cancel(self):
+                done.append("cancel")
+            def wait(self, ms):
+                done.append(("wait", ms))
+
+        win = self.bare_win([])
+        win.findChildren = lambda cls: [FakeWorker(), FakeWorker()]
+        self.assertEqual(win._cancel_launch_workers(), 2)
+        self.assertEqual(done, ["cancel", "cancel", ("wait", 2000), ("wait", 2000)],
+                         "必须先全部 cancel 再 wait，否则第二个 worker 要白等第一个的超时")
+
+    def test_adopt_runs_at_the_entry_point_not_in_the_constructor(self):
+        """接线位置的守护：`bt_component_category_tests.py:90` 与 `bt_multiversion_tests.py:820`
+        会直接构造真 MainWindow（只停掉联网抓版本）。而 `_adopt_running` 要读并写用户的
+        `running.json`、还要对真实端口发探测 —— 挂进 `__init__` 就是让两个不相干的单元测试
+        去改用户机器上的运行登记。Task 4 的 NoExecInvariant 已经漏写过一次（6a80c84 才收掉）。"""
+        import inspect
+        self.assertIn("_adopt_running", inspect.getsource(main.main),
+                      "生产入口没接认清运行状态的步骤")
+        self.assertNotIn("_adopt_running", inspect.getsource(main.MainWindow.__init__),
+                         "__init__ 里做这件事会被所有构造窗口的测试继承")
+
+
 if __name__ == "__main__":
     unittest.main()

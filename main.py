@@ -7605,7 +7605,30 @@ class MainWindow(QMainWindow):
             pass
 
     # ------------------------------------------------------------------
+    def _adopt_running(self) -> None:
+        """启动后一次性的"认清本机在跑什么"。只读 + 清僵尸，绝不拉起进程。"""
+        states = SERVICE_MANAGER.reconcile(self.current_components())
+        for key, st in states.items():
+            if st.state == "running":
+                self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
+        # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
+        # 否则窗口里会留一句已经没有依据的"残留登记"。
+        for card in self.cards:
+            card._refresh_launch_state()
+
+    def _cancel_launch_workers(self) -> int:
+        """关窗口前让在跑的启动/停止线程体面收尾：只取消"还在等端口"，不动被管理的进程。
+        先全部 cancel 再统一 wait —— 反过来写，后一个 worker 要白等前一个的超时。"""
+        workers = self.findChildren(LaunchWorker)
+        for w in workers:
+            w.cancel()
+        for w in workers:
+            w.wait(2000)
+        return len(workers)
+
     def closeEvent(self, event) -> None:
+        # 关窗前先让在跑的 LaunchWorker 体面收尾（cancel+wait 的顺序理由见 _cancel_launch_workers）。
+        self._cancel_launch_workers()
         # 先立旗：不再派发抓取、不再回写界面，并让在跑的抓取线程尽快从重试边界返回。
         # QThread 在运行时被析构会直接 abort 进程（Windows 退出码 0xC0000409），
         # 而版本抓取是启动即触发的，所以关窗必须等这些线程收尾。
@@ -7641,6 +7664,7 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     ensure_dir(CONFIG_DIR)
     win = MainWindow()
+    win._adopt_running()      # 认清本机在跑什么；不放 __init__——它会读写用户 running.json、探测真端口，构造窗口的测试会跟着遭殃
     win.show()
     return app.exec()
 
