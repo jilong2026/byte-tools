@@ -163,3 +163,8 @@ tmp_*.py
 # 本地图标/截图资源不入库的临时输出（assets/ 内的正式资源**要**入库）
 assets/~*
 assets/tmp_*
+
+# 真机演练/测速产物
+bt_source_bench.json
+bt_jdk_files.json
+bt_mv_results.txt
