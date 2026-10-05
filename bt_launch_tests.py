@@ -143,6 +143,47 @@ class RunningMap(unittest.TestCase):
         main.RUNNING_FILE.write_text(json.dumps(data), encoding="utf-8")
         self.assertEqual(main.load_running_map(), {})
 
+    def test_old_format_record_without_ports_field_still_loads(self):
+        """计划一写下的 running.json 根本没有 ports 字段。
+        若新字段没默认值，RunRecord(**item) 会 TypeError → 整条被丢弃 →
+        用户重开工具时正在跑的 Jenkins 直接认不出来。这条用例就是拦这个的。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="2.568.3", home="/h", data_dir="/d", port=8080,
+            console_url="http://127.0.0.1:8080/", pid=4321, pid_role="server",
+            started_at=1.0, launcher_cmd=["java"], ports=())})
+        raw = json.loads(main.RUNNING_FILE.read_text(encoding="utf-8"))
+        raw["jenkins"].pop("ports")                      # 回到计划一的磁盘形状
+        main.RUNNING_FILE.write_text(json.dumps(raw), encoding="utf-8")
+
+        rec = main.load_running_map()["jenkins"]
+        self.assertEqual(rec.ports, (8080,), "旧记录要从 port 归一，而不是被丢掉")
+
+    def test_ports_round_trip_is_a_tuple_of_ints(self):
+        """JSON 把 tuple 写成 list、把数字原样存；手改成字符串要能归一，改不动才丢。"""
+        main.save_running_map({"nacos": main.RunRecord(
+            key="nacos", version="2.3.2", home="/h", data_dir="/d", port=8848,
+            console_url="http://127.0.0.1:8848/", pid=7, pid_role="launcher",
+            started_at=1.0, launcher_cmd=["startup.cmd"], ports=(8848, 9848, 9849))})
+        got = main.load_running_map()["nacos"]
+        self.assertIsInstance(got.ports, tuple)
+        self.assertEqual(got.ports, (8848, 9848, 9849))
+
+    def test_scalar_ports_and_garbage_entries_are_not_fatal(self):
+        # ports 被手改成标量 8848 时按单口理解；改成 "http" 这类转不动的才丢整条
+        # （与既有坏 pid_role / port="http" 的政策一致）。
+        main.save_running_map({"nacos": main.RunRecord(
+            key="nacos", version="x", home="/h", data_dir="/d", port=8848,
+            console_url="u", pid=7, pid_role="launcher", started_at=1.0,
+            launcher_cmd=[], ports=(8848,))})
+        raw = json.loads(main.RUNNING_FILE.read_text(encoding="utf-8"))
+        raw["nacos"]["ports"] = 8848
+        main.RUNNING_FILE.write_text(json.dumps(raw), encoding="utf-8")
+        self.assertEqual(main.load_running_map()["nacos"].ports, (8848,))
+
+        raw["nacos"]["ports"] = ["http"]
+        main.RUNNING_FILE.write_text(json.dumps(raw), encoding="utf-8")
+        self.assertEqual(main.load_running_map(), {}, "转不动的 ports 与坏 port 同一政策")
+
 
 class PortCluster(unittest.TestCase):
     def probe(self, taken):

@@ -4475,6 +4475,11 @@ class RunRecord:
     pid_role: str            # "server" | "launcher" | "none"
     started_at: float
     launcher_cmd: List[str]
+    # 端口簇：主口 ∪ 派生口 ∪ 独立口。"运行中"与"停干净"都按这一组判，
+    # 因为 Nacos 主口掉了而 gRPC 还在听时，按单口判会清登记、留下两个没人认领的监听口。
+    # 默认 () 只表示"计划一写的旧文件里没这个字段"，加载侧会归一成 (port,)——
+    # 默认值不是可选性，它决定旧记录会不会被整批静默丢弃。
+    ports: tuple = ()
 
     def to_dict(self) -> Dict[str, object]:
         return dict(self.__dict__)
@@ -4512,6 +4517,15 @@ def load_running_map() -> Dict[str, RunRecord]:
             rec.started_at = float(rec.started_at)
         except (TypeError, ValueError):
             continue
+        # ports 是计划二新加的字段。旧文件没有它 → 从 port 归一，绝不因为"缺字段"丢记录。
+        raw_ports = item.get("ports", ())
+        if isinstance(raw_ports, (int, str)):          # 手改成标量时按单口理解
+            raw_ports = (raw_ports,)
+        try:
+            ports = tuple(int(p) for p in raw_ports)
+        except (TypeError, ValueError):
+            continue                                    # 转不动的按既有政策丢整条
+        rec.ports = ports or (rec.port,)
         out[rec.key] = rec
     return out
 
