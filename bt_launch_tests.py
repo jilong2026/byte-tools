@@ -840,8 +840,16 @@ class CardLaunchUi(unittest.TestCase):
         real = main.LaunchWorker
 
         class SpyWorker(main.LaunchWorker):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.delete_later_calls = 0
+
             def start(self):
                 created.append(self)
+
+            def deleteLater(self):
+                # 只计数不真删：断言"按身份收尾"到底动的是哪条 worker。
+                self.delete_later_calls += 1
 
         main.LaunchWorker = SpyWorker
         self.addCleanup(setattr, main, "LaunchWorker", real)
@@ -936,6 +944,83 @@ class CardLaunchUi(unittest.TestCase):
         self.assertEqual([w.action for w in created], ["start", "stop"])
         created[1].stopped.emit("jenkins")
         self.assertIn("已停止", spoken(), "stopped 掉了卡片不会报告结果")
+
+    # -- 以下用例是 fix round 1 补的：QThread 生命周期的两条删除窗口、
+    #    _sync_action_buttons 的运行中锁、僵尸登记的可见性。
+
+    def test_old_worker_finished_does_not_clear_the_force_stop_worker(self):
+        """窗口二：need_force 从 worker 线程里发出，_on_need_force 起跑第二条
+        force_stop 时老 worker 还没走完；它随后的 finished 会触发共用的
+        _on_launch_worker_done —— 那里无条件清属性就把新 worker 的引用抹掉了，
+        强杀真正在跑时没人持有它。替身 worker 平时不发 finished，所以这条路
+        此前零覆盖，必须手搓一次真发射。"""
+        self._mark_running()
+        created = self._stub_workers()
+        self._stub_dialogs([main.QMessageBox.Yes])
+
+        self.card.on_stop_clicked()          # 第一条：stop worker
+        old = created[0]
+        old.need_force.emit("jenkins", "端口 8080 仍在听，要强制结束吗？")
+        self.assertEqual([w.action for w in created], ["stop", "force_stop"])
+        new = created[1]
+        self.assertIs(self.card.launch_worker, new)
+
+        old.finished.emit()                  # 老 worker 收尾，共享同一个 done 槽
+        self.assertIs(self.card.launch_worker, new,
+                      "老 worker 的 finished 不许清掉新 worker 的引用")
+        self.assertEqual(new.delete_later_calls, 0,
+                         "新 worker 还在跑，谁都不许把它 deleteLater")
+        self.assertEqual(old.delete_later_calls, 1,
+                         "老 worker finished 后应 deleteLater 收回，不留孤儿")
+
+    def test_every_launch_worker_is_parented_to_the_card(self):
+        """窗口一：槽跑到 self.launch_worker = 新 worker 那一步时，老 worker 的
+        run() 可能还没返回；丢掉它最后一个 Python 引用，PySide 可以把还在跑的
+        QThread 就地销毁（Destroyed while thread is still running → abort）。
+        parent=self 让引用归 Qt 对象树持有，三条 worker 都要挂上。"""
+        self._mark_running()
+        created = self._stub_workers()
+        self._stub_dialogs([main.QMessageBox.Yes, main.QMessageBox.Yes])
+
+        self.card.on_stop_clicked()
+        self.assertIs(created[0].parent(), self.card, "stop worker 必须挂在卡片对象树下")
+
+        created[0].need_force.emit("jenkins", "端口 8080 仍在听，要强制结束吗？")
+        self.assertIs(created[1].parent(), self.card, "force_stop worker 必须挂在卡片对象树下")
+
+        self.card.on_start_clicked()
+        self.assertEqual([w.action for w in created], ["stop", "force_stop", "start"])
+        self.assertIs(created[2].parent(), self.card, "start worker 必须挂在卡片对象树下")
+
+    def test_sync_action_buttons_keeps_uninstall_locked_while_running(self):
+        """切换版本下拉框会走 _sync_action_buttons：它无条件重新启用卸载，
+        运行中切一下下拉框，按钮就和"● 运行中"的文案在同一张卡上自相矛盾。"""
+        self._mark_running()
+        self.card._refresh_launch_state()
+        self.assertFalse(self.card.btn_uninstall.isEnabled())
+        # Jenkins 非多版本，_mv_buttons_ready 平时恒 False，走不到点亮那一步；
+        # 这里造出"选中版本已安装"的态把点亮分支激活，否则用例咬不到要防的东西。
+        self.card._mv_buttons_ready = True
+        self.card._mv_installed_set = {self.card._current_version().version}
+
+        self.card._sync_action_buttons()
+        self.assertFalse(self.card.btn_uninstall.isEnabled(),
+                         "运行中（被启动锁过）时按钮同步不许重新点亮卸载")
+
+    def test_zombie_record_shows_residual_and_start_stays_clickable(self):
+        """"上次崩了、登记还留着、端口没在听"不该和"干净地停过"长得一模一样：
+        label 要说清残留，按钮仍按未运行摆（start() 会覆盖旧登记）。"""
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="http://127.0.0.1:8080/", pid=1, pid_role="server",
+            started_at=0.0, launcher_cmd=[])})
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": False
+        self.card._refresh_launch_state()
+        self.assertIn("残留", self.card.launch_label.text())
+        self.assertIn("8080", self.card.launch_label.text())
+        self.assertTrue(self.card.btn_start.isEnabled())
+        self.assertFalse(self.card.btn_console.isEnabled())
+        self.assertFalse(self.card.btn_stop.isEnabled())
 
 
 if __name__ == "__main__":

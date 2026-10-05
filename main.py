@@ -5611,7 +5611,13 @@ class ComponentCard(QFrame):
             self.btn_uninstall.setToolTip("请先停止运行中的 %s 再卸载" % self.component.display_name)
             self._uninstall_locked_by_launch = True
         else:
-            self.launch_label.setText("")
+            if st.state == "zombie":
+                # 僵尸登记要看得见：否则"上次崩了、登记还留着"和"干净地停过"长得一模一样。
+                # 按钮仍按未运行摆 —— start() 会覆盖旧登记，用户再点启动即可接管。
+                self.launch_label.setText(
+                    f"⚠ 上次运行残留登记（端口 {st.record.port} 没在听），再点启动会自动接管")
+            else:
+                self.launch_label.setText("")
             # 只解冻自己被锁过的那次：卸载按钮的可用性本来由 _detect_status /
             # _sync_action_buttons 按"选中版本装没装"判定，无条件点亮会给出
             # 一张未安装也能点卸载的卡片。
@@ -5630,8 +5636,11 @@ class ComponentCard(QFrame):
         if reply != QMessageBox.Yes:
             return
         self.btn_start.setEnabled(False)
+        # parent=self：worker 归卡片的 Qt 对象树持有，run() 还没回来时不依赖
+        # launch_worker 这一个引用吊命；结束后由 _on_launch_worker_done deleteLater 收回。
         self.launch_worker = LaunchWorker("start", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER)
+                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          parent=self)
         self.launch_worker.started_ok.connect(self._on_launch_ok)
         self.launch_worker.failed.connect(self._on_launch_failed)
         self.launch_worker.finished.connect(self._on_launch_worker_done)
@@ -5653,8 +5662,12 @@ class ComponentCard(QFrame):
                                 QMessageBox.No) != QMessageBox.Yes:
             self._log("warn", "未强制结束，进程仍在运行。")
             return
+        # need_force 是从 worker 线程里发的：这个槽跑的时候老 worker 的 run()
+        # 可能还没返回，丢掉它最后一个引用会被 PySide 就地销毁还在跑的 QThread。
+        # parent=self 把引用交给对象树持有，这条窗口才关得掉。
         self.launch_worker = LaunchWorker("force_stop", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER)
+                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          parent=self)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
         self.launch_worker.need_force.connect(self._on_need_force)
@@ -5666,13 +5679,21 @@ class ComponentCard(QFrame):
         self._refresh_launch_state()
 
     def _on_launch_worker_done(self) -> None:
-        self.launch_worker = None
+        # 按身份收尾：老 worker 的 finished 可能晚于新 worker 起跑
+        # （need_force 那条路上两条线程会短暂共存），无条件置 None 会把刚启动的
+        # force_stop worker 的引用抹掉，强杀正在跑时反而没人持有它。
+        worker = self.sender()
+        if worker is self.launch_worker:
+            self.launch_worker = None
+        if worker is not None:
+            worker.deleteLater()   # finished 之后删除是安全的：run() 已经返回
         self._refresh_launch_state()
 
     def on_stop_clicked(self) -> None:
         self.btn_stop.setEnabled(False)
         self.launch_worker = LaunchWorker("stop", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER)
+                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          parent=self)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
         # 这条线不能省：停不下来时 need_force 就是"问一次"的唯一入口，
@@ -5789,7 +5810,9 @@ class ComponentCard(QFrame):
         # 卸载按钮只对"已装的选中版本"启用：tooltip 承诺卸载选中的那个，
         # 而 selected 完全可能没装——放行会走 resolve 兜底删掉用户没选中的版本。
         if selected in self._mv_installed_set:
-            self.btn_uninstall.setEnabled(True)
+            # 运行中（被启动锁过）不许重新点亮卸载：切换版本下拉框也会走到这里，
+            # 无条件启用会让按钮和"● 运行中"的文案在同一张卡上自相矛盾。
+            self.btn_uninstall.setEnabled(not self._uninstall_locked_by_launch)
             self.btn_uninstall.setToolTip(
                 f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
                 "其他已装版本不动")
