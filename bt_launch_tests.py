@@ -2000,7 +2000,11 @@ class MainWindowAdopt(unittest.TestCase):
         self.assertEqual(logs, [], '僵尸不该被报成"检测到正在运行"')
 
     def test_adopt_running_reports_what_it_found_running(self):
-        """开工具时如果 Jenkins 还在跑，日志要认出它 —— 这是"关掉了再打开也认得"那条判据。"""
+        """开工具时如果 Jenkins 还在跑，日志要认出它 —— 这是"关掉了再打开也认得"那条判据。
+
+        同时必须把**登录凭据**一起报出来：这些服务是之前启的，
+        用户重开工具时界面上没有任何地方能看到"怎么登进去"。
+        """
         main.save_running_map({"jenkins": main.RunRecord(
             key="jenkins", version="x", home="/h", data_dir="/d", port=8123,
             console_url="http://127.0.0.1:8123/", pid=1, pid_role="server",
@@ -2010,7 +2014,13 @@ class MainWindowAdopt(unittest.TestCase):
             http_ok=lambda u, timeout=2.0: True, process_alive=lambda pid: True)
         logs = []
         self.bare_win(logs)._adopt_running()
-        self.assertEqual([m for _, m in logs], ["检测到 jenkins 正在运行（端口 8123）"])
+        msgs = [m for _, m in logs]
+        self.assertIn("检测到 jenkins 正在运行（端口 8123）", msgs)
+        joined = "\n".join(msgs)
+        self.assertIn("用户名：admin", joined,
+                      f"认出它在跑之后要顺手报出登录凭据：{msgs}")
+        self.assertIn("initialAdminPassword", joined,
+                      f"凭据要指向密码文件，用户才知道去哪儿取：{msgs}")
         self.assertIn("jenkins", main.load_running_map(), "在跑的登记不许被清掉")
 
     def test_adopt_running_re_syncs_every_card_after_cleaning(self):
@@ -2476,6 +2486,80 @@ class PortPlanning(unittest.TestCase):
             self.assertIn("OutOfMemoryError", out)
             self.assertIn("activemq.log", out)
             self.assertIn("尚未生成", main.vendor_log_tails(data, data, "nacos"))
+
+class LaunchCredentials(unittest.TestCase):
+    """启动后把登录凭据打进日志（2026-10-06 用户要求）。
+
+    动机：服务起来了，用户却登不进去，只能去翻文件/搜官方文档。
+    这些**不是秘密**——nacos/nacos、admin/admin 是出厂默认，装同一版本的人全都一样；
+    Jenkins 那个随机密码本来就在本机文件里、也只有本机能读。
+
+    三条规则要钉住：
+    ① 厂商默认值写在 `credentials_hint` 里，随登记走；
+    ② Jenkins 的密码是**首次启动随机生成**的，只能从 initialAdminPassword 读，
+       读不到就明说读不到（**不许编一个像密码的串**给用户）；
+    ③ 没有凭据的组件返回空列表，不许凭空造一段。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig_dir = main.CONFIG_DIR
+        main.CONFIG_DIR = Path(self.dir.name)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        self.comps = {c.key: c for c in main.build_components()}
+
+    def test_vendor_default_credentials_are_recorded_in_the_registry(self):
+        """两个用出厂默认密码的组件，凭据必须写在登记里（换版本时要能一眼核对）。"""
+        for key, user, pwd in (("nacos", "nacos", "nacos"),
+                                ("activemq", "admin", "admin")):
+            with self.subTest(key):
+                hint = self.comps[key].launch.credentials_hint
+                self.assertTrue(hint, f"{key} 没有登记凭据")
+                self.assertIn(user, hint, f"{key} 的凭据要写明用户名")
+                self.assertIn(pwd, hint, f"{key} 的凭据要写明密码")
+                self.assertIn("127.0.0.1", hint, f"{key} 的凭据要带控制台地址")
+
+    def test_jenkins_password_is_read_from_the_real_file(self):
+        """Jenkins 的初始密码是随机生成的，必须真读文件 —— 登记里写不了死。"""
+        secrets = Path(self.dir.name) / "jenkins-data" / "secrets"
+        secrets.mkdir(parents=True)
+        (secrets / "initialAdminPassword").write_text(
+            "  39ebcaf8baaa4a61b5fb3796914db695  \n", encoding="utf-8")
+        comp = self.comps["jenkins"]
+        lines = main.credentials_for(comp, comp.launch, 8080)
+        joined = "\n".join(lines)
+        self.assertIn("39ebcaf8baaa4a61b5fb3796914db695", joined,
+                      "启动日志里必须出现本机实际的初始密码")
+        # 末尾空白要去掉：文件里通常带换行，不 strip 的话复制出来会带不可见字符
+        self.assertNotIn("db695  \n", joined, "密码没去尾部空白")
+        self.assertIn("initialAdminPassword", joined,
+                      "还要告诉用户密码是从哪读出来的/在哪能改")
+
+    def test_missing_password_file_says_so_instead_of_inventing_one(self):
+        """读不到密码文件时要说读不到，**绝不能编一个看起来像密码的串**。
+        编一个的后果：用户拿着它去登录，失败后会以为是服务坏了。"""
+        comp = self.comps["jenkins"]
+        lines = main.credentials_for(comp, comp.launch, 8080)
+        joined = "\n".join(lines)
+        self.assertIn("读不到", joined, f"读不到文件时该明说：{lines}")
+        self.assertIn("initialAdminPassword", joined, "还要指出文件在哪")
+
+    def test_component_without_credentials_gets_nothing(self):
+        """没登记凭据的组件返回空列表 —— 不许凭空造一段出来。"""
+        spec = main.LaunchSpec(commands={o: ["x"] for o in
+                                          ("Windows", "Linux", "Darwin")},
+                               main_port=1234)
+        self.assertEqual(main.credentials_for(self.comps["maven"], spec, 1234), [])
+
+    def test_hint_port_is_rewritten_when_the_actual_port_differs(self):
+        """将来若允许换端口，凭据里的地址必须跟着改，不能让人照着不存在的端口去连。"""
+        comp = self.comps["nacos"]
+        lines = main.credentials_for(comp, comp.launch, 9999)
+        joined = "\n".join(lines)
+        self.assertIn("127.0.0.1:9999", joined, f"实际端口没进凭据文案：{lines}")
+        self.assertNotIn("127.0.0.1:8848", joined, f"还留着旧端口会让人连错地址：{lines}")
+
 
 class EvictGuard(unittest.TestCase):
     """端口被占时「结束占用者」这条能力自己的护栏。

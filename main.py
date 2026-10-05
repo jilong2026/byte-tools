@@ -3025,6 +3025,13 @@ class LaunchSpec:
     extra_env: Dict[str, str] = field(default_factory=dict)
     # 启动确认弹窗里的风险说明文本（监听地址、默认凭据一类）。
     risk_note: str = ""
+    # 启动成功后打进组件日志的**登录凭据**（2026-10-06 用户要求）。
+    # 与risk_note 分开：risk_note 是"启动前该知道的风险"，这个是"启动完要拿去登录的东西"——
+    # 两者时机不同、读者也不同，混在一起会让用户在确认框里翻找登录信息。
+    #
+    # 语义是**厂商出厂默认值**，不是本机实际值。厂商在首次启动时随机生成密码的
+    # （Jenkins 的 initialAdminPassword）不在这里写死，由 credentials_for() 读出来。
+    credentials_hint: str = ""
     # 卸载确认里必须显示的数据去处。Nacos 的 derby 在版本目录内（卸载即连带删除），
     # ActiveMQ 的数据与 conf 副本在 ~/.env-tools 下（卸载后保留）——
     # 一句"数据会被清理"含混带过就是拿计划一的承诺说假话。
@@ -3047,6 +3054,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "Jenkins 会监听本机 8080（默认对局域网开放），首次启动是解锁向导；"
             "初始管理员密码在 JENKINS_HOME 的 secrets 目录下。"
             "只想本机访问的话，把命令里的监听地址改成 127.0.0.1 再启动。"
+        ),
+        credentials_hint=(
+            "控制台：http://127.0.0.1:8080/　用户名：admin　"
+            "密码：首次启动时随机生成，写在 "
+            "~/.env-tools/jenkins-data/secrets/initialAdminPassword"
+            "（启动日志里会打印出来）。首次登录后请立刻在「管理 Jenkins → 安全」里改掉。"
         ),
         data_note=("任务、插件与配置都在 ~/.env-tools/jenkins-data 下，卸载只删版本目录、"
                    "这份数据会保留；要彻底清理请手动删除该目录。"),
@@ -3085,6 +3098,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "运行数据（derby）落在安装目录内的 data/ 下：卸载组件会连带删除它，"
             "这一点与 Jenkins 不同（Jenkins 的数据在 ~/.env-tools 下，卸载后保留）。"
         ),
+        credentials_hint=(
+            "控制台：http://127.0.0.1:8848/nacos　用户名：nacos　密码：nacos"
+            "（2.3.2 出厂默认，standalone 模式默认不开鉴权）。"
+            "改密码：Nacos 控制台右上角「修改密码」，或改 conf/application.properties 里的 "
+            "nacos.core.auth.default.token.secret（改了要重启生效）。"
+        ),
         data_note=("运行数据（derby）在安装目录内的 data/ 下，卸载会连带删除；"
                    "要保留数据请先把它复制到 ~/.env-tools 之外。"),
     ),
@@ -3119,6 +3138,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "ActiveMQ 默认监听 0.0.0.0，Web 控制台默认账号 admin/admin"
             "（conf/users.properties 实测）。首次启动会在 ~/.env-tools/activemq-data/conf"
             "建立配置副本，此后副本是权威：换版本不会自动合并厂商新增默认项。"
+        ),
+        credentials_hint=(
+            "控制台：http://127.0.0.1:8161/admin　用户名：admin　密码：admin"
+            "（6.3.2 出厂默认，见 conf/users.properties）。"
+            "改密码：编辑 ~/.env-tools/activemq-data/conf/users.properties 里的 admin 行"
+            "（注意冒号后面是**明文密码**，厂商为兼容旧版本不做哈希），改完重启生效。"
         ),
         data_note=("数据与配置副本在 ~/.env-tools/activemq-data（含 conf 副本、broker 存储与日志），"
                    "卸载只删版本目录，这份会保留；要彻底清理请手动删除该目录。"),
@@ -4928,6 +4953,55 @@ def _process_name(pid: int) -> str:
         return f"PID {pid}"
 
 
+def credentials_for(comp: Component, spec: LaunchSpec, port: int) -> List[str]:
+    """启动成功后要把登录凭据打进组件日志的行列表（可能为空）。
+
+    `spec.credentials_hint` 是**厂商出厂默认值**；这里会在能拿到真实值时把它替换/补全：
+
+    · Jenkins 的初始管理员密码是**首次启动随机生成**的，登记里写不了死。
+      真值在 `<JENKINS_HOME>/secrets/initialAdminPassword`，读出来才是有用的 ——
+      用户要的就是能直接复制去登录的那个串。
+    · 端口在 hint 里是写死的默认值，但端口被占用时我们不换端口（2026-06起不平移），
+      所以端口直接用本次实际监听的，hint 里的端口文本照样成立；万一将来又允许换端口，
+      这里用 f-string 重新拼就不会说错。
+    · 读不到就说读不到，**不许编一个看起来像密码的串**给用户。
+    """
+    if not spec.credentials_hint:
+        return []
+    # hint 里的端口是厂商默认值。当前策略是不平移（端口被占就结束占用者），
+    # 所以实际端口恒等于默认值，hint 文本可以直接用；
+    # 万一将来允许换端口，这里检测到不一致就该说清"实际是哪个"，不能让人照着
+    # 默认端口去连一个不存在的地址。
+    if port != spec.main_port:
+        lines = [spec.credentials_hint.replace(
+            f"127.0.0.1:{spec.main_port}", f"127.0.0.1:{port}")]
+    else:
+        lines = [spec.credentials_hint]
+
+    if comp.key == "jenkins":
+        # 随机密码只能从文件读。JENKINS_HOME 优先取登记里的 data_dir_env 值，
+        # 回落到 CONFIG_DIR/<key>-data（与 build_launch_plan 的算法一致）。
+        home = (plan_data_dir(comp, spec) or (CONFIG_DIR / f"{comp.key}-data"))
+        pwd_file = home / "secrets" / "initialAdminPassword"
+        try:
+            pwd = pwd_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            pwd = ""
+        if pwd:
+            lines.append(f"初始管理员密码（本机实际值）：{pwd}")
+        else:
+            lines.append(f"初始管理员密码：读不到 {pwd_file}；"
+                         f"若已完成解锁向导，用你自己设置的密码登录。")
+    return lines
+
+
+def plan_data_dir(comp: Component, spec: LaunchSpec) -> Optional[Path]:
+    """按 build_launch_plan 的同一规则算出 data_dir（拿不到就返回 None）。"""
+    if not spec.data_dir_env:
+        return None
+    return CONFIG_DIR / f"{comp.key}-data"
+
+
 def evict_port_occupant(port: int, label: str,
                         evicted: Optional[List[str]] = None) -> Optional[str]:
     """把占着 `port` 的进程结束掉。成功返回 None；失败返回一句中文原因。
@@ -6420,6 +6494,31 @@ class ComponentCard(QFrame):
         # 所以直接点名：停止按钮就在这张卡片上、按钮文字是什么。
         self._log("info", f"「停止」按钮已出现在这张卡片上（现在可用），"
                           f"再点一次可结束运行中的 {self.component.display_name}。")
+        self._log_credentials()
+
+    def _log_credentials(self) -> None:
+        """把登录凭据打进组件日志（2026-10-06 用户要求）。
+
+        凭据不算秘密了：这些是**厂商出厂默认**（nacos/nacos、admin/admin），
+        任何装了同一个版本的人都是同一份。而 Jenkins 那种随机密码本来就在
+        本机文件里、只有本机用户能读。它解决的是"服务起来了却登不进去，
+        还要自己去翻文件/翻官方文档"——那才是真折腾。
+
+        用 info 级而不是 warn 级：这不是风险提示，是用户现在就需要的信息。
+        """
+        spec = self.component.launch
+        if spec is None:
+            return
+        try:
+            port = self._launch_status().record.port \
+                if self._launch_status().state == "running" else spec.main_port
+        except Exception:
+            port = spec.main_port
+        try:
+            for line in credentials_for(self.component, spec, port):
+                self._log("info", line)
+        except Exception as exc:            # 凭据读不出来不该影响启动结果
+            self._log("warn", f"读取登录凭据失败（不影响使用）：{exc}")
 
     def _on_launch_notes(self, key: str, notes: list) -> None:
         """端口准备的告警逐条进组件日志。吞掉的话，用户之后想找"端口改在哪份文件里"
@@ -6464,6 +6563,10 @@ class ComponentCard(QFrame):
 
     def _on_launch_stopped(self, key: str) -> None:
         self._log("info", "已停止。")
+        # 停止后也报一次凭据：用户常常是"启动→看一眼配置→再停止"这个顺序，
+        # 停止这一刻他正要打开控制台，此刻给凭据最省事（日志滚动到底就能看到）。
+        if self.component.launch is not None:
+            self._log_credentials()
         self._refresh_launch_state()
 
     def _on_launch_worker_done(self) -> None:
@@ -7914,6 +8017,22 @@ class MainWindow(QMainWindow):
         # 清掉结果面板里残留的分类小标题
         self._clear_results_layout()
 
+    def _log_credentials_of(self, key: str, port: int) -> None:
+        """主窗侧：把某个正在运行的组件的登录凭据写进全局日志。
+
+        读不到就跳过——凭据只是便利信息，缺了不该让"认清本机运行状态"看起来失败。
+        """
+        # 走类名而不是 self：_COMPONENTS_CACHE 是类属性，用 MainWindow.xxx
+        # 在测试的"半初始化实例"上也能跑通（那类实例的 self 上没有绑定 staticmethod）。
+        comp = MainWindow.current_components().get(key)
+        if comp is None or getattr(comp, "launch", None) is None:
+            return
+        try:
+            for line in credentials_for(comp, comp.launch, port):
+                self._append_log("info", f"[{comp.display_name}] {line}")
+        except Exception:
+            pass
+
     def _mark_running_tabs(self) -> None:
         """Tab 标题后标 `●` 表示"这一页有组件在运行"，清空搜索/退出搜索时都要重算。
 
@@ -8506,6 +8625,10 @@ class MainWindow(QMainWindow):
             for key, st in states.items():
                 if st.state == "running":
                     self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
+                    # 把它的登录凭据一起报出来：这些服务是之前启的，
+                    # 用户重开工具时界面上没有任何地方能看到"怎么登进去"，
+                    # 逼着他去翻文件或搜官方文档。
+                    self._log_credentials_of(key, st.record.port)
             # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
             # 否则窗口里会留一句已经没有依据的"残留登记"。
             for card in self.cards:
