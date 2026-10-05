@@ -5653,6 +5653,11 @@ class ComponentCard(QFrame):
         self._refresh_launch_state()
 
     def _on_launch_failed(self, key: str, reason: str) -> None:
+        # 关窗链路里 cancel 触发的 failed 可能在退出途中投递进来；模态框自己转事件循环，
+        # 会把关窗卡住。只看顶层窗口（closeEvent 已立的 _closing 旗）是不是正在关。
+        if getattr(self.window(), "_closing", False):
+            self._log("warn", f"操作未完成（窗口正在关闭）：{reason}")
+            return
         self._log("error", f"操作失败：{reason}")
         QMessageBox.warning(self, "操作失败", reason)
         self._refresh_launch_state()
@@ -7607,14 +7612,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _adopt_running(self) -> None:
         """启动后一次性的"认清本机在跑什么"。只读 + 清僵尸，绝不拉起进程。"""
-        states = SERVICE_MANAGER.reconcile(self.current_components())
-        for key, st in states.items():
-            if st.state == "running":
-                self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
-        # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
-        # 否则窗口里会留一句已经没有依据的"残留登记"。
-        for card in self.cards:
-            card._refresh_launch_state()
+        # 整段兜底：reconcile 清僵尸会回写 running.json（ensure_dir+写+os.replace），
+        # ~/.env-tools 被只读/被锁/磁盘满时异常从这儿抛出就是从生产入口抛出、工具直接打不开 ——
+        # 和读取侧"让整个界面搞崩代价不成比例"是同一个权衡，识别失败只该留下一条 warn。
+        try:
+            states = SERVICE_MANAGER.reconcile(self.current_components())
+            for key, st in states.items():
+                if st.state == "running":
+                    self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
+            # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
+            # 否则窗口里会留一句已经没有依据的"残留登记"。
+            for card in self.cards:
+                card._refresh_launch_state()
+        except Exception as exc:
+            self._append_log("warn", f"认清本机运行状态失败（不影响使用）：{exc}")
 
     def _cancel_launch_workers(self) -> int:
         """关窗口前让在跑的启动/停止线程体面收尾：只取消"还在等端口"，不动被管理的进程。

@@ -1042,6 +1042,23 @@ class CardLaunchUi(unittest.TestCase):
         self.card._refresh_launch_state()
         self.assertFalse(self.card.btn_start.isEnabled())
 
+    def test_launch_failed_stays_quiet_while_the_window_is_closing(self):
+        """关窗链路 closeEvent→cancel→worker 的 failed.emit→这里。模态框自己转事件循环，
+        在退出途中弹起来能把关窗卡住；"queued 投递赶不上关窗"只是推测、离线也证实不了，
+        所以用 closeEvent 已立的 _closing 旗做便宜的确定性防护，不加新产品状态。"""
+        calls = self._stub_dialogs([])
+        logs = []
+        self.card.log_cb = lambda level, msg: logs.append((level, msg))
+
+        class FakeWin:
+            _closing = True
+
+        self.card.window = lambda: FakeWin()   # 遮蔽 Qt 的 window()，只影响 Python 侧调用
+        self.card._on_launch_failed("jenkins", "已取消等待")
+        self.assertEqual(calls, [], "窗口正在关闭时不许弹模态\"操作失败\"")
+        self.assertEqual(logs, [("warn", "[Jenkins] 操作未完成（窗口正在关闭）：已取消等待")],
+                         "不弹框也要在日志里留一句去向")
+
 
 class MainWindowAdopt(unittest.TestCase):
     """这一层的用例一律不构造真 MainWindow：`MainWindow.__init__` 会建 26 张卡片、
@@ -1053,7 +1070,8 @@ class MainWindowAdopt(unittest.TestCase):
     也能通过它调用；但凡碰真的 Qt 方法（如未遮蔽的 `findChildren`）就抛
     `RuntimeError: '__init__' method of object's base class not called`。
     所以 `_cancel_launch_workers` 用注入的 findChildren 测；`closeEvent` 本身测不了（要调 super），
-    它只有"调一次 _cancel_launch_workers 再交给 Qt"这一行，如实说明即可，不要为了测它去构造真窗口。"""
+    它除了关窗取消启动线程那一行委派外，还负责立 `_closing`/FETCH_ABORT 旗、存设置、
+    等版本探测与在途抓取线程收尾 —— 委派那行由源码守护用例钉接线，不要为了测它去构造真窗口。"""
 
     def bare_win(self, logs):
         win = main.MainWindow.__new__(main.MainWindow)
@@ -1070,10 +1088,16 @@ class MainWindowAdopt(unittest.TestCase):
         self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
         self._orig_mgr = main.SERVICE_MANAGER
         self.addCleanup(setattr, main, "SERVICE_MANAGER", self._orig_mgr)
-        # 找回路径"绝不执行进程"要有牙齿：任何 Popen 都要留下证据
+        # 找回路径"绝不执行进程"要有牙齿：任何拉进程的口都要留下证据
         self._orig_popen = main.subprocess.Popen
         main.subprocess.Popen = lambda *a, **k: self.calls.append(a)
         self.addCleanup(setattr, main.subprocess, "Popen", self._orig_popen)
+        self._orig_run = main.subprocess.run
+        main.subprocess.run = lambda *a, **k: self.calls.append(a)
+        self.addCleanup(setattr, main.subprocess, "run", self._orig_run)
+        self._orig_system = main.os.system
+        main.os.system = lambda *a, **k: self.calls.append(a)
+        self.addCleanup(setattr, main.os, "system", self._orig_system)
 
     def test_current_components_covers_whitelist(self):
         got = main.MainWindow.current_components()
@@ -1145,12 +1169,31 @@ class MainWindowAdopt(unittest.TestCase):
         """接线位置的守护：`bt_component_category_tests.py:90` 与 `bt_multiversion_tests.py:820`
         会直接构造真 MainWindow（只停掉联网抓版本）。而 `_adopt_running` 要读并写用户的
         `running.json`、还要对真实端口发探测 —— 挂进 `__init__` 就是让两个不相干的单元测试
-        去改用户机器上的运行登记。Task 4 的 NoExecInvariant 已经漏写过一次（6a80c84 才收掉）。"""
+        去改用户机器上的运行登记。Task 4 的 NoExecInvariant 已经漏写过一次（6a80c84 才收掉）。
+        closeEvent→_cancel_launch_workers 的委派同用源码守护：它防的是 QThread 运行时被析构
+        （Windows 退出码 0xC0000409），将来谁删了那行，行为用别的用例看不出来。"""
         import inspect
-        self.assertIn("_adopt_running", inspect.getsource(main.main),
+        # 断言一律匹配"调用形状"而不是光函数名：closeEvent 顶上的注释里就写着
+        # _cancel_launch_workers 这个名字，只匹配名字的守护删掉调用也会假绿。
+        self.assertIn("win._adopt_running()", inspect.getsource(main.main),
                       "生产入口没接认清运行状态的步骤")
-        self.assertNotIn("_adopt_running", inspect.getsource(main.MainWindow.__init__),
+        self.assertNotIn("._adopt_running()", inspect.getsource(main.MainWindow.__init__),
                          "__init__ 里做这件事会被所有构造窗口的测试继承")
+        self.assertIn("self._cancel_launch_workers()", inspect.getsource(main.MainWindow.closeEvent),
+                      "closeEvent 没接关窗取消在跑 worker 的步骤")
+
+    def test_adopt_running_never_blocks_startup_when_reconcile_fails(self):
+        """reconcile 清僵尸会回写 running.json：目录只读/被锁/磁盘满时，异常若从
+        _adopt_running 抛出就是从入口抛出，工具直接打不开。识别失败只该留下一条 warn。"""
+        class BoomManager:
+            def reconcile(self, _components):
+                raise OSError("权限不足")
+
+        main.SERVICE_MANAGER = BoomManager()
+        logs = []
+        self.bare_win(logs)._adopt_running()   # 兜底没生效时异常会在这儿把用例打红
+        self.assertEqual([lvl for lvl, _m in logs], ["warn"], "失败只该记一条中文 warn")
+        self.assertIn("权限不足", logs[0][1])
 
 
 if __name__ == "__main__":
