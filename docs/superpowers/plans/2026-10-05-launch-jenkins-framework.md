@@ -1256,6 +1256,20 @@ class StopFlow(unittest.TestCase):
         self.assertTrue(res.need_force)
         self.assertEqual(killed, [], "Windows 上停止第一步不许杀进程")
         self.assertIn("jenkins", main.load_running_map())
+
+    def test_windows_stop_cleans_stale_record_without_scaring(self):
+        """登记还在、端口其实早空了（进程自己死掉过）：Windows 路线要按"已经停了"处理，
+        不许回一句"这会打断正在进行的任务，要强制结束吗" —— 端口才是真相（spec §4）。"""
+        main.CURRENT_OS = "Windows"
+        killed = []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: killed.append(rec.pid))
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(killed, [], "没在监听就不该走到强杀")
+        self.assertEqual(main.load_running_map(), {})
 ```
 
 `StopFlow.setUp` 还要把 `CURRENT_OS` 钉成 POSIX 值（并在 cleanup 里还原），否则同一份用例在
@@ -1271,7 +1285,7 @@ Windows 与 Linux 上走的是两条不同分支，结果取决于跑测试的�
 所以 `_terminate_by_pid` 本体在计划原文里是**零覆盖** —— 把"launcher 就不许动手"整行删掉
 测试也不会红。spec §2 说 Nacos/ActiveMQ 的 PID 不可信，这条守卫是"绝不误杀别人进程"的最后防线，
 必须有独立用例；这是控制器在派发前的补充裁定。加上评审后按裁定补的 Windows 停止用例与
-负 PID 用例，本任务预期用例数为 48（后续 Task 9/10/11 的预期数已同步 +6）：
+负 PID 用例，本任务预期用例数为 50（后续 Task 9/10/11 的预期数已同步 +8）：
 
 ```python
 class TerminateByPidGuard(unittest.TestCase):
@@ -1357,9 +1371,8 @@ class ServiceManager:
             return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
         spec = comp.launch
         if spec.stop_kind == "shutdown_command" and spec.shutdown_commands.get(CURRENT_OS):
-            # 占位符契约（本期不可达分支，计划二才接线）：只认这三个键，
-            # 和 RunRecord 有的字段一一对应；{java}/{war}/{data_dir} 之类要用的话，
-            # 得先在这里补上来源，否则 format 直接 KeyError。
+            # 占位符契约（本期不可达分支，计划二才接线）：这里只喂得出处在 RunRecord 上的三个键，
+            # {java}/{war} 这类要另外补来源，否则 format 直接 KeyError。
             argv = [t.format(port=rec.port, home=rec.home, data_dir=rec.data_dir)
                     for t in spec.shutdown_commands[CURRENT_OS]]
             try:
@@ -1368,6 +1381,13 @@ class ServiceManager:
             except (OSError, subprocess.TimeoutExpired):
                 pass
         elif CURRENT_OS == "Windows":
+            # 端口是真相：进程早就没了，就别拿"会打断任务"去吓用户，清登记算它停好了。
+            if not self._is_listening(rec.port):
+                records = load_running_map()
+                records.pop(comp.key, None)
+                save_running_map(records)
+                return StopResult(True,
+                                  reason=f"{comp.display_name} 已经不在监听端口 {rec.port}，登记已清。")
             # Windows 上 os.kill 的任何信号值都是 TerminateProcess —— 那就是强杀本身，
             # 没有"先礼貌停一下"这一步。spec §5 定的是"超时只询问、不自动强杀"，
             # 所以这里绝不动手，直接把决定交给用户（确认后走 force_stop）。
@@ -1417,7 +1437,7 @@ class ServiceManager:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 48 tests ... OK`
+Expected: `Ran 50 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1425,6 +1445,15 @@ Expected: `Ran 48 tests ... OK`
 git add main.py bt_launch_tests.py
 git commit -m "feat(launch): stop/force_stop —— 超时只询问强制结束，停不成保留登记"
 ```
+
+**控制器留给后续任务的已知项（本任务不处理，勿静默丢弃）：**
+- `force_stop` 在 Windows 上发的是 9：`os.kill` 非 CTRL_* 分支走 `TerminateProcess(handle, code)`，
+  9 只成为子进程退出码，语义上该发 15。行为不变，属误导。→ 计划二引入第二个可停组件时一并改，
+  并在 `StopFlow` 里补一条 `CURRENT_OS=="Windows"` 的 force 路线用例。
+- `stop()` 的 `shutdown_command` 分支本期不可达，占位符契约只给了 `port/home/data_dir` 三键；
+  计划二接 Nacos/ActiveMQ 的 `shutdown.cmd` 时若需要 `{java}`/`{war}`，得先在该分支补来源，否则 `format` KeyError。
+- `sleeper(1.0)` 与 `deadline/rounds` 轮数绑死：Task 9 的 Worker 若要更细的取消粒度，
+  需要在 `stop/force_stop` 里传节拍而不是加参数默认值。
 
 ---
 
@@ -1436,7 +1465,7 @@ git commit -m "feat(launch): stop/force_stop —— 超时只询问强制结束�
 
 **Interfaces:**
 - Consumes: `ServiceManager.start/stop/force_stop`、`Component`
-- Produces: `class LaunchWorker(QThread)`，信号 `started_ok(str, str)`（key, console_url）、`failed(str, str)`（key, reason）、`stopped(str)`；构造参数 `(action, comp, comps, mgr)`，`action ∈ {"start","stop","force_stop"}`
+- Produces: `class LaunchWorker(QThread)`，信号 `started_ok(str, str)`（key, console_url）、`failed(str, str)`（key, reason）、`stopped(str)`；构造参数 `(action, comp, comps, mgr)`，`action ∈ {"start","stop","force_stop"}`；`cancel()` 经 `_sleep` 注入点真能中止等待（Task 11 的 `closeEvent` 要用）；模块级 `LaunchCancelled`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1473,9 +1502,49 @@ class LaunchWorkerSignals(unittest.TestCase):
         w.failed.connect(lambda k, r: got.append(r))
         w._dispatch()
         self.assertEqual(got, ["需要先装 JDK"])
+
+    def test_unexpected_exception_becomes_failed_not_a_silent_thread(self):
+        """start() 会真的动文件系统（建日志目录、开文件、写 running.json），
+        这些抛出来说明环境不对。run() 若不接住，线程静默死掉，卡片上的按钮就永远
+        停在"进行中"，用户什么也看不见 —— spec §5 要求失败必须可归因。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+
+        def boom(c, cs, sleeper=time.sleep):
+            raise OSError("磁盘只读")
+        mgr.start = boom
+        w = main.LaunchWorker("start", comp, {comp.key: comp}, mgr)
+        got = []
+        w.failed.connect(lambda k, r: got.append(r))
+        w.run()                     # 走 run()，验的正是线程入口包不包异常
+        self.assertEqual(len(got), 1, "异常必须转成一次 failed，不许静默")
+        self.assertIn("磁盘只读", got[0])
+
+    def test_cancel_stops_waiting_without_pretending_the_process_stopped(self):
+        """取消只是"别再盯着端口了"，进程可能还在起来 —— 这句话必须原样传给界面。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+
+        def slow_start(c, cs, sleeper=time.sleep):
+            while True:              # 模拟"一直没监听"：每轮把控制权交给 sleeper
+                sleeper(1.0)
+        mgr.start = slow_start
+        w = main.LaunchWorker("start", comp, {comp.key: comp}, mgr)
+        w.cancel()                   # 先取消再跑，第一轮 sleeper 就走取消分支，不会真死循环
+        got = []
+        w.failed.connect(lambda k, r: got.append(r))
+        w.run()
+        self.assertEqual(len(got), 1, "取消同样要给一条说明，不许静默结束线程")
+        self.assertIn("已取消", got[0])
+        self.assertIn("可能仍在启动", got[0])
 ```
 
-测试文件顶部补 `from PySide6.QtWidgets import QApplication`（本 Task 起要构造 QThread 子类，需有 QApplication）。
+测试文件顶部本 Task 起要补两行：`import time`（上面用例里的 `sleeper=time.sleep` 默认值要用）和
+`from PySide6.QtWidgets import QApplication`（要构造 `QThread` 子类，得有 QApplication）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1485,6 +1554,10 @@ Expected: FAIL，`no attribute 'LaunchWorker'`
 - [ ] **Step 3: 写最小实现**
 
 ```python
+class LaunchCancelled(Exception):
+    """用户取消等待。不是故障，只是"别再替我盯着端口了"。"""
+
+
 class LaunchWorker(QThread):
     """启动/停止的耗时动作。有界探活最长能到 startup_timeout 秒，
     绝不能放在 UI 线程里 —— 这正是 DownloadWorker 走线程的同一个理由。"""
@@ -1505,33 +1578,56 @@ class LaunchWorker(QThread):
     def cancel(self) -> None:
         self._cancelled = True
 
+    def _sleep(self, seconds: float) -> None:
+        """取消检查挂在 ServiceManager 的每轮等待上 —— 有界探活是唯一长耗时阶段，
+        而它的 sleeper 本来就是注入点，所以不用给它加新参数就能中止。"""
+        if self._cancelled:
+            raise LaunchCancelled()
+        time.sleep(seconds)
+
     def _dispatch(self) -> None:
         if self.action == "start":
-            res = self.mgr.start(self.comp, self.comps)
+            res = self.mgr.start(self.comp, self.comps, sleeper=self._sleep)
             if res.ok:
                 self.started_ok.emit(self.comp.key, res.console_url)
             else:
                 self.failed.emit(self.comp.key, res.reason)
-        elif self.action in ("stop", "force_stop"):
-            res = (self.mgr.force_stop(self.comp.key) if self.action == "force_stop"
-                   else self.mgr.stop(self.comp, self.comps))
-            if res.ok:
-                self.stopped.emit(self.comp.key)
-            elif res.need_force:
-                self.failed.emit(self.comp.key, "__need_force__\t" + res.reason)
-            else:
-                self.failed.emit(self.comp.key, res.reason)
+        elif self.action == "stop":
+            res = self.mgr.stop(self.comp, self.comps, sleeper=self._sleep)
+            self._emit_stop(res)
+        elif self.action == "force_stop":
+            self._emit_stop(self.mgr.force_stop(self.comp.key, sleeper=self._sleep))
+
+    def _emit_stop(self, res: "StopResult") -> None:
+        if res.ok:
+            self.stopped.emit(self.comp.key)
+        elif res.need_force:
+            self.failed.emit(self.comp.key, "__need_force__\t" + res.reason)
+        else:
+            self.failed.emit(self.comp.key, res.reason)
 
     def run(self) -> None:
-        self._dispatch()
+        try:
+            self._dispatch()
+        except LaunchCancelled:
+            # 取消只是停止"等"，进程还在不在没人知道 —— 这话必须说清，
+            # 否则用户以为取消等于停住了。
+            self.failed.emit(self.comp.key,
+                             "已取消等待。进程可能仍在启动中，稍后看状态或再点停止。")
+        except Exception as exc:
+            self.failed.emit(self.comp.key, f"{self.comp.display_name} 操作过程出错：{exc}")
 ```
 
 `__need_force__\t` 前缀是"要求界面问一次强制结束"的信号载荷约定，Task 10 在卡片侧解析；不要改成新增信号，避免多一条要接的线。
 
+`cancel()` 必须真的有用（计划初稿里 `_cancelled` 没人读，是死字段）：Task 11 的 `MainWindow.closeEvent`
+要对在跑的 worker 先 `cancel()` 再 `wait()`，否则窗口关了线程还在探端口。上面那条 `_sleep` 就是这条链的落点。
+
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 50 tests ... OK`
+Expected: `Ran 54 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1751,7 +1847,7 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 55 tests ... OK`
+Expected: `Ran 59 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1834,7 +1930,7 @@ Expected: FAIL，`no attribute 'current_components'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 57 tests ... OK`
+Expected: `Ran 61 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
