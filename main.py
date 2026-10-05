@@ -2974,6 +2974,12 @@ MULTI_VERSION_KEYS = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
 # 只会静默走"不改端口"分支——那正是 §5 要避免的"假装安全地改了配置"。
 PORT_WRITEBACKS = ("cli_only", "cli_flag", "conf_copy")
 
+# 停止手段取值域。port_lookup 是计划二新增：厂商自带停止手段不可用
+# （Nacos 的 shutdown.cmd 按进程名 taskkill /F，会杀到用户自己起的实例；
+#  ActiveMQ 的 stop 经 JAAS/JMX 且受 conf 副本影响），所以停止 = 端口反查 PID。
+# 取值写错同样不会报错、只会走错分支，所以和 PORT_WRITEBACKS 一样钉成常量。
+STOP_KINDS = ("pid", "shutdown_command", "port_lookup")
+
 
 @dataclass
 class LaunchSpec:
@@ -2983,8 +2989,9 @@ class LaunchSpec:
     # 按 OS 键的启动 argv 模板。允许这些占位符：
     #   {java} {war} {home} {data_dir} {port} {log_file}
     commands: Dict[str, List[str]]
-    # 停止手段："pid" = 只能结束进程（Jenkins 无 shutdown 脚本）；
-    #           "shutdown_command" = 有正规关闭脚本（计划二的 ActiveMQ / Nacos）
+    # 停止手段："pid" = 我们就是服务进程（Jenkins）；
+    #           "shutdown_command" = 有可用的正规关闭脚本（本期无人使用，留作计划三位置）；
+    #           "port_lookup" = 没有可靠厂商手段，停止走端口反查（Nacos / ActiveMQ）
     stop_kind: str = "pid"
     shutdown_commands: Dict[str, List[str]] = field(default_factory=dict)
     # 端口簇：主端口 + 派生偏移。本期 jenkins 只有主端口，offsets 为空。

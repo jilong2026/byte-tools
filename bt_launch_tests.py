@@ -66,6 +66,19 @@ class LaunchSpecTable(unittest.TestCase):
         self.assertTrue(set(main.PORT_WRITEBACKS) == allowed,
                         f"策略取值域漂移：{main.PORT_WRITEBACKS}")
 
+    def test_stop_kind_values_are_declared(self):
+        self.assertEqual(set(main.STOP_KINDS), {"pid", "shutdown_command", "port_lookup"})
+
+    def test_port_lookup_is_not_a_pid_kill_route(self):
+        """port_lookup 不是 pid：登记的 PID 是包装脚本，杀它服务照常在听。
+        同时钉住"别给 LaunchSpec 加 pid_role 字段"—— 那个身份只能由 stop_kind
+        在 start() 里推导，两处来源迟早会漂。"""
+        spec = main.LaunchSpec(commands={"Windows": []}, stop_kind="port_lookup",
+                               main_port=8161)
+        self.assertEqual(spec.stop_kind, "port_lookup")
+        self.assertNotIn("pid_role", spec.__dataclass_fields__,
+                         "pid_role 只能由 stop_kind 推导，不许在描述符上再存一份")
+
 
 class RunningMap(unittest.TestCase):
     def setUp(self):
