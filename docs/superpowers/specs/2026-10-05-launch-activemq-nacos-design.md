@@ -100,8 +100,8 @@ Nacos 的 GitHub 加速器第一发**停滞**（整包读入内存的写法下�
 | 计划一 §2.4 项 | 状态 | 依据 |
 |---|---|---|
 | 1 Nacos `startup.cmd` 的 `%COMMAND%` 拉起方式 | **已定**（文件级） | §2.2：Windows 前台 java，带 `%*` 透传 |
-| 2 Nacos 控制台路径 / gRPC 属性名 | **半定**：确认无 gRPC 属性可回写（派生）；控制台是 `/` 还是 `/nacos` **仍未证** | §2.2；`application.properties:139` 白名单里有 `/` 与 `/console-ui/public/**`，无 `/nacos` 前缀 → 倾向 `/`，但以 §9 A3 实测为准 |
-| 4 Windows `activemq.bat` 能否不装服务正常起 / 弹不弹独立窗口 | **未证** | 文件层只见 `:99` 前台 java 行；以 §9 A3/A5 实测为准 |
+| 2 Nacos 控制台路径 / gRPC 属性名 | **已定（A3 真机实测）**：控制台是 **`/nacos`**（初稿推测 `/` 是错的）；确认无 gRPC 属性可回写（派生） | §8.3 A3；`conf/application.properties:19` `server.servlet.contextPath=/nacos` |
+| 4 Windows `activemq.bat` 能否不装服务正常起 / 弹不弹独立窗口 | **已定（A3/A5 真机实测）**：能。task 名是 **`start`** 不是 `console`——`activemq.bat` 只把 `%*` 转发给 `activemq.jar` 的主类，后者没有 `console` task，传它会打 Usage 后以退出码 0 静默退出 | §8.3 A5 与「真机查出的三处缺陷」第 2 条 |
 | 6 ActiveMQ 61616 的正规回写点 | **已定**：`conf/activemq.xml:178` 单行可锚定 → 本期做平移（D6 推翻计划一的"不平移"） | §2.1 |
 
 ### 2.5 本文推翻的两条计划一结论（按 §2 更正格式记录）
@@ -192,8 +192,9 @@ extra_ports         = ()
 port_writeback      = cli_flag
 stop_kind           = port_lookup         # 见 §3.5：厂商停止脚本不可用，停止只走端口反查
 pid_role            = launcher            # 我们的直接子进程是 cmd.exe
-console_path        = "/"                 # 待 §9 A3 确认（"/" vs "/nacos"）
-health_path         = None                # 待 A3 回填；判活按簇做 TCP（三口全听才算运行中）
+console_path        = "/nacos"            # A3 实测（2026-10-05 真机）：conf/application.properties:19
+                                         # server.servlet.contextPath=/nacos —— 不在根路径
+health_path         = "/nacos"            # A3 实测同一条路径返回可达响应；判活仍按簇做 TCP（三口全听才算运行中）
 needs               = ("jdk",)
 min_java_major      = 8                   # 证据：§2.2 class major 52 + 包内脚本文字
 data_dir_env        = None                # 厂商未提供外移开关，见 §2.2 末条
@@ -216,8 +217,8 @@ extra_ports         = (61616,)            # 独立基准，同 span 内升序找
 port_writeback      = conf_copy
 stop_kind           = port_lookup         # 同 Nacos：厂商停止手段不用（理由见 §2.2 末条与 §3.5）
 pid_role            = launcher
-console_path        = "/admin"            # 待 §9 A3 实测确认
-health_path         = None
+console_path        = "/admin"            # A3 实测（2026-10-05 真机）：控制台在 /admin 且返回可达响应
+health_path         = "/admin"            # A3 实测同一条路径
 needs               = ("jdk",)
 min_java_major      = 17                  # 证据：§2.1 class major 61
 data_dir_env        = None                # 走 env 注入表而非单一 *_HOME
@@ -334,24 +335,68 @@ risk_note           = 控制台默认账号 admin/admin（conf/users.properties 
 现有 9 套件 / 396 用例必须继续全绿（`bt_multiversion_tests.py` 需 `PYTHONIOENCODING=utf-8`，既有债）。
 CI 与发布流程一律不跑真启动。
 
-本期实测（2026-10-05，`bt_launch_tests.py` 129 例）：
+本期实测（2026-10-05，`bt_launch_tests.py` 133 例）：
 `CardLaunchUi` 20、`ConfCopyWriteback` 7、`HealthProbe` 4、`LaunchPlan` 6、`LaunchSpecTable` 16、
 `LaunchWorkerSignals` 7、`MainWindowAdopt` 7、`NetstatParse` 6、`NoExecInvariant` 3、`PortCluster` 6、
-`PortPlanning` 8、`RunningMap` 10、`StartFlow` 7、`StopFlow` 14、`TerminateByPidGuard` 4、`ZombieMatrix` 4。
+`PortPlanning` 9、`RunningMap` 10、`StartFlow` 7、`StopFlow` 14、`TerminateByPidGuard` 4、`ZombieMatrix` 4。
+（真机演练后又补了 `LaunchPlan.test_launch_uses_the_installed_version_not_the_first_candidate`、
+`test_plan_two_health_paths_are_the_measured_ones`与 `LaunchSpecTable.test_activemq_task_must_be_one_the_jar_actually_understands`。）
 
 ---
 
 ## 9. 验收标准（计划二）
 
-> **收口状态（离线部分已完成，真机部分未开始）：** 第 6 项已离线收口，第 5 项**部分**收口 ——
-> `bt_launch_tests.py` **129 例**全绿（原 9 套件 396 例无回归）；
-> 全程未修改任何厂商官方文件（`test_conf_copy_writes_only_into_the_copy` 直接比对官方文件字节未变）。
-> 但第 5 项的"逐条经变异自检确认非空"**尚未达成**：四处变异里三处如期变红，
-> 第四处（把 `prepare_ports` 的 `conf_copy` 分支改成忽略回写失败）**改完 129 条仍全绿**——
-> "回写失败 → 拒绝拉起"这条接缝没有用例，详见 [DEVELOPMENT.md](../../../DEVELOPMENT.md) R5.6 的记录与补法。
-> **第 1、2、3、4 项全部依赖真机，`--launch jenkins|nacos|activemq --yes` 一次都没跑过（需用户在场），
-> §8.2 的 A1–A7 与 §2.4 各项仍无结论。** 文档、README、卡片文案一律保持
-> "已实现 / 离线护栏守护 / 真机待用户在场验证"三层，**不得写成已端到端验证**。
+> **收口状态（2026-10-05 真机演练已执行，见下）：** 第 1、3、4、5、6 项**已达成**，
+> 第 2 项（关工具重开的状态识别）**未单独演练**——演练脚本每次都是新进程，
+> 没有"关掉再打开"这一轮；该项的护栏在离线侧（`ZombieMatrix` / `MainWindowAdopt` / `RunningMap`）。
+> 离线 `bt_launch_tests.py` **133 例**全绿（原 9 套件无回归），四处变异自检**各自都红过**
+> （原先空护栏的那处已补用例，见 [DEVELOPMENT.md](../../../DEVELOPMENT.md) R5.6）。
+
+### 8.3 真机演练结论（2026-10-05，Windows，JDK 21 / `D:\soft\jdk\openjdk-21`）
+
+三件组件各跑一次 `--launch <key> --yes`，**全部四层判据通过**：
+
+| 组件 | 启动 | 实际端口簇 | 控制台 | 停止 | 登记残留 |
+|---|---|---|---|---|---|
+| Jenkins 2.580.1 | ✅ pid=4832 (server) | `[8080]` | `http://127.0.0.1:8080/` 可达 | 整簇释放 | 无 |
+| Nacos 2.3.2 | ✅ pid=10548 (launcher) | `[8848, 9848, 9849]` | `http://127.0.0.1:8848/nacos` 可达 | 整簇释放 | 无 |
+| ActiveMQ 6.3.2 | ✅ pid=19452 (launcher) | `[8161, 61616]` | `http://127.0.0.1:8161/admin` 可达 | 整簇释放 | 无 |
+
+**A1**（整簇随停止释放）：**PASS** ×3。停止前 `在听=[8848, 9848, 9849]` → 停止后 `在听=无`。
+**A2**（实际监听集合 == 登记的簇）：**PASS** ×3，三件都完全相等。
+**A3**（控制台路径）：**已定**——Nacos = `/nacos`（依据 `conf/application.properties:19`
+`server.servlet.contextPath=/nacos`，初稿推测的 `/` **是错的**）；ActiveMQ = `/admin`。
+两处 `console_path` 与 `health_path` 均已按实测回填，`None` 已清空。
+**A4**（`--server.port` 压过 `application.properties`）：**PASS**——Nacos 实测主口 8848
+正是我们指定的值，Nacos 保持 `cli_flag`、不回退 `conf_copy`。
+**A5**（ActiveMQ 前台不弹独立窗）：**PASS**——`start` task 经`activemq.bat` 前台运行，
+两口都在听，停止走端口反查拿到真实 PID（登记的 launcher PID 未被使用）。
+**A6**（`-Djetty.http.port` 压过 conf）：**仍未验证**（本期未尝试，保持"未验证"）。
+**A7**：本节即回写结论；计划一 §2.4 第 2、4 项同步更新。
+
+**端口平移与官方文件隔离（A2/R5.3 第 9 条的追加实证）**：人为让 8161 被占后，
+`choose_ports` 把主口平移到 8162，`prepare_ports` 只把 `jetty.http.port=8162` 写进
+`~/.env-tools/activemq-data/conf` 副本；**官方 `conf/jetty-spring.properties` 的 MD5
+演练前后完全一致**（`md5sum -c` 通过）、官方目录无 `.bak` 残留、broker 口 61616 两边一致。
+
+**R1 多源故障转移的真机实证**：Nacos 第 1 个源 `ghproxy.net` 读超时失败，
+自动切到第 2 个源 `gh-proxy.com` 成功（146.5 MB）；ActiveMQ 首个源华为云命中（54.6 MB）。
+两个组件的下载都走了 `DownloadWorker` 的多源链路，不是直连。
+
+**真机查出的三处产品缺陷（已修，见 git `1289922`）**：
+1. **启动用的是候选清单首位而非已安装版本** —— 候选首位 2.568.3、实际装 2.580.1，
+   点启动去找不存在的目录，`[WinError 267] 目录名称无效`。已加`resolve_launch_version()`
+   （生效版本 → 已安装最高版本），并给 `launch_gate` 补"一个都没装"的可行动提示。
+2. **ActiveMQ 的 task 名写错了** —— `activemq.bat` 只是把 `%*` 转发给 `activemq.jar`
+   的主类，后者只认 `backup/browse/create/start/stop/…`，**没有 `console`**。
+   传 `console` 会打印一份 Usage 然后**以退出码 0 正常退出**，于是"拉起了进程但端口一直不监听"，
+   连厂商日志都是空的。已改为 `start`，并补一条把 jar 自报 task 表钉下来的用例。
+3. **Nacos 控制台路径推测错了** —— 见 A3。
+
+**演练脚本自身的一处修正**：判据一原来只查一次 HTTP。Jenkins 2.580.1 实测里 Jetty 在
+T+0s 就bind 了 8080，而 Jenkins 还在 `Started initialization`（T+1s）——
+**端口在听 ≠ 服务可用**，一次性检查稳定误报"控制台不可达"。已改成有界重试
+（`bt_real_machine_drill.py:_wait_console`），与 `start()` 的有界探活同一套约定。
 
 1. Windows 上 ActiveMQ、Nacos 各完成一次：点启动 → 卡片"运行中 · 实际端口簇" → 打开控制台拿到登录页 →
    停止 → **整簇端口释放** → 数据/副本位置被告知。

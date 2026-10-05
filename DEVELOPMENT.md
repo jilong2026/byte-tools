@@ -718,10 +718,13 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 可启动组件（登记表 `LAUNCH_OF`）必须做到：**点启动就真的能访问控制台**；**端口是真相、PID 只是提示**；
 状态检测与找回**绝不执行启动脚本**；停止超时**只询问强制结束、不自动强杀**；运行中**禁止卸载**。
 
-本规则的落地状态要如实分层描述：框架与 Jenkins / ActiveMQ / Nacos 三件的一键启动**已实现且有离线护栏守护**，
-但**Windows 真机验证尚未执行**——`--launch jenkins|nacos|activemq --yes` 一次都没跑过（需用户在场），
-故计划一 spec §2.4 第 3、5 项与计划二 spec §8.2 的 A1–A7 **全部仍无结论**。文档、README、卡片文案一律写成
-"已实现、离线护栏守护、真机待用户在场验证"，**绝不得写成已端到端验证**。
+本规则的落地状态要如实分层描述：框架与 Jenkins / ActiveMQ / Nacos 三件的一键启动**已实现、有离线护栏守护，
+且已于 2026-10-05 在 Windows 真机验证**（JDK 21 / Jenkins 2.580.1 / ActiveMQ 6.3.2 / Nacos 2.3.2，
+三件各跑完一次 `--launch <key> --yes` 的四层判据：A1 整簇释放 / A2 监听集合等于登记簇 /
+A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 PASS**）。
+但**macOS 与 Linux 尚未真机验证**，且 A6（`-Djetty.http.port` 能否压过 conf）**仍未尝试**。
+文档、README、卡片文案对已验证的平台写"已在 Windows 真机验证"，对未验证的平台仍写
+"macOS/Linux 待验证"，**绝不得把三平台一概写成已验证**。
 
 ### R5.2 适用范围
 
@@ -806,7 +809,7 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 
 ### R5.6 护栏用例
 
-`bt_launch_tests.py`（130 条，全离线，不真起中间件）盯住：
+`bt_launch_tests.py`（133 条，全离线，不真起中间件）盯住：
 `LaunchSpecTable`（白名单恰为 `{jenkins, activemq, nacos}`、三平台命令非空、白名单外无 launch、
 `test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"、`test_plan_two_fields_default_to_plan_one_behaviour`
 钉住"计划二新字段的默认值就是计划一既有行为"）、`RunningMap`（含旧格式记录缺 `ports` 的加载侧归一）、
@@ -830,7 +833,7 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 把 `netstat_listener_pids` 调用挪进 `status()` → `test_detection_paths_never_consult_the_port_owner_table` 变红；
 把 `start()` 里的 `if not ok: return StartResult(False, "writeback", ...)` 整段删掉 →
 `test_start_refuses_to_spawn_when_writeback_fails` 变红。
-全部恢复后 130 条回绿。
+全部恢复后 133 条回绿。
 
 > 这条护栏是 Task 11 变异自检第 3 项查出来并当场补上的（补之前是空护栏：把 `prepare_ports`
 > 的 `conf_copy` 分支改成"忽略回写失败、照样返回 True"时 129 条全绿）。原因是原有用例只分别钉住两端 ——

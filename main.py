@@ -3068,7 +3068,9 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_writeback="cli_flag",      # 计划二的代码片段漏了这行：--server.port 就是 cli_flag
         console_path="/nacos",           # A3 真机实测：conf/application.properties:19
                                           # server.servlet.contextPath=/nacos —— 不在根路径
-        health_path=None,
+        # A3 真机实测（2026-10-05）：控制台在 /nacos，该路径返回可达响应。
+        # health_path 从 None 填成实测值——spec §9 写明"None 不是不测，是尚未实测"。
+        health_path="/nacos",
         needs=("jdk",),
         min_java_major=8,
         data_dir_env=None,               # 厂商无外移开关：-Dnacos.home 固定在安装目录内
@@ -3103,8 +3105,8 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_search_span=99,
         port_writeback="conf_copy",     # 计划给的片段漏了这行，缺了会退回 cli_only（端口根本改不动）
         extra_env={"ACTIVEMQ_CONF": "{conf_dir}", "ACTIVEMQ_DATA": "{data_dir}"},
-        console_path="/admin",           # 待真机 A3 确认
-        health_path=None,
+        console_path="/admin",           # A3 真机实测：控制台在 /admin 且返回可达响应
+        health_path="/admin",            # A3 实测同一条路径
         needs=("jdk",),
         min_java_major=17,
         data_dir_env=None,

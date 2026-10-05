@@ -502,6 +502,22 @@ class LaunchPlan(unittest.TestCase):
         self.comp = self.comps["jenkins"]
         self.spec = self.comp.launch
 
+    def test_plan_two_health_paths_are_the_measured_ones(self):
+        """health_path 必须是真机实测值，不能留None。
+
+        spec §9 写明「`health_path=None` 不是"不测"，是"尚未实测"」——
+        A3 出结论后必须回填。留None 的后果是演练判据一退化成"只看端口在听"，
+        而端口在听 ≠ 服务可用：Jenkins 2.580.1 实测里 Jetty 先bind 8080，
+        Jenkins还在 "Started initialization"，早一步查HTTP 会稳定误报不可达。
+        """
+        for key, path in (("nacos", "/nacos"), ("activemq", "/admin")):
+            with self.subTest(key):
+                s = main.LAUNCH_OF[key]
+                self.assertEqual(s.console_path, path,
+                                 f"{key} 的控制台路径应与 health_path 同源（实测值）")
+                self.assertEqual(s.health_path, path,
+                                 f"{key} 的 health_path 还停在 None：A3 已实测，必须回填")
+
     def test_launch_uses_the_installed_version_not_the_first_candidate(self):
         """启动必须用**磁盘上真装着的**版本，不是候选清单首位。
 

@@ -610,6 +610,7 @@ apply_active_version(comp, version)
 | `prepare_ports(comp, spec, plan, data_dir)` | `main.py:4876` | 端口回写闸门，返回 `(能否继续拉起, 失败原因, 提示行)`。`cli_only`/`cli_flag` 直接放行不碰文件；`conf_copy` 建副本 + 改两处端口。**回写必须在 spawn 之前完成**，失败必须阻止拉起 |
 | `vendor_log_tails(data_dir, home, key)` | `main.py:4918` | 启动超时时把厂商自己的日志（`activemq.log` / `start.out`）尾巴并进 `reason`，按 `VENDOR_LOG_CANDIDATES` 表找而不是猜 |
 | `resolve_java_home(comps)` | `main.py:5012` | `JAVA_HOME` **优先取本工具装的 JDK**，其次才退到环境变量；退到环境变量的值要校验目录真实存在 |
+| `resolve_launch_version(comp)` | `main.py:5038` | 启动该用**哪个已安装版本**：生效版本（active 登记且目录真实存在）→ 已安装目录里版本号最高的。一个都没装返回 `None`（`launch_gate` 据此拦住并给出"先点下载并安装"的可行动提示）。**不看 `comp.versions[0]`** —— 离线候选清单会落后于实际安装版本，真机踩过：候选首位 2.568.3、实装 2.580.1，按候选首位去找会 `[WinError 267] 目录名称无效`，界面只显示"拉起失败" |
 | `build_launch_plan(comp, spec, java_home, port, log_file)` | `main.py:5042` | 展开 argv、注入 env（`JAVA_HOME` + `data_dir_env` + `extra_env`，值支持 `{home}/{data_dir}/{conf_dir}/{port}`）、拼 `console_url`；`java_home` 一律是 JDK 安装目录（home），不是 exe |
 | `load_running_map()` / `save_running_map()` | `main.py:4578` / `:4623` | `~/.env-tools/running.json`（本机进程事实，与 `config.json` 用户偏好分开）读写；坏 JSON / 缺文件一律当空表，字段畸形只丢该条记录；写盘走"临时文件 + `os.replace`"原子覆盖。`ports` 缺省 `()` 由**加载侧**归一为 `(port,)` —— 新字段没有默认值会让旧记录整批被静默丢弃 |
 | `ServiceManager` | `main.py:5084` | 生命周期唯一入口：`status` / `adopt` / `reconcile`（只读 + 清僵尸，**绝不拉进程**）、`start`（门控 → `choose_ports` → `prepare_ports` 回写闸门 → 建 data 目录 → 重定向 stdout/stderr 到 `<data>/logs/byte-tools.out` → 有界轮次**整簇**探活 → 写登记）、`stop`（Windows 或 `port_lookup` 都只请示不自动强杀，超时 `need_force`）、`force_stop`（`pid_role=server` 才按登记 PID，否则按**端口反查**得到的唯一非自有 PID；**只在整簇端口确认释放后才清登记**）。探针 `is_listening`/`http_ok`/`process_alive`/`terminate`/`_lookup_pids` 全可注入 |
@@ -768,7 +769,7 @@ def main() -> int:
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
-| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（130 个用例，见 R5.6）。全量回归 9 套件之一 |
+| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（133 个用例，见 R5.6）。全量回归 9 套件之一 |
 
 #### `bt_multiversion_tests.py` 覆盖面
 
@@ -1008,7 +1009,7 @@ on_uninstall_clicked()   # main.py:4995
 ### 6.6 一键启动的数据流（规则 R5）
 
 > 落地状态如实描述：**框架与 Jenkins / ActiveMQ / Nacos 三件的一键启动已实现、有离线护栏
-> （`bt_launch_tests.py` 130 例）守护**；Windows 真机 `--launch jenkins|nacos|activemq --yes`
+> （`bt_launch_tests.py` 133 例）守护**；Windows 真机 `--launch jenkins|nacos|activemq --yes`
 > **一次都没跑过**，计划一 spec §2.4 第 3、5 项与计划二 spec §8.2 的 A1–A7 全部仍无结论、
 > `min_java_major` 维持 `None`、`console_path`/`health_path` 两个新组件仍为推测值。
 > 下述数据流是代码路径的静态描述，**不代表已在真机跑通**。
