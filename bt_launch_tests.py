@@ -543,21 +543,41 @@ class LaunchPlan(unittest.TestCase):
         self.comp = self.comps["jenkins"]
         self.spec = self.comp.launch
 
-    def test_plan_two_health_paths_are_the_measured_ones(self):
-        """health_path 必须是真机实测值，不能留None。
+    def test_health_path_must_not_duplicate_the_console_path(self):
+        """`health_path` 只有在"探活路径 ≠ 控制台路径"时才有值，否则必须是 None。
 
-        spec §9 写明「`health_path=None` 不是"不测"，是"尚未实测"」——
-        A3 出结论后必须回填。留None 的后果是演练判据一退化成"只看端口在听"，
-        而端口在听 ≠ 服务可用：Jenkins 2.580.1 实测里 Jetty 先bind 8080，
-        Jenkins还在 "Started initialization"，早一步查HTTP 会稳定误报不可达。
+        这条原来是 `test_plan_two_health_paths_are_the_measured_ones`，断言
+        `health_path` 必须等于实测的 console_path（"/nacos" / "/admin"），
+        理由是 spec 那句「`health_path=None` 不是不测，是尚未实测」——
+        **但我按字面执行反而造出了bug**：`console_url` 本身已经含 `console_path`
+        （形如 `http://127.0.0.1:8848/nacos`），上层再拼一次 `health_path`
+        就成了 `/nacos/nacos` → 稳定 404 → 真机演练连续两次误报"控制台不可达"，
+        而厂商日志明明写着 `Nacos started successfully`。排查花掉的时间比 bug 本身多。
+
+        真正的规则：`console_url` 是给用户点"打开控制台"用的完整地址，
+        探活只要测它就行；只有当探活要打**另一个**路径（Jenkins 的 `/login`）时
+        才需要 `health_path`。两者相同时填一遍就是给自己埋一个双拼的坑。
         """
         for key, path in (("nacos", "/nacos"), ("activemq", "/admin")):
             with self.subTest(key):
                 s = main.LAUNCH_OF[key]
-                self.assertEqual(s.console_path, path,
-                                 f"{key} 的控制台路径应与 health_path 同源（实测值）")
-                self.assertEqual(s.health_path, path,
-                                 f"{key} 的 health_path 还停在 None：A3 已实测，必须回填")
+                self.assertEqual(s.console_path, path, f"{key} 的控制台路径是实测值")
+                self.assertIsNone(s.health_path,
+                                  f"{key}: health_path 与 console_path 相同就该留 None——"
+                                  f"上层会把 console_url 与 health_path 拼起来，"
+                                  f"填成 {path!r} 会变成 {path}{path} → 404")
+
+    def test_health_path_is_used_when_it_differs_from_console_path(self):
+        """反向：Jenkins 探活路径确实不同于控制台路径时，该填还得填，且拼接结果正确。"""
+        s = main.LAUNCH_OF["jenkins"]
+        self.assertEqual(s.console_path, "/")
+        self.assertEqual(s.health_path, "/login",
+                         "Jenkins 的探活打在 /login，与控制台根路径不同，必须填")
+        plan = main.build_launch_plan(
+            next(c for c in main.build_components() if c.key == "jenkins"),
+            s, r"C:\jdk", 8080, Path("out.log"))
+        base = plan.console_url.rstrip("/")
+        self.assertEqual(base + s.health_path, "http://127.0.0.1:8080/login")
 
     def test_launch_uses_the_installed_version_not_the_first_candidate(self):
         """启动必须用**磁盘上真装着的**版本，不是候选清单首位。
@@ -715,6 +735,23 @@ class StartFlow(unittest.TestCase):
             return proc
         main.subprocess.Popen = fake_popen
         self.addCleanup(setattr, main.subprocess, "Popen", self._popen)
+        # 端口探测一律打桩成"全空闲"，并在需要时单独覆盖。
+        # 2026-10-06：端口策略改成"不平移、被占就杀占用者"之后，choose_ports
+        # 会真的去 bind/杀进程 —— 不打桩的话，用例成败就取决于这台机器 8080 上有没有
+        # 东西在跑（我这儿常年跑着 Jenkins，于是 happy_path 全红）。
+        # 离线用例的成败必须只由桩决定。
+        self._orig_free = main.port_is_free
+        main.port_is_free = lambda port, host="127.0.0.1": True
+        self.addCleanup(setattr, main, "port_is_free", self._orig_free)
+        # 结束占用者同样要桩掉：真去 os.kill 会连累别的进程。
+        self._orig_evict = main.evict_port_occupant
+        main.evict_port_occupant = lambda port, label, evicted=None: None
+        self.addCleanup(setattr, main, "evict_port_occupant", self._orig_evict)
+        # _occupied_reason 会调 occupant_of→netstat 去问"是谁占着"。
+        # 离线用例不许真跑外部命令（既慢、结果又依赖这台机器当时在跑什么）。
+        self._orig_netstat = main._netstat_text
+        main._netstat_text = lambda: ""
+        self.addCleanup(setattr, main, "_netstat_text", self._orig_netstat)
 
     def mgr(self, listening_after=1):
         """第 listening_after 次探活开始说"在听了"，模拟服务起来要几秒。"""
@@ -762,13 +799,88 @@ class StartFlow(unittest.TestCase):
         self.assertIn("已在运行", res.reason)
         self.assertEqual(len(self.spawned), 1, "重复启动必须被拒")
 
-    def test_frees_port_by_shifting_cluster_when_8080_taken(self):
-        orig = main.port_is_free
-        main.port_is_free = lambda port, host="127.0.0.1": port != 8080
-        self.addCleanup(setattr, main, "port_is_free", orig)
+    def test_taken_port_is_evicted_never_shifted(self):
+        """端口被占时**结束占用者并原地启动**，绝不平移到 8081。
+
+        这条原来是 `test_frees_port_by_shifting_cluster_when_8080_taken`
+        （断言"平移到 8081"）。2026-10-06 起契约反转为"不平移"，
+        理由：Nacos 的 gRPC 口由 `server.port + 1000` 派生、各类客户端配置里
+        写死 8848，ActiveMQ 的 61616 被大量中间件硬编码 —— 平移会造成
+        "服务起来了但外部客户端一个都连不上"，比起不来更难归因。
+
+        桩要连"结束之后端口已释放"一起模拟：真实实现杀掉占用者后会轮询复查，
+        端口若一直报占用，复查必然失败 —— 那正是"结束不掉"分支，不是这里要测的。
+        """
+        box = {"killed": False}
+
+        def free_after_kill(port, host="127.0.0.1"):
+            if port == 8080 and not box["killed"]:
+                return False
+            return True
+
+        def fake_evict(port, label, ev=None):
+            box["killed"] = True
+            if ev is not None:
+                ev.append(f"{port} ← fake.exe（PID 999）已结束")
+            return None
+
+        main.port_is_free = free_after_kill
+        main.evict_port_occupant = fake_evict
         res = self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
         self.assertTrue(res.ok, res.reason)
-        self.assertEqual(main.load_running_map()["jenkins"].port, 8081)
+        self.assertEqual(main.load_running_map()["jenkins"].port, 8080,
+                         "端口被占不许平移，必须还是官方默认端口")
+        self.assertTrue(any("已结束" in n for n in res.notes),
+                        f"结束了占用者却没告诉用户：notes={res.notes}")
+
+    def test_occupied_port_names_the_culprit_when_eviction_fails(self):
+        """结束占用者失败时，报错必须指名是哪个口、被谁占着。
+
+        只说"端口被占用"等于把排查成本推给用户——他还得自己去翻任务管理器。
+        """
+        main.port_is_free = lambda port, host="127.0.0.1": port != 8080
+        main.evict_port_occupant = lambda port, label, ev=None: (
+            f"端口 {port}（{label}）被 foo.exe（PID 4242）占用，结束它失败：拒绝访问")
+        res = self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.state, "port")
+        self.assertIn("4242", res.reason, "报错要点名占用者的 PID")
+        self.assertIn("foo.exe", res.reason, "报错要点名占用者的程序名")
+        self.assertEqual(self.spawned, [], "没拿到端口就不许拉起进程")
+        self.assertEqual(main.load_running_map(), {}, "启动失败不许留登记")
+
+    def test_occupied_port_names_the_process_that_refused_to_die(self):
+        """结束占用者成功、但端口复查仍不释放（进程赖着不走）→ 也要指名道姓。
+
+        这条覆盖"结束掉了却没释放"这条路径：它必须跟"结束失败"一样把占用者
+        的程序名与PID 说清，不能只说"端口被占用"。
+        """
+        main.port_is_free = lambda port, host="127.0.0.1": port != 8080
+        box = {"evicted": False}
+
+        def stubborn(port, label, ev=None):
+            box["evicted"] = True
+            if ev is not None:
+                ev.append(f"{port} ← stubborn.exe（PID 777）已结束")
+            return None                     # 报告"结束成功"，但端口复查仍不释放
+
+        main.evict_port_occupant = stubborn
+        res = self.mgr(listening_after=1).start(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.state, "port")
+        self.assertIn("8080", res.reason)
+        self.assertEqual(self.spawned, [], "没拿到端口就不许拉起进程")
+
+    def test_occupied_port_never_shifts_even_when_nothing_can_be_evicted(self):
+        """evict=False 时（不杀）也必须原地失败，不许退回平移。"""
+        main.port_is_free = lambda port, host="127.0.0.1": port != 8080
+        orig = main.evict_port_occupant
+        plan, why = main.choose_ports(self.comp.launch, is_free=main.port_is_free,
+                                      evict=False)
+        self.assertEqual(plan.all_ports, (), "拿不到端口就不该给出计划")
+        self.assertIn("8080", why, "失败原因要指名是哪个口")
+        self.assertIs(plan.main, 0)
+        del orig
 
     def test_start_carries_the_conf_copy_notice_to_the_card(self):
         """副本建立/差异文件这两句必须跟着 StartResult 回到卡片，由卡片写进组件日志。
@@ -2098,35 +2210,60 @@ class PortPlanning(unittest.TestCase):
         self.assertEqual(why, "")
         self.assertEqual(plan.all_ports, (8848, 9848, 9849))
 
-    def test_derived_ports_move_with_the_main_port(self):
-        """派生口（Nacos gRPC）跟着主口走：主口平移到 8850，9848 系也要变成 9850 系。
-        这条是"整簇一起可用"规则的另一半，写错就会起来一个半死的 Nacos。
+    def test_derived_ports_are_the_offsets_of_the_fixed_main_port(self):
+        """派生口（Nacos gRPC）= 主口 + offset，且**主口永远是官方默认的那个**。
 
-        占用集 {8848, 9848, 9849} 之下正确答案是 8850 而不是 8849：8849 这一簇是
-        {8849, 9849, 9850}，而 9849 已被占 —— 主口自己空着不算数。
-        （计划一 Task 3 就栽过这类"占用集算错"的夹具上，这次把推导写在这里。）"""
-        taken = {8848, 9848, 9849}
-        plan, why = main.choose_ports(self.spec(),
-                                      is_free=lambda p, host="127.0.0.1": p not in taken)
-        self.assertEqual((plan.main, plan.all_ports), (8850, (8850, 9850, 9851)), why)
+        这条原来叫 `test_derived_ports_move_with_the_main_port`，断言"主口平移到 8850
+        时派生口变成 9850/9851"。2026-10-06 起契约反转为**不平移**：
+        Nacos 的 gRPC 口由 `server.port + 1000/1001` 派生，而 SDK 与各类客户端
+        配置里写死 8848 —— 平移会造成"服务起来了但外部客户端一个都连不上"，
+        比起不来更难归因。所以主口恒为 8848，派生口恒为 9848/9849。
+        """
+        plan, why = main.choose_ports(
+            self.spec(), is_free=lambda p, host="127.0.0.1": True, evict=False)
+        self.assertEqual((plan.main, plan.derived, plan.all_ports),
+                         (8848, (9848, 9849), (8848, 9848, 9849)), why)
 
-    def test_extra_ports_search_their_own_base(self):
-        """独立口（ActiveMQ 61616）与 8161 没有固定偏移关系：控制台口平移到 8162 时，
-        broker 口仍应从 61616 自己的基准起找，不是 61617。"""
+    def test_extra_ports_keep_their_own_declared_value(self):
+        """独立口（ActiveMQ 61616）用它自己登记的值，不跟着主口动。
+
+        这条原来断言"控制台口平移到 8162 时 broker 口仍从 61616 起找" ——
+        现在连主口都不平移了，所以两个口都必须是登记时的原值。
+        """
         s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,))
-        taken = {8161}
-        plan, why = main.choose_ports(s, is_free=lambda p, host="127.0.0.1": p not in taken)
+        plan, why = main.choose_ports(
+            s, is_free=lambda p, host="127.0.0.1": True, evict=False)
         self.assertEqual((plan.main, plan.extras, plan.all_ports),
-                         (8162, (61616,), (8162, 61616)), why)
+                         (8161, (61616,), (8161, 61616)), why)
 
-    def test_failure_names_the_port_that_had_no_room(self):
-        """失败原因里必须指名是哪个口找不到位置；只说"端口不够"等于把用户打发去自己查。"""
-        s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,),
-                      port_search_span=3)
-        taken = {61616, 61617, 61618, 61619}
-        plan, why = main.choose_ports(s, is_free=lambda p, host="127.0.0.1": p not in taken)
+    def test_busy_port_fails_instead_of_shifting_and_names_every_busy_port(self):
+        """端口被占 → 原地失败（evict=False 时），且失败原因把**每一个**被占的口都列出来。
+
+        这条原来叫 `test_failure_names_the_port_that_had_no_room`，断言"8848 起 100 个
+        端口内都找不到整簇位置"。现在是"不平移"，所以失败原因必须列出到底哪几个口
+        被占着——派生口被占也要点名，否则用户只知道 8848 被占、不知道 gRPC 也有问题。
+        """
+        taken = {8848, 9848, 9849}
+        plan, why = main.choose_ports(
+            self.spec(), is_free=lambda p, host="127.0.0.1": p not in taken, evict=False)
+        self.assertEqual(plan.all_ports, (), "拿不到端口就不该给出计划")
+        for port in (8848, 9848, 9849):
+            self.assertIn(str(port), why, f"失败原因漏了被占的 {port}")
+        self.assertIn("不会再自动换端口", why, "要说清这次不会去别处找口")
+
+    def test_independent_port_taken_is_named_too(self):
+        """独立口（61616）被占时，失败原因要点名它，且不许连主口一起报成"都找不到"。
+
+        ActiveMQ 的两个口角色不同：8161 是控制台、61616 是 broker 传输口。
+        用户看到"8161 被占"去关控制台，结果broker 起不来 —— 两个口必须各自点名。
+        """
+        s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,))
+        taken = {61616}
+        plan, why = main.choose_ports(
+            s, is_free=lambda p, host="127.0.0.1": p not in taken, evict=False)
         self.assertEqual(plan.all_ports, ())
-        self.assertIn("61616", why)
+        self.assertIn("61616", why, "被占的独立口要点名")
+        self.assertIn("独立端口", why, "要点明它的角色是独立端口，不是派生口")
 
     def test_build_plan_injects_conf_dir_and_extra_env(self):
         """extra_env 的占位符必须能拿到 conf_dir/data_dir：ActiveMQ 的 ACTIVEMQ_CONF
@@ -2255,6 +2392,47 @@ class PortPlanning(unittest.TestCase):
             self.assertIn("activemq.log", out)
             self.assertIn("尚未生成", main.vendor_log_tails(data, data, "nacos"))
 
+class EvictGuard(unittest.TestCase):
+    """端口被占时「结束占用者」这条能力自己的护栏。
+
+    独立成类而不是挂在 StartFlow 里：StartFlow.setUp 为了隔离会把
+    evict_port_occupant 整个桩掉，挂在那边就永远测不到真函数。
+    """
+
+    def test_evict_never_kills_our_own_process(self):
+        """**绝不结束自己** —— 这条守卫删掉会造成不可逆的误伤。
+
+        场景：本工具刚给某个组件拉起进程（登记 PID = 本工具自己，因为
+        `startup.cmd` 之类包装器在某些配置下会让子进程等于 launcher），
+        用户又点了一次启动 → 端口反查回来的 PID 就是 `os.getpid()`。
+        此时若无条件 os.kill(getpid(), 9)，**本工具会把正在运行中的自己杀掉**，
+        用户看到的是界面突然消失、没有报错。
+
+        这条钉住"排除自己"这道闸：即使 PID 反查结果是自己，也只能报错不许动手。
+        """
+        import os as _os
+        with tempfile.TemporaryDirectory() as td:
+            # 结束占用者是 Windows-only 能力（用的是 tasklist + os.kill 语义），
+            # 非 Windows 上直接拒绝动手。所以这条用例先把 OS 钉成 Windows。
+            orig_os = main.CURRENT_OS
+            main.CURRENT_OS = "Windows"
+            self.addCleanup(setattr, main, "CURRENT_OS", orig_os)
+            # 让 occupant_of 报出"占用者就是我自己"
+            orig = main.occupant_of
+            main.occupant_of = lambda port: (_os.getpid(), "byte-tools.exe")
+            self.addCleanup(setattr, main, "occupant_of", orig)
+            killed = []
+            orig_kill = main.os.kill
+            main.os.kill = lambda pid, sig: killed.append(pid)
+            self.addCleanup(setattr, main.os, "kill", orig_kill)
+            orig_alive = main.pid_alive
+            main.pid_alive = lambda pid: True
+            self.addCleanup(setattr, main, "pid_alive", orig_alive)
+
+            why = main.evict_port_occupant(8080, "主端口")
+        self.assertIsNotNone(why, "占用者是自己时必须拒绝动手，而不是返回成功")
+        self.assertIn("自己", why, f"拒绝理由要说清是「自己」：{why}")
+        self.assertEqual(killed, [], "绝不能对自己 os.kill")
 
 if __name__ == "__main__":
     unittest.main()

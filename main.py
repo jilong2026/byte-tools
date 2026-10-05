@@ -3070,7 +3070,11 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
                                           # server.servlet.contextPath=/nacos —— 不在根路径
         # A3 真机实测（2026-10-05）：控制台在 /nacos，该路径返回可达响应。
         # health_path 从 None 填成实测值——spec §9 写明"None 不是不测，是尚未实测"。
-        health_path="/nacos",
+        # health_path 保持 None：探活路径与 console_path 相同（都是 /nacos）。
+        # 2026-10-06 教训：曾把它填成 "/nacos"，而 console_url 已经含 /nacos，
+        # 上层再拼一次就成了 /nacos/nacos → 稳定 404 → 演练误报"控制台不可达"。
+        # 这个字段只在"探活路径 ≠ 控制台路径"（Jenkins 那种 /login）时才有意义。
+        health_path=None,
         needs=("jdk",),
         min_java_major=8,
         data_dir_env=None,               # 厂商无外移开关：-Dnacos.home 固定在安装目录内
@@ -3106,7 +3110,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_writeback="conf_copy",     # 计划给的片段漏了这行，缺了会退回 cli_only（端口根本改不动）
         extra_env={"ACTIVEMQ_CONF": "{conf_dir}", "ACTIVEMQ_DATA": "{data_dir}"},
         console_path="/admin",           # A3 真机实测：控制台在 /admin 且返回可达响应
-        health_path="/admin",            # A3 实测同一条路径
+        health_path=None,                # 同上：探活路径 = console_path（/admin），不重复填
         needs=("jdk",),
         min_java_major=17,
         data_dir_env=None,
@@ -4860,8 +4864,8 @@ def set_openwire_port(path: Path, port: int) -> Tuple[bool, str]:
 
 @dataclass
 class PortPlan:
-    """一次启动最终要用的端口。三种角色分开存，是因为它们的平移规则根本不同：
-    派生口跟着主口走，独立口有自己的基准。合成一个 tuple 存就不区分得开了。"""
+    """一次启动最终要用的端口。三种角色分开存，是因为它们的来源不同：
+    派生口由主口按厂商规则算出来，独立口有自己的基准。合成一个 tuple 存就不区分得开了。"""
     main: int = 0
     derived: Tuple[int, ...] = ()
     extras: Tuple[int, ...] = ()
@@ -4876,26 +4880,164 @@ class PortPlan:
         return (self.main,) + tuple(self.derived) + tuple(self.extras)
 
 
-def choose_ports(spec: LaunchSpec, is_free=port_is_free) -> Tuple[PortPlan, str]:
-    """选端口：主口+派生口整簇同空（平移规则沿用计划一定死的"最小 + 整簇"），
-    独立口（extra_ports）各自按自己的基准另找——它们与主口没有固定偏移，
-    塞进 port_offsets 会静默写错端口。"""
-    base = pick_free_cluster(spec.main_port, spec.port_offsets, spec.port_search_span,
-                             is_free=is_free)
-    if base is None:
-        return PortPlan(), (f"{spec.main_port} 起 {spec.port_search_span + 1} 个端口内"
-                            f"都找不到整簇空闲的位置（含派生口 "
-                            f"{[spec.main_port + o for o in spec.port_offsets]}）。")
+def occupant_of(port: int) -> Tuple[Optional[int], str]:
+    """占着这个端口的 (PID, 进程名)。查不到就返回 (None, "")。
+
+    拿进程名是为了让"端口被占"这句话能指名道姓：用户看到"被 jenkins.jar(pid 1234) 占用"
+    才知道该关哪个，而不必自己去翻任务管理器。
+    """
+    try:
+        table = parse_netstat_listeners(_netstat_text())
+    except Exception:
+        return None, ""
+    pids = sorted(table.get(port, ()))
+    if not pids:
+        return None, ""
+    pid = pids[0]
+    return pid, _process_name(pid)
+
+
+def _netstat_text() -> str:
+    try:
+        kw = dict(capture_output=True, timeout=10,
+                  text=True, encoding="utf-8", errors="replace")
+        if CURRENT_OS == "Windows":
+            kw["creationflags"] = CREATE_NO_WINDOW
+        return subprocess.run(["netstat", "-ano"], **kw).stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _process_name(pid: int) -> str:
+    """进程名（可执行文件名）。查不到就回空串，不影响主流程。"""
+    try:
+        if CURRENT_OS == "Windows":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, timeout=10, text=True,
+                encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW)
+            parts = (out.stdout or "").strip().split('","')
+            if len(parts) >= 2 and parts[0]:
+                return parts[0].strip('" ') or f"PID {pid}"
+            return f"PID {pid}"
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                             capture_output=True, timeout=10, text=True)
+        return (out.stdout or "").strip() or f"PID {pid}"
+    except (OSError, subprocess.TimeoutExpired):
+        return f"PID {pid}"
+
+
+def evict_port_occupant(port: int, label: str,
+                        evicted: Optional[List[str]] = None) -> Optional[str]:
+    """把占着 `port` 的进程结束掉。成功返回 None；失败返回一句中文原因。
+
+    **无条件结束占用者**（用户 2026-10-06 明确要求）：端口被占就杀掉再启动，
+    不做端口平移。理由见 choose_ports 的说明——平移会让"服务起来了但外部客户端
+    连不上"，因为 Nacos/ActiveMQ 的默认端口是被外部配置硬编码的。
+
+    两条硬守卫，删掉任何一条都会造成不可逆的误伤：
+    ① 绝不结束我们自己（pid == os.getpid()）—— 否则本工具会把自己刚起的进程杀掉；
+    ② 归属不唯一（同口多个 PID）时不结束任何一个 —— 宁可启动失败也不赌。
+    """
+    if CURRENT_OS != "Windows":
+        return f"端口 {port}（{label}）被占用；当前只支持在 Windows 上自动结束占用者"
+    pid, name = occupant_of(port)
+    if pid is None:
+        # netstat 说有、却反查不到唯一归属（比如进程刚好退了）：不能猜，只当没查到。
+        return None
+    if pid == os.getpid():
+        return f"端口 {port}（{label}）被本工具自己的其他进程占用（PID {pid}），不能结束自己"
+    if not pid_alive(pid):
+        return None          # 占用者已经退了，当作清场成功
+    try:
+        os.kill(pid, 9)
+    except OSError as exc:
+        return f"端口 {port}（{label}）被 {name}（PID {pid}）占用，结束它失败：{exc}"
+    if evicted is not None:
+        evicted.append(f"{port} ← {name}（PID {pid}）已结束")
+    return None
+
+
+def process_alive(pid: int) -> bool:
+    """PID 是否还活着。查不到就当活着（宁可多等，不可误杀）。"""
+    try:
+        if CURRENT_OS == "Windows":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, timeout=10, text=True,
+                encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW)
+            return str(pid) in (out.stdout or "")
+        os.kill(pid, 0)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+# 别名：force_stop 那侧沿用旧名，这里保持 module 内的统一叫法
+pid_alive = process_alive
+
+
+def choose_ports(spec: LaunchSpec, is_free=port_is_free, evict: bool = True,
+                 evicted: Optional[List[str]] = None) -> Tuple[PortPlan, str]:
+    """**只用官方默认端口，不平移。** 端口被占就结束占用者（用户 2026-10-06 决定）。
+
+    为什么不平移（这是对原设计的推翻，理由成立）：
+    Nacos 的 gRPC 口由 `server.port + 1000/1001` 派生，而SDK 与各类客户端配置里
+    写死的是 8848；ActiveMQ 的 61616 更是被大量中间件硬编码。平移到 8849 之后，
+    **服务起来了但外部客户端一个都连不上**，界面还显示"运行中·端口 8849"——
+    这是比"起不来"更难归因的隐蔽故障。宁可把占了端口的东西杀掉，或者干脆报失败。
+
+    端口角色仍然是三种（派生口 / 独立口 / 主口），只是"怎么落到具体数字"不同了：
+    派生口按厂商规则由主口算，独立口用它自己的基准。
+
+    evicted（可选出参）：把"结束了谁"写进这个列表，供 start() 转成给用户看的提示行。
+    """
+    base = spec.main_port
+    if not base:
+        return PortPlan(), "该组件没有登记主端口，无法启动"
     derived = tuple(base + int(o) for o in spec.port_offsets)
-    extras: List[int] = []
-    for extra_base in spec.extra_ports:
-        hit = pick_free_cluster(int(extra_base), (), spec.port_search_span, is_free=is_free)
-        if hit is None:
-            # 半成功比不启动更坏：控制台起来了、客户端连不上，界面还显示"运行中"。
-            return PortPlan(), (f"端口 {extra_base}（组件的另一个必要端口）在 "
-                                f"{spec.port_search_span + 1} 个端口内也找不到空闲位置。")
-        extras.append(hit)
-    return PortPlan(main=base, derived=derived, extras=tuple(extras)), ""
+    extras = tuple(int(e) for e in spec.extra_ports)
+    plan = PortPlan(main=base, derived=derived, extras=extras)
+
+    busy = [p for p in plan.all_ports if not is_free(p)]
+    if busy and not evict:
+        return PortPlan(), _occupied_reason(busy, plan)
+    if busy:
+        for port in busy:
+            label = "主端口" if port == base else "端口"
+            why = evict_port_occupant(port, label, evicted)
+            if why:
+                return PortPlan(), why
+        # 结束完等一下再验：进程被杀到真正释放 socket 有几十到几百毫秒的窗口。
+        for _ in range(20):
+            if all(is_free(p) for p in plan.all_ports):
+                break
+            time.sleep(0.25)
+        still = [p for p in plan.all_ports if not is_free(p)]
+        if still:
+            return PortPlan(), _occupied_reason(still, plan)
+    return plan, ""
+
+
+def _occupied_reason(busy: List[int], plan: PortPlan) -> str:
+    """端口被占的失败原因，必须指名道姓说清是哪个口、被谁占着。
+
+    只说"端口被占用"等于把排查成本推给用户——他还得自己去翻任务管理器才知道该关什么。
+    """
+    details = []
+    for port in busy:
+        pid, name = occupant_of(port)
+        who = f"{name}（PID {pid}）" if pid else "某个进程"
+        role = "主端口" if port == plan.main else (
+            "派生端口" if port in plan.derived else "独立端口")
+        details.append(f"  · {port}（{role}）被 {who} 占用")
+    return ("端口被占用，已停止启动（不会再自动换端口）：\n"
+            + "\n".join(details)
+            + "\n请先关掉上面这些进程再启动。若那个进程正是你要用的东西，"
+              "停掉它之后本工具会重新拉起。")
+
 
 
 def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
@@ -5234,10 +5376,14 @@ class ServiceManager:
 
         base = spec.main_port
         # is_free 显式按名字传，不靠默认值绑定：默认参数在 def 时就把函数绑死了，
-        # 测试 patch main.port_is_free 会失效（Task 7 的端口平移用例正是靠它）。
-        port_plan, why = choose_ports(spec, is_free=port_is_free)
+        # 测试 patch main.port_is_free 会失效。
+        # 端口策略（2026-10-06 起）：只用官方默认端口，不平移；被占就结束占用者。
+        # 结束掉了谁要告诉用户 —— "我杀了某个进程"这种事不说出来是不道德的。
+        evicted: List[str] = []
+        port_plan, why = choose_ports(spec, is_free=port_is_free, evicted=evicted)
         if not port_plan.main:
             return StartResult(False, "port", why)
+        port_notes = [f"端口被占用，已结束占用者：{x}" for x in evicted]
 
         data_dir = CONFIG_DIR / f"{comp.key}-data"
         log_file = data_dir / "logs" / "byte-tools.out"
@@ -5245,6 +5391,9 @@ class ServiceManager:
         # 端口回写必须在 spawn 之前做完：改了配置却没起进程、或起进程时配置没生效，
         # 两边状态对不上时比"没启动"更难归因。
         ok, why, notes = prepare_ports(comp, spec, port_plan, data_dir)
+        # "我结束了哪个进程"必须跟着结果回到卡片：静默杀进程却不说是谁，
+        # 用户事后发现某程序被杀会完全不知道是哪一步干的。
+        notes = list(port_notes) + list(notes)
         if not ok:
             return StartResult(False, "writeback", why, notes=notes)
         plan = build_launch_plan(comp, spec, java_home, port_plan.main, log_file)

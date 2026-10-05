@@ -801,7 +801,11 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 - [ ] 决定端口策略（`port_writeback`）：`cli_only`（只有命令行 flag）/ `cli_flag`（命令行透传，不碰文件）/
       `conf_copy`（回写 `~/.env-tools/<key>-data` 下的副本 —— 必须锚定官方默认那一行 + 备份 + 幂等，
       **官方文件一个字节不动**；锚不到就拒改并指名要改哪一行）
-- [ ] 决定端口角色：哪些口走 `port_offsets`（跟主口平移）、哪些走 `extra_ports`（自己的基准）
+- [x] 决定端口角色：哪些口走 `port_offsets`（由主口按厂商规则派生）、哪些走 `extra_ports`（自己的基准）。
+      **2026-10-06 定：不自动平移端口** —— Nacos 的 gRPC 口由 `server.port + 1000` 派生、
+      客户端配置里写死 8848，ActiveMQ 的 61616 被大量中间件硬编码；平移会造成
+      「服务起来了但外部客户端一个都连不上」，比起不来更难归因。
+      端口被占时**结束占用者**再原地启动，并在日志里指名道姓说杀了谁。
 - [ ] 决定 `stop_kind`：`pid`（只有我们自己是服务进程时）/ `port_lookup`（PID 不可信、走端口反查，
       只请示不强杀）/ `shutdown_command`（有正规关闭脚本）
 - [ ] 补 `risk_note`（监听地址、默认凭据、首次向导）与 `data_note`（卸载时数据去哪儿，必须点名）
@@ -818,13 +822,13 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 `test_detection_paths_never_consult_the_port_owner_table` 钉住端口反查（一次 netstat 调用）
 不许出现在检测路径，而 `test_force_stop_actually_consults_it` 反过来钉住 `force_stop` **确实**会调用它 ——
 没有这条反向断言，"不许调用"可以靠把调用删干净白赢）、`ZombieMatrix`、`LaunchPlan`
-（`JAVA_HOME` 优先自家、回退需校验、门控可行动）、`StartFlow`（重定向、端口平移、超时不留登记）、
+（`JAVA_HOME` 优先自家、回退需校验、门控可行动）、`StartFlow`（重定向、端口被占时结束占用者、超时不留登记）、
 `StopFlow` / `TerminateByPidGuard`（非 server 角色 / 负 / None PID 绝不动手、Windows 先请示、
 归属歧义时报"无候选"而不是乱杀）、`LaunchWorkerSignals`（`need_force` 独立信号）、`CardLaunchUi`
 （运行中禁卸、worker 以 `parent=self` 交对象树、`stop`/`force_stop` 都接 `need_force`）、`MainWindowAdopt`
 （`_adopt_running` 在入口不在构造、closeEvent 先 `_cancel_launch_workers`、reconcile 失败不阻断启动）、
 `NetstatParse`（netstat 文本解析，含中文表头与 IPv6）、`ConfCopyWriteback`（conf 整目录副本幂等、
-只动目标行、锚不到就拒改并指名）、`PortPlanning`（`port_offsets` 跟主口平移、`extra_ports` 各自找自己的基准、
+只动目标行、锚不到就拒改并指名）、`PortPlanning`（端口固定用官方默认值、被占时结束占用者且指名道姓、`port_offsets`/`extra_ports` 各口角色与失败文案点名每个被占的端口、
 失败原因指名是哪个口）。
 
 护栏非空性经变异自检确认（三处已验红，一处**查出是空的**）：

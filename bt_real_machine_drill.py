@@ -240,9 +240,13 @@ def main_drill(apply: bool) -> int:
 def _wait_console(main_mod, url: str, rounds: int = 20, gap: float = 1.5) -> bool:
     """控制台可达性要有界重试，不能只探一次。
 
-    端口在听 ≠ 服务可用：Jenkins 2.580.1 实测（2026-10-05 真机）里Jetty 在
-    T+0s 就bind 了 8080，而 Jenkins 还在 "Started initialization"，直到 T+1s 才
-    初始化完。判据一若在端口通的瞬间查一次 HTTP��会稳定误报"控制台不可达"。
+    端口在听≠ 服务可用：Jenkins 2.580.1 实测（2026-10-05 真机）里 Jetty 在
+    T+0s 就 bind 了 8080，而 Jenkins 还在 "Started initialization"，直到 T+1s 才
+    初始化完。判据一若在端口通的瞬间查一次 HTTP 会稳定误报"控制台不可达"。
+
+    轮数是量过的，不是猜的：2026-10-06 实测 Nacos 2.3.2，start() 返回后第一次探
+    就通（T+13.7s，`Tomcat started on port(s): 8848 with context path '/nacos'`
+    与 start() 返回几乎同时）。30 秒窗口有30 倍余量，够用。
 
     这里用与 start() 相同的有界轮次约定（固定轮数 + 每轮 sleep），不用墙钟 deadline：
     deadline 在 sleep 被注入时会静默缩短宽限期。"""
@@ -289,8 +293,15 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     rec = res.record
     # 健康路径取自 LaunchSpec.health_path，不在这里硬编码 "/login"：
     # 账本裁定 F3 说这个字段留着就是给演练层当判据用的，写死就等于计划二一换组件即错。
-    health = comp.launch.health_path or "/"
-    got = _wait_console(main, rec.console_url.rstrip("/") + health)
+    # console_url 已经含 console_path（形如 http://127.0.0.1:8848/nacos），
+    # 不要再拼 health_path —— 2026-10-06 实测：Nacos 两者都是 /nacos，
+    # 拼起来变成 /nacos/nacos → 404，判据一稳定误报"控制台不可达"。
+    # health_path 存在的意义是「探活路径与控制台路径不同时」才追加（Jenkins 那种
+    # console_path="/" 而 health_path="/login" 的组合），这里只在真的不同才拼。
+    base = rec.console_url.rstrip("/")
+    health = comp.launch.health_path or ""
+    url = base if not health or health == comp.launch.console_path else base + health
+    got = _wait_console(main, url)
     print(f"[1/4] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
 
     def cluster_state(ports, label):
