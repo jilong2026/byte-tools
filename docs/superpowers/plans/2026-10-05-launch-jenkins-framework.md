@@ -623,7 +623,7 @@ class ServiceManager:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 21 tests ... OK`。若 `NoExecInvariant` 里 `adopt()` 断言与实现返回顺序不一致，按实现的组件顺序修正测试，**不要反过来放宽护栏**。
+Expected: `Ran 23 tests ... OK`。若 `NoExecInvariant` 里 `adopt()` 断言与实现返回顺序不一致，按实现的组件顺序修正测试，**不要反过来放宽护栏**。
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -742,7 +742,7 @@ Expected: FAIL，`'ServiceManager' object has no attribute 'reconcile'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 25 tests ... OK`
+Expected: `Ran 27 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -783,7 +783,8 @@ class LaunchPlan(unittest.TestCase):
         """EnvManager.get 只是 os.environ.get（main.py:3660），
         所以 JAVA_HOME 必须按"本工具装了哪个 JDK"来定，不能信进程环境。"""
         with tempfile.TemporaryDirectory() as td:
-            home = Path(td) / "jdk-21"
+            # Component.install_dir() 的形状是 <CONFIG_DIR>/<key>/<key>-<version>（main.py:227）
+            home = Path(td) / "jdk" / "jdk-21"
             (home / "bin").mkdir(parents=True)
             (home / "bin" / ("java.exe" if main.CURRENT_OS == "Windows" else "java")).write_bytes(b"x")
             orig_dir, orig_map = main.CONFIG_DIR, main.load_active_map
@@ -793,14 +794,24 @@ class LaunchPlan(unittest.TestCase):
             main.load_active_map = lambda: {"jdk": "21"}
             self.assertEqual(main.resolve_java_home(self.comps), str(home))
 
-    def test_java_home_falls_back_to_env_var(self):
-        orig = main.load_active_map
-        main.load_active_map = lambda: {}
-        self.addCleanup(setattr, main, "load_active_map", orig)
-        os.environ["JAVA_HOME"] = r"X:\external\jdk"
-        self.assertEqual(main.resolve_java_home(self.comps), r"X:\external\jdk")
-        os.environ.pop("JAVA_HOME")
-        self.assertIsNone(main.resolve_java_home(self.comps))
+    def test_java_home_falls_back_to_env_var_but_validates_it(self):
+        """本工具没装 JDK 时退到用户的 JAVA_HOME，但必须确认它真是个 JDK 目录：
+        指到一个不存在的路径就当没有，否则启动报错无从解释。"""
+        orig_map = main.load_active_map
+        orig_env = os.environ.get("JAVA_HOME")
+        self.addCleanup(setattr, main, "load_active_map", orig_map)
+        with tempfile.TemporaryDirectory() as td:
+            real_home = Path(td) / "external-jdk"
+            (real_home / "bin").mkdir(parents=True)
+            main.load_active_map = lambda: {}
+            os.environ["JAVA_HOME"] = str(real_home)
+            self.assertEqual(main.resolve_java_home(self.comps), str(real_home))
+            os.environ["JAVA_HOME"] = str(Path(td) / "does-not-exist")
+            self.assertIsNone(main.resolve_java_home(self.comps))
+        if orig_env is None:
+            os.environ.pop("JAVA_HOME", None)
+        else:
+            os.environ["JAVA_HOME"] = orig_env
 
     def test_gate_reports_missing_jdk_as_actionable(self):
         ok, reason = main.launch_gate(self.comp, self.spec, java_home=None)
@@ -808,22 +819,36 @@ class LaunchPlan(unittest.TestCase):
         self.assertIn("JDK", reason)
 
     def test_argv_expands_all_placeholders(self):
-        plan = main.build_launch_plan(self.comp, self.spec, r"C:\jdk\bin\java.exe",
-                                      8123, Path("D:/d/logs/byte-tools.out"))
-        self.assertEqual(plan.argv[:3], [r"C:\jdk\bin\java.exe", "-jar"])
+        plan = main.build_launch_plan(self.comp, self.spec, self.jdk_home,
+                                      8123, Path(self.dir.name) / "byte-tools.out")
+        java_exe = Path(self.jdk_home) / "bin" / ("java.exe" if main.CURRENT_OS == "Windows" else "java")
+        self.assertEqual(str(plan.argv[0]), str(java_exe),
+                         "build_launch_plan 收的是 JDK home，java 可执行文件由它自己拼")
+        self.assertEqual(plan.argv[1], "-jar")
+        self.assertTrue(str(plan.argv[2]).endswith("jenkins.war"))
         self.assertIn("--httpPort=8123", plan.argv)
-        self.assertNotIn("{port}", " ".join(plan.argv), "占位符没展开干净")
+        self.assertNotIn("{", " ".join(str(a) for a in plan.argv), "占位符没展开干净")
 
     def test_env_injects_jenkins_home_and_java_home(self):
-        plan = main.build_launch_plan(self.comp, self.spec, r"C:\jdk\bin\java.exe",
-                                      8080, Path("D:/d/logs/byte-tools.out"))
+        plan = main.build_launch_plan(self.comp, self.spec, self.jdk_home,
+                                      8080, Path(self.dir.name) / "byte-tools.out")
         self.assertEqual(plan.env["JENKINS_HOME"], str(Path(main.CONFIG_DIR) / "jenkins-data"))
-        self.assertEqual(plan.env["JAVA_HOME"], r"C:\jdk")
+        self.assertEqual(plan.env["JAVA_HOME"], self.jdk_home)
+        self.assertTrue(Path(plan.env["JENKINS_HOME"]).is_dir(), "数据目录必须在这一步就建好")
+        self.assertTrue(str(plan.cwd).endswith("jenkins-2.568.3"), "工作目录是组件安装目录")
 
     def test_console_url_uses_actual_port(self):
-        plan = main.build_launch_plan(self.comp, self.spec, "java", 8123, Path("x"))
+        plan = main.build_launch_plan(self.comp, self.spec, self.jdk_home, 8123,
+                                      Path(self.dir.name) / "o.out")
         self.assertEqual(plan.console_url, "http://127.0.0.1:8123/")
 ```
+
+`setUp` 里再加一行 `self.jdk_home = str(Path(self.dir.name) / "jdkhome")`（本任务的
+`build_launch_plan` 不校验 JDK 目录是否存在，校验是 `resolve_java_home` 的职责，已单独覆盖）。
+
+约定 **`java_home` 参数一律是 JDK 安装目录（home），不是 java 可执行文件路径** ——
+`resolve_java_home` 返回 home、`launch_gate` 判断 home 是否为 None、Task 7 的
+`start()` 把 home 原样传进来，三者必须是同一语义，否则 JAVA_HOME 会被写成 exe 路径。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -908,7 +933,7 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 31 tests ... OK`
+Expected: `Ran 33 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1126,7 +1151,7 @@ class ServiceManager:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 36 tests ... OK`
+Expected: `Ran 38 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1298,7 +1323,7 @@ class ServiceManager:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 40 tests ... OK`
+Expected: `Ran 42 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1412,7 +1437,7 @@ class LaunchWorker(QThread):
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 42 tests ... OK`
+Expected: `Ran 44 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1632,7 +1657,7 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 47 tests ... OK`
+Expected: `Ran 49 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1715,7 +1740,7 @@ Expected: FAIL，`no attribute 'current_components'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 49 tests ... OK`
+Expected: `Ran 51 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
