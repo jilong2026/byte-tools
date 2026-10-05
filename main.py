@@ -5613,9 +5613,11 @@ class ComponentCard(QFrame):
         else:
             if st.state == "zombie":
                 # 僵尸登记要看得见：否则"上次崩了、登记还留着"和"干净地停过"长得一模一样。
-                # 按钮仍按未运行摆 —— start() 会覆盖旧登记，用户再点启动即可接管。
+                # 文案只承诺 start() 真会做的事：它不看旧 PID，直接起一个新进程并覆盖这条登记
+                # —— 万一是"卡住但还活着"的旧进程，那个进程归 adopt/手工处理，别说成"接管"。
                 self.launch_label.setText(
-                    f"⚠ 上次运行残留登记（端口 {st.record.port} 没在听），再点启动会自动接管")
+                    f"⚠ 上次运行的残留登记（端口 {st.record.port} 没在听），"
+                    f"再点启动会重新起一个并覆盖这条登记")
             else:
                 self.launch_label.setText("")
             # 只解冻自己被锁过的那次：卸载按钮的可用性本来由 _detect_status /

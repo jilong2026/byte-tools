@@ -1018,9 +1018,29 @@ class CardLaunchUi(unittest.TestCase):
         self.card._refresh_launch_state()
         self.assertIn("残留", self.card.launch_label.text())
         self.assertIn("8080", self.card.launch_label.text())
+        # 文案不许承诺 start() 不做的事：它不看旧 PID，是直接起新进程覆盖登记。
+        # 上次评审点过这句"会自动接管"过界，钉在这里防止改回去。
+        self.assertIn("重新起一个", self.card.launch_label.text())
+        self.assertNotIn("接管", self.card.launch_label.text())
         self.assertTrue(self.card.btn_start.isEnabled())
         self.assertFalse(self.card.btn_console.isEnabled())
         self.assertFalse(self.card.btn_stop.isEnabled())
+
+    def test_current_worker_finished_hands_the_reference_back(self):
+        """上一条测的是"老 worker 的 finished 不许清掉新 worker"；这是同一处代码的另一半：
+        **当前** worker 结束时必须把属性交回，否则 `launch_worker is None` 永不成立，
+        启动按钮卡在禁用态。把 `self.launch_worker = None` 整行删掉，其余用例仍会全绿。"""
+        self._mark_running()
+        created = self._stub_workers()
+        self.card.on_stop_clicked()
+        self.assertIs(self.card.launch_worker, created[0])
+
+        created[0].finished.emit()
+        self.assertIsNone(self.card.launch_worker, "当前 worker 结束要交回引用")
+        self.assertEqual(created[0].delete_later_calls, 1)
+        # 交回引用不等于服务停了：端口还在听时启动仍旧不可点
+        self.card._refresh_launch_state()
+        self.assertFalse(self.card.btn_start.isEnabled())
 
 
 if __name__ == "__main__":
