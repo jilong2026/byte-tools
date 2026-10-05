@@ -2130,7 +2130,9 @@ git commit -m "test(drill): 新增 --launch 三层判据演练；按 Windows 实
 **Files:**
 - Modify: `CODE_WIKI.md`（§2 架构图、§3 目录结构、§4.6 业务逻辑层、§4.7 UI 层、§5.4 信号槽图、§8.2 后新增一节启动能力、§10 约束）
 - Modify: `DEVELOPMENT.md`（新增规则 R5：组件一键启动契约；规则索引补一行；把"后续规则占位"的 R5 去掉）
-- Modify: `README.md` / `README_EN.md`（功能特性加一条，Jenkins 那句"用户需自行 java -jar 启动"的旧说明要改掉，`main.py:3283` 附近注释同步）
+- Modify: `README.md` / `README_EN.md`（功能特性加一条。Jenkins 那句"用户需自行 java -jar 启动"的旧说明要改掉 ——
+  实测位置是 `main.py:3346-3363` 那段注释与 `unsupported_platform_hint`（计划起草时在 3283，前面的任务把它推下去了），
+  改文案时**按 `jenkins` 这个 Component 找，别按行号**；README 侧同步）
 
 **Interfaces:**
 - Consumes: 前 12 个 Task 的成果
