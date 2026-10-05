@@ -724,6 +724,10 @@ Expected: FAIL，`'ServiceManager' object has no attribute 'reconcile'`
             comp = comps.get(key)
             if comp is None or getattr(comp, "launch", None) is None:
                 continue
+            if key not in records:
+                continue          # 没有登记的 key 不是"待认定"的东西：卡片自己的
+                                  # status() 会答"未运行"，reconcile 只负责把有过登记的
+                                  # 一条条判完，返回集因此可以为空（用例钉的就是这个）
             st = self.status(key, comp, records)
             if st.state == "zombie":
                 records.pop(key, None)
