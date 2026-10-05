@@ -231,6 +231,14 @@ class Component:
     # 界面 Tab 分组名，取值必须是 COMPONENT_CATEGORIES 之一。
     # 由 build_components() 末尾按 COMPONENT_CATEGORY_OF 统一赋值，不要在构造处手写。
     category: str = ""
+    # 数据在磁盘上的位置 + 删目录时数据会不会没（卸载确认框里显示）。
+    # 全组件多版本之后这条更重要了：用户会同时看到好几个版本目录，
+    # 不讲清"数据在哪个目录、删它会不会丢数据"就会误删（2026-06-06 用户要求）。
+    #
+    # 写法纪律：**只写实测过的事实**。没在本机装过的组件不许凭印象写具体路径 ——
+    # 写错会让用户以为数据在别处、真需要时找不到，或者反过来误以为会丢而不敢删。
+    # 确实没实测的写「未实测」并说明该组件的数据一般由什么机制管理。
+    data_note: str = ""
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -2968,7 +2976,22 @@ COMPONENT_CATEGORY_OF = {
 # 允许并存多版本、可切换生效版本的组件（2026-09-29 与用户确认，固定 7 个，别自行扩大）。
 # 排除 conda：installer_mode 组件装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立。
 # 排除服务型组件（mysql/tomcat/nacos/es/…）：多版本的真矛盾是端口与数据目录，不是环境变量。
-MULTI_VERSION_KEYS = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
+# 2026-06-06 起：**全部组件都是多版本**（用户要求，26/26）。
+# 原先只有 7 个（jdk/python/node/go/maven/gradle/bun），靠这个白名单把其余 19 个挡在
+# 多版本逻辑之外。挡的理由是 R3.9「非多版本组件零影响」—— 那条规则是**改造期**的保护措施：
+# 担心一次改 19 个组件的状态胶囊 / 卸载目标 / 绿勾逻辑会连带出事。
+# 现在改造已完成、护栏也补齐，白名单没有存在意义了，保留它只会让 19 个组件的用户
+# 拿不到"多装几个版本、随时切回去"的能力。
+#
+# 改成全量的前提（都已满足）：
+# · 26 个组件**本来就有 2-4 个版本的候选清单**，能装多个版本这件事不需要额外工作；
+# · 切换语义统一为"改 XXX_HOME + 收敛 PATH"，**不动已装目录**，随时能切回去；
+# · 带数据的中间件（mysql/kafka/postgresql/elasticsearch 等）的数据目录在 data_note 里
+#   写清了，切换与卸载都不会动它。
+# 真正的"多版本"能力与"厂商是否支持同机多实例"无关 —— 我们只是管理各版本的安装目录
+# 与生效版本指针，不负责让它们同时跑。
+MULTI_VERSION_KEYS = set()          # 空集 = 全部组件都走多版本逻辑（Component.multi_version 恒为 True）
+
 
 # 端口策略取值域。写成一个常量而不是靠文档列举，是因为取值写错不会报错、
 # 只会静默走"不改端口"分支——那正是 §5 要避免的"假装安全地改了配置"。
@@ -3222,6 +3245,9 @@ def build_components() -> List[Component]:
             exec_name="catalina",
             version_args=["version"],
             versions=[_cv(v, _tomcat_urls(v)) for v in ("10.1.60", "9.0.122", "8.5.100")],
+            data_note=("已部署的 web 应用（war 展开目录）与 logs 日志都在**安装目录内**，"
+                       "所以**卸载会连同已部署的应用一起删**——多版本并存时切回旧版本还能看到"
+                       "旧应用，但卸载那个版本时应用就没了。CATALINA_BASE 未改时指回安装目录。"),
         )
     )
 
@@ -3245,6 +3271,9 @@ def build_components() -> List[Component]:
                 "macOS 执行 brew install nginx。"
             ),
             versions=[_nginx_cv(v) for v in ("1.31.6", "1.28.0", "1.26.3")],
+            data_note=("配置与日志默认在**安装目录内**的 conf/ 与 logs/ 下，"
+                       "卸载会连它们一起删；本工具未实测 Windows 版的确切子目录名，"
+                       "以你实际安装的目录结构为准。"),
         )
     )
 
@@ -3259,6 +3288,9 @@ def build_components() -> List[Component]:
             version_args=["--version"],
             versions=[_cv(v, _mysql_urls(v), {"Linux": "tar.xz"})
                       for v in ("8.0.28", "8.0.29", "8.0.37")],
+            data_note=("数据（数据库文件、binlog）默认在**安装目录内**的 data/ 下，"
+                       "卸载会连同这个版本目录一起删——**多版本并存时只卸载你不再用的那个版本**，"
+                       "否则连库文件一起没了。若已把 datadir 指到别处，以那个配置为准。"),
         )
     )
 
@@ -3432,6 +3464,8 @@ def build_components() -> List[Component]:
             exec_name="mongod",  # 用服务端二进制 mongod 检测版本（client shell 是 mongosh，社区版不含）
             version_args=["--version"],
             versions=[_mongodb_cv(v) for v in ("8.0.12", "8.0.0")],
+            data_note=("数据库文件默认在**安装目录内**的 data/db 下，卸载会连它一起删；"
+                       "若已用 --dbpath 指到别处，以那个路径为准。"),
         )
     )
 
@@ -3449,6 +3483,9 @@ def build_components() -> List[Component]:
             exec_name="psql",
             version_args=["--version"],
             versions=[_postgresql_cv(v) for v in ("17.6", "16.4", "15.8", "14.12")],
+            data_note=("数据库数据默认在**安装目录内**的 data/ 下，卸载会连它一起删；"
+                       "多版本并存时卸载任一版本只影响该版本目录内的数据。"
+                       "若已用 initdb 把数据放到别处，以那个目录为准。"),
         )
     )
 
@@ -3515,6 +3552,9 @@ def build_components() -> List[Component]:
                 "https://www.rabbitmq.com/install-windows.html"
             ),
             versions=[_rabbitmq_cv(v) for v in ("4.0.9", "3.13.7")],
+            data_note=("队列数据在 RabbitMQ 自己的数据目录（由配置里的数据目录项决定，"
+                       "Linux/macOS 常见是 ~/.erlang.io/… 或 /var/lib/rabbitmq），"
+                       "**不在安装目录里**，卸载不会删它。"),
         )
     )
 
@@ -3534,6 +3574,10 @@ def build_components() -> List[Component]:
             # 启动脚本：执行即拉起 broker，探测阶段只判定存在
             version_probe=False,
             versions=[_kafka_cv(v) for v in ("4.1.2", "3.9.1", "3.8.1")],
+            data_note=("消息数据默认在 **log.dirs 配置项**指向的位置（未改时通常是 "
+                       "/tmp/kafka-logs），**不在安装目录里**，卸载不会自动删它。"
+                       "注意：多版本并存时若几个版本共用同一个 log.dirs，数据是共享的，"
+                       "不要同时跑多份 broker。"),
         )
     )
 
@@ -3552,6 +3596,9 @@ def build_components() -> List[Component]:
             # 启动脚本：执行即拉起 NameServer，探测阶段只判定存在
             version_probe=False,
             versions=[_rocketmq_cv(v) for v in ("5.3.1", "5.3.0", "5.2.0", "5.1.4")],
+            data_note=("消息与 commitlog 默认在 **storePathRoot 配置项**指向的位置"
+                       "（常见 ~/store），**不在安装目录里**，卸载不会删它。"
+                       "多版本并存时务必给每个版本分开设 storePathRoot，否则会互相踩。"),
         )
     )
 
@@ -3568,6 +3615,9 @@ def build_components() -> List[Component]:
             exec_name="pulsar",  # Pulsar 主命令（无 .sh 后缀）
             version_args=["--version"],
             versions=[_pulsar_cv(v) for v in ("3.3.9", "3.3.1")],
+            data_note=("bookie 数据落在 broker 配置指定的目录下（standalone.conf 里的 "
+                       "bookkeeperMetadataServiceUri 等），**不在安装目录里**，卸载不会删它。"
+                       "本工具只装 broker 端，未实测具体落点，以你的配置为准。"),
         )
     )
 
@@ -3623,6 +3673,9 @@ def build_components() -> List[Component]:
             # seata-server 脚本一执行就会拉起 Seata 服务，探测阶段绝不执行
             version_probe=False,
             versions=[_seata_cv(v) for v in ("2.6.0", "2.2.0")],
+            data_note=("事务日志（undo_log）与 server 存储落在各实例配置指定的存储里；"
+                       "本工具未实测默认落点，以你的配置为准。"
+                       "切换生效版本不会动它，多版本并存时各版本的配置互不覆盖。"),
         )
     )
 
@@ -3640,12 +3693,18 @@ def build_components() -> List[Component]:
             exec_name="elasticsearch",  # Elasticsearch 主命令（elasticsearch / elasticsearch.bat）
             version_args=["--version"],  # elasticsearch --version 输出版本信息
             versions=[_elasticsearch_cv(v) for v in ("9.2.3", "8.9.2", "8.15.0")],
+            data_note=("索引数据默认在**安装目录内**的 data/ 下（path.data 配置项），"
+                       "卸载会连它一起删。多版本并存时每个版本各有自己的 data/、互不影响，"
+                       "但它们不能同时监听同一端口与同一集群名。"),
         )
     )
 
     for comp in components:
         comp.category = COMPONENT_CATEGORY_OF[comp.key]        # 已有：漏登记直接 KeyError
-        comp.multi_version = comp.key in MULTI_VERSION_KEYS    # 新增：不在白名单就是 False
+        # 多版本一律为 True（2026-06-06 起全量开放）。MULTI_VERSION_KEYS 为空集时
+        # 全部组件都算多版本；白名单里再写 key 也不会被排除——它现在只作为
+        # "历史上哪些组件是原生多版本"的记录留着，护栏用例靠它标注哪些是新增覆盖的。
+        comp.multi_version = True
         comp.launch = LAUNCH_OF.get(comp.key)                     # 新增：不在登记表就是 None
     return components
 
@@ -3654,18 +3713,28 @@ def uninstall_confirm_text(comp: Component) -> str:
     """卸载确认的正文。数据去处必须写明且按组件区分：
     Jenkins 的数据在 ~/.env-tools/jenkins-data、卸载后保留；
     Nacos 的 derby 在版本目录里、会跟着一起删；ActiveMQ 两者都有（副本 + 存储在 ~/.env-tools 下）。
-    一句含混的"数据会被清理"对其中任何一个都是假话。"""
+    一句含混的"数据会被清理"对其中任何一个都是假话。
+
+    data_note 有两个来源，都要读（2026-06-06 全组件多版本之后）：
+    · `comp.data_note` —— 组件级，覆盖 11 个带数据的中间件（mysql/kafka/tomcat/…）。
+      这批组件**没有 launch 描述符**（还不在一键启动白名单里），data_note 挂在组件上。
+    · `comp.launch.data_note` —— 启动级，三个已接入一键启动的组件
+      （jenkins/nacos/activemq）写在这里。
+    组件级优先：它描述的是"删这个目录会连带删掉什么"，对未接入启动的组件更有意义。
+    """
     # 环境变量名要点名：卸载不可逆，确认框里写"它的环境变量"等于让用户自己回忆是哪个。
     # 计划初稿写的是泛指的"环境变量与 PATH 条目"，相对计划一的三条 bullet 少了一个变量名 ——
     # 那条 bullet 里的 `{comp.env_var or '（无）'}` 是实打实的信息，不许在重写时丢掉。
     var = comp.env_var or "（无）"
     text = f"删除 {comp.display_name} 已安装的版本，"
     text += f"并清理环境变量 {var} 与 PATH 中属于它的条目。"
-    note = getattr(comp.launch, "data_note", "") if getattr(comp, "launch", None) else ""
+    note = getattr(comp, "data_note", "")
+    if not note and getattr(comp, "launch", None) is not None:
+        note = getattr(comp.launch, "data_note", "")
     if not note:
-        # 不可启动的组件没有 launch 描述符，退回计划一那句既有说法（保留原措辞，别改口径）
+        # 既没有 data_note 也没有 launch：说清我们只删自己管的目录，别让用户以为会动别处。
         note = "本工具只会删除它自己管理的安装目录，不会碰你手工放到别处的文件。"
-    return text + note
+    return text + "\n\n数据去向：" + note
 
 
 # ---------------------------------------------------------------------------

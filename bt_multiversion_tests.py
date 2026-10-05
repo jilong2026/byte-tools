@@ -251,26 +251,63 @@ class MultiVersionFlag(EnvSandbox):
         super().setUp()
         self.components = {c.key: c for c in main.build_components()}
 
-    def test_only_the_seven_agreed_components_are_multi_version(self):
-        got = {k for k, c in self.components.items() if c.multi_version}
-        self.assertEqual(got, EXPECTED_MULTI_VERSION)
+    def test_all_components_are_multi_version(self):
+        """**全部 26 个组件都是多版本**（2026-06-06 用户要求，26/26）。
 
-    def test_service_and_installer_mode_components_are_off(self):
-        for key in ("conda", "mysql", "tomcat", "nacos", "elasticsearch",
-                    "docker", "powershell", "nginx", "kubectl"):
-            self.assertFalse(self.components[key].multi_version, key)
+        这条原来是 `test_only_the_seven_agreed_components_are_multi_version`，
+        断言"恰好是协商好的那 7 个"。白名单是**改造期**的保护措施：当时担心一次改
+        19 个组件的状态胶囊 / 卸载目标 / 绿勾逻辑会连带出事。改造已完成、护栏也补齐，
+        白名单失去意义，保留它只会让 19 个组件的用户拿不到"多装几个版本、随时切回去"。
+        """
+        not_multi = {k for k, c in self.components.items() if not c.multi_version}
+        self.assertEqual(not_multi, set(),
+                         f"这些组件还没开多版本：{sorted(not_multi)}")
+        self.assertEqual(len(self.components), 26,
+                         f"组件数变了（{len(self.components)} 个），"
+                         f"下面几条按26 个写的断言要一起核对")
+
+    def test_data_bearing_components_all_have_a_data_note(self):
+        """带数据的中间件全都要有 data_note：多版本并存后，
+        卸载/切换会同时看到"多个版本目录"，用户必须能一句话知道数据在哪、会不会没。
+
+        data_note 有两个来源，任一有即可：
+        · `comp.data_note` —— 组件级，覆盖 11 个带数据的中间件（mysql/kafka/tomcat/…）；
+        · `comp.launch.data_note` —— 启动级，jenkins/nacos/activemq 三个一键启动组件写在这里。
+        """
+        for key in ("mysql", "postgresql", "kafka", "elasticsearch", "mongodb",
+                    "rabbitmq", "activemq", "nacos", "pulsar", "rocketmq", "seata",
+                    "tomcat", "nginx", "jenkins"):
+            with self.subTest(key):
+                comp = self.components[key]
+                note = getattr(comp, "data_note", "")
+                if not note and getattr(comp, "launch", None) is not None:
+                    note = getattr(comp.launch, "data_note", "")
+                self.assertTrue(note,
+                                f"{key} 装了数据却没有 data_note（组件级与启动级都没写），"
+                                f"多版本下用户无从判断删目录会不会丢数据")
+
+    def test_uninstall_confirm_text_shows_the_data_note(self):
+        """data_note 写了还得真的出现在卸载确认框里，否则等于没写。"""
+        for key in ("mysql", "kafka", "tomcat"):
+            with self.subTest(key):
+                comp = self.components[key]
+                text = main.uninstall_confirm_text(comp)
+                self.assertIn("数据去向", text,
+                              f"{key} 的卸载确认框没有数据去向那一段")
+                self.assertIn(comp.data_note[:16], text,
+                              f"{key} 的 data_note 没进卸载确认框：{text!r}")
 
     def test_every_component_has_the_attribute(self):
         # F3：原来是 isinstance(comp.multi_version, bool)——dataclass 默认值保证了
-        # 类型，永远为真，近似同义反复。改成逐组件核对"标志 == 在白名单里"，
-        # 把 multi_version 与 MULTI_VERSION_KEYS 的对应关系真钉住。
+        # 类型，永远为真，近似同义反复。改成逐组件核对"标志真的是 bool 且为真"，
+        # 把"全量多版本"这个契约真钉住（不是靠某几个样本推断）。
         for key, comp in self.components.items():
-            self.assertEqual(comp.multi_version, key in EXPECTED_MULTI_VERSION, key)
+            self.assertIsInstance(comp.multi_version, bool, key)
+            self.assertTrue(comp.multi_version, f"{key} 不是多版本")
 
-    def test_no_dead_keys_in_multi_version_whitelist(self):
-        # F3：MULTI_VERSION_KEYS 里打错一个字母（"jd k"/"python3"）在产品码里
-        # 静默无效果——白名单必须是组件 key 全集的子集，这条断言负责报错。
-        # 校验放测试侧而不是产品码：运行时检查拖慢启动，且线上不会有第三种人。
+    def test_multi_version_whitelist_has_no_dead_keys(self):
+        # F3：MULTI_VERSION_KEYS 里打错一个字母在产品码里静默无效果。
+        # 现在它退化成"历史上哪些组件是原生多版本"的记录，但仍然不该有死键。
         self.assertTrue(main.MULTI_VERSION_KEYS <= {c.key for c in main.build_components()},
                         f"白名单存在死键：{main.MULTI_VERSION_KEYS - {c.key for c in main.build_components()}}")
 
@@ -867,15 +904,21 @@ class ConfigureUsesSelectedVersion(EnvSandbox):
         self.assertFalse(card._apply_active("17"))
         self.assertNotIn("jdk", main.load_active_map())
 
-    def test_non_multi_version_component_still_configures(self):
+    def test_every_component_can_switch_to_its_selected_version(self):
+        """全部 26 个组件都能"把下拉框选中的版本设为生效版本"（2026-06-06 起全量多版本）。
+
+        这条原来叫 `test_non_multi_version_component_still_configures`，
+        断言"非多版本组件配了 CATALINA_HOME、但**不进 active 表**"。
+        现在没有非多版本组件了，契约反转为：切换即写active 表。
+        """
         self.as_windows()
         comp = self.make_component("tomcat", "10.1.60")
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         card.on_configure_clicked()
         self.assertEqual(self.win_env["CATALINA_HOME"],
                          str(comp.install_dir("10.1.60")))
-        self.assertNotIn("tomcat", main.load_active_map(),
-                         "非多版本组件不进 active 表")
+        self.assertEqual(main.load_active_map().get("tomcat"), "10.1.60",
+                         "全量多版本后，切换必须进 active 表，否则 UI 胶囊认不出生效版本")
 
 
 class InstalledCheckIcon(EnvSandbox):
@@ -1142,20 +1185,25 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
         self.assertTrue(card.btn_configure.isEnabled())
         self.assertIn("生效", card.btn_configure.toolTip())
 
-    def test_non_multi_version_capsule_text_unchanged(self):
-        # 回归护栏：非多版本组件的胶囊必须还是老文案，不能被新逻辑污染
+    def test_installed_but_not_configured_shows_a_capsule_not_a_bare_string(self):
+        """装了但没配生效版本时，胶囊要有一句话说清"装了、还没生效"。
+
+        这条原来叫 `test_non_multi_version_capsule_text_unchanged`，
+        逐字断言非多版本组件的老文案 "● 已下载，未配置"。全量多版本后胶囊由
+        多版本逻辑接管，老文案不再出现——但**它真正要守的东西**（不许空串、
+        要说清当前状态）没变，改守这些。
+        """
         comp = self.make_component("tomcat", "10.1.60")
         self.as_windows()
         self.win_env["CATALINA_HOME"] = str(comp.install_dir("10.1.60"))
         self.enable_detect()
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         text = card.status_label.text()
-        self.assertNotIn("已装", text)
-        self.assertTrue(text)                          # 而不是空字符串
-        # 缺陷 C：把"逐字一致"真钉住——本 fixture 只造了空的 bin/ 目录、没有
-        # catalina 可执行文件，detect() 判不到「已配置」，落回「已下载未配置」这条
-        # 老文案（不是 ✓ 已配置、也不是 ○ 未安装）。断言实际产出的旧文案前缀。
-        self.assertEqual(text, "● 已下载，未配置")
+        self.assertTrue(text, "状态胶囊不能是空串")
+        # 全量多版本后这条要显示多版本胶囊：装了几个 + 哪个生效。
+        # 旧断言 assertNotIn("已装") 是"非多版本不该显示已装"的意思，现在反过来了。
+        self.assertIn("已装", text, f"多版本胶囊该说明装了几个：{text!r}")
+        self.assertIn("10.1.60", text, f"胶囊要点名生效版本：{text!r}")
 
     def test_only_the_active_version_is_probed(self):
         card = self._card(active=self.JDK_ACTIVE)
@@ -1511,12 +1559,22 @@ class UninstallTargetResolve(EnvSandbox):
         self.assertIsNone(path)
         self.assertIn("无法识别版本号", note)
 
-    def test_non_multi_version_with_two_dirs_still_refuses(self):
-        # 硬约束：非多版本组件行为与改造前逐字一致——装俩又定位不到就罢工
+    def test_uninstall_target_picks_the_highest_when_selection_is_not_installed(self):
+        """选了没装的版本、又装着多个 → 卸最高的那个（罢工等于卸载失灵）。
+
+        这条原来叫 `test_non_multi_version_with_two_dirs_still_refuses`，
+        断言非多版本组件要**罢工**并提示"请先在下拉框中选择具体版本"。
+        全量多版本后这个罢工分支不再合理：多版本的意义就是"装着好几个"，
+        用户选了列表里没有的版本时按语义降序卸最高才是他要的。
+        （R3.9 里把这条钉成硬约束，2026-06-06 全量开放后该约束作废。）
+        """
         comp = self.make_component("tomcat", "10.1.60", "9.0.100")
         path, note = comp.resolve_uninstall_target("8.8.8")
-        self.assertIsNone(path)
-        self.assertIn("请先在下拉框中选择具体版本", note)
+        self.assertIsNotNone(path, "装了多个版本时不能罢工——那等于卸载失灵")
+        self.assertEqual(main.version_from_install_dir(comp, path), "10.1.60",
+                         f"应卸语义版本最高的那个，实际 {path}")
+        self.assertIn("8.8.8", note,
+                      f"说明里要交代原本要卸什么、实际换了哪个：{note}")
 
 
 class StaleProbeWorkerGuard(EnvSandbox):
@@ -1819,13 +1877,24 @@ class UninstallConfirmText(EnvSandbox):
         self.assertTrue(comp.install_dir("17").is_dir())
         self.assertTrue(comp.install_dir("21").is_dir())
 
-    def test_non_multiversion_confirm_text_byte_identical(self):
+    def test_uninstall_confirm_text_carries_both_multi_version_tail_and_data_note(self):
+        """多版本组件的卸载确认框要同时说清两件事：**卸哪个版本** + **数据会怎样**。
+
+        这条原来叫 `test_non_multiversion_confirm_text_byte_identical`，
+        断言非多版本组件的尾巴是"（若所选版本与实际安装版本不一致…）"。
+        全量多版本后走的是多版本那句尾巴，但**不能把 data_note 挤掉** ——
+        多版本并存时用户尤其需要知道"删这个版本目录会不会连带删掉数据"。
+        """
         self.as_windows()
         comp = self.make_component("tomcat", "10.1.60")
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         captured = self._capture_question()
         card.on_uninstall_clicked()
-        self.assertIn(self.NON_MV_TAIL, captured["text"])
+        text = captured["text"]
+        self.assertIn("数据去向", text, f"确认框里没有数据去向那一段：{text!r}")
+        self.assertIn("会连同已部署的应用一起删", text,
+                      f"tomcat 的 data_note 没进确认框：{text!r}")
+        self.assertIn("CATALINA_HOME", text, "环境变量名要点名")
 
 
 class MultiVersionBadge(EnvSandbox):
@@ -1864,15 +1933,20 @@ class MultiVersionBadge(EnvSandbox):
                 self.assertTrue(badges[0].toolTip().strip(), "角标必须有悬停说明")
                 self.assertIn("生效", badges[0].toolTip())
 
-    def test_no_badge_widget_on_other_components(self):
+    def test_badge_widget_exists_on_every_component(self):
+        """全量多版本后，每个组件都要有「可多版本」角标（2026-06-06）。
+
+        这条原来叫 `test_no_badge_widget_on_other_components`，
+        断言"非多版本组件不创建角标节点（不是创建后隐藏）"。
+        现在没有非多版本组件了，契约反过来：**全部都要有**，且必须是真节点
+        （不能靠创建后隐藏糊弄——那会让 findChild 查到却看不见）。
+        """
         self.as_windows()
-        others = [c.key for c in main.build_components() if not c.multi_version]
-        self.assertTrue(others)
-        for key in others:
-            with self.subTest(key=key):
-                card = self._card(key)
-                self.assertEqual(self._badges(card), [],
-                                 "非多版本组件不该创建角标节点（不是创建后隐藏）")
+        for comp in main.build_components():
+            with self.subTest(key=comp.key):
+                card = self._card(comp.key)
+                self.assertTrue(self._badges(card),
+                                f"{comp.key} 缺「可多版本」角标")
 
     def test_title_text_stays_exactly_display_name(self):
         self.as_windows()
@@ -1930,15 +2004,22 @@ class RealMachineRegressions(EnvSandbox):
         self.assertEqual(main.load_active_map().get("jdk"), "21")
         self.assertEqual(self.win_env["JAVA_HOME"], str(comp.install_dir("21")))
 
-    def test_non_multi_version_install_still_appends(self):
-        """非多版本组件的安装路径不许被顺手改掉。"""
+    def test_install_after_extract_registers_the_installed_version_as_active(self):
+        """装完一个新版本要把它登记成生效版本（2026-06-06 全量多版本）。
+
+        这条原来叫 `test_non_multi_version_install_still_appends`，
+        断言"非多版本组件装完**不进** active 表"。现在契约反转为：进active 表。
+        理由：多版本下"装完装的那个"就是用户最可能要用的那个，
+        不登记的话胶囊认不出生效版本，用户还得手动点一次「切换为生效版本」。
+        """
         self.as_windows()
         comp = self.make_component("tomcat", "10.1.60")
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         card._configure_after_extract(comp.install_dir("10.1.60"))
         self.assertEqual(self.win_env["CATALINA_HOME"], str(comp.install_dir("10.1.60")))
         self.assertIn(str(comp.install_dir("10.1.60") / "bin"), self.win_path)
-        self.assertNotIn("tomcat", main.load_active_map())
+        self.assertEqual(main.load_active_map().get("tomcat"), "10.1.60",
+                         "装完的版本要成为生效版本")
 
     # ---- ① 的显示面：HOME 与 PATH 命中不一致时不许只报一个 ----
     def test_home_and_path_mismatch_is_disclosed_not_hidden(self):
@@ -1986,8 +2067,14 @@ class RealMachineRegressions(EnvSandbox):
         self.assertFalse(card.btn_uninstall.isEnabled())
         self.assertIn("你自己装的", card.btn_uninstall.toolTip())
 
-    def test_non_multi_version_external_detection_text_unchanged(self):
-        """非多版本组件的这条回落文案逐字不变。"""
+    def test_external_installed_component_is_labelled_as_not_ours(self):
+        """系统里自己装的（非本工具装的）组件，胶囊要说明"不由本工具管理"。
+
+        这条原来叫 `test_non_multi_version_external_detection_text_unchanged`，
+        逐字断言非多版本组件的旧文案。全量多版本后那套文案已经变了，
+        但**这条用例真正要守的东西没变**：探测到系统安装时必须说清"这不是我装的"，
+        否则用户会以为本工具能切换/卸载它，点下去全是无效操作。
+        """
         self.as_windows()
         external = main.CONFIG_DIR.parent / "own-tomcat"
         (external / "bin").mkdir(parents=True, exist_ok=True)
@@ -1997,21 +2084,30 @@ class RealMachineRegressions(EnvSandbox):
         card = main.ComponentCard(comp, lambda lvl, msg: None)
         self.enable_detect()
         card._detect_status()
-        # tomcat 的 version_probe 为真，异步版本号还没回来时旧文案就带这个尾巴，
-        # 逐字照抄改造前的产物 —— 这条断言的意义就是"非多版本一个字符都没变"
-        self.assertEqual(card.status_label.text(), "✓ 已配置（CATALINA_HOME） · 版本检测中…")
-        self.assertTrue(card.btn_uninstall.isEnabled())
-        self.assertEqual(card.btn_uninstall.toolTip(),
-                         "卸载将删除本地安装目录，并清理由本工具写入的环境变量")
+        text = card.status_label.text()
+        self.assertTrue(text, "状态胶囊不能是空串")
+        self.assertIn("系统安装", text,
+                      f"探测到系统安装时必须说清它不由本工具管理：{text!r}")
+        self.assertFalse(card.btn_uninstall.isEnabled(),
+                         "系统装的组件不许给卸载按钮：点了也做不到")
 
     # ---- ① 的操作面：多版本组件的按钮要叫「切换为生效版本」----
-    def test_switch_button_label_only_for_multi_version(self):
+    def test_switch_button_label_is_now_universal(self):
+        """全量多版本后，所有组件的按钮都是「切换为生效版本」（2026-06-06）。
+
+        这条原来叫 `test_switch_button_label_only_for_multi_version`，
+        断言"只有 jdk 那类是『切换为生效版本』，tomcat 还是『配置环境变量』"。
+        两种叫法指的是同一个动作（都把选中版本写进 XXX_HOME），留着两种文案
+        只会让用户以为 tomcat 是"不能切版本"的那种。
+        """
         self.as_windows()
-        mv = self._card("jdk")
-        self.assertEqual(mv.btn_configure.text(), "切换为生效版本")
-        comp = self.make_component("tomcat", "10.1.60")
-        ordinary = main.ComponentCard(comp, lambda lvl, msg: None)
-        self.assertEqual(ordinary.btn_configure.text(), "配置环境变量")
+        for key in ("jdk", "tomcat", "mysql", "nginx", "nacos"):
+            with self.subTest(key):
+                comp = self.make_component(key, "1.0.0")if key not in ("jdk",) \
+                    else self.make_component(key)
+                card = main.ComponentCard(comp, lambda lvl, msg: None)
+                self.assertEqual(card.btn_configure.text(), "切换为生效版本",
+                                 f"{key} 的按钮文案该统一")
 
 
 class SwitchVerification(EnvSandbox):

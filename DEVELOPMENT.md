@@ -515,22 +515,39 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 测试文件必须先 stub WMI 再 `import main`（`platform._wmi_query` 抛 `OSError` + `platform.uname.cache_clear()`，
 `bt_multiversion_tests.py:19-30`），碰 Qt 的还要 `QT_QPA_PLATFORM=offscreen`。
 
-### R3.9 非多版本组件零影响
+### R3.9 全部组件都是多版本（2026-06-06 起，取代原「非多版本组件零影响」）
 
-任何多版本相关的分支都必须用 `component.multi_version` 门控（状态胶囊 `_render_status_label` /
-`_detect_status`、卸载目标 `resolve_uninstall_target`、卸载摘要 `Component.uninstall` 第 4 步、
-绿勾 `_refresh_installed_marks`、确认框尾巴 `on_uninstall_clicked`）。非多版本组件的状态文案、按钮逻辑与
-卸载结果必须与改造前**逐字一致**。护栏用例：`test_non_multi_version_capsule_text_unchanged`、
-`test_non_multi_version_with_two_dirs_still_refuses`、`test_non_multiversion_confirm_text_byte_identical`。
-典型陷阱：`resolve_uninstall_target`（`main.py:293-338`）里"选了没装的版本、磁盘上又装着多个"这种情形，
-多版本组件改为按语义降序卸最高的并说明（罢工等于卸载失灵），非多版本组件必须继续罢工、不得跟着放宽。
+**原规则**：任何多版本分支都要用 `component.multi_version` 门控，非多版本组件的状态文案、
+按钮逻辑与卸载结果必须与改造前逐字一致。那是**多版本改造期间**的保护措施——
+当时只改 7 个（jdk/python/node/go/maven/gradle/bun），担心一次改 26 个会连带出事。
+典型陷阱曾写死为"非多版本组件卸载时选中未装版本必须罢工"。
 
-**一条明确豁免**：「下载并安装」的"选中版本已装则置灰"是**面向全部 26 个组件**的新规则
-（`ComponentCard._installed_here()` + `_sync_action_buttons()`），**不受本条约束**，
-也不许为了本条去把它门控回"只多版本组件"。判据是"目录存在且里面找得到该组件的可执行文件"，
-半截安装不算已装（否则按钮灰掉、卸载又无事可做，用户会被困死）。
-护栏用例：`InstallButtonBlockedWhenInstalled`。
+**现在作废**：26 个组件**全部**支持多版本（用户 2026-06-06 要求）。理由与前提：
+- 26 个组件本来就有 2-4 个版本的候选清单，能装多个版本不需要额外能力；
+- 切换语义统一为"改 XXX_HOME + 收敛 PATH"，**不动已装目录**，随时能切回去；
+- 带数据的中间件（mysql/kafka/postgresql/elasticsearch/tomcat…）在 `Component.data_note`
+  里写清了数据在哪、删目录会不会丢，卸载确认框里逐字展示。
+- 真正的"多版本"能力与"厂商是否支持同机多实例"无关：我们只管理各版本的安装目录与
+  生效版本指针，不负责让它们同时跑。
 
+`MULTI_VERSION_KEYS` 退化成"历史上哪些组件是原生多版本"的记录（空集），`multi_version`
+恒为 True。护栏：`test_all_components_are_multi_version`、`test_every_component_has_the_attribute`。
+**R3.9 里的 `multi_version` 门控代码仍保留**（7 处）—— 它们不再是"保护非多版本"，
+而是"组件级 vs 启动级"两套路径的分工，删掉会让 jenkins/nacos 走错分支。
+
+**卸载目标解析**（`Component.resolve_uninstall_target`）：全部组件统一为
+"选了没装的版本、磁盘上又装着多个 → 按语义降序卸最高的并把换了什么说清"。
+不再有罢工分支——多版本的前提就是"装着好几个"，罢工等于卸载失灵。
+护栏：`test_uninstall_target_picks_the_highest_when_selection_is_not_installed`。
+
+**新增：`Component.data_note`（组件级，11 个带数据的中间件）**。与 `LaunchSpec.data_note`
+（启动级，jenkins/nacos/activemq 三个一键启动组件）并存，`uninstall_confirm_text()`
+两处都读、组件级优先。**只写实测过的事实**，没在本机装过的组件写"未实测"，
+不许凭印象编数据目录 —— 写错会让用户以为数据在别处、真需要时找不到，
+或反过来误以为会丢而不敢删。护栏：`test_data_bearing_components_all_have_a_data_note`、
+`test_uninstall_confirm_text_shows_the_data_note`。
+
+**一条仍然有效的豁免**：「下载并安装」的"选中版本已装则置灰"对全部 26 个组件生效，
 ### R3.10 下拉框清单必须包含"已装但清单里没有"的版本
 
 在线版本清单只保留近期版本（实测：bun 清单里已无 1.4.1，磁盘上却装着 `bun-1.4.1`）。
