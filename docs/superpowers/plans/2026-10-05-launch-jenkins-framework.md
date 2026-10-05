@@ -1170,7 +1170,7 @@ git commit -m "feat(launch): ServiceManager.start —— 门控、选端口、�
 
 **Interfaces:**
 - Consumes: `load_running_map` / `save_running_map`、`LaunchSpec.stop_kind` / `shutdown_commands`
-- Produces: `ServiceManager.stop(comp, comps, deadline=30.0, sleeper=time.sleep) -> StopResult`；`@dataclass StopResult(ok: bool, need_force: bool, reason: str)`；`ServiceManager.force_stop(key) -> StopResult`
+- Produces: `ServiceManager.stop(comp, comps, deadline=30.0, sleeper=time.sleep) -> StopResult`；`@dataclass StopResult(ok: bool, need_force: bool, reason: str)`；`ServiceManager.force_stop(key, sleeper=time.sleep, rounds=5) -> StopResult`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1241,12 +1241,37 @@ class StopFlow(unittest.TestCase):
         res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
         self.assertTrue(res.ok, res.reason)
         self.assertEqual(killed, [(43210, 15)])
+
+    def test_windows_pid_stop_asks_before_killing(self):
+        """Windows 路线专用：os.kill 的任何信号值在 Windows 上都是 TerminateProcess，
+        也就是"强杀"本身。spec §5 要求超时只询问、不自动强杀，所以停止的第一步不许动手。"""
+        main.CURRENT_OS = "Windows"
+        killed = []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda rec: killed.append(rec.pid))
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertTrue(res.need_force)
+        self.assertEqual(killed, [], "Windows 上停止第一步不许杀进程")
+        self.assertIn("jenkins", main.load_running_map())
+```
+
+`StopFlow.setUp` 还要把 `CURRENT_OS` 钉成 POSIX 值（并在 cleanup 里还原），否则同一份用例在
+Windows 与 Linux 上走的是两条不同分支，结果取决于跑测试的机器：
+
+```python
+        self._orig_os = main.CURRENT_OS
+        main.CURRENT_OS = "Linux"
+        self.addCleanup(setattr, main, "CURRENT_OS", self._orig_os)
 ```
 
 再加一个类，直接钉死默认收尸器的守卫条件（StopFlow 的用例全部注入了 `terminate`，
 所以 `_terminate_by_pid` 本体在计划原文里是**零覆盖** —— 把"launcher 就不许动手"整行删掉
 测试也不会红。spec §2 说 Nacos/ActiveMQ 的 PID 不可信，这条守卫是"绝不误杀别人进程"的最后防线，
-必须有独立用例；这是控制器在派发前的补充裁定，预期用例数由 42 改为 46）：
+必须有独立用例；这是控制器在派发前的补充裁定。加上评审后按裁定补的 Windows 停止用例与
+负 PID 用例，本任务预期用例数为 48（后续 Task 9/10/11 的预期数已同步 +6）：
 
 ```python
 class TerminateByPidGuard(unittest.TestCase):
@@ -1274,6 +1299,12 @@ class TerminateByPidGuard(unittest.TestCase):
     def test_zero_pid_is_never_killed(self):
         main.ServiceManager._terminate_by_pid(self.rec("server", pid=0))
         self.assertEqual(self.kills, [])
+
+    def test_negative_pid_is_never_killed(self):
+        """os.kill(-1, …) 在 POSIX 上是"发给所有进程"，登记被手改成负数时绝不能往下传。"""
+        main.ServiceManager._terminate_by_pid(self.rec("server", pid=-1))
+        main.ServiceManager._terminate_by_pid(self.rec("server", pid=None))
+        self.assertEqual(self.kills, [])
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1298,12 +1329,13 @@ Expected: FAIL，`no attribute 'stop'` / `__init__() got unexpected keyword 'ter
         """只结束我们自己登记过的 PID。
 
         spec §2 说明 Nacos / ActiveMQ 的 PID 不可信，所以计划二必须走正规
-        shutdown 脚本；本期 Jenkins 我们就是服务进程，terminate 才成立。"""
-        if rec.pid_role != "server" or not rec.pid:
+        shutdown 脚本；本期 Jenkins 我们就是服务进程，terminate 才成立。
+        非 server 角色一律不动手 —— 这条守卫是"绝不误杀别人进程"的最后防线。"""
+        if rec.pid_role != "server" or rec.pid is None or rec.pid <= 0:
             return
         try:
             os.kill(rec.pid, 15)
-        except (ProcessLookupError, PermissionError, OSError):
+        except OSError:
             pass
 ```
 
@@ -1325,29 +1357,41 @@ class ServiceManager:
             return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
         spec = comp.launch
         if spec.stop_kind == "shutdown_command" and spec.shutdown_commands.get(CURRENT_OS):
-            argv = [t.format(port=rec.port, home=rec.home) for t in spec.shutdown_commands[CURRENT_OS]]
+            # 占位符契约（本期不可达分支，计划二才接线）：只认这三个键，
+            # 和 RunRecord 有的字段一一对应；{java}/{war}/{data_dir} 之类要用的话，
+            # 得先在这里补上来源，否则 format 直接 KeyError。
+            argv = [t.format(port=rec.port, home=rec.home, data_dir=rec.data_dir)
+                    for t in spec.shutdown_commands[CURRENT_OS]]
             try:
                 subprocess.run(argv, cwd=rec.home, timeout=20,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        elif CURRENT_OS == "Windows":
+            # Windows 上 os.kill 的任何信号值都是 TerminateProcess —— 那就是强杀本身，
+            # 没有"先礼貌停一下"这一步。spec §5 定的是"超时只询问、不自动强杀"，
+            # 所以这里绝不动手，直接把决定交给用户（确认后走 force_stop）。
+            return StopResult(False, need_force=True,
+                              reason=(f"{comp.display_name}（端口 {rec.port}）在 Windows 上只能直接终止进程，"
+                                      f"这会打断正在进行的任务、可能丢未落盘的配置。要强制结束吗？"))
         else:
             self._terminate(rec)
 
-        left = deadline
-        while left > 0:
+        # 与 start() 同一套"有界轮次"约定（main.py 里 start 的注释钉过）：按轮计数、
+        # 每轮 sleeper(1.0)、至少探一次。用 deadline 递减做墙钟会在 sleeper 被注入成
+        # 短睡时把宽限期静默缩短，no-op 时退化成忙等。
+        for _ in range(max(1, int(deadline))):
             if not self._is_listening(rec.port):
                 records = load_running_map()
                 records.pop(comp.key, None)
                 save_running_map(records)
                 return StopResult(True, reason=f"{comp.display_name} 已停止，端口 {rec.port} 已释放。")
             sleeper(1.0)
-            left -= 1.0
         return StopResult(False, need_force=True,
                           reason=(f"{comp.display_name} 在 {int(deadline)} 秒内没停下来（端口 {rec.port} 仍在听）。"
                                   f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
 
-    def force_stop(self, key: str) -> StopResult:
+    def force_stop(self, key: str, sleeper=time.sleep, rounds: int = 5) -> StopResult:
         """用户明确同意后的强制结束。仍然只在"端口确实释放"时才清登记。"""
         rec = load_running_map().get(key)
         if rec is None:
@@ -1357,19 +1401,23 @@ class ServiceManager:
                 os.kill(rec.pid, 9)
             except OSError:
                 pass
-        if self._is_listening(rec.port):
-            return StopResult(False, need_force=True,
-                              reason=f"端口 {rec.port} 仍在监听，可能是别的进程占着，不是本工具启动的那个。")
-        records = load_running_map()
-        records.pop(key, None)
-        save_running_map(records)
-        return StopResult(True, reason="已强制结束并释放端口。")
+        # 终止调用返回 ≠ 监听 socket 已关闭：给一个有界复查窗口，
+        # 否则刚被我们杀掉的进程会被误报成"别的进程占着端口"。
+        for _ in range(max(1, int(rounds))):
+            if not self._is_listening(rec.port):
+                records = load_running_map()
+                records.pop(key, None)
+                save_running_map(records)
+                return StopResult(True, reason="已强制结束并释放端口。")
+            sleeper(1.0)
+        return StopResult(False, need_force=True,
+                          reason=f"端口 {rec.port} 仍在监听，可能是别的进程占着，不是本工具启动的那个。")
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 46 tests ... OK`
+Expected: `Ran 48 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1483,7 +1531,7 @@ class LaunchWorker(QThread):
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 48 tests ... OK`
+Expected: `Ran 50 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1703,7 +1751,7 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 53 tests ... OK`
+Expected: `Ran 55 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1786,7 +1834,7 @@ Expected: FAIL，`no attribute 'current_components'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 55 tests ... OK`
+Expected: `Ran 57 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
