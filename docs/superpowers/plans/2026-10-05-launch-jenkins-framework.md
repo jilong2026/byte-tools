@@ -1228,6 +1228,52 @@ class StopFlow(unittest.TestCase):
         res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
         self.assertFalse(res.ok)
         self.assertIn("没有本工具的启动登记", res.reason)
+
+    def test_stop_defaults_to_killing_the_registered_server_pid(self):
+        """不注入 terminate 时，stop() 必须真的落到 _terminate_by_pid —— 那是生产默认路径。"""
+        killed = []
+        orig = main.os.kill
+        main.os.kill = lambda pid, sig: killed.append((pid, sig))
+        self.addCleanup(setattr, main.os, "kill", orig)
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(killed, [(43210, 15)])
+```
+
+再加一个类，直接钉死默认收尸器的守卫条件（StopFlow 的用例全部注入了 `terminate`，
+所以 `_terminate_by_pid` 本体在计划原文里是**零覆盖** —— 把"launcher 就不许动手"整行删掉
+测试也不会红。spec §2 说 Nacos/ActiveMQ 的 PID 不可信，这条守卫是"绝不误杀别人进程"的最后防线，
+必须有独立用例；这是控制器在派发前的补充裁定，预期用例数由 42 改为 46）：
+
+```python
+class TerminateByPidGuard(unittest.TestCase):
+    """默认收尸器：只杀我们登记为 server 的 PID，别的一律不动。"""
+
+    def setUp(self):
+        self.kills = []
+        self._kill = main.os.kill
+        self.addCleanup(setattr, main.os, "kill", self._kill)
+        main.os.kill = lambda pid, sig: self.kills.append((pid, sig))
+
+    def rec(self, role, pid=43210):
+        return main.RunRecord(key="jenkins", version="2.568.3", home="/h", data_dir="/d",
+                              port=8080, console_url="http://127.0.0.1:8080/",
+                              pid=pid, pid_role=role, started_at=0.0, launcher_cmd=["java"])
+
+    def test_server_pid_gets_sigterm(self):
+        main.ServiceManager._terminate_by_pid(self.rec("server"))
+        self.assertEqual(self.kills, [(43210, 15)])
+
+    def test_launcher_pid_is_never_killed(self):
+        main.ServiceManager._terminate_by_pid(self.rec("launcher"))
+        self.assertEqual(self.kills, [], "PID 不可信时不许动手（spec §2）")
+
+    def test_zero_pid_is_never_killed(self):
+        main.ServiceManager._terminate_by_pid(self.rec("server", pid=0))
+        self.assertEqual(self.kills, [])
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -1323,7 +1369,7 @@ class ServiceManager:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 42 tests ... OK`
+Expected: `Ran 46 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1437,7 +1483,7 @@ class LaunchWorker(QThread):
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 44 tests ... OK`
+Expected: `Ran 48 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1657,7 +1703,7 @@ spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它�
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 49 tests ... OK`
+Expected: `Ran 53 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
@@ -1740,7 +1786,7 @@ Expected: FAIL，`no attribute 'current_components'`
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: `Ran 51 tests ... OK`
+Expected: `Ran 55 tests ... OK`
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
