@@ -1650,10 +1650,13 @@ git commit -m "feat(launch): LaunchWorker 线程层，失败原因与强制结�
 ### Task 10: `ComponentCard` 按钮排与状态文本
 
 **Files:**
-- Modify: `main.py:4896-4931`（按钮区，`btn_uninstall` 之后）
-- Modify: `main.py:5061`（`_detect_status`）与 `main.py:4949-4954`（胶囊文本来源）
-- Modify: `main.py:5511`（`on_uninstall_clicked` 加互斥）
+- Modify: `main.py`（按钮区，`btn_uninstall` 之后 —— 现 `main.py:5531`）
+- Modify: `main.py`（`_detect_status` 现 `main.py:5669`；状态胶囊写点现 `5565/5579/5719/5798/5810`）
+- Modify: `main.py`（`on_uninstall_clicked` 现 `main.py:6119`，加互斥）
+- Modify: `main.py`（`ServiceManager` 类之后加模块级单例；`MainWindow` 现 `main.py:6511`）
 - Test: `bt_launch_tests.py`（追加 `CardLaunchUi`）
+
+> 行号会随任务推进漂移（计划起草时这批锚点还都在 4900-5500 段）。**按符号名定位，行号只当起点。**
 
 **Interfaces:**
 - Consumes: `ServiceManager`、`LaunchWorker`、`main.SERVICE_MANAGER`（本 Task 新增模块级单例）
@@ -1670,6 +1673,10 @@ class CardLaunchUi(unittest.TestCase):
         self._orig = main.RUNNING_FILE
         main.RUNNING_FILE = Path(self.dir.name) / "running.json"
         self.addCleanup(setattr, main, "RUNNING_FILE", self._orig)
+        # 下面两条用例会直接改模块单例的探针。不还原的话，"_is_listening 永远真"
+        # 会漏给同一进程里后跑的任何类 —— 别的用例就在猜这台机器有没有在听了。
+        self._orig_listen = main.SERVICE_MANAGER._is_listening
+        self.addCleanup(setattr, main.SERVICE_MANAGER, "_is_listening", self._orig_listen)
         comp = next(c for c in main.build_components() if c.key == "jenkins")
         self.card = main.ComponentCard(comp, lambda msg, level: None)
 
@@ -1693,7 +1700,7 @@ class CardLaunchUi(unittest.TestCase):
         self.assertIn("8080", self.card.launch_label.text())
 
     def test_launch_state_does_not_touch_the_existing_capsule(self):
-        """状态胶囊有 5 处写点（main.py:4957/4971/5111/5190/5202），
+        """状态胶囊有 5 处写点（现 main.py:5565/5579/5719/5798/5810），
         把运行状态挤进去会把既有胶囊逻辑搅浑，所以它只写自己那个 label。"""
         before = self.card.status_label.text()
         self.card._refresh_launch_state()
@@ -1728,6 +1735,25 @@ Expected: FAIL，`'ComponentCard' object has no attribute 'btn_start'`
 ```python
 SERVICE_MANAGER = ServiceManager()
 ```
+
+卡片要点停止就得能拿到别的组件（Jenkins 要看 JDK 装了没），所以下面这段**原属 Task 11，
+按裁定 F1 提前到本任务**，否则 Task 10 引用一个还不存在的 `staticmethod`：
+
+```python
+class MainWindow(QMainWindow):
+    ...
+    _COMPONENTS_CACHE: Dict[str, "Component"] = {}
+
+    @staticmethod
+    def current_components() -> Dict[str, "Component"]:
+        """只读的组件表：卡片的启动/停止要用别的组件（needs 判定），
+        但不该每张卡片自己再 build_components() 一次。"""
+        if not MainWindow._COMPONENTS_CACHE:
+            MainWindow._COMPONENTS_CACHE = {c.key: c for c in build_components()}
+        return MainWindow._COMPONENTS_CACHE
+```
+
+Task 11 因此只剩 `_adopt_running()` 与 `__init__` 接线，不再定义这个方法。
 
 `ComponentCard._build_ui` 里 `mid.addWidget(self.btn_uninstall)` 之后追加：
 
@@ -1853,7 +1879,7 @@ SERVICE_MANAGER = ServiceManager()
             QDesktopServices.openUrl(QUrl(st.record.console_url))
 ```
 
-`_detect_status()` 末尾加一行 `self._refresh_launch_state()`。日志入口用卡片已有的 `self._log(level, msg)`（`main.py:4944`，内部再转 `log_cb`），级别只用现有那三种：`info` / `warn` / `error`（`MainWindow._append_log` 在 `main.py:6758`，全仓库现用的就是这三个值）。
+`_detect_status()` 末尾加一行 `self._refresh_launch_state()`。日志入口用卡片已有的 `self._log(level, msg)`（现 `main.py:5552`，内部再转 `log_cb`），级别只用现有那三种：`info` / `warn` / `error`（`MainWindow._append_log` 在现 `main.py:7366`，全仓库现用的就是这三个值）。
 
 spec §5 里"端口是被本工具自己起的进程占着 → 提供停掉它再重试"这一条，由这里自然成立：`_refresh_launch_state()` 认出运行中后，「启动」变灰而「停止」可点，用户点停止即释放端口，再点启动。不需要额外弹窗，也不需要在 `start()` 里偷偷停别人。
 
@@ -1879,7 +1905,7 @@ git commit -m "feat(ui): 组件卡片启动/停止/打开控制台按钮，运�
 
 **Interfaces:**
 - Consumes: `SERVICE_MANAGER.reconcile`、`build_components`
-- Produces: `MainWindow.current_components() -> Dict[str, Component]`（`staticmethod`，Task 10 已在用）、`MainWindow._adopt_running()`
+- Produces: `MainWindow._adopt_running()`；`MainWindow.current_components()` 由 Task 10 交付（裁定 F1 提前），本任务只消费
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1913,23 +1939,15 @@ class MainWindowAdopt(unittest.TestCase):
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
-Expected: FAIL，`no attribute 'current_components'`
+Expected: FAIL，`no attribute '_adopt_running'`。
+（`test_current_components_covers_whitelist` 这时应当**已经通过** —— 那个方法按裁定 F1 在 Task 10 就落地了，
+本任务只是它的第一次跨卡片回归断言。若它红，说明 Task 10 漏交付，回去补 Task 10，不要在这里重定义。）
 
 - [ ] **Step 3: 写最小实现**
 
-`MainWindow` 内加：
+`MainWindow` 内加（`current_components()` 已在 Task 10 交付，这里**不要重复定义**）：
 
 ```python
-    _COMPONENTS_CACHE: Dict[str, "Component"] = {}
-
-    @staticmethod
-    def current_components() -> Dict[str, "Component"]:
-        """卡片的启动/停止要用到别的组件（Jenkins 要看 JDK 装了没），
-        所以给一个只读的组件表，不要让卡片自己再 build_components() 一次。"""
-        if not MainWindow._COMPONENTS_CACHE:
-            MainWindow._COMPONENTS_CACHE = {c.key: c for c in build_components()}
-        return MainWindow._COMPONENTS_CACHE
-
     def _adopt_running(self) -> None:
         """启动后一次性的"认清本机在跑什么"。只读 + 清僵尸，绝不拉起进程。"""
         states = SERVICE_MANAGER.reconcile(self.current_components())
