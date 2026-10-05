@@ -249,6 +249,12 @@ def launch_drill(comp_key: str, apply: bool) -> int:
               f"可选：{sorted(comps)}")
         return 1
     comp = comps[comp_key]
+    if comp.launch is None:
+        # 白名单外的组件（本期只有 jenkins 在内）不许拿一个看起来会成功的 dry-run 糊人：
+        # 真跑会被 launch_gate 拒，dry-run 却只打印"将启动"。
+        print(f"演练失败：{comp.display_name} 不在本期启动白名单 "
+              f"LAUNCH_KEYS={sorted(main.LAUNCH_KEYS)}，演练只能接登记过的组件")
+        return 1
     if not apply:
         # 数据目录要说准：spec §0 决策 3 定的是"数据与版本目录分离"，
         # JENKINS_HOME 在 CONFIG_DIR/<key>-data，不在版本目录里。
@@ -273,6 +279,11 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     print(f"[2/3] 停止 ok={stop.ok} 需强制={stop.need_force} reason={stop.reason}")
     print(f"[3/3] 登记残留={list(left)}")
     if not stop.ok or rec.key in left:
+        return 1
+    if not got:
+        # 判据一不能只被"打印"架空：端口在听不代表服务可用（Jenkins 启动中会 503，
+        # 首次解锁向导前 /login 也可能拿不到可达响应）。既然写了三层，就得三层都能否决。
+        print("演练失败：控制台不可达（判据一）—— 端口在听不等于服务可用")
         return 1
     return 0
 
