@@ -2199,7 +2199,9 @@ git commit -m "test(drill): 新增 --launch 三层判据演练；按 Windows 实
 ### Task 13: 文档与规则同步
 
 **Files:**
-- Modify: `CODE_WIKI.md`（§2 架构图、§3 目录结构、§4.6 业务逻辑层、§4.7 UI 层、§5.4 信号槽图、§8.2 后新增一节启动能力、§10 约束）
+- Modify: `CODE_WIKI.md`（§2 整体架构、§3 目录结构、§4.6 业务逻辑层、§4.7 UI 层、§5.3 信号槽连接图、
+  §6 核心流程加一节"一键启动的数据流"、§4.9 离线回归测试补 `bt_launch_tests.py` 一行、§10 约束）
+  —— 章节号以文件现有目录为准；`§5.4` 是"关键函数索引"不是信号槽图，别写错位置。
 - Modify: `DEVELOPMENT.md`（新增规则 R5：组件一键启动契约；规则索引补一行；把"后续规则占位"的 R5 去掉）
 - Modify: `README.md` / `README_EN.md`（功能特性加一条。Jenkins 那句"用户需自行 java -jar 启动"的旧说明要改掉 ——
   实测位置是 `main.py:3346-3363` 那段注释与 `unsupported_platform_hint`（计划起草时在 3283，前面的任务把它推下去了），
@@ -2258,7 +2260,11 @@ QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -u bt_
 QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_component_category_tests.py
 QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_mirror_spec_tests.py
 QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_search_and_newcmp_tests.py
+QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_refresh_versions_tests.py
 ```
+
+（这套件清单是按 `ls bt_*_tests.py` 数出来的，共 9 个；计划初稿漏了 `bt_refresh_versions_tests.py`，
+"其余 7 套件"也应是 8 套 —— 靠记忆写回归清单就会漏东西。）
 
 Expected: 全部 `OK`（`bt_multiversion` 那条需 `PYTHONIOENCODING=utf-8`，是既有债，不修）。
 
@@ -2277,4 +2283,4 @@ git commit -m "docs: 规则 R5（组件一键启动契约）与 README/CODE_WIKI
 
 ## 完成定义（计划一）
 
-spec §8 的第 1、2、4、5 项在 Jenkins 上全部达成：点启动 → 卡片显示"运行中 · 实际端口" → 打开控制台拿到 Jenkins 页面 → 停止 → 端口释放；关掉 byte-tools 再打开能正确识别运行状态且不重复拉起；8080 被占时自动落到空闲口且界面链接跟着实际端口；§2.4 相关实测项有结论并回写；`bt_launch_tests.py` 全绿且经变异测试确认非空护栏；其余 7 套件仍全绿。
+spec §8 的第 1、2、4、5 项在 Jenkins 上全部达成：点启动 → 卡片显示"运行中 · 实际端口" → 打开控制台拿到 Jenkins 页面 → 停止 → 端口释放；关掉 byte-tools 再打开能正确识别运行状态且不重复拉起；8080 被占时自动落到空闲口且界面链接跟着实际端口；§2.4 相关实测项有结论并回写；`bt_launch_tests.py` 全绿且经变异测试确认非空护栏；其余 8 套件仍全绿。
