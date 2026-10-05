@@ -4572,26 +4572,47 @@ def port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+# 监听态在两个平台上拼写不同：Windows 是 LISTENING，POSIX（Linux/macOS/BSD）是 LISTEN。
+# 只认一个的话，端口反查在另一个平台上恒返回 {}，而失败方向是安全的（宁可不杀），
+# 代价是强制结束功能在那儿静默失灵。
+_NETSTAT_LISTEN_STATES = ("LISTENING", "LISTEN")
+
+
 def parse_netstat_listeners(text: str) -> Dict[int, Set[int]]:
-    """把 `netstat -ano` 的文本解析成 {端口: {PID, …}}，只认 LISTENING 行。
+    """把 `netstat -ano` 的文本解析成 {端口: {PID, …}}，只认监听态的行。
 
     按列形状定位、不按表头：中文 Windows 的表头是本地化的
     （"协议 本地地址 外部地址 状态 PID"），而状态值不翻译（仍是 LISTENING）。
-    任何依赖表头文字的写法在中文系统上会整体失灵。"""
+    任何依赖表头文字的写法在中文系统上会整体失灵。
+
+    状态值必须收全 Windows 的 LISTENING 与 POSIX 的 LISTEN：
+    BSD 系的行形如 "tcp4 0 0 127.0.0.1.8848 *.* LISTEN 12345"，状态在倒数第一列、
+    PID 在倒数第二列，与 Windows 正好相反 —— 所以下面按尾部的形状选列序。
+    只认LISTENING 的话，本解析器在 Linux/macOS 上恒返回 {}，
+    端口反查在那两个平台上会静默变成"找不到对象"，功能哑掉而不是报错。"""
     out: Dict[int, Set[int]] = {}
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) < 5 or not parts[0].upper().startswith("TCP"):
+        # 协议列：Windows 是 TCP/TCPv6，POSIX 是 tcp4/tcp6（udp4 会被这里挡掉）。
+        if not parts or not parts[0].lower().startswith("tcp") or len(parts) < 5:
             continue
-        if parts[-2].upper() != "LISTENING":
+        if parts[-2].upper() in _NETSTAT_LISTEN_STATES:
+            local_i, pid_i = -4, -1              # Windows 列序
+        elif parts[-1].upper() in _NETSTAT_LISTEN_STATES:
+            local_i, pid_i = -4, -2              # POSIX 列序
+        else:
             continue
         try:
-            # 列序（split 后）：[-1]=PID、[-2]=状态、[-3]=**外部地址**、[-4]=本地地址。
+            # 列序（split 后）：Windows [-1]=PID、[-2]=状态、[-3]=**外部地址**、[-4]=本地地址。
             # 端口在**本地地址**上，也就是 parts[-4]。写成 -3 会取到外部地址的 0
             # （"0.0.0.0:0" / "[::]:0"），于是所有监听行都归到端口 0 —— 这是计划初稿的 off-by-one，
             # 由 Task 4 的实现者按自家用例暴露出来并改对；改错的写法过不了下面任何一条用例。
-            port = int(parts[-4].rsplit(":", 1)[-1])   # [::]:8848 取最后一段
-            pid = int(parts[-1])
+            # 本地地址的分隔符两个平台不同：Windows 是 "0.0.0.0:8848" / "[::]:8848"（冒号），
+            # POSIX 是 "127.0.0.1.8848" / "*.8848"（点）。只认一种分隔符，
+            # 就会在另一个平台上恒取不到端口 —— 所以两种都切一次。
+            local = parts[local_i].rsplit(":", 1)[-1].rsplit(".", 1)[-1]
+            port = int(local)
+            pid = int(parts[pid_i])
         except ValueError:
             continue
         out.setdefault(port, set()).add(pid)
@@ -4609,8 +4630,13 @@ def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
     """端口 → 唯一监听 PID。**这是子进程调用，只许出现在 stop/force_stop 路径**；
     出现在 status/adopt/reconcile 里就等于从后门放掉"状态检测绝不执行进程"。"""
     try:
-        done = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=10,
-                              text=True, encoding="utf-8", errors="replace")
+        kw = dict(capture_output=True, timeout=10,
+                  text=True, encoding="utf-8", errors="replace")
+        if CURRENT_OS == "Windows":
+            # 静默外部命令（与 main.py 里其它外部命令同一惯例）：
+            # 从 GUI 点"强制结束"时，不带这个标志会闪一个黑框。
+            kw["creationflags"] = CREATE_NO_WINDOW
+        done = subprocess.run(["netstat", "-ano"], **kw)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     return _pick_unique_pids(parse_netstat_listeners(done.stdout or ""), ports)
@@ -4975,11 +5001,15 @@ class ServiceManager:
     """本机进程生命周期的唯一入口。探针全部可注入，测试因此不碰网络也不碰进程。"""
 
     def __init__(self, is_listening=port_is_listening, http_ok=http_ok,
-                 process_alive=process_is_alive, terminate=None):
+                 process_alive=process_is_alive, terminate=None, lookup_pids=None):
         self._is_listening = is_listening
         self._http_ok = http_ok
         self._process_alive = process_alive
         self._terminate = terminate or self._terminate_by_pid
+        # 端口反查的注入点。用 lambda 包一层而不是把函数当默认值绑死：
+        # 默认参数在 def 时求值，测试 patch main.netstat_listener_pids 就会失效
+        # （这个坑计划一的 start() 已经踩过并写进注释）。
+        self._lookup_pids = lookup_pids or (lambda ports: netstat_listener_pids(ports))
 
     @staticmethod
     def _terminate_by_pid(rec: RunRecord) -> None:
@@ -5002,9 +5032,14 @@ class ServiceManager:
         rec = (records if records is not None else load_running_map()).get(key)
         if rec is None:
             return LaunchStatus("not_installed_or_stopped")
-        if not self._is_listening(rec.port):
+        # 按整簇判，不按单口：Nacos 主口在听、gRPC 9848 掉了是"半死"，
+        # 显示成运行中会让用户以为客户端连得上（spec 计划二 §7）。
+        # 老记录没有 ports 字段（加载侧才做归一），进程内现构造的也得能判，故按 port 兜底。
+        silent = [p for p in (tuple(rec.ports) or (rec.port,))
+                  if not self._is_listening(p)]
+        if silent:
             return LaunchStatus("zombie", rec,
-                                f"登记的进程已不在监听 {rec.port}")
+                                f"登记的进程已不在监听 {'/'.join(str(p) for p in silent)}")
         return LaunchStatus("running", rec)
 
     def adopt(self, comps: Dict[str, Component]) -> List[LaunchStatus]:
@@ -5152,35 +5187,46 @@ class ServiceManager:
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        elif CURRENT_OS == "Windows":
-            # 端口是真相：进程早就自己没了，就别拿"会打断任务"去吓用户，清登记算它停好了。
-            if not self._is_listening(rec.port):
+        elif spec.stop_kind == "port_lookup" or CURRENT_OS == "Windows":
+            # 端口是真相：整簇都空了就当已停（下面的等待循环会清登记），别吓用户。
+            ports = tuple(rec.ports) or (rec.port,)
+            if not any(self._is_listening(p) for p in ports):
                 records = load_running_map()
                 records.pop(comp.key, None)
                 save_running_map(records)
                 return StopResult(True,
-                                  reason=f"{comp.display_name} 已经不在监听端口 {rec.port}，登记已清。")
-            # Windows 上 os.kill 的任何信号值都是 TerminateProcess —— 那就是强杀本身，
-            # 没有"先礼貌停一下"这一步。spec §5 定的是"超时只询问、不自动强杀"，
-            # 所以这里绝不动手，直接把决定交给用户（确认后走 force_stop）。
+                                  reason=f"{comp.display_name} 已经不在监听 "
+                                         f"{'/'.join(str(p) for p in ports)}，登记已清。")
+            if spec.stop_kind != "port_lookup":
+                return StopResult(False, need_force=True,
+                                  reason=(f"{comp.display_name}（端口 {rec.port}）在 Windows 上只能直接终止进程，"
+                                          f"这会打断正在进行的任务、可能丢未落盘的配置。要强制结束吗？"))
+            # port_lookup 没有优雅手段：厂商的关闭脚本按进程名强杀会误伤本机同名实例，
+            # 而登记的 PID 是包装脚本不是服务进程。所以第一步只请示，一个进程都不碰。
             return StopResult(False, need_force=True,
-                              reason=(f"{comp.display_name}（端口 {rec.port}）在 Windows 上只能直接终止进程，"
-                                      f"这会打断正在进行的任务、可能丢未落盘的配置。要强制结束吗？"))
+                              reason=(f"{comp.display_name}（端口 "
+                                      f"{'/'.join(str(p) for p in ports)}）没有可用的优雅停止手段："
+                                      f"它的启动脚本是包装器，登记的 PID 不是服务进程，"
+                                      f"而厂商自带的关闭脚本按进程名强杀、会误伤本机其它同名实例。"
+                                      f"要按端口找到那个进程并强制结束吗？"))
         else:
             self._terminate(rec)
 
         # 与 start() 同一套"有界轮次"约定（main.py 里 start 的注释钉过）：按轮计数、
         # 每轮 sleeper(1.0)、至少探一次。用 deadline 递减做墙钟会在 sleeper 被注入成
         # 短睡时把宽限期静默缩短，no-op 时退化成忙等。
+        ports = tuple(rec.ports) or (rec.port,)
         for _ in range(max(1, int(deadline))):
-            if not self._is_listening(rec.port):
+            if not any(self._is_listening(p) for p in ports):
                 records = load_running_map()
                 records.pop(comp.key, None)
                 save_running_map(records)
-                return StopResult(True, reason=f"{comp.display_name} 已停止，端口 {rec.port} 已释放。")
+                return StopResult(True, reason=f"{comp.display_name} 已停止，端口 "
+                                               f"{'/'.join(str(p) for p in ports)} 已释放。")
             sleeper(1.0)
         return StopResult(False, need_force=True,
-                          reason=(f"{comp.display_name} 在 {int(deadline)} 秒内没停下来（端口 {rec.port} 仍在听）。"
+                          reason=(f"{comp.display_name} 在 {int(deadline)} 秒内没停下来（端口 "
+                                  f"{'/'.join(str(p) for p in ports)} 仍在听）。"
                                   f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
 
     def force_stop(self, key: str, sleeper=time.sleep, rounds: int = 5) -> StopResult:
@@ -5188,22 +5234,50 @@ class ServiceManager:
         rec = load_running_map().get(key)
         if rec is None:
             return StopResult(False, reason="没有登记记录")
-        if self._process_alive(rec.pid) and rec.pid_role == "server":
-            try:
-                os.kill(rec.pid, 9)
-            except OSError:
-                pass
+        ports = tuple(rec.ports) or (rec.port,)
+        still = [p for p in ports if self._is_listening(p)]
+        if still:
+            owners = self._lookup_pids(tuple(still))
+            mine = {p: pid for p, pid in owners.items() if pid != os.getpid()}
+            if rec.pid_role == "server":
+                if self._process_alive(rec.pid):
+                    try:
+                        os.kill(rec.pid, 9)
+                    except OSError:
+                        pass
+            elif mine:
+                # 三重闸：① 有我们自己的登记（上面 rec is not None 已保证）
+                #      ② 不是我们自己（pid != os.getpid()）
+                #      ③ 用户已确认 —— 走到 force_stop 本身就是确认
+                # 归属有歧义（同口多 PID）时 _pick_unique_pids 不给结果，宁可不杀。
+                for pid in sorted(set(mine.values())):
+                    try:
+                        os.kill(pid, 9)
+                    except OSError:
+                        pass
+            else:
+                # 端口反查没给出"唯一、且不是我们自己"的对象 → 一个都不许杀。
+                # 这里必须当场把"为什么没动手"说清并返回：只往下走复查循环，
+                # 用户拿到的就是"端口还在听，可能是别人占着"——把我们的不作为说成别人的错。
+                return StopResult(False, need_force=True,
+                                  reason=(f"没有找到可以安全强制结束的进程：端口 "
+                                          f"{'/'.join(str(p) for p in still)} 仍在听，"
+                                          f"但端口反查没有给出唯一归属（或给出的就是我们自己）。"
+                                          f"已放弃强制结束，登记保留，不动任何进程。"))
         # 终止调用返回 ≠ 监听 socket 已关闭：给一个有界复查窗口，
-        # 否则刚被我们杀掉的进程会被误报成"别的进程占着端口"。
+        # 否则刚被我们杀掉的进程会被误报成"别的进程占着端口"。按整簇复查：
+        # 主口掉了、gRPC 还在听不算停干净。
         for _ in range(max(1, int(rounds))):
-            if not self._is_listening(rec.port):
+            if not any(self._is_listening(p) for p in ports):
                 records = load_running_map()
                 records.pop(key, None)
                 save_running_map(records)
                 return StopResult(True, reason="已强制结束并释放端口。")
             sleeper(1.0)
+        left = [p for p in ports if self._is_listening(p)]
         return StopResult(False, need_force=True,
-                          reason=f"端口 {rec.port} 仍在监听，可能是别的进程占着，不是本工具启动的那个。")
+                          reason=f"端口 {'/'.join(str(p) for p in left)} 仍在监听，"
+                                 f"可能是别的进程占着，不是本工具启动的那个。")
 
 
 # 卡片按钮要的是同一个登记/探针视图：多张卡片各持一个 ServiceManager 会把

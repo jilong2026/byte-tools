@@ -288,6 +288,54 @@ class NoExecInvariant(unittest.TestCase):
             main.save_running_map({})
             self.assertEqual(mgr.status("jenkins", comps["jenkins"]).state, "not_installed_or_stopped")
 
+    def nacos_comps(self):
+        """本任务跑在 Task 8 登记 nacos 之前，build_components() 里没有 nacos，
+        所以照 StopFlow 的办法用 jenkins 的组件本地造一个 key=nacos、launch=port_lookup 的描述符。"""
+        comps = {c.key: c for c in main.build_components()}
+        comp = comps["jenkins"]
+        comp.key = "nacos"
+        comp.launch = main.LaunchSpec(
+            commands={os_name: ["{home}/bin/startup.cmd"]
+                      for os_name in ("Windows", "Linux", "Darwin")},
+            stop_kind="port_lookup", main_port=8848, port_offsets=(1000, 1001))
+        comps["nacos"] = comp
+        return comps
+
+    def nacos_rec(self):
+        """launcher 角色的三口簇登记，与 StopFlow 的同名夹具同形（不能跨类复用）。"""
+        return main.RunRecord(key="nacos", version="2.3.2", home="/h", data_dir="/d",
+                              port=8848, console_url="http://127.0.0.1:8848/",
+                              pid=43210, pid_role="launcher", started_at=0.0,
+                              launcher_cmd=["startup.cmd"], ports=(8848, 9848, 9849))
+
+    def test_detection_paths_never_consult_the_port_owner_table(self):
+        """端口反查是一次 netstat 调用。它出现在 status/adopt/reconcile 里，
+        就等于从后门放掉"状态检测绝不执行进程"。"""
+        calls = []
+        orig = main.netstat_listener_pids
+        main.netstat_listener_pids = lambda ports: calls.append(tuple(ports)) or {}
+        self.addCleanup(setattr, main, "netstat_listener_pids", orig)
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False)
+        comps = self.nacos_comps()
+        main.save_running_map({"nacos": self.nacos_rec()})
+        mgr.status("nacos", comps["nacos"])
+        mgr.adopt(comps)
+        mgr.reconcile(comps)
+        self.assertEqual(calls, [], "检测路径调用了端口反查")
+
+    def test_force_stop_actually_consults_it(self):
+        """反向：force 路径确实会去查。否则上面那条"不许调用"可以靠删掉调用白赢。"""
+        calls = []
+        orig = main.netstat_listener_pids
+        main.netstat_listener_pids = lambda ports: calls.append(tuple(ports)) or {}
+        self.addCleanup(setattr, main, "netstat_listener_pids", orig)
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  process_alive=lambda pid: False)
+        main.save_running_map({"nacos": self.nacos_rec()})
+        mgr.force_stop("nacos", sleeper=lambda s: None, rounds=1)
+        self.assertEqual(len(calls), 1, "force_stop 没调用端口反查")
+        self.assertEqual(set(calls[0]), {8848, 9848, 9849})
+
 
 class ZombieMatrix(unittest.TestCase):
     """spec §5：PID 死 / PID 活端口不在 / 端口在听但 PID 不符 / 坏 JSON，
@@ -573,6 +621,30 @@ class StopFlow(unittest.TestCase):
             key="jenkins", version="2.568.3", home="/h", data_dir="/d", port=8080,
             console_url="http://127.0.0.1:8080/", pid=43210, pid_role="server",
             started_at=0.0, launcher_cmd=["java"])})
+        # key 仍用 jenkins、spec 本地造 —— Task 8 才把 nacos 登记进 build_components，
+        # 这里引用它就等于让用例跑在未来任务的代码上。
+        self.lookup_spec = main.LaunchSpec(
+            commands={os_name: ["{home}/bin/startup.cmd"]
+                      for os_name in ("Windows", "Linux", "Darwin")},
+            stop_kind="port_lookup", main_port=8848, port_offsets=(1000, 1001))
+        self.lookup_comp = next(c for c in main.build_components() if c.key == "jenkins")
+        self.lookup_comp.key = "nacos"      # 只用于本地夹具：登记 key 与 spec 对齐
+        self.lookup_comp.launch = self.lookup_spec
+        self.comps["nacos"] = self.lookup_comp
+        self.comp_nacos = self.lookup_comp
+
+    def nacos_rec(self, ports=(8848, 9848, 9849)):
+        """launcher 角色的三口簇登记：登记的 PID 是包装脚本，不是服务进程。"""
+        return main.RunRecord(key="nacos", version="2.3.2", home="/h", data_dir="/d",
+                              port=ports[0], console_url="http://127.0.0.1:8848/",
+                              pid=43210, pid_role="launcher", started_at=0.0,
+                              launcher_cmd=["startup.cmd"], ports=ports)
+
+    def rec(self, ports=()):
+        return main.RunRecord(key="jenkins", version="x", home="/h", data_dir="/d",
+                              port=8080, console_url="http://127.0.0.1:8080/", pid=1,
+                              pid_role="server", started_at=0.0, launcher_cmd=[],
+                              ports=ports)
 
     def test_jenkins_stop_uses_pid_terminate_and_drops_record(self):
         killed = []
@@ -682,6 +754,94 @@ class StopFlow(unittest.TestCase):
         res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
         self.assertTrue(res.ok, res.reason)
         self.assertEqual(killed, [], "没在监听就不该走到强杀")
+        self.assertEqual(main.load_running_map(), {})
+
+    def test_running_requires_the_whole_cluster_to_be_listening(self):
+        """Nacos 主口在听、9848 掉了，是"半死"，不是运行中：按单口判会显示运行中，
+        而客户端连不上；下一个任务把它判成僵尸又会清掉登记，两个没人认领的监听口留下。"""
+        rec = self.rec(ports=(8848, 9848, 9849))
+        st = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": p != 9848).status("nacos", self.comp, {
+                "nacos": rec})
+        self.assertEqual(st.state, "zombie")
+        self.assertIn("9848", st.reason)
+
+    def test_zombie_detection_copes_with_records_lacking_ports(self):
+        # 计划一写的记录没有 ports；按 port 兜底，不许 TypeError冒出来
+        # （加载侧归一化只覆盖"从磁盘读"，进程内刚构造出来的记录也得能判）
+        st = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True).status(
+            "jenkins", self.comp, {"jenkins": self.rec(ports=())})
+        self.assertEqual(st.state, "running")
+
+    def test_force_stop_kills_the_port_owner_found_by_lookup(self):
+        """登记的 PID 是 cmd.exe（launcher），杀它 java 还活着。所以动手对象是
+        "端口反查出来的那个 PID"，不是登记里那个。打桩 os.kill —— 真杀进程违反离线约束。"""
+        main.save_running_map({"nacos": self.nacos_rec()})
+        killed = []
+        orig_kill = main.os.kill
+        main.os.kill = lambda pid, sig: killed.append((pid, sig))
+        self.addCleanup(setattr, main.os, "kill", orig_kill)
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda rec: killed.append(("rec", rec.pid)),
+                                  lookup_pids=lambda ports: {8848: 55555})
+        res = mgr.force_stop("nacos", sleeper=lambda s: None, rounds=1)
+        self.assertFalse(res.ok, "端口还在听就不许算停成功")
+        self.assertIn((55555, 9), killed, "该杀的是端口反查出来的 PID")
+        self.assertNotIn(("rec", 43210), killed,
+                         "不许退回杀登记里那个 launcher PID")
+
+    def test_port_lookup_role_asks_before_any_kill(self):
+        """launcher 角色的停止没有优雅手段：第一步只请示，一个进程都不许碰。"""
+        main.save_running_map({"nacos": self.nacos_rec()})
+        killed, looked = [], []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  process_alive=lambda pid: True,
+                                  terminate=lambda rec: killed.append(rec.pid),
+                                  lookup_pids=lambda ports: looked.append(tuple(ports)) or {})
+        res = mgr.stop(self.comp_nacos, self.comps, deadline=1.0, sleeper=lambda s: None)
+        self.assertFalse(res.ok)
+        self.assertTrue(res.need_force)
+        self.assertEqual(killed, [], "launcher 角色不许走 PID 终止")
+        self.assertEqual(looked, [], "请示阶段连端口反查都不该跑，还没得到用户的确认")
+        self.assertIn("强制", res.reason)
+
+    def test_force_stop_refuses_ambiguous_and_self_targets(self):
+        main.save_running_map({"nacos": self.nacos_rec()})
+        # 必须打桩 os.kill：这条用例的正中间就是"别杀我们自己"。
+        # 不打桩的话，一旦自我保护闸写坏，os.kill(os.getpid(), 9) 会把测试进程自己带走，
+        # 症状是 exit=9 的静默消失而不是一条断言失败 —— 比红更难查。
+        killed = []
+        orig_kill = main.os.kill
+        main.os.kill = lambda pid, sig: killed.append((pid, sig))
+        self.addCleanup(setattr, main.os, "kill", orig_kill)
+        # 同口两个 PID（端口复用/容器网络栈都可能）→ 宁可不认，认了就可能杀错
+        for table, why in (({}, "空表"), ({8848: os.getpid()}, "是我们自己")):
+            with self.subTest(why):
+                main.save_running_map({"nacos": self.nacos_rec()})
+                del killed[:]
+                mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                          process_alive=lambda pid: True,
+                                          lookup_pids=lambda ports, t=table: dict(t))
+                res = mgr.force_stop("nacos", sleeper=lambda s: None, rounds=1)
+                self.assertFalse(res.ok)
+                self.assertIn("强制", res.reason)
+                self.assertEqual(killed, [], f"{why}：一个进程都不许动")
+                self.assertIn("nacos", main.load_running_map(), "停不掉就不许清登记")
+
+    def test_force_stop_releases_only_after_the_whole_cluster_goes_quiet(self):
+        """复查必须按簇：主口掉了、gRPC 还在听，不能算"已停止"并清登记。"""
+        main.save_running_map({"nacos": self.nacos_rec()})
+        listening = {8848: False, 9848: True, 9849: False}
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": listening.get(p, False),
+                                  process_alive=lambda pid: False,
+                                  lookup_pids=lambda ports: {})
+        res = mgr.force_stop("nacos", sleeper=lambda s: None, rounds=1)
+        self.assertFalse(res.ok)
+        self.assertIn("9848", res.reason)
+        self.assertIn("nacos", main.load_running_map())
+        listening[9848] = False
+        self.assertTrue(mgr.force_stop("nacos", sleeper=lambda s: None, rounds=1).ok)
         self.assertEqual(main.load_running_map(), {})
 
 
@@ -1366,6 +1526,37 @@ class NetstatParse(unittest.TestCase):
         self.assertNotIn(61616, main._pick_unique_pids(table, (61616,)),
                          "归属有歧义时不许给出动手对象")
         self.assertEqual(main._pick_unique_pids(table, (8848,)), {8848: 12345})
+
+    def test_posix_listen_state_is_recognised_too(self):
+        """Linux/macOS 的 netstat 状态串是 LISTEN，不是 LISTENING。
+
+        只认LISTENING 的话，本解析器在非Windows 上恒返回 {}，
+        端口反查在那两个平台上会静默变成"找不到对象"——功能哑掉而不是报错。
+        """
+        table = main.parse_netstat_listeners(
+            "tcp4  0  0  127.0.0.1.8848  *.*  LISTEN  12345\n")
+        self.assertEqual(table.get(8848), {12345})
+
+    def test_netstat_subprocess_runs_without_a_console_window(self):
+        """netstat 会被真实调用（Task 7 起它在force 路径上可达）。
+        不带 CREATE_NO_WINDOW，从GUI 点"强制结束"就会闪一个黑框。"""
+        seen = {}
+
+        class Done:
+            stdout = "  TCP    0.0.0.0:8848    0.0.0.0:0    LISTENING   12345\n"
+
+        def fake_run(argv, **kw):
+            seen.update(kw)
+            seen["argv"] = argv
+            return Done()
+
+        orig = main.subprocess.run
+        main.subprocess.run = fake_run
+        self.addCleanup(setattr, main.subprocess, "run", orig)
+        main.CURRENT_OS = "Windows"
+        main.netstat_listener_pids([8848])
+        self.assertEqual(seen.get("creationflags", 0) & main.CREATE_NO_WINDOW,
+                         main.CREATE_NO_WINDOW, "netstat 子进程没带静默标志")
 
 
 class ConfCopyWriteback(unittest.TestCase):
