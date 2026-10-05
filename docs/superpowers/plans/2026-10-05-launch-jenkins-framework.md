@@ -1905,7 +1905,8 @@ git commit -m "feat(ui): 组件卡片启动/停止/打开控制台按钮，运�
 ### Task 11: `MainWindow` 接运行状态与组件表访问
 
 **Files:**
-- Modify: `main.py:5903` 附近（`MainWindow`）
+- Modify: `main.py`（`MainWindow` 现 `:6511`；**已存在**的 `closeEvent` 现 `:7629` —— 只插一句，别替掉它）
+- Modify: `main.py`（生产入口 `main()` 现 `:7636`，`_adopt_running()` 接在这里）
 - Test: `bt_launch_tests.py`（追加 `MainWindowAdopt`）
 
 **Interfaces:**
@@ -1963,7 +1964,7 @@ class MainWindowAdopt(unittest.TestCase):
         self.bare_win(logs)._adopt_running()
         self.assertEqual(main.load_running_map(), {})
         self.assertEqual(self.calls, [], "找回过程拉起了进程")
-        self.assertEqual(logs, [], "僵尸不该被报成"检测到正在运行"")
+        self.assertEqual(logs, [], '僵尸不该被报成"检测到正在运行"')
 
     def test_adopt_running_reports_what_it_found_running(self):
         """开工具时如果 Jenkins 还在跑，日志要认出它 —— 这是"关掉了再打开也认得"那条判据。"""
@@ -2059,8 +2060,12 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
         return len(workers)
 
     def closeEvent(self, event) -> None:
-        self._cancel_launch_workers()
-        super().closeEvent(event)
+        # ……这里不是新写一个 closeEvent：MainWindow 原本就有一个（现 main.py:7629），
+        # 它立 _closing 旗、置 FETCH_ABORT、存设置、等版本探测线程收尾 —— 那些一行都不能丢
+        # （QThread 在运行时被析构会直接 abort 进程，那段注释钉的就是这件事）。
+        # 正确做法是把下面这一句加到**既有** closeEvent 的最前面，其余原样保留：
+        #     self._cancel_launch_workers()
+        ...
 ```
 
 接线**不要放在 `MainWindow.__init__`**，放在生产入口 `main()` 里 `win = MainWindow()` 之后、`win.show()` 之前
@@ -2083,6 +2088,12 @@ Expected: FAIL，`'MainWindow' object has no attribute '_adopt_running'`（第�
 
 Run: `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u bt_launch_tests.py`
 Expected: `Ran 78 tests ... OK`
+
+**控制器记下的两条待补守护（本任务未实现，交给整枝最终评审那一轮统一处理，不要在这儿假装做过）：**
+- 外来登记在 `reconcile` 后仍然存活，目前只由"文件字节没变"间接证明 —— 缺一条正面断言
+  （`load_running_map()` 里别的 key 还在）。对应账本里 Task 5 的 deferred 项。
+- worker 现在是卡片的 Qt 子对象，所以**销毁卡片**（切分类、重建窗口）这条路径也会走对象树析构，
+  `closeEvent` 只管关窗。对应 Task 10 复核点名、我当时判给最终评审的那条 deferred 项。
 
 - [ ] **Step 5: 输出提交命令（由用户执行）**
 
