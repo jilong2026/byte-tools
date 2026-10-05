@@ -3648,6 +3648,7 @@ class LaunchWorker(QThread):
     started_ok = Signal(str, str)   # (key, console_url)
     failed = Signal(str, str)       # (key, reason)
     stopped = Signal(str)           # key
+    need_force = Signal(str, str)   # (key, reason)：一次"要不要强制结束"的询问，不是错误
 
     def __init__(self, action: str, comp: Component,
                  comps: Dict[str, Component], mgr: "ServiceManager", parent=None):
@@ -3680,14 +3681,18 @@ class LaunchWorker(QThread):
             self._emit_stop(res)
         elif self.action == "force_stop":
             self._emit_stop(self.mgr.force_stop(self.comp.key, sleeper=self._sleep))
+        else:
+            # 认不出的 action 必须出声：静默返回就是"线程跑完了却什么信号都没发"，
+            # 卡片会永远停在"进行中"，正是 run() 兜底要防的那类故障。
+            self.failed.emit(self.comp.key, f"{self.comp.display_name} 不支持的操作：{self.action}")
 
     def _emit_stop(self, res: "StopResult") -> None:
-        # __need_force__\t 前缀是"要求界面问一次强制结束"的载荷约定，Task 10 在卡片侧解析；
-        # 不新增信号，免得多加一条要接的线。
         if res.ok:
             self.stopped.emit(self.comp.key)
         elif res.need_force:
-            self.failed.emit(self.comp.key, "__need_force__\t" + res.reason)
+            # 询问走独立信号：混在 failed 的正文里，卡片一时忘了拆前缀，
+            # 就会把"__need_force__"这种控制标记直接显示给用户。
+            self.need_force.emit(self.comp.key, res.reason)
         else:
             self.failed.emit(self.comp.key, res.reason)
 

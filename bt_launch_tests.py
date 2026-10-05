@@ -689,6 +689,53 @@ class LaunchWorkerSignals(unittest.TestCase):
         self.assertIn("已取消", got[0])
         self.assertIn("可能仍在启动", got[0])
 
+    def test_stop_action_emits_stopped_on_success(self):
+        """Task 10 的按钮态全靠这三个信号驱动，stop 走通时必须发 stopped，
+        不能只靠"没有 failed"来推断。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+        mgr.stop = lambda c, cs, deadline=30.0, sleeper=time.sleep: main.StopResult(True, reason="停了")
+        w = main.LaunchWorker("stop", comp, {comp.key: comp}, mgr)
+        got, bad = [], []
+        w.stopped.connect(lambda k: got.append(k))
+        w.failed.connect(lambda k, r: bad.append(r))
+        w._dispatch()
+        self.assertEqual(got, ["jenkins"])
+        self.assertEqual(bad, [], "停成功不该顺带发一条 failed")
+
+    def test_need_force_is_handed_to_the_card_as_a_separate_signal(self):
+        """"要不要强制结束"是一次询问，不是一条错误信息。混在 failed 里，
+        卡片忘判前缀就会把控制标记当正文显示给用户 —— 所以单独一条信号。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True)
+        mgr.stop = lambda c, cs, deadline=30.0, sleeper=time.sleep: main.StopResult(
+            False, need_force=True, reason="在 Windows 上只能直接终止进程。要强制结束吗？")
+        w = main.LaunchWorker("stop", comp, {comp.key: comp}, mgr)
+        asks, bad = [], []
+        w.need_force.connect(lambda k, r: asks.append((k, r)))
+        w.failed.connect(lambda k, r: bad.append(r))
+        w._dispatch()
+        self.assertEqual(asks, [("jenkins", "在 Windows 上只能直接终止进程。要强制结束吗？")])
+        self.assertEqual(bad, [], "询问不许同时当成失败")
+
+    def test_unknown_action_reports_failure_instead_of_going_silent(self):
+        """认不出的 action 以前直接不发信号：线程跑完、卡片停在"进行中"，
+        正是兜底要防的那类故障。Task 11 接三个字符串值，写错就要能立刻看见。"""
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False)
+        w = main.LaunchWorker("reboot", comp, {comp.key: comp}, mgr)
+        got = []
+        w.failed.connect(lambda k, r: got.append(r))
+        w.run()
+        self.assertEqual(len(got), 1, "未知动作必须出声")
+        self.assertIn("reboot", got[0])
+
 
 if __name__ == "__main__":
     unittest.main()
