@@ -885,7 +885,7 @@ def _maven_urls(v: str) -> Dict[str, List[str]]:
     name = f"apache-maven-{v}-bin"
     rel = f"/apache/maven/maven-3/{v}/binaries/{name}"
     official = f"https://archive.apache.org/dist/maven/maven-3/{v}/binaries/{name}"
-    mirrors = _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")
+    mirrors = _mb("huaweicloud", "bfsu", "tuna", "tencent", "ustc", "nju", "aliyun")
 
     def lst(ext: str) -> List[str]:
         return [f"{b}{rel}.{ext}" for b in mirrors] + [f"{official}.{ext}"]
@@ -900,7 +900,7 @@ def _tomcat_urls(v: str) -> Dict[str, List[str]]:
     rel = f"/apache/tomcat/tomcat-{major}/v{v}/bin/{name}"
     official = f"https://archive.apache.org/dist/tomcat/tomcat-{major}/v{v}/bin/{name}"
     # 实测（2026-09-28）：10.1.60 七家镜像全通；9.0.x 少腾讯云，8.5.x 只剩华为云 + archive
-    mirrors = _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")
+    mirrors = _mb("huaweicloud", "tencent", "tuna", "bfsu", "nju", "ustc", "aliyun")
 
     def lst(ext: str) -> List[str]:
         return [f"{b}{rel}.{ext}" for b in mirrors] + [f"{official}.{ext}"]
@@ -928,6 +928,13 @@ def _mysql_urls(v: str) -> Dict[str, List[str]]:
     （阿里 8.0.27/8.0.28-macos11、华为 8.0.24~8.0.28-macos11 与 8.0.29-macos12，
     两种架构都有）。所以 Darwin 按 macos11→12→14 三个候选名 × 三个基址展开，
     靠故障转移选中真实存在的那个。
+    实测（2026-10-06 取样 2MB 测速，Range 请求）纠正：
+      - 华为云 `mirrors.huaweicloud.com/mysql/Downloads/` **30.8 MB/s**，阿里云只有 0.4 MB/s ——
+        差 70 倍，所以华为云排首位（原来阿里云在前）。
+      - 官方 `cdn.mysql.com/Downloads/MySQL-8.0/mysql-8.0.28-winx64.zip` **实测 404**：
+        旧版本归档已从主 CDN 下线（dev.mysql.com 与 downloads.mysql.com/archives 返 403 反爬）。
+        官网对 8.0.28 这个版本不再兜底，但 8.0.37 等新版仍挂着，所以保留在末位不删 ——
+        删掉等于放弃"镜像全挂时还有最后一次机会"。
     """
     major_minor = v.rsplit(".", 1)[0]
     cdn_base = f"https://cdn.mysql.com/Downloads/MySQL-{major_minor}"
@@ -935,23 +942,24 @@ def _mysql_urls(v: str) -> Dict[str, List[str]]:
     win_name = f"mysql-{v}-winx64.zip"
     linux_mirror_name = f"mysql-{v}-linux-glibc2.12-x86_64.tar.xz"
     linux_official_name = f"mysql-{v}-linux-glibc2.28-x86_64.tar.xz"
-    aliyun, huawei = _mb("aliyun", "huaweicloud")
+    # 按实测速度排：华为云 30.8 MB/s 在前，阿里云 0.4 MB/s 退到末位（仍留着，它能通）。
+    huawei, aliyun = _mb("huaweicloud", "aliyun")
 
     # macOS 包：官方 CDN 只挂最新版（8.0.28/8.0.29 连 macos11、macos12 命名也 404），
     # 镜像站则留着老版本当年命名的包，所以镜像侧试 macos11/macos12，官方只试 macos14。
     mac_list: List[str] = []
-    for base in (f"{aliyun}/mysql/MySQL-{major_minor}",
-                 f"{huawei}/mysql/Downloads/MySQL-{major_minor}"):
+    for base in (f"{huawei}/mysql/Downloads/MySQL-{major_minor}",
+                 f"{aliyun}/mysql/MySQL-{major_minor}"):
         mac_list += [f"{base}/mysql-{v}-{tag}-{mac_arch}.tar.gz" for tag in ("macos11", "macos12")]
     mac_list.append(f"{cdn_base}/mysql-{v}-macos14-{mac_arch}.tar.gz")
 
     return {
-        "Windows": [f"{aliyun}/mysql/MySQL-{major_minor}/{win_name}",
-                    f"{huawei}/mysql/Downloads/MySQL-{major_minor}/{win_name}",
+        "Windows": [f"{huawei}/mysql/Downloads/MySQL-{major_minor}/{win_name}",
+                    f"{aliyun}/mysql/MySQL-{major_minor}/{win_name}",
                     f"{cdn_base}/{win_name}"],
         "Darwin":  mac_list,
-        "Linux":   [f"{aliyun}/mysql/MySQL-{major_minor}/{linux_mirror_name}",
-                    f"{huawei}/mysql/Downloads/MySQL-{major_minor}/{linux_mirror_name}",
+        "Linux":   [f"{huawei}/mysql/Downloads/MySQL-{major_minor}/{linux_mirror_name}",
+                    f"{aliyun}/mysql/MySQL-{major_minor}/{linux_mirror_name}",
                     f"{cdn_base}/{linux_official_name}"],
     }
 
@@ -985,7 +993,7 @@ def _node_urls(v: str) -> Dict[str, List[str]]:
     mac_arch = "arm64" if IS_ARM else "x64"
 
     def lst(name: str) -> List[str]:
-        mirrors = [f"{b}/nodejs-release/v{v}/{name}" for b in _mb("tuna", "nju", "bfsu")]
+        mirrors = [f"{b}/nodejs-release/v{v}/{name}" for b in _mb("tuna", "bfsu", "nju")]
         mirrors += [f"{_mb('huaweicloud')[0]}/nodejs/v{v}/{name}",
                     f"{_mb('npmmirror')[0]}/-/binary/node/v{v}/{name}"]
         return mirrors + [f"https://nodejs.org/dist/v{v}/{name}"]
@@ -1009,7 +1017,7 @@ def _git_urls(v: str) -> Dict[str, List[str]]:
     没有可执行的 git（要自己 configure + make），列出来只会让用户下一个用不了
     的东西。这两个平台改由 Component.unsupported_platform_hint 引导用系统包管理器。
     """
-    hwm, hw = _mb("huaweicloud-py", "huaweicloud")
+    hwm, hw = _mb("huaweicloud", "huaweicloud-py")
     npmm = _mb("npmmirror")[0]
     win_tag = f"v{v}.windows.1"
     win_name = f"MinGit-{v}-64-bit.zip"
@@ -1039,7 +1047,7 @@ def _nginx_urls(v: str) -> Dict[str, List[str]]:
         是给 apt/yum 用的包仓库，没有 nginx.org/download 那套 zip）；
       - 华为云两个子域同源不同域名，故障转移仍值得都列上，末位是 nginx.org 官网。
     """
-    hwm, hw = _mb("huaweicloud-py", "huaweicloud")
+    hwm, hw = _mb("huaweicloud", "huaweicloud-py")
     name = f"nginx-{v}.zip"
     return {
         "Windows": [f"{hwm}/nginx/{name}", f"{hw}/nginx/{name}",
@@ -1073,7 +1081,7 @@ def fetch_nginx_versions() -> List[ComponentVersion]:
           只取三段式版本（1.28.0 这种），跳过 1.27 之类的两段历史目录名。
     """
     rx = _re.compile(r'nginx-(\d+\.\d+\.\d+)\.zip')
-    hwm, hw = _mb("huaweicloud-py", "huaweicloud")
+    hwm, hw = _mb("huaweicloud", "huaweicloud-py")
     indexes = [
         f"{hwm}/nginx/",
         f"{hw}/nginx/",
@@ -1184,7 +1192,7 @@ def _conda_urls(v: str) -> Dict[str, List[str]]:
 
     def lst(name: str) -> List[str]:
         mirrors = [f"{b}/anaconda/miniconda/{name}"
-                   for b in _mb("tuna", "nju", "bfsu", "ustc")]
+                   for b in _mb("ustc", "nju", "tuna", "bfsu")]
         return mirrors + [f"https://repo.anaconda.com/miniconda/{name}"]
 
     return {
@@ -1205,11 +1213,15 @@ def _go_urls(v: str) -> Dict[str, List[str]]:
     实测（2026-09-28 GET + byte-tools UA）纠正：Go 的二进制树只有少数镜像同步。
     阿里云 /golang/ 与南大 /golang/ 是 200 且有完整 Content-Length；华为云 repo 与
     mirrors 两个子域一律 401，清华没有 golang 目录（404），腾讯云同样 404，
-    中科大只是 302 跳回 dl.google.com（本机对 dl.google.com TLS 握手失败，
-    等于没有镜像）。所以这里只保留真正可用的两家。
+    中科大当时只是 302 跳回 dl.google.com（本机对 dl.google.com TLS 握手失败）。
+
+    2026-10-06 复测推翻了"中科大只是 302"这条：`mirrors.ustc.edu.cn/golang/go1.24.6.windows-amd64.zip`
+    直接回 206 且速度 3.9 MB/s，是真正可用的镜像 —— 2026-09 那次多半是探测没带 Range
+    或撞上它跳转的时机。所以现在三家：南大 5.3 > 中科大 3.9 > 阿里 0.4 MB/s。
+    阿里虽然最慢但保留 —— 0.4 MB/s 也比官网在 TLS 上握手失败强。
     """
-    # 国内镜像基址（按 R1.3 优先级），官网末位
-    mirror_bases = [f"{b}/golang" for b in _mb("aliyun", "nju")]
+    # 按实测速度排（2026-10-06 取样 3MB）：nju 5.3 > ustc 3.9 > aliyun 0.4 MB/s
+    mirror_bases = [f"{b}/golang" for b in _mb("nju", "ustc", "aliyun")]
     official = "https://go.dev/dl"
 
     # 按 CPU 架构挑选文件名（Go 官方命名约定）
@@ -1256,7 +1268,7 @@ def _gradle_urls(v: str) -> Dict[str, List[str]]:
     """
     # 国内镜像基址（按实测可用性排序），末位为官网
     mirror_bases = [f"{b}/gradle" for b in
-                    _mb("huaweicloud", "huaweicloud-py", "nju", "tencent")]
+                    _mb("huaweicloud", "tencent", "nju", "huaweicloud-py")]
     official = "https://services.gradle.org/distributions"
     # Gradle 对三平台发布同一个 -bin.zip 包
     filename = f"gradle-{v}-bin.zip"
@@ -1555,9 +1567,11 @@ def _jenkins_urls(v: str) -> Dict[str, List[str]]:
         （实测 2.568.3 八家全通，2.426.3 只剩华为云）。
     """
     filename = "jenkins.war"
+    # 按 2026-10-06 实测速度排：huawei 26.7 > ustc 11.4 > tuna 8.0 > tencent 5.9
+    # ≈ bfsu 5.6 > nju 3.6 > huawei-py 1.8 > aliyun 0.3 MB/s
     mirror_bases = [f"{b}/jenkins/war-stable/{v}" for b in
-                    _mb("huaweicloud", "huaweicloud-py", "tuna", "bfsu", "nju",
-                        "aliyun", "tencent", "ustc")]
+                    _mb("huaweicloud", "ustc", "tuna", "tencent", "bfsu", "nju",
+                        "huaweicloud-py", "aliyun")]
     official_base = f"https://get.jenkins.io/war-stable/{v}"
 
     urls = [f"{base}/{filename}" for base in mirror_bases]
@@ -1658,7 +1672,7 @@ def _kafka_urls(v: str) -> Dict[str, List[str]]:
     filename = f"kafka_{scala_version}-{v}.tgz"
 
     mirror_bases = [f"{b}/apache/kafka" for b in
-                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
+                    _mb("huaweicloud", "tuna", "tencent", "bfsu", "nju", "ustc", "aliyun")]
     official_base = "https://archive.apache.org/dist/kafka"
 
     urls = [f"{base}/{v}/{filename}" for base in mirror_bases]
@@ -1702,7 +1716,7 @@ def _rocketmq_urls(v: str) -> Dict[str, List[str]]:
     # 实测（2026-09-28 GET + byte-tools UA）：apache/rocketmq 七家镜像 + archive 全部
     # 200（90 MB 真包，ustc 回 gzip 魔数）；不带 UA 时 ustc 会 403，曾被误判为假镜像。
     mirror_bases = [f"{b}/apache/rocketmq" for b in
-                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
+                    _mb("huaweicloud", "tencent", "ustc", "bfsu", "tuna", "nju", "aliyun")]
     official_base = "https://archive.apache.org/dist/rocketmq"
 
     urls = [f"{base}/{v}/{filename}" for base in mirror_bases]
@@ -1744,7 +1758,7 @@ def _pulsar_urls(v: str) -> Dict[str, List[str]]:
     filename = f"apache-pulsar-{v}-bin.tar.gz"
 
     mirror_bases = [f"{b}/apache/pulsar" for b in
-                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
+                    _mb("huaweicloud", "nju", "tuna", "tencent", "ustc", "bfsu", "aliyun")]
     official_base = "https://archive.apache.org/dist/pulsar"
 
     urls = [f"{base}/pulsar-{v}/{filename}" for base in mirror_bases]
@@ -1789,7 +1803,7 @@ def _activemq_urls(v: str) -> Dict[str, List[str]]:
     win_filename = f"apache-activemq-{v}-bin.zip"
 
     mirror_bases = [f"{b}/apache/activemq" for b in
-                    _mb("huaweicloud", "tuna", "aliyun", "nju", "bfsu", "tencent", "ustc")]
+                    _mb("huaweicloud", "tencent", "bfsu", "nju", "tuna", "ustc", "aliyun")]
     official_base = "https://archive.apache.org/dist/activemq"
 
     linux_urls = [f"{base}/{v}/{linux_filename}" for base in mirror_bases]
@@ -1877,9 +1891,11 @@ def _seata_urls(v: str) -> Dict[str, List[str]]:
     # Apache dist 布局：<镜像>/apache/incubator/seata/<v>/apache-seata-<v>-incubating-bin.tar.gz
     # 2.6.0 八家镜像 + archive 全通；2.2.0 只剩华为云两个子域 + archive。
     filename = f"apache-seata-{v}-incubating-bin.tar.gz"
+    # 按 2026-10-06 实测速度排：huawei 28.6 > nju 9.8 > huawei-py 7.4 ≈ tuna 7.3
+    #≈ bfsu 7.3 > tencent 6.7 > ustc 3.4 > aliyun 0.3 MB/s（阿里云垫底，挪到最后）
     mirror_bases = [f"{b}/apache/incubator/seata/{v}" for b in
-                    _mb("huaweicloud", "huaweicloud-py", "tuna", "aliyun", "nju",
-                        "bfsu", "tencent", "ustc")]
+                    _mb("huaweicloud", "nju", "huaweicloud-py", "tuna",
+                        "bfsu", "tencent", "ustc", "aliyun")]
     urls = [f"{base}/{filename}" for base in mirror_bases]
     urls.append(f"https://archive.apache.org/dist/incubator/seata/{v}/{filename}")
 
