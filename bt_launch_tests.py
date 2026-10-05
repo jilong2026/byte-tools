@@ -134,7 +134,35 @@ class LaunchSpecTable(unittest.TestCase):
         argv = main.LAUNCH_OF["activemq"].commands["Windows"]
         self.assertIn("bin/activemq.bat", argv[0])
         self.assertNotIn("win64", argv[0])
-        self.assertEqual(argv[1], "console")
+        # task 名必须是 start 而不是 console —— 真机实测（2026-10-05, 6.3.2）：
+        # activemq.bat 把 %* 透传给 activemq.jar 的主类，它只认 backup/browse/create/
+        # start/stop/… 这一组 task，**没有 console**；传 console 会打印 Usage 后自己退出，
+        # 结果两个口都不监听、日志也是空的（连"厂商日志"都读不到）。
+        # 这条断言原来写的是 "console"，是计划初稿没核实包内 task 表的猜测。
+        self.assertEqual(argv[1], "start")
+        for os_name in ("Linux", "Darwin"):
+            with self.subTest(os_name):
+                self.assertEqual(main.LAUNCH_OF["activemq"].commands[os_name][1], "start")
+
+    def test_activemq_task_must_be_one_the_jar_actually_understands(self):
+        """ActiveMQ 的 task 名不能凭印象写：activemq.bat 只是把 %* 转发给 activemq.jar
+        的主类，不认识的 task 会打印一份 Usage 然后正常退出——**退出码是 0**，
+        于是 start() 那边看到的是"拉起了进程但端口一直不监听"，日志还空空如也。
+
+        真机踩过这个坑：初稿写 console，而 6.3.2 的 jar 根本没有 console task。
+        这里把 jar 自报的 task 表钉下来（表来自真机 `activemq.bat start` 的 Usage 输出），
+        换版本时若 task 表变了，这条会提醒重新核实而不是静默启动失败。"""
+        # 6.3.2 activemq.jar 主类自报的任务（真机实测，Usage 原文摘录）
+        known = {"backup", "browse", "bstat", "consumer", "create", "decrypt", "dstat",
+                 "encrypt", "export", "list", "producer", "purge", "query", "start", "stop"}
+        for os_name in ("Windows", "Linux", "Darwin"):
+            with self.subTest(os_name):
+                argv = main.LAUNCH_OF["activemq"].commands[os_name]
+                self.assertEqual(len(argv), 2, "只应传task 一个参数，多余参数会被 jar 当数据")
+                task = argv[1]
+                self.assertIn(task, known,
+                              f"{os_name}: activemq.jar 不认这个 task（会打 Usage 后静默退出）")
+                self.assertNotEqual(task, "console", "console 不是 ActiveMQ 的 task")
 
     def test_data_note_is_required_for_plan_two_components(self):
         """计划一的"停止后数据保留"承诺对 Nacos 不成立（derby 在版本目录里）。
@@ -473,6 +501,54 @@ class LaunchPlan(unittest.TestCase):
         self.comps = {c.key: c for c in main.build_components()}
         self.comp = self.comps["jenkins"]
         self.spec = self.comp.launch
+
+    def test_launch_uses_the_installed_version_not_the_first_candidate(self):
+        """启动必须用**磁盘上真装着的**版本，不是候选清单首位。
+
+        真机踩到的坑（2026-10-05）：build_components 的候选首位是 2.568.3，
+        用户实际装的是 2.580.1，于是点启动去找一个不存在的目录，
+        spawn 报 [WinError 267]，界面只显示"拉起失败"，用户完全无从下手。
+        离线用例全绿是因为它们自己造 install_dir，看不出这个错配。
+
+        这条钉住"生效版本 → 已安装最高版本"的优先级，
+        以及"一个都没装时 launch_gate 要拦住并说清怎么装"。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            comp = self.comp
+            # 造出"装了 2.580.1、但候选首位是 2.568.3"的错配现场
+            home = Path(td) / "jenkins" / "jenkins-2.580.1"
+            home.mkdir(parents=True)
+            (home / "jenkins.war").write_bytes(b"x")
+            orig_dir, main.CONFIG_DIR = main.CONFIG_DIR, Path(td)
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_dir)
+            orig_active = main.load_active_map
+            main.load_active_map = lambda: {comp.key: "2.580.1"}
+            self.addCleanup(setattr, main, "load_active_map", orig_active)
+
+            self.assertEqual(main.resolve_launch_version(comp), "2.580.1",
+                             "生效版本装了就要用它，哪怕候选首位是别的版本")
+            plan = main.build_launch_plan(comp, self.spec, self.jdk_home, 8080,
+                                          Path(td) / "out.log")
+            self.assertIn("jenkins-2.580.1", " ".join(plan.argv),
+                          "拉起命令指向了没装的版本目录")
+            self.assertTrue(Path(plan.argv[2]).is_file(), "war 路径不存在，spawn 必失败")
+
+            # 生效版本没装时退回"已安装里版本号最高的"，而不是候选首位
+            main.load_active_map = lambda: {comp.key: "2.555.3"}
+            home2 = Path(td) / "jenkins" / "jenkins-2.555.3"
+            home2.mkdir(parents=True)
+            (home2 / "jenkins.war").write_bytes(b"x")
+            self.assertEqual(main.resolve_launch_version(comp), "2.555.3",
+                             "生效版本没装就该退回实际装着的那个")
+
+            # 一个都没装 → 必须拦住并说清怎么装，不能让人点了没反应
+            empty = Path(td) / "empty"
+            (empty / "jenkins").mkdir(parents=True)
+            main.CONFIG_DIR = empty
+            self.assertIsNone(main.resolve_launch_version(comp))
+            ok, why = main.launch_gate(comp, self.spec, self.jdk_home)
+            self.assertFalse(ok, "一个版本都没装却放过了门控")
+            self.assertIn("下载并安装", why, "门控原因要给出可点的下一步")
 
     def test_java_home_prefers_our_own_installed_jdk(self):
         """EnvManager.get 只是 os.environ.get（main.py:3660），

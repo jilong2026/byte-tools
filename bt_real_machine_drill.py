@@ -237,6 +237,25 @@ def main_drill(apply: bool) -> int:
     return 0 if ok else 1
 
 
+def _wait_console(main_mod, url: str, rounds: int = 20, gap: float = 1.5) -> bool:
+    """控制台可达性要有界重试，不能只探一次。
+
+    端口在听 ≠ 服务可用：Jenkins 2.580.1 实测（2026-10-05 真机）里Jetty 在
+    T+0s 就bind 了 8080，而 Jenkins 还在 "Started initialization"，直到 T+1s 才
+    初始化完。判据一若在端口通的瞬间查一次 HTTP��会稳定误报"控制台不可达"。
+
+    这里用与 start() 相同的有界轮次约定（固定轮数 + 每轮 sleep），不用墙钟 deadline：
+    deadline 在 sleep 被注入时会静默缩短宽限期。"""
+    import time
+    for i in range(max(1, int(rounds))):
+        if main_mod.http_ok(url):
+            return True
+        if i == 0:
+            print(f"      控制台暂未就绪，有界重试（最多 {rounds} 轮）…")
+        time.sleep(gap)
+    return False
+
+
 def launch_drill(comp_key: str, apply: bool) -> int:
     """四层判据（沿用本脚本既有风格）：拉得起 → 停止按整个端口簇体检 → 强制确认 →
     停得干净（登记无残留）。
@@ -271,7 +290,7 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     # 健康路径取自 LaunchSpec.health_path，不在这里硬编码 "/login"：
     # 账本裁定 F3 说这个字段留着就是给演练层当判据用的，写死就等于计划二一换组件即错。
     health = comp.launch.health_path or "/"
-    got = main.http_ok(rec.console_url.rstrip("/") + health)
+    got = _wait_console(main, rec.console_url.rstrip("/") + health)
     print(f"[1/4] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
 
     def cluster_state(ports, label):

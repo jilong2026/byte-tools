@@ -3066,7 +3066,8 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_offsets=(1000, 1001),      # gRPC 口由 server.port 派生（包内无对应属性可回写）
         port_search_span=99,
         port_writeback="cli_flag",      # 计划二的代码片段漏了这行：--server.port 就是 cli_flag
-        console_path="/",                # 待真机 A3 确认；先按包内白名单形状（含 / 无 /nacos）取根
+        console_path="/nacos",           # A3 真机实测：conf/application.properties:19
+                                          # server.servlet.contextPath=/nacos —— 不在根路径
         health_path=None,
         needs=("jdk",),
         min_java_major=8,
@@ -3087,9 +3088,14 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         #   broker 口  conf/activemq.xml:178        name="openwire" tcp://0.0.0.0:61616
         #   bin/activemq.bat:74/76 "未设才默认" + :99 传 -Dactivemq.conf/-Dactivemq.data
         # 所以端口只写 data 目录里的 conf 副本，官方目录零改动。
-        commands={"Windows": ["{home}/bin/activemq.bat", "console"],
-                  "Linux": ["{home}/bin/activemq", "console"],
-                  "Darwin": ["{home}/bin/activemq", "console"]},
+        # A5/A6 真机实测（2026-10-05, apache-activemq-6.3.2）：`activemq.bat` 把 %* 透传给
+        # activemq.jar 的主类，它只认自己的一组 task（backup/browse/create/start/stop/…），
+        # **没有 console** —— 传 console 会打印 Usage 然后自己退出，两个口都不监听。
+        # `start` = "Creates and starts a broker using a configuration file"，正是我们要的。
+        # （计划初稿写的是 console，是没核实包内 task 表的猜测；真机一跑就露馅。）
+        commands={"Windows": ["{home}/bin/activemq.bat", "start"],
+                  "Linux": ["{home}/bin/activemq", "start"],
+                  "Darwin": ["{home}/bin/activemq", "start"]},
         stop_kind="port_lookup",
         main_port=8161,
         port_offsets=(),
@@ -4886,7 +4892,7 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
     if spec.port_writeback != "conf_copy":
         return False, (f"{comp.display_name} 的端口策略 {spec.port_writeback!r} 不认识，"
                        f"已放弃启动（不会去猜该怎么改配置）。"), []
-    src = comp.install_dir(comp.versions[0].version) / "conf"
+    src = comp.install_dir(resolve_launch_version(comp) or comp.versions[0].version) / "conf"
     conf, console_file, broker_file = conf_targets(data_dir)
     notes: List[str] = []
     state, diff = prepare_conf_copy(src, conf)
@@ -5027,6 +5033,32 @@ def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
     return None
 
 
+def resolve_launch_version(comp: Component) -> Optional[str]:
+    """启动该用哪个已安装版本。**只认磁盘上真装着的**，不看候选列表首位。
+
+    离线默认清单（build_components 的 versions）会落后于实际安装的版本：
+    在线抓取失败时尤其明显——清单首位是 2.568.3，用户装的是 2.580.1，
+    于是点启动会去找一个根本没装的目录，spawn 报 [WinError 267] 目录名称无效，
+    而界面上只显示"拉起失败"，用户完全无从下手（真机演练 2026-10-05 实测）。
+
+    优先级：生效版本（active 登记，用户明确选过的）→ 已安装目录里版本号最高的。
+    返回 None 表示磁盘上一个都没装。"""
+    active = load_active_map().get(comp.key)
+    if active and comp.install_dir(active).is_dir():
+        return active
+    installed = [p.name for p in comp.installed_dirs()]
+    if not installed:
+        return None
+    # 目录名形如<key>-<version>；取版本号那半段按数值排，"2.9.0" < "2.10.0" 才成立。
+    def _ver(name: str) -> Tuple[int, ...]:
+        tail = name.split("-", 1)[1] if "-" in name else name
+        parts = []
+        for chunk in tail.split("."):
+            parts.append(int(chunk) if chunk.isdigit() else 0)
+        return tuple(parts)
+    return max(installed, key=_ver)
+
+
 def launch_gate(comp: Component, spec: LaunchSpec,
                 java_home: Optional[str]) -> Tuple[bool, str]:
     """启动前门控。失败原因必须可行动（spec §5）：说清缺什么、点这里能补什么。"""
@@ -5036,6 +5068,13 @@ def launch_gate(comp: Component, spec: LaunchSpec,
         return False, "启动需要先有 JDK：在本工具里装一个 JDK（推荐 17），再回来点启动。"
     if not comp.versions:
         return False, "该组件还没有可启动的版本"
+    if resolve_launch_version(comp) is None:
+        # 这条以前不存在，于是"候选清单里有、磁盘上没装"会一路走到 spawn 才炸。
+        # 现在在门控就说清是"没装"，并直接给出可点的下一步。
+        shown = "、".join(v.version for v in comp.versions[:3])
+        return False, (f"磁盘上还没有 {comp.display_name} 的任何已安装版本，"
+                       f"没法启动（可选版本：{shown}）。"
+                       f"请先在本工具里点「下载并安装」装一个版本，再回来点启动。")
     return True, ""
 
 
@@ -5045,7 +5084,7 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
 
     重定向不是可选项：Windows 用 DETACHED_PROCESS 拉起后没有有效控制台句柄，
     不重定向就等于把启动报错扔掉，事后只能猜（设计 §4）。"""
-    version = comp.versions[0].version
+    version = resolve_launch_version(comp) or comp.versions[0].version
     home = comp.install_dir(version)
     war = home / "jenkins.war"
     # 数据与版本目录分离（spec §0 决策 3）：JENKINS_HOME 指向 CONFIG_DIR/<key>-data，
@@ -5218,7 +5257,9 @@ class ServiceManager:
             # 整簇都要在听才算起来：Nacos 的 gRPC 9848/9849 与 ActiveMQ 的 broker 口
             # 没起来时控制台能开、客户端连不上，只探主口会登记成一个"半死"的运行中。
             if all(self._is_listening(p) for p in port_plan.all_ports):
-                rec = RunRecord(key=comp.key, version=comp.versions[0].version,
+                rec = RunRecord(key=comp.key,
+                                version=resolve_launch_version(comp)
+                                or comp.versions[0].version,
                                 home=str(plan.cwd), data_dir=plan.env.get(spec.data_dir_env, ""),
                                 port=port_plan.main, console_url=plan.console_url,
                                 pid=proc.pid,
