@@ -4713,13 +4713,14 @@ class ServiceManager:
             sleeper(1.0)
 
         # 超时：把刚拉起的进程收掉，不留一个"没人登记的监听者"
+        reason = (f"{spec.startup_timeout} 秒内 {port} 未监听。"
+                  f"启动输出见 {plan.log_file}，末尾内容：{self._tail(plan.log_file)}")
         try:
             proc.terminate()
-        except Exception:
-            pass
-        return StartResult(False, "timeout",
-                           f"{spec.startup_timeout} 秒内 {port} 未监听。"
-                           f"启动输出见 {plan.log_file}，末尾内容：{self._tail(plan.log_file)}")
+        except OSError as exc:
+            # 收尸失败必须出声：这个进程恰恰不在 running.json 里（spec §5）
+            reason += f"；进程可能仍在监听（PID {proc.pid}，收尸失败：{exc}）"
+        return StartResult(False, "timeout", reason)
 
     @staticmethod
     def _tail(path: Path, lines: int = 8) -> str:

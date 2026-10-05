@@ -370,6 +370,11 @@ class StartFlow(unittest.TestCase):
         (home / "data").mkdir(parents=True, exist_ok=True)
         (home / "jenkins.war").write_bytes(b"x")
         self.spawned = []
+        self.procs = []
+        # 桩掉 JDK 解析：用例成败不许取决于这台机器恰好有没有 JAVA_HOME 或已装 JDK
+        self._orig_jdk = main.resolve_java_home
+        main.resolve_java_home = lambda comps: str(Path(self.dir.name) / "jdk" / "jdk-17")
+        self.addCleanup(setattr, main, "resolve_java_home", self._orig_jdk)
 
         class FakePopen:
             def __init__(self, argv, **kw):
@@ -381,9 +386,14 @@ class StartFlow(unittest.TestCase):
             class P:
                 pid = 43210
                 returncode = None
+                terminated = False
                 def poll(self):
                     return None
-            return P()
+                def terminate(self):
+                    self.terminated = True
+            proc = P()
+            self.procs.append(proc)
+            return proc
         main.subprocess.Popen = fake_popen
         self.addCleanup(setattr, main.subprocess, "Popen", self._popen)
 
@@ -423,6 +433,7 @@ class StartFlow(unittest.TestCase):
         res = self.mgr(listening_after=10 ** 6).start(self.comp, self.comps, sleeper=lambda s: None)
         self.assertFalse(res.ok)
         self.assertIn("未监听", res.reason)
+        self.assertTrue(self.procs[0].terminated)
         self.assertEqual(main.load_running_map(), {}, "启动失败不许留登记")
 
     def test_second_start_is_refused_while_running(self):
