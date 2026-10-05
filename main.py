@@ -6244,19 +6244,25 @@ class ComponentCard(QFrame):
         # 启动相关按钮：只有登记了启动描述符的组件才有（LAUNCH_KEYS，本期只有 Jenkins）
         self.launch_worker: Optional[LaunchWorker] = None
         if self.component.launch is not None:
+            # 启动/停止合并成**一个**按钮（2026-10-06 用户要求）：
+            # 未运行时显示「启动」，运行中变成「停止」，点了就做对应的事。
+            #
+            # 为什么不用两个按钮切换显隐：按钮的位置会变，用户的眼睛要重新找一遍。
+            # 2026-10-06 用户连续三次反馈"没有停止按钮"—— 按钮其实一直好着
+            # （可见可用、文本"停止"），问题在于它与「启动」并排、
+            # 运行状态时那一格才亮起来，看起来就像"多出来的按钮没出现"。
+            # 合成一个之后：按钮永远在那儿，状态直接写在按钮文字上，
+            # 不用找、不用猜。
             self.btn_start = QPushButton("启动")
             self.btn_start.setObjectName("primaryBtn")
             self.btn_start.setCursor(QCursor(Qt.PointingHandCursor))
             self.btn_start.setFixedHeight(34)
-            self.btn_start.clicked.connect(self.on_start_clicked)
+            self.btn_start.clicked.connect(self.on_start_stop_clicked)
             mid.addWidget(self.btn_start)
-
-            self.btn_stop = QPushButton("停止")
-            self.btn_stop.setFixedHeight(34)
-            self.btn_stop.clicked.connect(self.on_stop_clicked)
-            self.btn_stop.setEnabled(False)
-            mid.addWidget(self.btn_stop)
-
+            # 刻意**不保留** `self.btn_stop`：合并按钮后没有第二个 widget，
+            # 留一个同名别名会让读代码的人以为界面上有两个按钮。
+            # 旧代码里 `btn_stop.isEnabled()` 那个"是否在运行"的判据，
+            # 改为读按钮文字——见 _running_per_ui()。
             self.btn_console = QPushButton("打开控制台")
             self.btn_console.setFixedHeight(34)
             self.btn_console.clicked.connect(self.on_console_clicked)
@@ -6318,12 +6324,38 @@ class ComponentCard(QFrame):
         except Exception:       # 主窗可能正处在关窗流程里，标记刷不上不影响功能
             pass
 
+    def _running_per_ui(self) -> bool:
+        """**界面上**认定的"在运行"：按钮文字是不是「停止」。
+
+        为什么读文字而不读 enabled：合并按钮后按钮在运行中也要可点（它就是停止按钮），
+        enabled 已经不能区分状态了。而按钮文字就是用户看到的状态本身 ——
+        读它等于"用户以为的"与"程序认为的"永远一致。
+        Tab 上的运行标记、跳页逻辑都用它。
+        """
+        return self.btn_start.text().rstrip("… ") == "停止"
+
     def _refresh_launch_state_impl(self) -> None:
         st = self._launch_status()
         running = st.state == "running"
-        self.btn_start.setEnabled(not running and self.launch_worker is None)
-        self.btn_stop.setEnabled(running)
+        self.btn_start.setEnabled(self.launch_worker is None)
         self.btn_console.setEnabled(running)
+        # 按钮文字就是状态本身：运行中显示「停止」，否则显示「启动」。
+        # 正在起/停的过渡态（"启动中…"/"停止中…"）不能被这一行盖掉——
+        # 那是用户点下去之后的即时反馈，被立刻改回「启动」会让人以为没点上。
+        if self.launch_worker is None:
+            if running:
+                self.btn_start.setText("停止")
+                self.btn_start.setObjectName("dangerBtn")
+                self.btn_start.setToolTip(
+                    f"停止 {self.component.display_name}（端口 {st.record.port}）")
+            else:
+                self.btn_start.setText("启动")
+                self.btn_start.setObjectName("primaryBtn")
+                self.btn_start.setToolTip(
+                    f"启动 {self.component.display_name}（端口 {self.component.launch.main_port}）")
+            # 换objectName 后要重刷 QSS，否则配色停留在上一个状态。
+            self.btn_start.style().unpolish(self.btn_start)
+            self.btn_start.style().polish(self.btn_start)
         if running:
             self.launch_label.setText(f"● 运行中 · 端口 {st.record.port}")
             # 运行中禁止卸载：边跑边删目录会把正在写的日志和数据留在半删状态
@@ -6366,6 +6398,7 @@ class ComponentCard(QFrame):
         if reply != QMessageBox.Yes:
             return
         self.btn_start.setEnabled(False)
+        self.btn_start.setText("启动中…")
         # parent=self：worker 归卡片的 Qt 对象树持有，run() 还没回来时不依赖
         # launch_worker 这一个引用吊命；结束后由 _on_launch_worker_done deleteLater 收回。
         self.launch_worker = LaunchWorker("start", self.component,
@@ -6444,8 +6477,26 @@ class ComponentCard(QFrame):
             worker.deleteLater()   # finished 之后删除是安全的：run() 已经返回
         self._refresh_launch_state()
 
+    def on_start_stop_clicked(self) -> None:
+        """启动/停止合并按钮的唯一入口：按当前实况决定做哪件事。
+
+        判据用 `_launch_status()`（直接读端口实况），不用按钮上次的文字或启用态——
+        那两个都可能被异步结果改过，用它们当依据就会出现"按钮写着启动、其实在跑"
+        或者反过来，点一下做了错的事。
+        """
+        st = self._launch_status()
+        if st.state == "running":
+            self.on_stop_clicked()
+        elif st.state == "zombie":
+            # 僵尸登记（登记还在、端口没在听）：点按钮的意图是"清掉它重新起一个"，
+            # 而不是"再停一次已经没在跑的东西"——那会让用户以为按钮坏了。
+            self.on_start_clicked()
+        else:
+            self.on_start_clicked()
+
     def on_stop_clicked(self) -> None:
-        self.btn_stop.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("停止中…")
         self.launch_worker = LaunchWorker("stop", self.component,
                                           MainWindow.current_components(), SERVICE_MANAGER,
                                           parent=self)
@@ -7879,7 +7930,7 @@ class MainWindow(QMainWindow):
         for idx in range(tabs.count()):
             base = base_titles[idx] if idx < len(base_titles) else tabs.tabText(idx)
             cards = tab_cards[idx] if idx < len(tab_cards) else []
-            running = any(hasattr(c, "btn_stop") and c.btn_stop.isEnabled()
+            running = any(hasattr(c, "btn_start") and c._running_per_ui()
                           for c in cards)
             tabs.setTabText(idx, f"{base}{'  ●' if running else ''}")
 
@@ -7903,7 +7954,7 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             if not hasattr(card, "btn_start"):
                 continue
-            if not card.btn_stop.isEnabled():
+            if not card._running_per_ui():
                 continue                     # 没在运行，不用跳
             idx = next((n for n, li in enumerate(layouts) if li.indexOf(card) != -1), -1)
             if idx >= 0 and idx != tabs.currentIndex():

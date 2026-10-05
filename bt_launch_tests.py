@@ -1502,14 +1502,26 @@ class CardLaunchUi(unittest.TestCase):
         self.assertEqual(before, after, "挂勾动了条目文本")
 
     def test_running_state_disables_start_and_enables_stop_and_console(self):
+        """运行中：同一个按钮可用、且文字变成「停止」（2026-10-06 合并按钮后重写）。
+
+        原来这条断言"启动禁用 + 停止可用"——那是**两个按钮**的设计。
+        合并成一个之后两者是同一个 widget（btn_stop 是 btn_start 的别名），
+        `assertFalse(btn_start) and assertTrue(btn_stop)` 必然自相矛盾。
+        真正的契约现在是：按钮位置固定、可用、**文字即状态**。
+        """
         main.save_running_map({"jenkins": main.RunRecord(
             key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
             console_url="http://127.0.0.1:8080/", pid=1, pid_role="server",
             started_at=0.0, launcher_cmd=[])})
         main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
         self.card._refresh_launch_state()
-        self.assertFalse(self.card.btn_start.isEnabled())
-        self.assertTrue(self.card.btn_stop.isEnabled())
+        self.assertFalse(hasattr(self.card, "btn_stop"),
+                         "合并后不该再有第二个停止按钮，留个同名别名会让人以为界面上有两个")
+        self.assertTrue(self.card.btn_start.isEnabled(),
+                        "运行中这个按钮必须可点——它就是停止按钮")
+        self.assertTrue(self.card._running_per_ui(), "运行中按钮应被认成在运行")
+        self.assertEqual(self.card.btn_start.text(), "停止",
+                         "运行中按钮文字必须是「停止」，用户靠它认状态")
         self.assertTrue(self.card.btn_console.isEnabled())
         self.assertIn("运行中", self.card.launch_label.text())
         self.assertIn("8080", self.card.launch_label.text())
@@ -1532,7 +1544,64 @@ class CardLaunchUi(unittest.TestCase):
         main.save_running_map({})
         self.card._refresh_launch_state()
         self.assertTrue(self.card.btn_start.isEnabled())
+        self.assertEqual(self.card.btn_start.text(), "启动",
+                         "未运行时按钮文字必须是「启动」")
         self.assertFalse(self.card.btn_console.isEnabled())
+
+    def test_one_button_carries_both_actions(self):
+        """启动/停止是**同一个**按钮，位置固定，状态写在文字上（2026-10-06 用户要求）。
+
+        用户原话：「没启动时显示启动，启动成功后按钮『启动』变成『停止』，点击停止就停止」。
+        原来的双按钮设计（启动 + 停止并排、运行态才亮停止）让他连续三次反馈
+        "没有停止按钮" —— 按钮其实一直好着，问题是位置会变、眼睛要重新找一遍。
+
+        这条把"只有一个按钮"钉死：删掉 btn_stop 若还能过，说明有第二个同名入口。
+        """
+        self.assertFalse(hasattr(self.card, "btn_stop"),
+                         "界面上只能有一个按钮，不能再有第二个停止入口")
+
+        # 未运行 → 「启动」
+        main.save_running_map({})
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.btn_start.text(), "启动")
+
+        # 运行中 → 「停止」，且**可点**（它就是停止按钮）
+        main.save_running_map({"jenkins": main.RunRecord(
+            key="jenkins", version="x", home="/h", data_dir="/d", port=8080,
+            console_url="u", pid=1, pid_role="server", started_at=0.0,
+            launcher_cmd=[], ports=(8080,))})
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.btn_start.text(), "停止",
+                         "运行中按钮文字必须变成「停止」")
+        self.assertTrue(self.card.btn_start.isEnabled(),
+                        "运行中这个按钮必须可点——它是停止按钮，变灰会被读成「按钮没了」")
+        # 按钮身份也要变：运行中是危险操作，要与「卸载」明确区分开
+        self.assertEqual(self.card.btn_start.objectName(), "dangerBtn")
+        self.assertIn("停止", self.card.btn_start.toolTip())
+
+        # 停止完成后 → 回到「启动」
+        main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": False
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.btn_start.text(), "启动")
+        self.assertEqual(self.card.btn_start.objectName(), "primaryBtn")
+
+    def test_transitional_caption_is_not_overwritten_by_refresh(self):
+        """点了按钮之后的过渡态（"启动中…"/"停止中…"）不能被状态刷新盖回「启动」。
+
+        那是用户点下去之后的即时反馈。被立刻改掉的话，他会以为按钮没点上，
+        于是连点几次 —— 而每次点击都会起一个 worker。
+        """
+        main.save_running_map({})
+        self.card.launch_worker = object()          # 模拟 worker 在跑
+        self.addCleanup(setattr, self.card, "launch_worker", None)
+        self.card.btn_start.setEnabled(False)
+        self.card.btn_start.setText("启动中…")
+        self.card._refresh_launch_state()
+        self.assertEqual(self.card.btn_start.text(), "启动中…",
+                         "过渡态文字被状态刷新盖掉了")
+        self.assertFalse(self.card.btn_start.isEnabled(),
+                         "worker 在跑时不该让用户再点一次")
 
     def test_uninstall_is_blocked_while_running(self):
         """spec §5：运行中禁止卸载，避免"边跑边删目录"。"""
@@ -1662,7 +1731,10 @@ class CardLaunchUi(unittest.TestCase):
         card = main.ComponentCard(comp, lambda msg, level: None)
         self.assertIn("运行中", card.launch_label.text())
         self.assertTrue(card.btn_console.isEnabled())
-        self.assertFalse(card.btn_start.isEnabled())
+        # 合并按钮后，运行中这个按钮**要可用**（它就是停止按钮），
+        # 状态由文字「停止」表达，而不是把它禁用。
+        self.assertTrue(card.btn_start.isEnabled())
+        self.assertEqual(card.btn_start.text(), "停止")
 
     def test_worker_signals_drive_the_card(self):
         """started_ok / failed / stopped 三条连线是卡片唯一的"结果"入口：掉一条，
@@ -1764,10 +1836,18 @@ class CardLaunchUi(unittest.TestCase):
         # 文案不许承诺 start() 不做的事：它不看旧 PID，是直接起新进程覆盖登记。
         # 上次评审点过这句"会自动接管"过界，钉在这里防止改回去。
         self.assertIn("重新起一个", self.card.launch_label.text())
+        # 僵尸态按钮仍应是「启动」且可点：点它的意图是"清掉残留重新起一个"。
+        # 合并按钮后如果这里显示「停止」，用户点下去会走stop 路径 —— 而端口本来
+        # 就没在听，点了等于什么都不发生，看起来就是按钮坏了。
+        self.assertEqual(self.card.btn_start.text(), "启动",
+                         "僵尸态要显示「启动」而不是「停止」")
+        self.assertFalse(self.card._running_per_ui(),
+                         "僵尸态不算在运行：点按钮的意图是重新起一个")
+        self.assertTrue(self.card.btn_start.isEnabled(),
+                        "僵尸态按钮必须可点，否则用户点它像坏了")
         self.assertNotIn("接管", self.card.launch_label.text())
         self.assertTrue(self.card.btn_start.isEnabled())
         self.assertFalse(self.card.btn_console.isEnabled())
-        self.assertFalse(self.card.btn_stop.isEnabled())
 
     def test_current_worker_finished_hands_the_reference_back(self):
         """上一条测的是"老 worker 的 finished 不许清掉新 worker"；这是同一处代码的另一半：
@@ -1783,7 +1863,12 @@ class CardLaunchUi(unittest.TestCase):
         self.assertEqual(created[0].delete_later_calls, 1)
         # 交回引用不等于服务停了：端口还在听时启动仍旧不可点
         self.card._refresh_launch_state()
-        self.assertFalse(self.card.btn_start.isEnabled())
+        # 合并按钮后"服务还活着"不再表现为按钮禁用，而表现为文字仍是「停止」。
+        # 断言这一点才真正守住"交回引用 ≠ 服务已停"——删掉 self.launch_worker = None
+        # 会让按钮文字卡在过渡态或状态判定失准。
+        self.assertEqual(self.card.btn_start.text(), "停止",
+                         "端口还在听时按钮应仍显示「停止」")
+        self.assertTrue(self.card.btn_start.isEnabled())
 
     def test_launch_failed_stays_quiet_while_the_window_is_closing(self):
         """关窗链路 closeEvent→cancel→worker 的 failed.emit→这里。模态框自己转事件循环，
