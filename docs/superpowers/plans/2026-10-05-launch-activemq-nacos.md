@@ -334,6 +334,11 @@ class NetstatParse(unittest.TestCase):
         self.assertEqual(table.get(8848), {12345}, "IPv4/IPv6 两行都要归到同一个 PID")
         self.assertEqual(table.get(9848), {12345})
         self.assertEqual(table.get(135), {1212})
+        # 只有 IPv6 行时也必须认得出归属：真实世界里"只绑 [::]"的服务很常见，
+        # 少了这一步，删掉 IPv6 处理只会让上面三条"顺带"绿着（变异自检实测过）。
+        v6_only = ("  TCP    [::]:61616             [::]:0                 LISTENING       4444\n")
+        only = main.parse_netstat_listeners(self.HEAD + v6_only)
+        self.assertEqual(only.get(61616), {4444}, "IPv6-only 监听行不许被丢掉")
 
     def test_only_listening_rows_count(self):
         # ESTABLISHED 那行里有 8848，但它是客户端连接，不能当成"谁在监听这个口"
@@ -386,7 +391,11 @@ def parse_netstat_listeners(text: str) -> Dict[int, Set[int]]:
         if parts[-2].upper() != "LISTENING":
             continue
         try:
-            port = int(parts[-3].rsplit(":", 1)[-1])   # [::]:8848 取最后一段
+            # 列序（split 后）：[-1]=PID、[-2]=状态、[-3]=**外部地址**、[-4]=本地地址。
+            # 端口在**本地地址**上，也就是 parts[-4]。写成 -3 会取到外部地址的 0
+            # （"0.0.0.0:0" / "[::]:0"），于是所有监听行都归到端口 0 —— 这是计划初稿的 off-by-one，
+            # 由 Task 4 的实现者按自家用例暴露出来并改对；改错的写法过不了下面任何一条用例。
+            port = int(parts[-4].rsplit(":", 1)[-1])   # [::]:8848 取最后一段
             pid = int(parts[-1])
         except ValueError:
             continue
