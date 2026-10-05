@@ -186,6 +186,11 @@ class NoExecInvariant(unittest.TestCase):
     然后跑完只读路径。这条用例是整套设计最需要长期守住的东西。"""
 
     def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig = main.RUNNING_FILE
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig)
         self._popen = main.subprocess.Popen
         self._probe = main._probe_version
         def _boom(*_a, **_k):
