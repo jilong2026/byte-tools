@@ -220,6 +220,10 @@ class Component:
     # 例：Docker 在 Windows 上无 static binary，需引导用户去 Docker Desktop 官网下载。
     # 不配置该字段时，回退到通用提示"当前系统 X 无可用下载地址"。
     unsupported_platform_hint: Optional[str] = None
+    # 启动描述符（见 docs/superpowers/specs/2026-10-05-one-click-launch-design.md §3）。
+    # 由 build_components() 末尾按 LAUNCH_OF 统一赋值，不要在构造处手写 ——
+    # 与 MULTI_VERSION_KEYS 同一套"单一真源"做法。
+    launch: Optional["LaunchSpec"] = None
     # 界面 Tab 分组名，取值必须是 COMPONENT_CATEGORIES 之一。
     # 由 build_components() 末尾按 COMPONENT_CATEGORY_OF 统一赋值，不要在构造处手写。
     category: str = ""
@@ -2960,6 +2964,62 @@ COMPONENT_CATEGORY_OF = {
 MULTI_VERSION_KEYS = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
 
 
+@dataclass
+class LaunchSpec:
+    """一个组件"怎么被拉起来"的描述符。本期只有 cli 改端口一种端口策略，
+    配置回写（property_file）留给计划二，故此处不提供该字段。"""
+
+    # 按 OS 键的启动 argv 模板。允许这些占位符：
+    #   {java} {war} {home} {data_dir} {port} {log_file}
+    commands: Dict[str, List[str]]
+    # 停止手段："pid" = 只能结束进程（Jenkins 无 shutdown 脚本）；
+    #           "shutdown_command" = 有正规关闭脚本（计划二的 ActiveMQ / Nacos）
+    stop_kind: str = "pid"
+    shutdown_commands: Dict[str, List[str]] = field(default_factory=dict)
+    # 端口簇：主端口 + 派生偏移。本期 jenkins 只有主端口，offsets 为空。
+    main_port: int = 0
+    port_offsets: tuple = ()
+    port_search_span: int = 99
+    # 界面打开控制台用：http://127.0.0.1:{port}{console_path}
+    console_path: str = "/"
+    # 探活路径。None 表示只做 TCP 判活，不发 HTTP。
+    health_path: Optional[str] = None
+    # 前置组件 key。Jenkins 需要 JDK。
+    needs: tuple = ()
+    # JDK 最低大版本。spec §2.4 第 5 项实测前必须留 None，
+    # 非 None 才能启用版本门控；填数字前请先拿到实测结论。
+    min_java_major: Optional[int] = None
+    # 要注入的数据目录环境变量名（Jenkins: JENKINS_HOME）。None 表示不注入。
+    data_dir_env: Optional[str] = None
+    # 拉起后多久内必须开始监听，超时判启动失败。
+    startup_timeout: int = 120
+    # 启动确认弹窗里的风险说明文本（监听地址、默认凭据一类）。
+    risk_note: str = ""
+
+
+LAUNCH_OF: Dict[str, LaunchSpec] = {
+    "jenkins": LaunchSpec(
+        commands={os_name: ["{java}", "-jar", "{war}", "--httpPort={port}"]
+                  for os_name in ("Windows", "Linux", "Darwin")},
+        stop_kind="pid",
+        main_port=8080,
+        console_path="/",
+        health_path="/login",
+        needs=("jdk",),
+        min_java_major=None,
+        data_dir_env="JENKINS_HOME",
+        startup_timeout=180,
+        risk_note=(
+            "Jenkins 会监听本机 8080（默认对局域网开放），首次启动是解锁向导；"
+            "初始管理员密码在 JENKINS_HOME 的 secrets 目录下。"
+            "只想本机访问的话，把命令里的监听地址改成 127.0.0.1 再启动。"
+        ),
+    ),
+}
+
+LAUNCH_KEYS = set(LAUNCH_OF)
+
+
 def group_components(components: List[Component]) -> Dict[str, List[Component]]:
     """按 COMPONENT_CATEGORIES 的顺序分组，供界面建 Tab。"""
     grouped: Dict[str, List[Component]] = {name: [] for name in COMPONENT_CATEGORIES}
@@ -3451,6 +3511,7 @@ def build_components() -> List[Component]:
     for comp in components:
         comp.category = COMPONENT_CATEGORY_OF[comp.key]        # 已有：漏登记直接 KeyError
         comp.multi_version = comp.key in MULTI_VERSION_KEYS    # 新增：不在白名单就是 False
+        comp.launch = LAUNCH_OF.get(comp.key)                     # 新增：不在登记表就是 None
     return components
 
 
