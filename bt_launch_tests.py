@@ -272,5 +272,85 @@ class ZombieMatrix(unittest.TestCase):
         self.assertIn("nacos", main.load_running_map())
 
 
+class LaunchPlan(unittest.TestCase):
+    def setUp(self):
+        # build_launch_plan 会 ensure_dir(data_dir)，不patch CONFIG_DIR 就会在真
+        # ~/.env-tools 下留下 jenkins-data 目录。
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig_dir = main.CONFIG_DIR
+        main.CONFIG_DIR = Path(self.dir.name)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        # 本任务的 build_launch_plan 不校验 JDK 目录是否存在，校验是 resolve_java_home
+        # 的职责，已单独覆盖；这里只需一个稳定的 home 字符串。
+        self.jdk_home = str(Path(self.dir.name) / "jdkhome")
+        self.comps = {c.key: c for c in main.build_components()}
+        self.comp = self.comps["jenkins"]
+        self.spec = self.comp.launch
+
+    def test_java_home_prefers_our_own_installed_jdk(self):
+        """EnvManager.get 只是 os.environ.get（main.py:3660），
+        所以 JAVA_HOME 必须按"本工具装了哪个 JDK"来定，不能信进程环境。"""
+        with tempfile.TemporaryDirectory() as td:
+            # Component.install_dir() 的形状是 <CONFIG_DIR>/<key>/<key>-<version>（main.py:227）
+            home = Path(td) / "jdk" / "jdk-21"
+            (home / "bin").mkdir(parents=True)
+            (home / "bin" / ("java.exe" if main.CURRENT_OS == "Windows" else "java")).write_bytes(b"x")
+            orig_dir, orig_map = main.CONFIG_DIR, main.load_active_map
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig_dir)
+            self.addCleanup(setattr, main, "load_active_map", orig_map)
+            main.CONFIG_DIR = Path(td)
+            main.load_active_map = lambda: {"jdk": "21"}
+            self.assertEqual(main.resolve_java_home(self.comps), str(home))
+
+    def test_java_home_falls_back_to_env_var_but_validates_it(self):
+        """本工具没装 JDK 时退到用户的 JAVA_HOME，但必须确认它真是个 JDK 目录：
+        指到一个不存在的路径就当没有，否则启动报错无从解释。"""
+        orig_map = main.load_active_map
+        orig_env = os.environ.get("JAVA_HOME")
+        self.addCleanup(setattr, main, "load_active_map", orig_map)
+        with tempfile.TemporaryDirectory() as td:
+            real_home = Path(td) / "external-jdk"
+            (real_home / "bin").mkdir(parents=True)
+            main.load_active_map = lambda: {}
+            os.environ["JAVA_HOME"] = str(real_home)
+            self.assertEqual(main.resolve_java_home(self.comps), str(real_home))
+            os.environ["JAVA_HOME"] = str(Path(td) / "does-not-exist")
+            self.assertIsNone(main.resolve_java_home(self.comps))
+        if orig_env is None:
+            os.environ.pop("JAVA_HOME", None)
+        else:
+            os.environ["JAVA_HOME"] = orig_env
+
+    def test_gate_reports_missing_jdk_as_actionable(self):
+        ok, reason = main.launch_gate(self.comp, self.spec, java_home=None)
+        self.assertFalse(ok)
+        self.assertIn("JDK", reason)
+
+    def test_argv_expands_all_placeholders(self):
+        plan = main.build_launch_plan(self.comp, self.spec, self.jdk_home,
+                                      8123, Path(self.dir.name) / "byte-tools.out")
+        java_exe = Path(self.jdk_home) / "bin" / ("java.exe" if main.CURRENT_OS == "Windows" else "java")
+        self.assertEqual(str(plan.argv[0]), str(java_exe),
+                         "build_launch_plan 收的是 JDK home，java 可执行文件由它自己拼")
+        self.assertEqual(plan.argv[1], "-jar")
+        self.assertTrue(str(plan.argv[2]).endswith("jenkins.war"))
+        self.assertIn("--httpPort=8123", plan.argv)
+        self.assertNotIn("{", " ".join(str(a) for a in plan.argv), "占位符没展开干净")
+
+    def test_env_injects_jenkins_home_and_java_home(self):
+        plan = main.build_launch_plan(self.comp, self.spec, self.jdk_home,
+                                      8080, Path(self.dir.name) / "byte-tools.out")
+        self.assertEqual(plan.env["JENKINS_HOME"], str(Path(main.CONFIG_DIR) / "jenkins-data"))
+        self.assertEqual(plan.env["JAVA_HOME"], self.jdk_home)
+        self.assertTrue(Path(plan.env["JENKINS_HOME"]).is_dir(), "数据目录必须在这一步就建好")
+        self.assertTrue(str(plan.cwd).endswith("jenkins-2.568.3"), "工作目录是组件安装目录")
+
+    def test_console_url_uses_actual_port(self):
+        plan = main.build_launch_plan(self.comp, self.spec, self.jdk_home, 8123,
+                                      Path(self.dir.name) / "o.out")
+        self.assertEqual(plan.console_url, "http://127.0.0.1:8123/")
+
+
 if __name__ == "__main__":
     unittest.main()

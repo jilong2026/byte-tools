@@ -4509,6 +4509,76 @@ class LaunchStatus:
     reason: str = ""
 
 
+@dataclass
+class LaunchPlan:
+    """一次拉起所需的全部信息，纯数据 —— 决策都在这里做完，ServiceManager 只负责执行。"""
+    argv: List[str]
+    env: Dict[str, str]
+    cwd: Path
+    log_file: Path
+    console_url: str
+
+
+def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
+    """优先用本工具装的 JDK；没有再退到 JAVA_HOME 环境变量。
+
+    EnvManager.get 就是 os.environ.get，拿它当"用户装的 JDK"会读到
+    被本工具改脏的进程环境，与 R3 里"回滚要读持久层的真值"是同一个坑。"""
+    jdk = comps.get("jdk")
+    if jdk is not None:
+        active = load_active_map().get("jdk")
+        if active:
+            home = jdk.install_dir(active)
+            if jdk.exec_path_in_home(str(home)) is not None:
+                return str(home)
+    env_home = os.environ.get("JAVA_HOME")
+    if env_home and (Path(env_home) / "bin").is_dir():
+        return env_home
+    return None
+
+
+def launch_gate(comp: Component, spec: LaunchSpec,
+                java_home: Optional[str]) -> Tuple[bool, str]:
+    """启动前门控。失败原因必须可行动（spec §5）：说清缺什么、点这里能补什么。"""
+    if getattr(comp, "launch", None) is None:
+        return False, "本工具暂不支持启动该组件"
+    if java_home is None and "jdk" in (spec.needs or ()):
+        return False, "启动需要先有 JDK：在本工具里装一个 JDK（推荐 17），再回来点启动。"
+    if not comp.versions:
+        return False, "该组件还没有可启动的版本"
+    return True, ""
+
+
+def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
+                      port: int, log_file: Path) -> LaunchPlan:
+    """按 OS 展开模板，注入 env，定好 data_dir 与重定向文件。
+
+    重定向不是可选项：Windows 用 DETACHED_PROCESS 拉起后没有有效控制台句柄，
+    不重定向就等于把启动报错扔掉，事后只能猜（设计 §4）。"""
+    version = comp.versions[0].version
+    home = comp.install_dir(version)
+    war = home / "jenkins.war"
+    # 数据与版本目录分离（spec §0 决策 3）：JENKINS_HOME 指向 CONFIG_DIR/<key>-data，
+    # 这样换版本、重装、卸载都不碰任务与插件。
+    data_dir = CONFIG_DIR / f"{comp.key}-data"
+    env = dict(os.environ)
+    env["JAVA_HOME"] = str(Path(java_home))
+    if spec.data_dir_env:
+        env[spec.data_dir_env] = str(data_dir)
+    ensure_dir(data_dir)
+    mapping = {
+        "java": str(Path(java_home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")),
+        "war": str(war),
+        "home": str(home),
+        "data_dir": str(data_dir),
+        "port": str(port),
+        "log_file": str(log_file),
+    }
+    argv = [t.format(**mapping) for t in spec.commands[CURRENT_OS]]
+    return LaunchPlan(argv=argv, env=env, cwd=home, log_file=log_file,
+                      console_url=f"http://127.0.0.1:{port}{spec.console_path}")
+
+
 class ServiceManager:
     """本机进程生命周期的唯一入口。探针全部可注入，测试因此不碰网络也不碰进程。"""
 
