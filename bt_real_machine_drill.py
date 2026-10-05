@@ -238,7 +238,8 @@ def main_drill(apply: bool) -> int:
 
 
 def launch_drill(comp_key: str, apply: bool) -> int:
-    """三层判据（沿用本脚本既有风格）：拉得起 → 端口在听且控制台给 2xx → 停得干净。
+    """四层判据（沿用本脚本既有风格）：拉得起 → 停止按整个端口簇体检 → 强制确认 →
+    停得干净（登记无残留）。
 
     单元测试证明的是逻辑对，这一层证明真机器上真能跑（R3.16 的教训）。
     """
@@ -271,23 +272,50 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     # 账本裁定 F3 说这个字段留着就是给演练层当判据用的，写死就等于计划二一换组件即错。
     health = comp.launch.health_path or "/"
     got = main.http_ok(rec.console_url.rstrip("/") + health)
-    print(f"[1/3] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
+    print(f"[1/4] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
+
+    def cluster_state(ports, label):
+        """端口簇逐个体检。计划一只看 rec.port 一个口，本期两个组件是三口/两口，
+        只看主口会得出"停干净了"的假结论——主口掉了 gRPC 还在听也算没停。"""
+        live = [p for p in ports if main.port_is_listening(p)]
+        print(f"      {label}: {list(ports)} 在听={live or '无'}")
+        return live
+
+    # 老记录没有 ports 字段（计划一的 running.json），按主口兜底，别让读侧 KeyError。
+    rec_ports = tuple(rec.ports) or (rec.port,)
+    live_before = cluster_state(rec_ports, "停止前")
+
+    print("[2/4] 停止：")
     stop = main.SERVICE_MANAGER.stop(comp, comps)
     if not stop.ok and stop.need_force:
         # Windows 上 stop 第一步只请示、不动手（Task 8 裁定 1）。演练里这一票由脚本替
         # 用户点"是"，否则一条按设计走通的路径会被判成失败。
-        print("[2/3] 停止需要确认，演练按「是」继续：", stop.reason)
+        print("[3/4] 停止需要确认，演练按「是」继续：", stop.reason)
         stop = main.SERVICE_MANAGER.force_stop(rec.key)
+    print(f"      停止 ok={stop.ok} 需强制={stop.need_force} reason={stop.reason}")
+    # 按簇复查，而不是只看主口：主口掉了但派生口还在听，同样是"没停干净"。
+    live_after = cluster_state(rec_ports, "停止后")
+
     left = main.load_running_map()
-    print(f"[2/3] 停止 ok={stop.ok} 需强制={stop.need_force} reason={stop.reason}")
-    print(f"[3/3] 登记残留={list(left)}")
-    if not stop.ok or rec.key in left:
+    print(f"[4/4] 登记残留={list(left)}")
+    if not stop.ok or rec.key in left or live_after:
         return 1
     if not got:
         # 判据一不能只被"打印"架空：端口在听不代表服务可用（Jenkins 启动中会 503，
-        # 首次解锁向导前 /login 也可能拿不到可达响应）。既然写了三层，就得三层都能否决。
+        # 首次解锁向导前 /login 也可能拿不到可达响应）。既然写了四层，就得四层都能否决。
         print("演练失败：控制台不可达（判据一）—— 端口在听不等于服务可用")
         return 1
+
+    print("\n--- 计划二待验证项（只有 --yes 真跑才有结论）---")
+    print("A1 整簇端口是否随停止一起释放：", "PASS" if not live_after else "FAIL")
+    print("A2 实际监听集合是否等于登记的簇：", list(live_before or []), "登记为", list(rec_ports))
+    print("A3 控制台路径：", rec.console_url, "可达=", got)
+    print("A4 Nacos --server.port 是否压过 application.properties：",
+          "若主口实测端口 == 我们指定的端口 → PASS（否则 Nacos 要改走 conf_copy，回补设计）")
+    print("A5 ActiveMQ console 是否前台不弹独立窗："
+          "（人工确认任务管理器里 java.exe 数量与窗口）")
+    print("A6 -Djetty.http.port 能否压过 conf：本期未尝试，保持「未验证」")
+    print("A7 结论请回写两份 spec：计划一 §2.4 第 2、4 项；计划二 §8.2")
     return 0
 
 
