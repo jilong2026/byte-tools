@@ -4580,6 +4580,10 @@ def parse_netstat_listeners(text: str) -> Dict[int, Set[int]]:
         if parts[-2].upper() != "LISTENING":
             continue
         try:
+            # 列序（split 后）：[-1]=PID、[-2]=状态、[-3]=**外部地址**、[-4]=本地地址。
+            # 端口在**本地地址**上，也就是 parts[-4]。写成 -3 会取到外部地址的 0
+            # （"0.0.0.0:0" / "[::]:0"），于是所有监听行都归到端口 0 —— 这是计划初稿的 off-by-one，
+            # 由 Task 4 的实现者按自家用例暴露出来并改对；改错的写法过不了下面任何一条用例。
             port = int(parts[-4].rsplit(":", 1)[-1])   # [::]:8848 取最后一段
             pid = int(parts[-1])
         except ValueError:
