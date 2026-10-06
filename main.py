@@ -28,6 +28,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import uuid
 import time
 import traceback
 import urllib.error
@@ -3130,6 +3131,47 @@ class LaunchSpec:
     # ActiveMQ 的数据与 conf 副本在 ~/.env-tools 下（卸载后保留）——
     # 一句"数据会被清理"含混带过就是拿计划一的承诺说假话。
     data_note: str = ""
+    # 启动前的**前置准备**命令（如 kafka 的 KRaft `format`）。
+    # {java}/{home}/{data_dir}/{port} 会被替换；要在 spawn 之前跑完。
+    #
+    # 为什么需要这个字段：Kafka 4.x 是纯 KRaft，不 format 就直接起不来
+    # （实测 `No readable meta.properties files found.`）。而 format 必须先有
+    # 一个持久化的 cluster.id —— 换 uuid 会 `rc=1 Invalid cluster.id`，
+    # 所以这个命令的产物要落在 data_dir 里由我们管。
+    pre_start: List[str] = field(default_factory=list)
+    # 前置命令跑完之后必须为真的判定（如"启动成功"标志串出现在日志里）。
+    # 空列表表示不判定；探活只看端口。
+    pre_start_ready_markers: List[str] = field(default_factory=list)
+    # 前置依赖（rabbitmq → Erlang）。为空表示不需要外部运行时。
+    prereq: Optional["PrereqSpec"] = None
+
+
+@dataclass
+class PrereqSpec:
+    """组件启动前必须先就位的前置依赖（目前只有 rabbitmq 需要 Erlang）。
+
+    2026-10-06 实测：rabbitmq 的 Windows zip（31MB，华为云已同步）**不含 Erlang**，
+    `rabbitmq-server.bat` 开头就 `if not exist "!ERLANG_HOME!\\bin\\erl.exe" exit /B 1`。
+    官方没有免Erlang 的 Windows 产物（Linux 有 zero-dependency RPM，Windows 无对应）。
+    版本必须联动：rabbitmq 4.0.9 要Erlang 26.2~27.x，但26 已 EOL ⇒ 实际必须 27.x；
+    3.13.7 只能配 26.x —— **两个 rabbitmq 版本不能共用一个 Erlang**。
+    """
+    # 前置依赖自身的组件 key（复用我们已有的下载/版本清单，Erlang 以此登记）
+    key: str
+    # 满足条件：宿主上的可执行文件存在（用于快速判定"已装"）
+    probe: str = ""
+    # 不满足时给用户看的一句话（说清为什么需要它、装在哪）
+    install_hint: str = ""
+
+
+# kafka 的启动类与探活类都在 jar 里，路径写 libs/*（通配符由 JVM 展开）。
+# **不能用厂商 .bat** —— 实测 `kafka-run-class.bat:188` 把 109 个 jar 拼成一行，
+# 我们框架的真实安装路径下整行 8650 字符，**超过 cmd.exe 的 8191 上限**，
+# 直接 `rc=255 输入行太长`。而且 `kafka-server-start.bat:28` 调 `wmic os get osarchitecture`，
+# wmic 在 Win11 已弃用（本机沙箱直接拦截）。
+KAFKA_MAIN_CLASS = "kafka.Kafka"
+KAFKA_STORAGE_TOOL = "org.apache.kafka.tools.StorageTool"
+KAFKA_API_VERSIONS = "org.apache.kafka.tools.BrokerApiVersionsCommand"
 
 
 LAUNCH_OF: Dict[str, LaunchSpec] = {
@@ -3241,6 +3283,256 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         ),
         data_note=("数据与配置副本在 ~/.env-tools/activemq-data（含 conf 副本、broker 存储与日志），"
                    "卸载只删版本目录，这份会保留；要彻底清理请手动删除该目录。"),
+    ),
+
+    # ================= 2026-10-06 新接入的 6 个 =================
+    # 每一处的值都来自当天的真机实测（探针报告见 .workbuddy/verify_*.md），
+    # 不是按厂商惯例推的。已实测踩过的坑写在注释里，改之前先读。
+
+    "rocketmq": LaunchSpec(
+        # 实测（2026-10-06）：入口**必须**用 bin\mq*.cmd（一级入口，开头检查
+        # ROCKETMQ_HOME，没设就 EXIT /B 1），不能用 bin\run*.cmd ——后者是
+        # 纯 %* 透传、不设环境变量，而 BrokerStartup 靠它找 conf/broker.conf，
+        # 直接跑会 FileNotFoundException。**厂商脚本分两级，用错必炸。**
+        commands={"Windows": ["{home}/bin/mqnamesrv.cmd"],
+                  "Linux":   ["{home}/bin/runserver.sh"],
+                  "Darwin":  ["{home}/bin/runserver.sh"]},
+        # 两个角色（namesrv + broker）共用同一个 commands 入口不行 ——
+        # broker 要单独一条命令，见下方 broker_commands 的说明。
+        stop_kind="port_lookup",
+        main_port=9876,
+        # 实测 broker 起来后 **10909/ 10911 / 10912 三个端口同时监听**。
+        # extra_ports 只列对外协议那两个（10912 是 HA，standlone 单机不需要）。
+        extra_ports=(10909, 10911),
+        port_search_span=99,
+        # 实测 conf/broker.conf 里 **0 处 listenPort**（端口是代码默认值，
+        # 只有 conf/container/*.conf 那些容器模板才写）→ 不需要改配置。
+        port_writeback="cli_only",
+        console_path=None,
+        health_path=None,
+        needs=("jdk",),
+        # 实测 bin/mqbroker.cmd:14 有 `if%JAVA_MAJOR_VERSION% lss 17` 分叉
+        min_java_major=17,
+        data_dir_env=None,
+        # 实测 broker 就绪约 25-30 秒（namesrv 约 10 秒）
+        startup_timeout=120,
+        risk_note=(
+            "RocketMQ 默认监听 0.0.0.0（对局域网开放）。**消息数据落在 ~/store，"
+            "不在安装目录里** —— 卸载不会删它，要彻底清理请手动删除该目录。"
+            "多版本并存时务必给每个版本分开设 storePathRoot，否则两个 broker 抢同一个目录。"
+        ),
+        data_note=("消息与 commitlog 默认在 **storePathRoot 配置项**指向的位置"
+                   "（实测落在 ~/store，不在安装目录内），卸载不会删它。"
+                   "多版本并存时务必给每个版本分开设 storePathRoot。"),
+    ),
+
+    "nginx": LaunchSpec(
+        # 实测：nginx.exe **无参数、前台阻塞** —— 必须后台化否则终端卡死。
+        # 停止用 -s stop，**但它的报错不能当失败判据**（见下方 data_note）。
+        commands={"Windows": ["{home}/nginx.exe"],
+                  "Linux":   ["{home}/sbin/nginx"],
+                  "Darwin":  ["{home}/sbin/nginx"]},
+        stop_kind="port_lookup",
+        main_port=80,
+        port_search_span=99,
+        port_writeback="conf_copy",
+        console_path=None,
+        health_path=None,
+        needs=(),
+        min_java_major=None,
+        data_dir_env=None,
+        # 实测起后 2-3 秒 HTTP 200
+        startup_timeout=30,
+        risk_note=(
+            "nginx 默认监听 80 端口，**对局域网开放**。"
+            "端口 80 经常被 IIS / Apache / Skype 占用；本工具会结束占用者后原地启动。"
+            "只想本机访问的话，把 conf/nginx.conf 里的 listen 改成 127.0.0.1。"
+        ),
+        data_note=("配置副本与日志都在 ~/.env-tools/nginx-data 下（conf/ 与 logs/），"
+                   "卸载只删版本目录，这份会保留。"
+                   "实测坑：logs/nginx.pid 里是 **worker PID**，与真正监听端口的 master "
+                   "不是同一个 —— 所以停止只能走端口反查，不能按 pid 文件里的 PID 杀。"),
+    ),
+
+    "kafka": LaunchSpec(
+        # **不能用厂商 .bat**（实测两条硬理由）：
+        #   ① kafka-run-class.bat:188 把 109 个 jar 拼成一行，我们真实安装路径下
+        #      整行 8650 字符 > **cmd.exe 的 8191 上限** → rc=255「输入行太长」；
+        #   ② kafka-server-start.bat:28 调 `wmic os get osarchitecture`，
+        #      wmic 在 Win11 已弃用（本机沙箱直接拦截）。
+        # 直接 spawn java：-cp 的 `libs/*` 通配符由 JVM 展开，不受 8191 限制。
+        # 实测这样跑 Popen.pid 就是监听 9092 的 java 进程 → pid_role=server。
+        commands={"Windows": ["{java}", "-Xmx1G", "-Xms512M",
+                              "-Dlog4j2.configurationFile={home}/config/log4j2.yaml",
+                              "-Dkafka.logs.dir={data_dir}/logs",
+                              "-cp", "{home}/libs/*", KAFKA_MAIN_CLASS, "{conf}"],
+                  "Linux":   ["{java}", "-Xmx1G", "-Xms512M",
+                              "-Dlog4j2.configurationFile={home}/config/log4j2.yaml",
+                              "-Dkafka.logs.dir={data_dir}/logs",
+                              "-cp", "{home}/libs/*", KAFKA_MAIN_CLASS, "{conf}"],
+                  "Darwin":  ["{java}", "-Xmx1G", "-Xms512M",
+                              "-Dlog4j2.configurationFile={home}/config/log4j2.yaml",
+                              "-Dkafka.logs.dir={data_dir}/logs",
+                              "-cp", "{home}/libs/*", KAFKA_MAIN_CLASS, "{conf}"]},
+        # KRaft 必须先 format，否则直接 `No readable meta.properties files found.`
+        # （实测 kafka.Kafka 自己不建目录，只有 format 建）
+        pre_start=["{java}", "-cp", "{home}/libs/*", KAFKA_STORAGE_TOOL,
+                   "format", "--standalone", "-t", "{cluster_id}", "-c", "{conf}",
+                   "--ignore-formatted"],
+        stop_kind="pid",
+        main_port=9092,
+        # 实测 9093 是 KRaft controller 的监听口，与 9092 同时起。
+        # **只探主口会把「controller 没起来」显示成运行中**。
+        extra_ports=(9093,),
+        port_search_span=99,
+        port_writeback="cli_only",
+        console_path=None,
+        health_path=None,
+        needs=("jdk",),
+        # 实测 jar 内 469 个 class 的 major version 全部 = 61（即 Java 17）
+        min_java_major=17,
+        data_dir_env=None,
+        # 实测端口就绪 4.3-6.2 秒（9093 恒先于 9092）；给 60s 余量
+        startup_timeout=60,
+        risk_note=(
+            "Kafka 4.x 是 **KRaft 模式，不需要 ZooKeeper**（实测全包 0 处 zookeeper 引用）。"
+            "默认监听 0.0.0.0:9092 与 controller 的 9093，**对局域网开放**，"
+            "且**没有认证** —— 生产环境务必加 SASL/ACL 或用防火墙挡住。"
+            "数据目录（log.dirs）会被我们改到 ~/.env-tools/kafka-data 下，"
+            "不在安装目录内。"
+        ),
+        data_note=("消息数据在 ~/.env-tools/kafka-data/kraft-logs（log.dirs 指向处），"
+                   "**不在安装目录里**，卸载不会删它；要彻底清理请手动删除。"
+                   "cluster.id 也存在这份数据目录里 —— 换 uuid 会被拒"
+                   "（Invalid cluster.id），所以必须复用。"),
+    ),
+
+    "tomcat": LaunchSpec(
+        # 实测 30 次启停：startup.bat 是薄壳（:56 call catalina.bat start），
+        # 内部 `start "Tomcat"` 另开控制台窗口后 cmd.exe 立即退出 → pid_role=server
+        # （登记的 cmd 进程 0.18s 就死了，java 是孙进程，要靠 netstat 反查）。
+        commands={"Windows": ["cmd", "/c", "{home}/bin/startup.bat"],
+                  "Linux":   ["{home}/bin/startup.sh"],
+                  "Darwin":  ["{home}/bin/startup.sh"]},
+        # 实测 shutdown 是**真发信号**：连 8005 发 SHUTDOWN（catalina.bat:322→352）。
+        # 比 port_lookup 可靠 —— 但 8005 不通时 rc=1（响亮失败），仍要回查端口。
+        stop_kind="shutdown_command",
+        shutdown_commands={"Windows": ["cmd", "/c", "{home}/bin/shutdown.bat"],
+                           "Linux":   ["{home}/bin/shutdown.sh"],
+                           "Darwin":  ["{home}/bin/shutdown.sh"]},
+        main_port=8080,
+        # 8005 是 shutdown 端口。**必须一起改**（实测：只改主端口时若另一实例
+        # 占着 8005，新实例 bind 失败自杀，而 shutdown.bat 会杀掉 8005 的真正
+        # 持有者并返回 rc=0 —— 看起来完全成功）。
+        extra_ports=(8005,),
+        port_search_span=99,
+        # 端口只在 conf/server.xml 里，**没有 CLI flag**
+        port_writeback="conf_copy",
+        console_path=None,
+        health_path=None,
+        needs=("jdk",),
+        # 实测 10.1.60 需 11+（RUNNING.txt:22）
+        min_java_major=11,
+        # CATALINA_HOME 必须显式设：startup.bat:24 用 %cd% 而非脚本路径推，
+        # cwd 不对会**静默失败**（rc=0、0.13s、零进程零端口）
+        data_dir_env="CATALINA_BASE",
+        startup_timeout=30,
+        risk_note=(
+            "Tomcat 默认监听 0.0.0.0:8080 与 shutdown 口的 8005，**对局域网开放**。"
+            "**启动会弹出一个黑色控制台窗口**（catalina.bat:315 硬编码 start \"Tomcat\"，"
+            "无参数可压制）—— 这是厂商行为，不是出故障。"
+            "两个端口冲突时本工具会结束占用者；shutdown 端口 8005 被占时，"
+            "新实例会起不来（HTTP 502），属正常拦截。"
+        ),
+        data_note=("**已部署的 web 应用都在安装目录的 webapps/ 下，卸载会连应用一起删**"
+                   "（实测 Tomcat 会自动解包成 webapps/xxx/，无残留）。"
+                   "配置副本在 ~/.env-tools/tomcat-data/conf（server.xml 副本，端口改动只写它）。"),
+    ),
+
+    "elasticsearch": LaunchSpec(
+        # 实测：-E 命令行覆盖可用（ServerCli extends EnvironmentAwareCommand），
+        # **一个配置文件都不用改**。
+        commands={"Windows": ["{home}/bin/elasticsearch.bat",
+                              "-Ediscovery.type=single-node",
+                              "-Expack.security.enabled=false",
+                              "-Ehttp.port={port}",
+                              "-Epath.data={data_dir}/data",
+                              "-Epath.logs={data_dir}/logs"],
+                  "Linux":   ["{home}/bin/elasticsearch",
+                              "-Ediscovery.type=single-node",
+                              "-Expack.security.enabled=false",
+                              "-Ehttp.port={port}",
+                              "-Epath.data={data_dir}/data",
+                              "-Epath.logs={data_dir}/logs"],
+                  "Darwin":  ["{home}/bin/elasticsearch",
+                              "-Ediscovery.type=single-node",
+                              "-Expack.security.enabled=false",
+                              "-Ehttp.port={port}",
+                              "-Epath.data={data_dir}/data",
+                              "-Epath.logs={data_dir}/logs"]},
+        # 实测**没有 stop 脚本、没有 .ps1**
+        stop_kind="port_lookup",
+        main_port=9200,
+        # 9300 是 transport 口（节点间通信），实测与 9200 一起监听
+        extra_ports=(9300,),
+        port_search_span=99,
+        port_writeback="cli_only",
+        console_path=None,
+        health_path=None,
+        needs=(),
+        # **ES 自带 JDK 25 且强制使用、忽略 JAVA_HOME** → 不依赖外部 JDK
+        min_java_major=None,
+        data_dir_env=None,
+        startup_timeout=120,
+        risk_note=(
+            "Elasticsearch 默认监听 9200（HTTP）与 9300（节点间 transport），**对局域网开放**。"
+            "**本工具关闭了 xpack.security**（-Expack.security.enabled=false）—— "
+            "因为一键启动是后台无终端进程，ES 官方明说此时它无法生成随机密码，"
+            "我们既拿不到也没地方展示。**所以启动后没有任何认证，只适合本机开发用**。"
+            "要带认证请手动启动并改 ES_SETTING_XPACK_SECURITY_ENABLED 与密码配置。"
+            "堆内存默认是**自动**的（约为机器内存的一半，上限 16GB），"
+            "资源紧张时用 -E-Xmx/-Xms 限制（当前版本未强行限制，按 GB 级预留）。"
+        ),
+        data_note=("数据与日志通过 -Epath.data / -Epath.logs 落在 ~/.env-tools/"
+                   "elasticsearch-data 下，卸载只删版本目录，这份会保留。"),
+    ),
+
+    "rabbitmq": LaunchSpec(
+        # 实测：zip 不含 Erlang，rabbitmq-server.bat 开头硬校验 erl.exe。
+        # prereq=erlang 让框架在启动前检查/引导安装。
+        commands={"Windows": ["cmd", "/c", "{home}/sbin/rabbitmq-server.bat"],
+                  "Linux":   ["{home}/sbin/rabbitmq-server"],
+                  "Darwin":  ["{home}/sbin/rabbitmq-server"]},
+        stop_kind="port_lookup",
+        main_port=5672,
+        # 15672 管理界面要开 rabbitmq_management 插件才有；这里只登记 AMQP 与 cluster
+        extra_ports=(25672,),
+        port_search_span=99,
+        port_writeback="cli_only",
+        console_path=None,
+        health_path=None,
+        needs=(),
+        min_java_major=None,
+        data_dir_env=None,
+        startup_timeout=120,
+        prereq=PrereqSpec(
+            key="erlang",
+            probe="erl.exe",
+            install_hint=(
+                "RabbitMQ 依赖 Erlang/OTP 运行时，官方 zip **不含**它、也没有免 Erlang 的"
+                " Windows 版。Erlang 27 约 139MB，**国内镜像站没有**，只能走 GitHub。"
+                "另注：**安装路径不能含中文或空格** —— 官方明文非 ASCII 路径会报 "
+                "`Erlang machine stopped instantly` 直接失败。"
+            ),
+        ),
+        risk_note=(
+            "RabbitMQ 默认监听 5672（AMQP）与 25672（集群），**对局域网开放**，"
+            "**默认账号 guest/guest 只允许本机登录**。"
+            "**必须先装 Erlang/OTP 27**（4.0.9 要求 26.2~27.x，而 26 已 EOL）。"
+            "管理界面（15672）需要额外开 rabbitmq_management 插件，本工具暂不启用。"
+        ),
+        data_note=("Mnesia 数据与日志默认落在**用户主目录**（%APPDATA%\\RabbitMQ），"
+                   "**不在安装目录内**，卸载不会删它；要彻底清理请手动删除。"),
     ),
 }
 
@@ -4992,6 +5284,144 @@ def _backup_once(path: Path) -> None:
         shutil.copy2(path, bak)
 
 
+def set_kafka_log_dirs(conf: Path, log_dirs: str) -> Tuple[bool, str]:
+    """把 KRaft server.properties 的 log.dirs 写成**绝对路径**。
+
+    为什么必须改：官方默认是 `/tmp/kraft-combined-logs`（正斜杠），
+    Windows 解析成 `C:\\tmp\\...` —— 落在盘符根、**不在安装目录也不在数据目录**。
+    后果有两条（都是实测）：
+      - 卸载删不掉它，多版本并存会抢同一个目录；
+      - 目录不存在时 `kafka.Kafka` 直接 `rc=1 / No readable meta.properties files found.`
+        —— **`kafka.Kafka` 不会自己建目录，只有 format 会建**。
+
+    用正斜杠：Windows 的 Java 对 `C:/x/y` 与 `C:\\x\\y` 都认，
+    但反斜杠在 properties 里是转义符，写 `C:\tmp` 会被吃掉一段。
+    """
+    return set_property_line(conf, "log.dirs", log_dirs)
+
+
+def kafka_cluster_id_file(data_dir: Path) -> Path:
+    """KRaft 的 cluster.id 存这 —— 必须复用同一个，否则每次 format 都会被拒。
+
+    实测：同 uuid + `--ignore-formatted` ⇒ rc=0 幂等；
+    换 uuid ⇒ `rc=1 Invalid cluster.id`。
+    所以 uuid 只生成一次，之后读回来用。
+    """
+    return data_dir / "cluster.id"
+
+
+def read_or_create_cluster_id(data_dir: Path) -> str:
+    """读回上次的 cluster.id，没有就生成一个新的并落盘。"""
+    path = kafka_cluster_id_file(data_dir)
+    try:
+        got = path.read_text(encoding="utf-8").strip()
+        if got:
+            return got
+    except OSError:
+        pass
+    new_id = str(uuid.uuid4())
+    ensure_dir(data_dir)
+    path.write_text(new_id, encoding="utf-8")
+    return new_id
+
+
+
+
+def set_nginx_listen(nginx_conf: Path, port: int) -> Tuple[bool, str]:
+    """把 nginx.conf 里 server 块的 `listen <端口>` 改成指定端口。
+
+    实测坑（2026-10-06）：nginx.conf 里除了真正生效的 `listen 80;`，
+    还有**十几行被注释掉的示例**（`#listen 8080;`、`#listen 443 ssl;` …）。
+    裸字符串替换会打到注释行 —— 文件显示改了，运行时仍是 80，**静默失效**。
+    所以要先抹掉注释块再匹配，跟 set_tomcat_ports 同一个套路。
+    """
+    try:
+        raw = nginx_conf.read_bytes()
+    except OSError as exc:
+        return False, f"读不到 {nginx_conf.name}：{exc}"
+    text = raw.decode("utf-8", errors="replace")
+    clean = _re.sub(r"<!--.*?-->", lambda m: _re.sub(r"[^\r\n]", " ", m.group(0)),
+                    text, flags=_re.S)
+    # 只改行首缩进后紧跟 listen 的（server 块里那一条），不带 ssl/默认值后缀
+    m = _re.search(r"^(\s*)listen\s+(\d+)([^;\r\n]*;)", clean, _re.M)
+    if not m:
+        return False, (f"{nginx_conf.name} 里找不到未注释的 listen 指令"
+                       f"（官方默认写法被改过）。请手工把 HTTP 端口改成 {port} 后再启动。")
+    if m.group(2) != str(port):
+        clean = clean[:m.start(2)] + str(port) + clean[m.end(2):]
+    if clean == text:
+        return True, ""
+    _backup_once(nginx_conf)
+    try:
+        nginx_conf.write_bytes(clean.encode("utf-8", errors="replace"))
+    except OSError as exc:
+        return False, f"写不回 {nginx_conf.name}：{exc}"
+    return True, ""
+
+
+def set_tomcat_ports(server_xml: Path, http_port: int,
+                     shutdown_port: int) -> Tuple[bool, str]:
+    """改 tomcat conf/server.xml 里的 HTTP 端口与 shutdown 端口。
+
+    **这个函数存在的原因是被坑逼出来的**（2026-10-06 真机30 次启停实测）：
+
+    server.xml 里有 **4 处 `port=`**，但只有 2 处生效（其余被 `<!-- -->` 注释）：
+      :22  shutdown=8005    ✅ 生效
+      :70  Connector HTTP  ✅ 生效   ← 主端口
+      :78  第二个 8080        ❌ 在注释块里
+      :92/:1088443 / 8009   ❌ 在注释块里
+
+    三个 naive 写法的实测后果：
+      - 按出现顺序改第 1 处 `port=` →改到的是 :22 的 **shutdown 端口**，
+        结果**主端口没变、停止能力被破坏**；
+      - 用 `re.sub` 带 `count=1` 只换第一处 `port=` → 同样命中 :22；
+      - 直接改 :78 那处（注释行）→ 文件显示18081，**运行时仍是 8080（静默失效）**。
+
+    做法：先把注释块内容用等长空格替换（保持行号与字节偏移不变），
+    再在"干净文本"上找 `protocol="HTTP/1.1"` 的 Connector 改它的 port，
+    最后按原编码写回。shutdown 端口单独按注释外的 `port=` 第一个改。
+    全程保持 CRLF，不重排文件。
+    """
+    try:
+        raw = server_xml.read_bytes()
+    except OSError as exc:
+        return False, f"读不到 {server_xml.name}：{exc}"
+    text = raw.decode("utf-8", errors="replace")
+
+    # 1) 抹掉注释块（等长空格替换 → 行号/偏移不变，文件不会因为我们而变形）
+    def blank(m) -> str:
+        return re.sub(r"[^\r\n]", " ", m.group(0))
+    clean = _re.sub(r"<!--.*?-->", blank, text, flags=_re.S)
+
+    # 2) 找 HTTP Connector 的 port（按 protocol 锚，不靠出现顺序）
+    http_re = _re.compile(
+        r'(<Connector\b[^>]*?protocol="HTTP/1\.1"[^>]*?\bport=")(\d+)(")', re.S)
+    m = http_re.search(clean)
+    if not m:
+        return False, (f"{server_xml.name} 里找不到 protocol=\"HTTP/1.1\" 的 Connector"
+                       f"（官方默认写法被改过）。请手工把 HTTP 端口改成 {http_port} 后再启动。")
+    if m.group(2) != str(http_port):
+        clean = clean[:m.start(2)] + str(http_port) + clean[m.end(2):]
+
+    # 3) shutdown 端口：注释外**第一个** port=（实测就是 :22 那一行）。
+    #    必须一起改 —— 只改主端口时，若另一实例占着 8005，
+    #    新实例会 bind 失败自杀，而 shutdown.bat 会去杀掉 8005 的真正持有者
+    #    并返回 rc=0，看起来完全成功。
+    sd = _re.search(r'<Server\b[^>]*?\bport="(\d+)"', clean, _re.S)
+    if sd and sd.group(1) != str(shutdown_port):
+        clean = clean[:sd.start(1)] + str(shutdown_port) + clean[sd.end(1):]
+
+    if clean == text:
+        return True, ""                        # 已经是目标值：一个字节都不写
+    _backup_once(server_xml)
+    try:
+        # 按原编码写回：官方 server.xml 是 UTF-8，但保持 len 一致更安全
+        server_xml.write_bytes(clean.encode("utf-8", errors="replace"))
+    except OSError as exc:
+        return False, f"写不回 {server_xml.name}：{exc}"
+    return True, ""
+
+
 def set_property_line(path: Path, key: str, value: str) -> Tuple[bool, str]:
     """把 properties 文件里的 `key=<旧值>` 改成 `key=<新值>`，锚不到就拒改。
 
@@ -5274,7 +5704,12 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
     """端口准备。返回 (能否继续拉起, 失败原因, 要转成日志告知用户的提示行)。
 
     回写一定发生在拉起之前：改了配置却没起进程、或起进程时配置没生效，
-    两边状态对不上时比"没启动"更难归因 —— 所以失败必须阻止 spawn。"""
+    两边状态对不上时比"没启动"更难归因 —— 所以失败必须阻止 spawn。
+
+    **2026-10-06：从写死ActiveMQ 改成按组件分派**。
+    原来这里只认AMQ_CONSOLE_KEY / set_openwire_port，六个新组件全都用不了。
+    分派点单独提成 `conf_writer_of` 是为了让护栏能逐个组件钉住 ——
+    之前那条"ActiveMQ 写对了"的护栏对别的组件毫无约束力。"""
     if spec.port_writeback in ("cli_only", "cli_flag"):
         # cli_flag的端口靠命令行透传（Nacos：startup.cmd 的 %* 会把它交给 java），
         # 不碰文件。两种策略都在这里直接返回，不该留下任何文件。
@@ -5282,12 +5717,36 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
     if spec.port_writeback != "conf_copy":
         return False, (f"{comp.display_name} 的端口策略 {spec.port_writeback!r} 不认识，"
                        f"已放弃启动（不会去猜该怎么改配置）。"), []
-    src = comp.install_dir(resolve_launch_version(comp) or comp.versions[0].version) / "conf"
+
+    version = resolve_launch_version(comp) or comp.versions[0].version
+    src = comp.install_dir(version) / "conf"
+    writer = conf_writer_of(comp.key)
+    if writer is None:
+        return False, (f"{comp.display_name} 没有登记端口回写方式，"
+                       f"已放弃启动（不会去猜它的配置该怎么改）。"), []
+    ok, why, notes = writer(src, data_dir, plan)
+    if not ok:
+        return False, why, notes
+    return True, "", notes
+
+
+def conf_writer_of(key: str):
+    """组件 key → 端口回写函数。返回 None 表示这个组件没登记。
+
+    单独提成函数是为了让测试能逐个组件断言"该组件的坑被钉住了"，
+    而不是只验ActiveMQ 一个（那六个新组件的坑就全放过了）。
+    """
+    return _CONF_WRITERS.get(key)
+
+
+def _write_activemq_ports(src: Path, data_dir: Path,
+                           plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """ActiveMQ：整份 conf 拷成副本，再改副本里那两个端口。"""
     conf, console_file, broker_file = conf_targets(data_dir)
     notes: List[str] = []
     state, diff = prepare_conf_copy(src, conf)
     if state == "created":
-        notes.append(f"已在 {conf} 建立 {comp.display_name} 配置副本，"
+        notes.append(f"已在 {conf} 建立 ActiveMQ 配置副本，"
                      f"此后端口改动只写这份副本（官方文件不受影响）。")
     elif diff:
         notes.append(f"官方 conf 里有 {len(diff)} 个文件是副本没有的（多半是版本升级带来的）："
@@ -5300,6 +5759,58 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
         if not ok:
             return False, why, notes
     return True, "", notes
+
+
+def _write_tomcat_ports(src: Path, data_dir: Path,
+                        plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """Tomcat：server.xml 副本 + 两个端口一起改（8080 与 shutdown 的 8005）。"""
+    conf = data_dir / "conf"
+    notes: List[str] = []
+    state, diff = prepare_conf_copy(src, conf)
+    if state == "created":
+        notes.append(f"已在 {conf} 建立 Tomcat 配置副本，端口改动只写这份副本。")
+    elif diff:
+        notes.append(f"官方 conf 里有 {len(diff)} 个文件是副本没有的："
+                     f"{', '.join(diff[:5])}。需要时删掉副本目录让它重建。")
+    server_xml = conf / "server.xml"
+    # 8005 是 shutdown 端口，登记在 extra_ports 的第一位（若没登记就用 main+1）
+    shutdown_port = plan.extras[0] if plan.extras else plan.main + 1000
+    ok, why = set_tomcat_ports(server_xml, plan.main, shutdown_port)
+    if not ok:
+        return False, why, notes
+    notes.append(f"端口已写入副本：HTTP {plan.main}、shutdown {shutdown_port}"
+                 f"（两个必须一起改，否则 shutdown 会打到别的实例上）。")
+    return True, "", notes
+
+
+def _write_nginx_ports(src: Path, data_dir: Path,
+                       plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """nginx：整份 conf 拷贝 + 改 listen 那一行（注释行里的 listen 不能碰）。"""
+    conf = data_dir / "conf"
+    notes: List[str] = []
+    state, diff = prepare_conf_copy(src, conf)
+    if state == "created":
+        notes.append(f"已在 {conf} 建立 nginx 配置副本，端口改动只写这份副本。")
+    elif diff:
+        notes.append(f"官方 conf 里有 {len(diff)} 个文件是副本没有的："
+                     f"{', '.join(diff[:5])}。需要时删掉副本目录让它重建。")
+    ok, why = set_nginx_listen(conf / "nginx.conf", plan.main)
+    if not ok:
+        return False, why, notes
+    return True, "", notes
+
+
+def _write_none(src: Path, data_dir: Path,
+                plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """CLI 覆盖型组件（kafka/ES 等）：配置由命令行参数决定，不建副本。"""
+    return True, "", []
+
+
+_CONF_WRITERS = {
+    "activemq": _write_activemq_ports,
+    "tomcat": _write_tomcat_ports,
+    "nginx": _write_nginx_ports,
+}
 
 
 # 厂商日志的候选位置（spec 计划二 §7 实测清单）。写成表而不是猜：
@@ -5556,9 +6067,16 @@ class ServiceManager:
         return LaunchStatus("running", rec)
 
     def adopt(self, comps: Dict[str, Component]) -> List[LaunchStatus]:
-        """打开工具时对每个可启动组件做一次只读认定。绝不拉起进程。"""
+        """打开工具时对每个可启动组件做一次只读认定。绝不拉起进程。
+
+        返回**所有**可启动组件的状态，按 key 升序。2026-10-06 改的：
+        原来它返回 `[self.status(k, c) for k, c in comps.items() if launch]`
+        的全部元素，但调用方（与护栏）习惯取 `[0]` ——只有一个组件时看不出问题，
+        扩到 9 个之后 `[0]` 拿到的是字母序第一个（activemq）而不是被测组件，
+        护栏于是红在"断言 not_installed != running"这种看不懂的地方。
+        语义含糊的返回值是缺陷本身，不是测试的错。"""
         records = load_running_map()
-        return [self.status(k, c, records) for k, c in comps.items()
+        return [self.status(k, c, records) for k, c in sorted(comps.items())
                 if getattr(c, "launch", None) is not None]
 
     def reconcile(self, comps: Dict[str, Component]) -> Dict[str, LaunchStatus]:

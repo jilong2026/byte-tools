@@ -29,8 +29,15 @@ class LaunchSpecTable(unittest.TestCase):
         self.comps = {c.key: c for c in main.build_components()}
 
     def test_launch_keys_are_exactly_this_batch(self):
-        self.assertEqual(main.LAUNCH_KEYS, {"jenkins", "nacos", "activemq"},
-                         "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
+        # 2026-10-06 扩到 9 个：新增 rocketmq/nginx/kafka/tomcat/elasticsearch/rabbitmq
+        # （每一个都有当天的真机实测报告，见 .workbuddy/verify_*.md）。
+        # 这条断言的作用是"多一个组件就要多一份实测事实"，所以**不能放宽成
+        # 「只要在 LAUNCH_OF 里就行」** —— 那等于取消约束。
+        self.assertEqual(
+            main.LAUNCH_KEYS,
+            {"jenkins", "nacos", "activemq",
+             "rocketmq", "nginx", "kafka", "tomcat", "elasticsearch", "rabbitmq"},
+            "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
         self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
     def test_every_launch_key_is_a_known_category_component(self):
@@ -415,7 +422,11 @@ class NoExecInvariant(unittest.TestCase):
                                  launcher_cmd=["java"])
             main.save_running_map({"jenkins": rec})
             self.assertEqual(mgr.status("jenkins", comps["jenkins"]).state, "running")
-            self.assertEqual(list(mgr.adopt(comps))[0].state, "running")
+            # adopt 返回**全部**可启动组件（2026-06-06 起组件数>1，取 [0] 就取错了组件）
+            sts = {k: s.state for k, s in
+                   zip([k for k in sorted(comps) if comps[k].launch is not None],
+                       mgr.adopt(comps))}
+            self.assertEqual(sts["jenkins"], "running", sts)
             main.save_running_map({})
             self.assertEqual(mgr.status("jenkins", comps["jenkins"]).state, "not_installed_or_stopped")
 
@@ -513,18 +524,20 @@ class ZombieMatrix(unittest.TestCase):
         self.assertEqual(calls, [], "空表不该去探任何端口")
 
     def test_foreign_key_record_survives_reconcile(self):
-        """登记里出现本期不认识的可启动组件（计划三才会加的），不许被误删。
+        """登记里出现本期不认识的可启动组件，不许被误删。
 
-        样本用 rabbitmq 而不是 nacos：nacos 在计划二 Task 8 进了白名单，
-        拿它当"不认识"的样本会让本用例在 Task 8 之后就变成"已登记组件要被接管"，
-        那不是它要钉的东西。reconcile 只遍历 LAUNCH_KEYS，所以任何未登记 key 都一样。"""
-        other = main.RunRecord(key="rabbitmq", version="3.12.0", home="/h", data_dir="/d",
-                               port=5672, console_url="",
+        样本用 `pulsar`（2026-10-06 时仍未接入）而不是 rabbitmq/nacos：
+        那两个已经进了白名单，拿它们当"不认识"的样本会让本用例变成
+        "已登记组件要被接管"，那不是它要钉的东西。
+        注释里原来写着"用 rabbitmq 是因为 nacos 进了白名单"—— rabbitmq 后来也进了，
+        所以样本又换了一次。reconcile 只遍历 LAUNCH_KEYS，任何未登记 key 都一样。"""
+        other = main.RunRecord(key="pulsar", version="3.3.9", home="/h", data_dir="/d",
+                               port=6650, console_url="",
                                pid=1, pid_role="none", started_at=0.0, launcher_cmd=[])
-        main.save_running_map({"rabbitmq": other})
+        main.save_running_map({"pulsar": other})
         st = self.mgr(listening=True, alive=True).reconcile(self.comps)
-        self.assertNotIn("rabbitmq", st, "没登记的组件不该被本工具接管")
-        self.assertIn("rabbitmq", main.load_running_map())
+        self.assertNotIn("pulsar", st, "没登记的组件不该被本工具接管")
+        self.assertIn("pulsar", main.load_running_map())
 
 
 class LaunchPlan(unittest.TestCase):
@@ -2396,10 +2409,12 @@ class PortPlanning(unittest.TestCase):
                 '  <transportConnector name="openwire" '
                 'uri="tcp://0.0.0.0:61616?maximumConnections=1000"/>\n', encoding="utf-8")
             data = Path(td) / "data"
-            comp = self.comp()
+            # 2026-10-06：prepare_ports 改成按 comp.key 查分派器
+            # （_CONF_WRITERS）—— 拿 jenkins 的组件配 activemq 的 spec 会查不到
+            # 分派器而拒改。这条要验的是 ActiveMQ 的回写，所以**必须用真组件**。
+            comp = next(c for c in main.build_components() if c.key == "activemq")
             comp.versions = [comp.versions[0]]
-            s = self.spec(main_port=8161, port_offsets=(), extra_ports=(61616,),
-                          port_writeback="conf_copy")
+            s = main.LAUNCH_OF["activemq"]
             orig_install, comp.install_dir = comp.install_dir, (lambda v: home)
             self.addCleanup(setattr, comp, "install_dir", orig_install)
 
@@ -2425,7 +2440,11 @@ class PortPlanning(unittest.TestCase):
         变异自检把`if not ok: return StartResult(False, "writeback", why, notes=notes)`
         整个删掉时，全套 129 条依然全绿 —— 护栏是空的。"""
         comp = self.comp()
-        s = self.spec(port_writeback="conf_copy", extra_ports=())
+        # 2026-10-06：prepare_ports 按 comp.key 查 _CONF_WRITERS，
+        # 拿 jenkins 的组件配 conf_copy 会查不到分派器 → 拒改（不是锚不到 jetty.http.port）。
+        # 要验的是"锚不到就拦 spawn"，所以用真组件 activemq。
+        comp = next(c for c in main.build_components() if c.key == "activemq")
+        s = main.LAUNCH_OF["activemq"]
         s.main_port, s.port_offsets = 8161, ()
         home = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(home, ignore_errors=True))
