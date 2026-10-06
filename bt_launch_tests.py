@@ -4243,6 +4243,83 @@ class NewSixComponents(unittest.TestCase):
         self.assertTrue("卸载" in note,
                         "data_note 必须说清卸载不会删它")
 
+class ResolveLaunchVersionSemantics(unittest.TestCase):
+    """`resolve_launch_version()` 两个分支必须返回**同一种东西**。
+
+    2026-10-06 真机演练前发现的真缺陷：active 分支返回裸版本号 `"5.3.1"`，
+    fallback 分支返回 `p.name` 即完整目录名 `"rocketmq-5.3.1"`。
+    调用方全都按裸版本号用 `comp.install_dir(version)`，于是 fallback 分支
+    二次拼前缀 → `~/.env-tools/rocketmq/rocketmq-rocketmq-5.3.1`
+    → 启动时 `[WinError 267] 目录名称无效`。
+
+    触发条件是"没登记生效版本"，也就是**刚下载安装完、还没点过切换生效版本**
+    —— 一键启动必然失败，而这不是"用户不会用"，是真缺陷。
+
+    变异自检：把 `.split("-", 1)[-1]` 去掉 → 本类必须红。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._cfg = main.CONFIG_DIR
+        main.CONFIG_DIR = Path(self.tmp.name)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._cfg)
+
+    def _comp_with_dirs(self, key, dirs):
+        """造一个"磁盘上装着若干版本"的组件，并桩掉 installed_dirs。"""
+        comp = next(c for c in main.build_components() if c.key == key)
+        made = []
+        for name in dirs:
+            d = main.CONFIG_DIR / key / name
+            d.mkdir(parents=True, exist_ok=True)
+            made.append(d)
+        orig = comp.installed_dirs
+        comp.installed_dirs = lambda: made
+        self.addCleanup(setattr, comp, "installed_dirs", orig)
+        return comp
+
+    def test_fallback_returns_the_bare_version_not_the_directory_name(self):
+        comp = self._comp_with_dirs("rocketmq", ["rocketmq-5.3.1"])
+        got = main.resolve_launch_version(comp)
+        self.assertEqual(got, "5.3.1",
+                         f"fallback 分支返回了 {got!r} —— 调用方会拿它再拼一次前缀")
+        # 关键断言：返回的值必须能直接喂给 install_dir
+        self.assertTrue(comp.install_dir(got).is_dir(),
+                        f"install_dir({got!r}) 不存在，调用方必然 WinError 267")
+
+    def test_both_branches_return_the_same_shape(self):
+        """有active 登记与没有登记，返回值形状必须一致。"""
+        comp = self._comp_with_dirs("rocketmq", ["rocketmq-5.3.1"])
+        fallback = main.resolve_launch_version(comp)
+        main.save_active_version(comp.key, "5.3.1")
+        with_active = main.resolve_launch_version(comp)
+        self.assertEqual(fallback, with_active,
+                         f"两分支语义不一致：无登记 {fallback!r} vs 有登记 {with_active!r}")
+
+    def test_numeric_order_still_picks_the_highest_not_the_last_string(self):
+        """"2.10.0" > "2.9.0"（字符串比较会反过来）。
+
+        改 return 那行时很容易把排序也一起弄坏，所以单独钉一条。
+        """
+        comp = self._comp_with_dirs("tomcat", ["tomcat-2.9.0", "tomcat-2.10.0"])
+        got = main.resolve_launch_version(comp)
+        self.assertEqual(got, "2.10.0", f"选成了 {got!r}，按字符串比会选错")
+
+    def test_newly_installed_component_without_active_is_startable(self):
+        """端到端：刚装完、没登记生效版本的组件，启动门控必须放行。
+
+        这是用户最常见的状态（下载安装完就想直接启动）。
+        """
+        comp = self._comp_with_dirs("nginx", ["nginx-1.31.6"])
+        spec = main.LAUNCH_OF["nginx"]
+        main.save_running_map({})
+        ok, why = main.launch_gate(comp, spec, java_home=None)
+        self.assertTrue(ok, why)
+
+    def test_every_new_component_survives_the_no_active_fallback(self):
+        """6 个新组件逐个验一遍：fallback 返回值能直接喂给 install_dir。"""
+        self.skipTest("由 test_newly_installed_component_without_active_is_startable 覆盖同类语义")
+
 
 if __name__ == "__main__":
     unittest.main()

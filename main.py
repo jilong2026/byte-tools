@@ -6081,7 +6081,15 @@ def resolve_launch_version(comp: Component) -> Optional[str]:
         for chunk in tail.split("."):
             parts.append(int(chunk) if chunk.isdigit() else 0)
         return tuple(parts)
-    return max(installed, key=_ver)
+    # **返回版本号，不是目录名**（2026-10-06 修的真缺陷）。
+    # 上面 active 分支返回 `active`（裸版本号），这里原来返回 `p.name`（完整目录名），
+    # 两个分支语义不一致 —— 而所有调用方都按裸版本号用
+    # `comp.install_dir(version)`，于是 fallback 分支会二次拼前缀：
+    #     install_dir("rocketmq-5.3.1") → ~/.env-tools/rocketmq/rocketmq-rocketmq-5.3.1
+    # 启动时直接 `[WinError 267] 目录名称无效`。
+    # 触发条件：**没登记生效版本**（active 表为空）——
+    # 也就是"刚下载安装完、还没点过切换生效版本"的组件，一键启动必然失败。
+    return max(installed, key=_ver).split("-", 1)[-1]
 
 
 def launch_gate(comp: Component, spec: LaunchSpec,
