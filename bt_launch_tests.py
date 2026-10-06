@@ -62,8 +62,26 @@ class LaunchSpecTable(unittest.TestCase):
                 self.assertIsNone(comp.launch, f"{key} 不该有启动描述符")
 
     def test_min_java_major_is_none_until_measured(self):
-        """spec §2.4 第 5 项实测前禁止填数字，门控只能退化成"有没有 JDK"。"""
-        self.assertIsNone(self.comps["jenkins"].launch.min_java_major)
+        """spec §2.4 第 5 项：**没实测过就不许填数字**，门控只能退化成"有没有 JDK"。
+
+        2026-10-08 更新：jenkins 已经实测过了 —— 拆装在本机的 2.580.1 读出来
+        `META-INF/MANIFEST.MF: Java-Version: 11`，包内唯一顶层 class 的
+        major version = 55（= Java 11）。所以它现在**允许**有数字，且必须是 11；
+        其余没拆过包的组件仍然一律 None。这条护栏因此从"jenkins 必须 None"
+        改成"jenkins 必须是实测值、别人必须 None" —— 前者防止随手填数字，
+        后者防止把"没测过"悄悄变成"测过了"。
+        """
+        self.assertEqual(self.comps["jenkins"].launch.min_java_major, 11,
+                         "jenkins 的门槛 11 来自 war 清单实测（Java-Version: 11）")
+        measured = {"jenkins": 11, "nacos": 8, "activemq": 17, "rocketmq": 17,
+                    "kafka": 17, "tomcat": 11, "seata": 8}
+        for key, spec in main.LAUNCH_OF.items():
+            if key in measured:
+                self.assertEqual(spec.min_java_major, measured[key],
+                                 f"{key} 的门槛与实测值不符")
+            else:
+                self.assertIsNone(spec.min_java_major,
+                                  f"{key} 还没实测过版本门槛，不许填数字")
 
     def test_plan_two_fields_default_to_plan_one_behaviour(self):
         """新字段必须带默认值且默认就是计划一 Jenkins 的既有行为，
@@ -2900,9 +2918,15 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         self.assertIn(prereq.probe, why,
                       "必须点名缺的是哪个可执行文件（用户不知道要装什么）")
         self.assertIn("Erlang", why)
-        # install_hint 的关键信息要透出来：官方 zip 不含它 + 没有国内镜像
-        self.assertIn("官方 zip", why)
-        self.assertIn("GitHub", why)
+        # install_hint 的关键信息要透出来。
+        # 2026-10-08 起这条提示的定位变了：Erlang 成了隐藏组件、由本工具随 rabbitmq
+        # **自动安装**，所以文案的首要信息是"不用你自己装"；其余（国内没镜像、
+        # 只能走 GitHub、路径不能带中文/空格）作为"自动安装失败时该看什么"保留。
+        # 这里断的是**关键信息确实透出来了**，而不是某一句旧文案 ——
+        # 断文案会把正当改文案的修改也一起钉死。
+        self.assertIn("自动", why, "必须说清这件事由工具负责，用户不用自己装")
+        self.assertIn("GitHub", why, "必须交代来源（国内没镜像，走 GitHub 加速器）")
+        self.assertIn("中文", why, "必须交代非 ASCII 路径会直接失败这个硬约束")
 
     def test_check_prereq_passes_when_the_executable_exists(self):
         """装了就必须放行 —— 否则装完Erlang 点启动还是被拦在门控外。"""
@@ -2940,14 +2964,20 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         # 2026-10-06：check_prereq 还会扫免安装 Erlang 的约定落点
         # （find_erlang_home_erl），开发机上真装了 Erlang 时它会绕过 PATH 检查，
         # 门控就放过了 —— 这条用例会红。桩掉它。
+        # 2026-10-08：本工具自己装的 Erlang（~/.env-tools/erlang/erlang-*）也被
+        # 认作"已就位"（installed_erlang_erl），那条路同样要桩掉，
+        # 否则本机替 rabbitmq 装过 Erlang 之后这条用例会假红。
         orig_find = main.find_erlang_home_erl
         main.find_erlang_home_erl = lambda: ""
         self.addCleanup(setattr, main, "find_erlang_home_erl", orig_find)
+        orig_installed = main.installed_erlang_erl
+        main.installed_erlang_erl = lambda: ""
+        self.addCleanup(setattr, main, "installed_erlang_erl", orig_installed)
 
         ok, why = main.launch_gate(comp, comp.launch, java_home=None)
         self.assertFalse(ok, "缺 Erlang 却放过了门控 —— rabbitmq-server.bat 会一闪就退")
         self.assertIn("erl", why.lower(), f"拦截原因必须指向缺失的可执行文件：{why}")
-        self.assertNotIn("下载并安装", why,
+        self.assertNotIn("磁盘上还没有", why,
                          "已经装了，只是缺 Erlang；原因不许说成'没装'")
 
         # 镜像：Erlang 就位后必须放行，否则这条护栏钉不住真正的因果

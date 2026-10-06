@@ -262,9 +262,14 @@ class MultiVersionFlag(EnvSandbox):
         not_multi = {k for k, c in self.components.items() if not c.multi_version}
         self.assertEqual(not_multi, set(),
                          f"这些组件还没开多版本：{sorted(not_multi)}")
-        self.assertEqual(len(self.components), 26,
+        # 2026-10-08：组件数 26 → 27，多出来的是 **隐藏组件 erlang**
+        # （rabbitmq 的前置运行时，不进界面）。用户可见的仍然是 26 个，
+        # 所以两条都要钉：总数含隐藏，可见数不含。
+        self.assertEqual(len(self.components), 27,
                          f"组件数变了（{len(self.components)} 个），"
-                         f"下面几条按26 个写的断言要一起核对")
+                         f"下面几条按数量写的断言要一起核对")
+        visible = [k for k, c in self.components.items() if not getattr(c, "hidden", False)]
+        self.assertEqual(len(visible), 26, "用户可见组件数必须仍是 26")
 
     def test_data_bearing_components_all_have_a_data_note(self):
         """带数据的中间件全都要有 data_note：多版本并存后，

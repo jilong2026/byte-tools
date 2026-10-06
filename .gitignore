@@ -168,3 +168,7 @@ assets/tmp_*
 bt_source_bench.json
 bt_jdk_files.json
 bt_mv_results.txt
+
+# 真机演练的输出（bt_live_matrix.py 每次运行一份）：是证据不是源码，
+# 单次运行几百行 JSON，全部入库只会把仓库撑大。复查时按报告里写的命令重跑即可。
+live_*.json

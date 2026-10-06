@@ -79,11 +79,15 @@ class NewComponentsRegistered(unittest.TestCase):
     def test_both_new_keys_exist(self):
         for key in ("powershell", "nginx"):
             self.assertIn(key, self.by_key, f"{key} 没进 build_components()")
-        self.assertEqual(len(self.by_key), TOTAL)
+        # +1 是隐藏组件 erlang（rabbitmq 的前置运行时，不进界面）
+        self.assertEqual(len(self.by_key), TOTAL + 1)
+        self.assertTrue(self.by_key["erlang"].hidden)
 
     def test_membership_still_matches_the_agreed_split(self):
         got = {name: set() for name in EXPECTED_MEMBERSHIP}
         for comp in self.by_key.values():
+            if getattr(comp, "hidden", False):
+                continue
             got[comp.category].add(comp.key)
         self.assertEqual(got, EXPECTED_MEMBERSHIP)
 

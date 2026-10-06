@@ -51,12 +51,19 @@ class CategoryOnComponent(unittest.TestCase):
     def test_membership_matches_the_agreed_split(self):
         got = {name: set() for name in EXPECTED_MEMBERSHIP}
         for comp in self.components:
+            if getattr(comp, "hidden", False):
+                continue        # 隐藏的前置组件（erlang）不进任何 Tab
             got[comp.category].add(comp.key)
         self.assertEqual(got, EXPECTED_MEMBERSHIP)
 
     def test_no_component_is_left_unclassified(self):
-        self.assertEqual({c.key for c in self.components}, ALL_KEYS)
-        self.assertEqual(len(self.components), 26)
+        # 2026-10-08 起多了 erlang —— 它是 rabbitmq 的前置运行时，
+        # **隐藏组件**（不出现在界面），所以它在 build_components() 里、
+        # 不在分类成员表里。这里把两件事都钉住：
+        self.assertEqual({c.key for c in self.components}, ALL_KEYS | {"erlang"})
+        self.assertEqual(len(self.components), 27)
+        visible = sum(len(v) for v in main.group_components(self.components).values())
+        self.assertEqual(visible, 26, "隐藏组件不许出现在任何 Tab 里")
 
 
 class GroupComponentsHelper(unittest.TestCase):

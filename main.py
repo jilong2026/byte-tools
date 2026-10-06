@@ -240,6 +240,11 @@ class Component:
     # 写错会让用户以为数据在别处、真需要时找不到，或者反过来误以为会丢而不敢删。
     # 确实没实测的写「未实测」并说明该组件的数据一般由什么机制管理。
     data_note: str = ""
+    # **不在界面上出现的组件**（2026-10-08 为 Erlang 加的）。
+    # 它不是给用户装的东西，而是 rabbitmq 的前置运行时：用户要的是"点启动就能起"，
+    # 而不是"先自己去找 Erlang 装好"。界面据此跳过它（见 MainWindow._build_tabs），
+    # 但它仍然走同一套下载/解压/版本解析机制 —— 少一套平行实现就少一处会坏的地方。
+    hidden: bool = False
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -690,11 +695,22 @@ MIRROR_BASES: List[tuple] = [
 ]
 _MIRROR_BY_NAME = dict(MIRROR_BASES)
 
-# GitHub Release 加速器（2026-09 实测可用；ghproxy.com 已停服，不要再引入）
+# GitHub Release 加速器。**顺序 = 速度顺序**，第一位是实测最快的那条链路。
+#
+# 2026-10-08 本机实测重排（原来 ghproxy.net 在前，那是 2026-09 的结论，已经反转）：
+#   对同一个 PowerShell-7.6.6-win-x64.zip（101MB）与 Erlang otp_win64_27.3.4.1.zip（155MB）
+#   各取 10-13 秒的实际字节数（带 UA=byte-tools）：
+#       ghfast.top      751 KB/s (pwsh) / 401 KB/s (erlang)
+#       gh-proxy.com    133 KB/s        / 117 KB/s
+#       ghproxy.net      14 KB/s        /  28 KB/s
+#   两个仓库的结论一致，所以这不是单个包的现象。
+#   代价说明：旧的顺序下 erlang 的 155MB 只有 6 KB/s（≈7 小时），
+#   而这条链路本来就是给"国内没镜像、只能走 GitHub"的组件用的 ——
+#   顺序错了等于那些组件全都下不下来。
 GH_ACCELERATORS: List[str] = [
-    "https://ghproxy.net/",
-    "https://gh-proxy.com/",
     "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
 ]
 
 # 故障转移参数（避免魔法数字）
@@ -1148,6 +1164,62 @@ def fetch_nginx_versions() -> List[ComponentVersion]:
     if not versions:
         raise RuntimeError("Nginx 版本列表抓取失败：华为云镜像与 nginx.org 均不可用")
     return [_nginx_cv(v) for v in _sort_semver_desc(versions)[:12]]
+
+
+def _erlang_urls(v: str) -> Dict[str, List[str]]:
+    """
+    Erlang/OTP Windows 便携包下载 URL 列表（R1 多源故障转移模式）。
+
+    入参 v: str   OTP 版本号，如 "27.3.4.1"
+    返回: {"Windows": [加速器…, GitHub 官方]}；非 Windows 返回 {}
+
+    说明（2026-10-08 实测）：
+      - 只有 GitHub Releases 发 otp_win64_<v>.zip 这种**免安装便携包**，
+        解压后就是一个 OTP 根目录（bin/erl.exe）—— 不需要跑安装器、不改注册表；
+      - 国内镜像没有它：`repo.huaweicloud.com/erlang/` 只有源码 tarball，
+        `mirrors.tuna.tsinghua.edu.cn/erlang/` 直接 404（带 UA 实测）；
+      - 所以只能 _gh_accelerated（加速器在前、末位裸 GitHub）。
+      - Windows 之外（官方包是 .tar.gz 源码）本工具不由它承担，返回空。
+    """
+    if CURRENT_OS != "Windows":
+        return {}
+    return {"Windows": _gh_accelerated(
+        f"https://github.com/erlang/otp/releases/download/OTP-{v}/otp_win64_{v}.zip")}
+
+
+def _erlang_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_erlang_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_erlang_versions() -> List[ComponentVersion]:
+    """
+    抓取 Erlang/OTP 版本列表（GitHub Releases，只取带 otp_win64_<v>.zip 的 tag）。
+
+    返回: ComponentVersion 列表，按版本号倒序，最多 8 个。
+
+    异常: GitHub API 不可用时抛 RuntimeError，调用方降级到离线默认清单。
+
+    说明: OTP 的 tag 形如 OTP-27.3.4.1，资产名 otp_win64_27.3.4.1.zip。
+          只认**有 Windows 便携包**的 tag —— 没有资产的 tag 列出来就是让用户白点一次。
+    """
+    data = _github_api_json(
+        "https://api.github.com/repos/erlang/otp/releases?per_page=30", timeout=20)
+    if not isinstance(data, list):
+        raise RuntimeError("Erlang 版本列表抓取失败：GitHub Releases 返回异常")
+    rx = _re.compile(r"^otp_win64_(\d+(?:\.\d+)*)\.zip$")
+    found: List[str] = []
+    for rel in data:
+        if not isinstance(rel, dict) or rel.get("prerelease"):
+            continue
+        for asset in (rel.get("assets") or []):
+            name = (asset or {}).get("name") or ""
+            m = rx.match(name)
+            if m:
+                found.append(m.group(1))
+    if not found:
+        raise RuntimeError("Erlang 版本列表抓取失败：最近的 release 里没有 Windows 便携包")
+    return [_erlang_cv(v) for v in _sort_semver_desc(set(found))[:8]]
 
 
 def _pwsh_urls(v: str) -> Dict[str, List[str]]:
@@ -3006,6 +3078,7 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "elasticsearch": fetch_elasticsearch_versions,
     "powershell": fetch_powershell_versions,
     "nginx": fetch_nginx_versions,
+    "erlang": fetch_erlang_versions,
 }
 
 
@@ -3053,6 +3126,9 @@ COMPONENT_CATEGORY_OF = {
     "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
     "nginx": "开发软件",
     "docker": "其它软件", "kubectl": "其它软件", "jenkins": "其它软件",
+    # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
+    # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
+    "erlang": "开发环境",
 }
 
 # 允许并存多版本、可切换生效版本的组件（2026-09-29 与用户确认，固定 7 个，别自行扩大）。
@@ -3220,7 +3296,14 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         console_path="/",
         health_path="/login",
         needs=("jdk",),
-        min_java_major=None,
+        # 2026-10-08 实测后填 11（原来是 None = 不查版本，只查"有没有 JDK"）。
+        # 实测证据（对装在本机的 jenkins 2.580.1 拆包读的，不是按惯例推的）：
+        #   META-INF/MANIFEST.MF 里写着 `Java-Version: 11`，
+        #   包内唯一那个顶层 .class 的 major version = 55（= Java 11）。
+        # 填 11 的效果：宿主上只有 JDK 8 时会触发自动装一个够用的 JDK，
+        # 而不是让 Jenkins 用旧 JVM 起不来（那时报的是 UnsupportedClassVersionError，
+        # 用户完全看不出是 JDK 版本问题）。本机的 17/21 都不会被误伤。
+        min_java_major=11,
         data_dir_env="JENKINS_HOME",
         startup_timeout=180,
         risk_note=(
@@ -3595,14 +3678,18 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "两个端口冲突时本工具会结束占用者；shutdown 端口 8005 被占时，"
             "新实例会起不来（HTTP 502），属正常拦截。"
         ),
-        data_note=("**已部署的 web 应用都在安装目录的 webapps/ 下，卸载会连应用一起删**"
-                   "（实测 Tomcat 会自动解包成 webapps/xxx/，无残留）。"
+        data_note=("**部署的 web 应用在 ~/.env-tools/tomcat-data/webapps/ 下（生效的那份）**："
+                   "启动时 CATALINA_BASE 指向 tomcat-data，Tomcat 的 apphost 就是 "
+                   "tomcat-data/webapps —— 安装目录里那份 webapps/ 只在首次启动时被同步过来"
+                   "（只补缺、不覆盖你改过的文件）。卸载组件不删 tomcat-data，"
+                   "要彻底清理请手动删除该目录。"
                    "配置副本在 ~/.env-tools/tomcat-data/conf（server.xml 副本，端口改动只写它）。"),
         credentials_hint=(
-            "**Tomcat 没有管理控制台** —— 8080 用来跑你部署的web 应用，"
+            "**Tomcat 没有管理控制台** —— 8081 用来跑你部署的 web 应用，"
             "根路径返回 404 是正常的（没放任何应用）。"
-            "把 WAR 放进 webapps/ 后访问 http://127.0.0.1:8080/应用名/。"
-            "部署后别忘了解压产物也在 webapps/ 下，**卸载会连应用一起删**。"
+            "把 WAR 放进 ~/.env-tools/tomcat-data/webapps/ 后访问 "
+            "http://127.0.0.1:8081/应用名/（放安装目录那份不生效 —— CATALINA_BASE 不在那）。"
+            "部署后别忘了解压产物也在 webapps/ 下。"
         ),
     ),
 
@@ -3716,8 +3803,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         ),
     ),
 
-    "rabbitmq": LaunchSpec(
-        # 实测：zip 不含 Erlang，rabbitmq-server.bat 开头硬校验 erl.exe。
+    "rabbitmq": LaunchSpec(        # 实测：zip 不含 Erlang，rabbitmq-server.bat 开头硬校验 erl.exe。
         # prereq=erlang 让框架在启动前检查/引导安装。
         # **RABBITMQ_NODENAME 必须是 ASCII 且固定**（2026-10-06 真机实测踩出来的，
         # 踩得很隐蔽）：节点名默认取 rabbit@<主机名>，而中文主机名（本机就是
@@ -3758,8 +3844,10 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             key="erlang",
             probe="erl.exe",
             install_hint=(
-                "RabbitMQ 依赖 Erlang/OTP 运行时，官方 zip **不含**它、也没有免 Erlang 的"
-                " Windows 版。Erlang 27 约 139MB，**国内镜像站没有**，只能走 GitHub。"
+                "本工具会在点「启动」时**自动下载并安装**配套的 Erlang/OTP"
+                "（4.x 配 27.x、3.13 配 26.x，版本是绑死的），你不需要自己装。"
+                "这条提示只在你看到自动安装失败时才需要读：Erlang 27 约 139MB、"
+                "**国内镜像站没有**，只能走 GitHub 加速器，网络差时可能失败。"
                 "另注：**安装路径不能含中文或空格** —— 官方明文非 ASCII 路径会报 "
                 "`Erlang machine stopped instantly` 直接失败。"
             ),
@@ -3872,9 +3960,16 @@ LAUNCH_KEYS = set(LAUNCH_OF)
 
 
 def group_components(components: List[Component]) -> Dict[str, List[Component]]:
-    """按 COMPONENT_CATEGORIES 的顺序分组，供界面建 Tab。"""
+    """按 COMPONENT_CATEGORIES 的顺序分组，供界面建 Tab。
+
+    **隐藏组件不进界面**（Component.hidden，目前只有 Erlang）：它是 rabbitmq
+    的前置运行时，由「启动 rabbitmq」自动装好，不该出现在用户的组件列表里 ——
+    列出来用户就会以为"我也该单独装一个 Erlang"，而版本还必须是配套的那个。
+    """
     grouped: Dict[str, List[Component]] = {name: [] for name in COMPONENT_CATEGORIES}
     for comp in components:
+        if getattr(comp, "hidden", False):
+            continue
         grouped[comp.category].append(comp)   # 未登记的分类直接 KeyError
     return grouped
 
@@ -4149,10 +4244,20 @@ def build_components() -> List[Component]:
             path_subdir="",  # 解压后二进制直接在根目录
             exec_name="docker",
             version_args=["--version"],
-            # Windows 平台不支持 Docker static binary 自动下载，给用户友好引导
+            # Windows 平台不支持 Docker static binary 自动下载，给用户友好引导。
+            # 2026-10-08 本机实测确认这不是"暂时不提供"而是**平台形态不同**：
+            # Docker 官方的 static binary（docker/dockerd 两个裸可执行文件）只发
+            # Linux/macOS；Windows 上要的是 Docker Desktop（需要 WSL2 或 Hyper-V
+            # 后端 + 安装期管理员授权，装完还得重启），本工具"解压即用"的模型
+            # 装不出一个能跑的 Windows Docker。
             unsupported_platform_hint=(
-                "Docker 在 Windows 上需使用 Docker Desktop GUI 安装器，本工具暂不提供自动下载。"
-                "请前往官网下载安装：https://www.docker.com/products/docker-desktop/"
+                "Docker 在 Windows 上没有「解压即用」的形态 —— "
+                "官方 static binary 只发 Linux/macOS，Windows 侧必须装 Docker Desktop"
+                "（它依赖 WSL2 或 Hyper-V，安装时需要管理员授权、通常还要重启）。"
+                "本工具不代装它。请到官网下载 Docker Desktop："
+                "https://www.docker.com/products/docker-desktop/\n"
+                "如果你要的只是「在本机跑 Linux 容器」：也可以装 WSL2 "
+                "（管理员 PowerShell 执行 wsl --install）再在发行版里 apt install docker.io。"
             ),
             versions=[_docker_cv(v) for v in ("27.3.1", "27.3.0", "27.2.1", "26.1.4")],
         )
@@ -4321,6 +4426,28 @@ def build_components() -> List[Component]:
             path_subdir="bin",
             exec_name="pulsar",  # Pulsar 主命令（无 .sh 后缀）
             version_args=["--version"],
+            # **不许执行版本探测**（2026-10-08 本机实测）：
+            #   - 解压出来的 bin/pulsar 是 **bash 脚本**（首行 #!/usr/bin/env bash），
+            #     Windows 上直接 spawn 它只会得到 `WinError 193 不是有效的 Win32 应用程序`；
+            #   - 而且 `bin/pulsar --version` 在这个版本上**根本不是有效子命令**
+            #     （实测回 `-- Invalid command '--version'`）——
+            #     也就是说这个探测命令两个平台上都拿不到版本号，探了只会白花一次调用。
+            version_probe=False,
+            # Windows 上只有 pulsar-admin/pulsar-client/pulsar-perf/pulsar-shell 的
+            # .cmd 包装器，**没有主命令 pulsar.cmd**（实测 3.3.9 的 bin 下就这些文件）。
+            # 主 CLI（local/standalone/daemon）只有 POSIX shell 脚本，官方 Windows
+            # 起步文档也是让用 Docker 或 WSL。与其装完给用户一个跑不起来的命令，
+            # 不如把这件事说清楚。
+            unsupported_platform_hint=(
+                "Apache Pulsar 官方在 Windows 上只提供 bin/*.cmd 的部分工具"
+                "（pulsar-admin / pulsar-client / pulsar-perf / pulsar-shell），"
+                "**主命令 pulsar 只有 POSIX shell 脚本**（bin/pulsar 是 bash），"
+                "Windows 原生跑不起来 —— 官方起步文档也要求 Docker 或 WSL。\n"
+                "两种可用做法：\n"
+                "① 在 WSL2 里用（把上面的 tar.gz 下到 Linux 侧解压，再 ./bin/pulsar standalone）；\n"
+                "② 用 Docker：docker run -it -p 6650:6650 -p 8080:8080 "
+                "apachepulsar/pulsar:3.3.9 bin/pulsar standalone"
+            ),
             versions=[_pulsar_cv(v) for v in ("3.3.9", "3.3.1")],
             data_note=("bookie 数据落在 broker 配置指定的目录下（standalone.conf 里的 "
                        "bookkeeperMetadataServiceUri 等），**不在安装目录里**，卸载不会删它。"
@@ -4398,7 +4525,11 @@ def build_components() -> List[Component]:
             # 宁可少一个版本，也不给用户一个装了就起不来的选项。
             versions=[_seata_cv("2.2.0")],
             data_note=("事务日志（undo_log）与 server 存储落在各实例配置指定的存储里；"
-                       "本工具未实测默认落点，以你的配置为准。"
+                       "**服务端日志实测落在安装目录内的 seata-server/logs/ 下**"
+                       "（2026-10-08 真机复核：那个目录里只有 seata_gc.log，"
+                       "logback 的 seata-server.log 没有生成 —— 排障时先看"
+                       " ~/.env-tools/seata-data/logs/byte-tools.out 里捕获的控制台输出，"
+                       "它在启动阶段会打印 Tomcat 端口与 Server started）。"
                        "切换生效版本不会动它，多版本并存时各版本的配置互不覆盖。"),
         )
     )
@@ -4420,6 +4551,27 @@ def build_components() -> List[Component]:
             data_note=("索引数据默认在**安装目录内**的 data/ 下（path.data 配置项），"
                        "卸载会连它一起删。多版本并存时每个版本各有自己的 data/、互不影响，"
                        "但它们不能同时监听同一端口与同一集群名。"),
+        )
+    )
+
+    # ------------------ Erlang/OTP（隐藏组件：rabbitmq 的前置运行时）------------------
+    # 用户要的是"点启动 RabbitMQ 就能起"，而不是"先自己去找 Erlang 装好"。
+    # 所以 Erlang 在这里登记成一个**隐藏组件**（不出现在界面），复用同一套
+    # 下载多源故障转移 / 解压落位 / 版本解析；rabbitmq 的门控查不到 Erlang 时
+    # 就自动把它装上（见 ensure_launch_prereqs）。
+    components.append(
+        Component(
+            key="erlang",
+            display_name="Erlang/OTP（RabbitMQ 前置运行时）",
+            env_var=None,        # 刻意不设：实测免安装版不需要任何 *_HOME，
+                                 # rabbitmq 的 rabbitmq-env.bat 自己 Get-Command erl.exe
+            path_subdir="bin",
+            exec_name="erl",
+            version_args=["-noshell", "-eval",
+                          "io:format(\"~s~n\",[erlang:system_info(otp_release)]),halt()."],
+            versions=[_erlang_cv(v) for v in ("27.3.4.1", "27.2", "26.2.5.11")],
+            hidden=True,
+            data_note="Erlang 是 RabbitMQ 的前置运行时，由本工具随 RabbitMQ 自动安装。",
         )
     )
 
@@ -4574,6 +4726,147 @@ class DownloadWorker(QThread):
     def _emit_cancel(self) -> None:
         """用户取消时统一发射 finished_fail 信号（沿用约定消息，便于上层判断不弹窗）。"""
         self.finished_fail.emit("用户取消")
+
+
+# ---------------------------------------------------------------------------
+# 安装（下载完成 → 落位）的**唯一实现**
+#
+# 为什么抽成模块级函数（2026-10-08）：这段逻辑原本只存在于
+# ComponentCard._on_download_ok 里，于是每一次真机演练都只能自己再抄一遍
+# （bt_mv_drill.py 就抄了 60 行），抄出来的副本与产品代码必然越走越远 ——
+# 演练绿灯不代表用户点下去会成功。抽出来之后，演练调的就是用户点的那条路径。
+# ---------------------------------------------------------------------------
+def _null_log(level: str, message: str) -> None:  # pragma: no cover - 默认值
+    """默认日志出口：什么都不做。"""
+    return None
+
+
+def install_downloaded(comp: Component, version: str, archive: Path,
+                       log: Optional[Callable[[str, str], None]] = None) -> Path:
+    """把下载好的归档/安装器落位成 comp 的 install_dir(version)，返回该目录。
+
+    入参 comp:    Component                目标组件
+    入参 version: str                      版本号（目录名契约：<key>-<version>）
+    入参 archive: Path                     已下载完成的文件
+    入参 log:     Callable[[str,str],None] 日志出口 (level, message)
+    返回:         Path                     落位后的安装目录
+
+    行为与原来内联在 _on_download_ok 里的逐字一致：
+      - installer_mode（conda）：静默跑安装器，目标目录由安装器参数决定
+      - 单文件（exe / war / 无扩展名）：拷进目标目录根 + 按 exec_name 改名，
+        否则 exec_path_in_home 找不到可执行文件，状态会被判成"没装"
+      - 归档（zip / tar.gz / tar.xz）：解压到 .extract-<version> 再 move 归位
+    """
+    emit = log or _null_log
+    target_root = CONFIG_DIR / comp.key
+    ensure_dir(target_root)
+    final = comp.install_dir(version)
+
+    if comp.installer_mode:
+        emit("info", "开始运行安装器（静默安装）…")
+        if final.exists():
+            shutil.rmtree(final, ignore_errors=True)
+        _run_installer_for(comp, archive, final, emit)
+        emit("ok", f"安装完成：{final}")
+        return final
+
+    emit("info", "开始解压…")
+    tmp_dir = target_root / f".extract-{version}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    ensure_dir(tmp_dir)
+    root = extract_archive(archive, tmp_dir)
+
+    archive_ext = archive_ext_for(comp, version)
+    is_single_binary = archive_ext in ("exe", "war", "", "bin")
+    # **单文件也要改名，即使 exec_name 是 None**（2026-10-08 真机实测定位的缺陷）：
+    # 原来这里是 `if is_single_binary and comp.exec_name:`，于是 **jenkins 落位后
+    # 文件仍叫 `jenkins-2.568.3.war`** —— 而 jenkins 的 LaunchSpec 里写死了
+    # `{java} -jar {war}`，war 的路径由 build_launch_plan 硬拼成
+    # `<home>/jenkins.war`。两者对不上，点启动必然
+    # `[WinError 267] 目录名称无效`（用户装完就起不来）。
+    # 现在 war 有兜底名 jenkins.war；exe/无扩展名的单文件仍然必须靠 exec_name，
+    # 没有 exec_name 时不动它（改名成什么都是猜）。
+    if is_single_binary:
+        renamed_by_fallback = False
+        if comp.exec_name:
+            if archive_ext == "war":
+                target_name = (comp.exec_name if comp.exec_name.endswith(".war")
+                               else comp.exec_name + ".war")
+                renamed_by_fallback = True
+            elif archive_ext == "exe" or CURRENT_OS == "Windows":
+                target_name = comp.exec_name + ".exe"
+                renamed_by_fallback = True
+            else:
+                target_name = comp.exec_name
+                renamed_by_fallback = True
+        elif archive_ext == "war":
+            # 唯一有"通用文件名"的单文件形态：war 包在 Servlet 容器里就叫
+            # <app>.war（启动命令也按这个名找它）。名字从下载文件名里取，
+            # 不写死组件 key：`jenkins-2.568.3.war` → `jenkins.war`。
+            stem = archive.name.rsplit(".", 1)[0]
+            target_name = (stem.split("-", 1)[0] or "app") + ".war"
+            renamed_by_fallback = True
+        else:
+            target_name = ""
+        if renamed_by_fallback:
+            for f in root.iterdir():
+                if f.is_file():
+                    new_path = root / target_name
+                    if new_path != f and not new_path.exists():
+                        f.rename(new_path)
+                    break
+
+    if final.exists():
+        shutil.rmtree(final, ignore_errors=True)
+    shutil.move(str(root), str(final))
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    emit("ok", f"解压完成：{final}")
+    return final
+
+
+def archive_ext_for(comp: Component, version: str) -> str:
+    """取该版本在当前平台的归档类型（查不到版本时返回空串 → 走单文件分支的旧语义）。"""
+    for cv in comp.versions:
+        if cv.version == version:
+            return cv.archive_for_current()
+    return ""
+
+
+def _run_installer_for(comp: Component, installer_path: Path, target_dir: Path,
+                       emit: Callable[[str, str], None] = _null_log) -> None:
+    """静默运行安装器（Miniconda 这类）。与 ComponentCard._run_installer 逐字一致。"""
+    args = list(comp.installer_args.get(CURRENT_OS, []))
+    ensure_dir(target_dir.parent)
+
+    if CURRENT_OS == "Windows":
+        # Windows Miniconda: 参数末尾 /D=path 不允许带引号
+        cmd = [str(installer_path)] + args + [f"/D={target_dir}"]
+        emit("info", f"运行：{' '.join(cmd)}")
+        proc = subprocess.run(cmd, check=False)
+    else:
+        # macOS / Linux: bash installer.sh -b -f -p <path>
+        os.chmod(installer_path, 0o755)
+        cmd = ["bash", str(installer_path)] + args + [str(target_dir)]
+        emit("info", f"运行：{' '.join(cmd)}")
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if proc.stdout:
+            emit("info", proc.stdout.strip()[:500])
+        if proc.stderr:
+            emit("warn", proc.stderr.strip()[:500])
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"安装器返回非零退出码：{proc.returncode}")
+
+
+class _LoggerAdapter:
+    """把组件卡片实例上的 _log 方法适配成 install_downloaded 需要的两参可调用对象。"""
+
+    def __init__(self, bound_log) -> None:
+        self._bound = bound_log
+
+    def __call__(self, level: str, message: str) -> None:
+        self._bound(level, message)
 
 
 # ---------------------------------------------------------------------------
@@ -5997,16 +6290,42 @@ def evict_port_occupant(port: int, label: str,
     return None
 
 
+def _tasklist_pid_exists(pid: int) -> bool:
+    """用 tasklist 精确判断 PID 是否存在（**不做子串匹配**）。
+
+    为什么不能用 `str(pid) in stdout`（2026-10-08 真机实测定位）：
+    tasklist 的 CSV 里除了 PID 还有**内存用量**那一列，而它是「912,560 K」这种
+    带千分位的数字 —— `pid=91256` 会命中 `912,560 K`，于是**一个早就退出的 PID
+    被判成活着**。后果很具体：jenkins 的 java 启动器退出后，running.json 里那行
+    PID 已经不存在，`force_stop` 却以为它还在，os.kill 打在一个不存在的 PID 上，
+    真正监听端口的子进程毫发无伤 —— 用户点"停止"永远停不掉，只能去任务管理器。
+    解析成字段再比，才是"这个 PID 存在吗"这个问题的答案。
+    """
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=10, text=True,
+            encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        # 查不到就当活着（宁可多等，不可误杀）—— 与旧行为一致
+        return True
+    for line in (out.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith('"'):
+            continue
+        fields = [f.strip().strip('"') for f in line.split('","')]
+        if len(fields) >= 2 and fields[0] and fields[1].isdigit():
+            if int(fields[1]) == int(pid):
+                return True
+    return False
+
+
 def process_alive(pid: int) -> bool:
     """PID 是否还活着。查不到就当活着（宁可多等，不可误杀）。"""
     try:
         if CURRENT_OS == "Windows":
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True, timeout=10, text=True,
-                encoding="utf-8", errors="replace",
-                creationflags=CREATE_NO_WINDOW)
-            return str(pid) in (out.stdout or "")
+            return _tasklist_pid_exists(pid)
         os.kill(pid, 0)
         return True
     except (OSError, subprocess.TimeoutExpired):
@@ -6152,9 +6471,44 @@ def _write_activemq_ports(src: Path, data_dir: Path,
     return True, "", notes
 
 
+def sync_runtime_assets(src_dir: Path, dst_dir: Path) -> List[str]:
+    """把安装目录里的**静态内容**补进数据目录（只补缺的，绝不覆盖已有的）。
+
+    为什么需要它（2026-10-08 真机实测定位的两个缺陷）：
+      - nginx 的 `nginx.conf` 里是 `root html;`，而 root 是**相对 -p prefix** 解析的，
+        我们给的 prefix 是 data_dir → 它去找 `~/.env-tools/nginx-data/html/`，
+        而那个目录从来不存在 → 首页 404（用户点了控制台却打不开）。
+        credentials_hint 里早就写着"站点内容在 nginx-data/html/"，只是没人真的去建它。
+      - tomcat 的 CATALINA_BASE 指向 data 目录 → 它的 `apphost` 是
+        `data_dir/webapps`，而那份是空的（webapps 目录建了、里面什么都没拷）
+        → ROOT 上下文不存在 → 首页 404。
+
+    只补缺、不覆盖：用户改过的 index.html / 自己部署的 WAR 不会被我们冲掉。
+    返回补进来的条目名（给日志用）。
+    """
+    added: List[str] = []
+    if not src_dir.is_dir():
+        return added
+    ensure_dir(dst_dir)
+    for item in sorted(src_dir.iterdir()):
+        target = dst_dir / item.name
+        if target.exists():
+            continue
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
+        added.append(item.name)
+    return added
+
+
 def _write_tomcat_ports(src: Path, data_dir: Path,
                         plan: PortPlan) -> Tuple[bool, str, List[str]]:
-    """Tomcat：server.xml 副本 + 两个端口一起改（8080 与 shutdown 的 8005）。"""
+    """Tomcat：server.xml 副本 + 两个端口一起改（8080 与 shutdown 的 8005）。
+
+    另外把安装目录的 webapps/ 同步进 CATALINA_BASE（见 sync_runtime_assets）——
+    不同步的话 CATALINA_BASE 下的 webapps 是空目录，ROOT 上下文不存在，
+    点控制台拿到 404（2026-10-08 真机实测）。"""
     conf = data_dir / "conf"
     notes: List[str] = []
     state, diff = prepare_conf_copy(src, conf)
@@ -6171,12 +6525,23 @@ def _write_tomcat_ports(src: Path, data_dir: Path,
         return False, why, notes
     notes.append(f"端口已写入副本：HTTP {plan.main}、shutdown {shutdown_port}"
                  f"（两个必须一起改，否则 shutdown 会打到别的实例上）。")
+    # webapps 源目录在安装目录根的 webapps/（厂商包布局），不是 conf 那层
+    home = src.parent
+    added = sync_runtime_assets(home / "webapps", data_dir / "webapps")
+    if added:
+        notes.append(f"已把安装目录的 webapps/ 同步进 {data_dir / 'webapps'}"
+                     f"（补 {len(added)} 项：{', '.join(added[:5])}）；"
+                     f"CATALINA_BASE 指向这里，不同步首页会 404。")
     return True, "", notes
 
 
 def _write_nginx_ports(src: Path, data_dir: Path,
                        plan: PortPlan) -> Tuple[bool, str, List[str]]:
-    """nginx：整份 conf 拷贝 + 改 listen 那一行（注释行里的 listen 不能碰）。"""
+    """nginx：整份 conf 拷贝 + 改 listen 那一行（注释行里的 listen 不能碰）。
+
+    另外把安装目录的 html/ 同步进 prefix（= data_dir）——
+    `root html;` 是相对 prefix 解析的，而 prefix 是我们给的 data_dir，
+    不同步的话首页 404（2026-10-08 真机实测）。"""
     conf = data_dir / "conf"
     notes: List[str] = []
     state, diff = prepare_conf_copy(src, conf)
@@ -6188,6 +6553,10 @@ def _write_nginx_ports(src: Path, data_dir: Path,
     ok, why = set_nginx_listen(conf / "nginx.conf", plan.main)
     if not ok:
         return False, why, notes
+    added = sync_runtime_assets(src.parent / "html", data_dir / "html")
+    if added:
+        notes.append(f"已把安装目录的 html/ 同步进 {data_dir / 'html'}"
+                     f"（补 {len(added)} 项），否则 root html 解析不到、首页 404。")
     return True, "", notes
 
 
@@ -6471,11 +6840,15 @@ def resolve_launch_version(comp: Component) -> Optional[str]:
 
 def launch_gate(comp: Component, spec: LaunchSpec,
                 java_home: Optional[str]) -> Tuple[bool, str]:
-    """启动前门控。失败原因必须可行动（spec §5）：说清缺什么、点这里能补什么。"""
+    """启动前门控。失败原因必须可行动（spec §5）：说清缺什么、点这里能补什么。
+
+    2026-10-08 起，缺前置运行时不再由这里"劝用户去装"：界面在拉起 launch_worker
+    之前会先调 prereq_components() 把它们自动装好（见 ensure/prereq_* 那一段）。
+    这段文案保留为**兜底**（自动安装被打断、或用户直接调 ServiceManager 时）。"""
     if getattr(comp, "launch", None) is None:
         return False, "本工具暂不支持启动该组件"
     if java_home is None and "jdk" in (spec.needs or ()):
-        return False, "启动需要先有 JDK：在本工具里装一个 JDK（推荐 17），再回来点启动。"
+        return False, "启动需要先有 JDK：本工具会在点「启动」时自动装一个，请重试或手动装一个 JDK。"
     if not comp.versions:
         return False, "该组件还没有可启动的版本"
     # 前置依赖（2026-10-06 新增，目前只有 rabbitmq → Erlang）。
@@ -6496,6 +6869,31 @@ def launch_gate(comp: Component, spec: LaunchSpec,
     return True, ""
 
 
+def installed_erlang_erl() -> str:
+    """找一个可用的 erl.exe：**先看本工具自己装的**，再看宿主上的约定落点。
+
+    为什么顺序是本工具优先（2026-10-08）：Erlang 现在是本工具的隐藏组件，
+    装在 ~/.env-tools/erlang/erlang-<v>/bin/erl.exe —— 那个位置不在原来的搜索
+    glob（C:\\erlang* / Program Files）里，于是"我们刚替用户装好的 Erlang"
+    会被门控判成"没装"，rabbitmq 永远启动不了（自动安装白做）。
+    """
+    for path in erlang_installed_dirs():
+        for cand in (path / "bin" / "erl.exe",):
+            if cand.is_file():
+                return str(cand)
+    return find_erlang_home_erl()
+
+
+def erlang_installed_dirs() -> List[Path]:
+    """本工具装的 Erlang 版本目录，按版本号**降序**（最新的先用）。"""
+    root = CONFIG_DIR / "erlang"
+    if not root.is_dir():
+        return []
+    dirs = [p for p in root.iterdir()
+            if p.is_dir() and p.name.startswith("erlang-") and not p.name.startswith(".")]
+    return sorted(dirs, key=lambda p: _version_key(p.name), reverse=True)
+
+
 def check_prereq(prereq: PrereqSpec) -> Tuple[bool, str]:
     """前置依赖是否就位。
 
@@ -6509,7 +6907,7 @@ def check_prereq(prereq: PrereqSpec) -> Tuple[bool, str]:
     probe = prereq.probe or ""
     if not probe:
         return True, ""
-    found = shutil.which(probe) or find_erlang_home_erl()
+    found = shutil.which(probe) or installed_erlang_erl()
     if found:
         return True, ""
     # 文案坑（2026-10-06 护栏抓出来的）：我第一版写的是
@@ -6551,6 +6949,123 @@ def check_prereq_for(comp: Component, spec: LaunchSpec) -> Tuple[bool, str]:
     if spec.prereq is None:
         return True, ""
     return check_prereq(spec.prereq)
+
+
+# ---------------------------------------------------------------------------
+# 「开机就能用」：启动前置依赖的**自动就位**
+#
+# 用户的要求是"缺失的前置依赖（JDK / Erlang）由软件自己装好配好"，
+# 而原来的实现只会在门控里说一句"请先装一个 JDK"就停下 —— 那是把活儿交回给用户。
+# 下面这组函数把"缺什么"变成"我们去装什么"：
+#   prereq_components()     → 列出还缺的组件 key（界面据此先装后启）
+#   java_major_of()         → 顺便补上 min_java_major 的版本门控（原来那个字段没人读）
+#   prereq_install_versions → rabbitmq 4.x/3.x 各自配套的 Erlang major
+# ---------------------------------------------------------------------------
+_JAVA_MAJOR_TIMEOUT = 20
+
+
+def java_major_of(home: Optional[str]) -> Optional[int]:
+    """读某个 JDK 目录的 major 版本；读不到返回 None。
+
+    两个格式都要认（2026-10-08 实测两边都存在）：
+      - `java version "1.8.0_392"` → 8（JDK 8 及以前用 1.x 记法）
+      - `java version "21.0.5"`    → 21
+    不认的话 JDK 8 会被读成 1：结论恰好也是"太旧"，但那个错数字会一路进日志和文案。
+    """
+    if not home:
+        return None
+    exe = Path(home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")
+    if not exe.is_file():
+        return None
+    kwargs: Dict[str, object] = {"stdin": STDIN_DEVNULL}
+    if CURRENT_OS == "Windows":
+        kwargs["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run([str(exe), "-version"], capture_output=True, text=True,
+                              timeout=_JAVA_MAJOR_TIMEOUT, check=False, **kwargs)
+    except Exception:
+        return None
+    text = (proc.stdout or "") + (proc.stderr or "")   # java -version 只写 stderr
+    m = _re.search(r'version\s+"1\.(\d+)', text)
+    if m:
+        return int(m.group(1))
+    m = _re.search(r'version\s+"(\d+)', text)
+    return int(m.group(1)) if m else None
+
+
+def jdk_home_version(comps: Dict[str, "Component"]) -> Tuple[Optional[str], Optional[int]]:
+    """返回 (JAVA_HOME, major)。找不到 JDK 时 (None, None)。"""
+    home = resolve_java_home(comps)
+    return home, java_major_of(home)
+
+
+def prereq_components(comp: "Component", comps: Dict[str, "Component"]) -> List[str]:
+    """该组件的启动还缺哪些**可自动安装的**组件 key。
+
+    判据与 launch_gate 同一套（resolve_java_home / check_prereq），只是把"缺"
+    翻译成"要装谁"：
+      - 需要 JDK 而宿主上一个都找不到 → "jdk"
+      - 有 JDK 但低于 spec.min_java_major → 也返回 "jdk"（装一个新的来顶）
+      - prereq 声明的运行时（Erlang）找不到 → prereq.key
+    """
+    spec = getattr(comp, "launch", None)
+    if spec is None:
+        return []
+    missing: List[str] = []
+    if "jdk" in (spec.needs or ()):
+        _home, major = jdk_home_version(comps)
+        need = spec.min_java_major
+        if major is None or (need is not None and major < need):
+            missing.append("jdk")
+    if spec.prereq is not None:
+        ok, _why = check_prereq(spec.prereq)
+        if not ok:
+            missing.append(spec.prereq.key)
+    return [k for k in missing if k in comps]
+
+
+def prereq_install_versions(comp: "Component") -> List[str]:
+    """该组件**实际会用到**的前置运行时版本前缀，用于匹配"装哪个版本才配套"。
+
+    RabbitMQ 与 Erlang 的版本是绑死的（4.x 要 Erlang 26.2~27.x，3.13 只能配 26.x），
+    两个 rabbitmq 版本不能共用一个 Erlang —— 见 PrereqSpec 的说明。
+    返回空列表表示"不挑，装清单里最新那个即可"。
+    """
+    versions = [cv.version for cv in getattr(comp, "versions", [])]
+    table: Dict[str, List[Tuple[str, List[str]]]] = {
+        "rabbitmq": [("4.", ["27."]), ("3.", ["26."])],
+    }
+    out: List[str] = []
+    for cv_version in versions:
+        for prefix, erl_prefixes in table.get(getattr(comp, "key", ""), []):
+            if cv_version.startswith(prefix):
+                out.extend(erl_prefixes)
+                break
+    return out
+
+
+def pick_prereq_version(prereq_comp: "Component", wanted_prefixes: List[str]) -> Optional[str]:
+    """在前置组件清单里挑版本：优先匹配 wanted_prefixes，否则取第一个**能下载的**。
+
+    只在"当前平台有下载地址"的版本里挑：离线清单里可能带着别的平台的版本
+    （Erlang 的 Windows 便携包在 Linux/macOS 上是空列表），
+    挑中一个下不了的版本，用户看到的就是"点启动 → 立刻失败"。
+    """
+    downloadable = [cv for cv in prereq_comp.versions if cv.urls_for_current()]
+    for cv in downloadable:
+        if any(cv.version.startswith(p) for p in wanted_prefixes):
+            return cv.version
+    return downloadable[0].version if downloadable else None
+
+
+def prereq_already_installed(prereq_comp: "Component", version: str) -> bool:
+    """该前置组件的这个版本是否已经落位成一个能用的目录。"""
+    home = prereq_comp.install_dir(version)
+    if not home.is_dir():
+        return False
+    if prereq_comp.exec_name is None:
+        return True
+    return prereq_comp.exec_path_in_home(str(home)) is not None
 
 
 def run_pre_start(comp: Component, spec: LaunchSpec, plan: LaunchPlan,
@@ -6657,7 +7172,7 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
     # ——所以只要把它加进**这个子进程的** PATH 就行，
     # **不动用户的系统/用户环境变量**（那是别人机器上的既定配置，不该由我们改）。
     if spec.prereq is not None:
-        erl = find_erlang_home_erl()
+        erl = installed_erlang_erl()
         if erl:
             erl_bin = str(Path(erl).parent)
             env["PATH"] = erl_bin + os.pathsep + env.get("PATH", "")
@@ -6884,6 +7399,13 @@ class ServiceManager:
                 records = load_running_map()
                 records[comp.key] = rec
                 save_running_map(records)
+                # 端口全在听 ≠ 控制台能用。这里再探一次控制台（**不改判定**：
+                # 服务进程已在监听、登记已落盘，就仍然是"启动成功"），
+                # 把"控制台还没就绪"作为一条提示行交给界面，好让用户看到
+                # "再等一会儿"而不是点开一个 503 页面以为坏了（Jenkins 实测就是这样）。
+                note = self._console_readiness_note(spec, port_plan.main)
+                if note:
+                    notes = list(notes) + [note]
                 return StartResult(True, "running", record=rec,
                                    console_url=plan.console_url, notes=notes)
             sleeper(1.0)
@@ -6969,8 +7491,31 @@ class ServiceManager:
                                   reason=f"{comp.display_name} 已经不在监听 "
                                          f"{'/'.join(str(p) for p in ports)}，登记已清。")
             if spec.stop_kind != "port_lookup":
+                # **登记的 PID 已经死了、端口却还在听**（2026-10-08 真机实测定位）：
+                # java -jar 在 Windows 上由 java.exe 先起一个子 JVM（或启动器先退），
+                # 于是 running.json 里那一行 pid 可能已经不存在，真正监听的是它的子进程。
+                # 旧代码在这里直接回 need_force，而 force_stop 又只认"活着的登记 PID"
+                # （`if self._process_alive(rec.pid)`）→ 两边都推给对方的死角：
+                # 用户点停止 → 弹"要强制结束吗" → 点确定 → 回"我什么都没杀"，
+                # 最后只能自己去任务管理器里杀 java.exe。
+                # 现在在这里按端口反查唯一归属，把"该杀谁"查清楚再交给 force_stop。
+                live = [p for p in (tuple(rec.ports) or (rec.port,)) if self._is_listening(p)]
+                owner = ""
+                owners = self._lookup_pids(tuple(live)) if live else {}
+                mine = {p: pid for p, pid in owners.items() if pid != os.getpid()}
+                # **判据用"登记 PID 是不是持有端口的那个"，而不是"登记 PID 还活着吗"**
+                # （2026-10-08 实测教训）：PID 存活查询会误判 —— 一个早已退出的 PID
+                # 在 Windows 上可能被 OpenProcess 判成"还在"（PID 被系统回收或
+                # 句柄语义差异），于是"死者"被当成"凶手"，真正的监听进程毫发无伤。
+                # 端口归属是我们**刚查出来的事实**，没有这种不确定性。
+                if mine and len(set(mine.values())) == 1 and rec.pid not in set(mine.values()):
+                    real_pid = next(iter(set(mine.values())))
+                    owner = (f"登记的 PID {rec.pid} 已经不持有该端口，"
+                             f"实际监听的是 PID {real_pid}（java 启动器先退出、子 JVM 在听）。")
                 return StopResult(False, need_force=True,
-                                  reason=(f"{comp.display_name}（端口 {rec.port}）在 Windows 上只能直接终止进程，"
+                                  reason=(f"{comp.display_name}（端口 {rec.port}）"
+                                          f"{owner + ' ' if owner else ''}"
+                                          f"在 Windows 上只能直接终止进程，"
                                           f"这会打断正在进行的任务、可能丢未落盘的配置。要强制结束吗？"))
             # port_lookup 没有优雅手段：厂商的关闭脚本按进程名强杀会误伤本机同名实例，
             # 而登记的 PID 是包装脚本不是服务进程。所以第一步只请示，一个进程都不碰。
@@ -7000,6 +7545,30 @@ class ServiceManager:
                                   f"{'/'.join(str(p) for p in ports)} 仍在听）。"
                                   f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
 
+    def _console_readiness_note(self, spec: LaunchSpec, port: int) -> str:
+        """启动成功后探一次控制台，返回给用户的提示行（没问题时返回空串）。
+
+        为什么值得多花一次 HTTP（2026-10-08 真机实测定位）：
+        Jenkins 的 8080 一开始监听就回 `503 Please wait while Jenkins is getting
+        ready to work` —— "已启动"是真的，但用户点控制台会看到一个等待页。
+        与其让他怀疑没启动成功，不如在日志里点明"控制台还在初始化"。
+
+        判据只用于**提示**，不参与"启动成功/失败"：服务进程确实在监听、
+        登记也确实落盘了，那就是启动成功（把 5xx 当失败会让 Jenkins 启动永远判失败）。
+        """
+        if not spec.console_path:
+            return ""
+        url = f"http://127.0.0.1:{port}{spec.console_path}"
+        try:
+            r = requests.get(url, timeout=8, allow_redirects=True, headers=HTTP_UA)
+            code = r.status_code
+        except Exception:
+            return ""
+        if code >= 500:
+            return (f"已启动，但控制台 {url} 现在返回 {code}（服务还在初始化），"
+                    f"稍等一会儿再点控制台；端口已经在正常服务。")
+        return ""
+
     def force_stop(self, key: str, sleeper=time.sleep, rounds: int = 5) -> StopResult:
         """用户明确同意后的强制结束。仍然只在"端口确实释放"时才清登记。"""
         rec = load_running_map().get(key)
@@ -7021,6 +7590,17 @@ class ServiceManager:
                         killed.append(rec.pid)
                     except OSError:
                         pass
+                if mine and not killed:
+                    # 登记 PID 说"还活着"、但它**并不是**持有端口的那一个
+                    # （java 启动器先退、子 JVM 在听；或 PID 被系统回收后判活有误）：
+                    # 只杀登记 PID 的话端口永远不会释放，用户点停止永远停不掉。
+                    # 归属唯一才动手（mine 的构造保证），且只杀端口真正的主人。
+                    for pid in sorted(set(mine.values())):
+                        try:
+                            os.kill(pid, 9)
+                            killed.append(pid)
+                        except OSError:
+                            pass
             elif mine:
                 # 三重闸：① 有我们自己的登记（上面 rec is not None 已保证）
                 #      ② 不是我们自己（pid != os.getpid()）
@@ -7586,6 +8166,10 @@ class ComponentCard(QFrame):
         self.log_cb = log_cb
         self.worker: Optional[DownloadWorker] = None
         self._extracted_path: Optional[Path] = None
+        # 前置运行时（JDK / Erlang）的自动安装队列与下载线程。
+        # 队列非空时「启动」按钮显示"准备依赖…"，装完自动继续启动。
+        self._prereq_queue: List[Tuple[Component, str]] = []
+        self.prereq_worker: Optional[DownloadWorker] = None
         # 「已配置」标签的异步版本号回填状态
         self._status_where = ""
         self._status_version = ""
@@ -7870,6 +8454,17 @@ class ComponentCard(QFrame):
 
     def on_start_clicked(self) -> None:
         spec = self.component.launch
+        # 「开机就能用」：缺前置运行时（JDK / Erlang）时**先自动装好再启动**，
+        # 而不是弹一句"请先装一个 JDK"把活儿交回给用户。
+        missing = prereq_components(self.component, MainWindow.current_components())
+        if missing:
+            self._install_missing_prereqs(missing)
+            return
+        self._do_start()
+
+    def _do_start(self) -> None:
+        """真正开始启动（前置依赖已就位时走这里）。"""
+        spec = self.component.launch
         # 端口提示必须与实际行为一致。2026-10-06 起策略是"不平移、被占就结束占用者"，
         # 这里原来还写着"被占用时会自动往后找空闲口"—— 确认框里说假话比不说更糟：
         # 用户以为端口会变，于是按自己的预期去连那个并不存在的端口。
@@ -7897,6 +8492,113 @@ class ComponentCard(QFrame):
         self.launch_worker.notes.connect(self._on_launch_notes)
         self.launch_worker.finished.connect(self._on_launch_worker_done)
         self.launch_worker.start()
+
+    # ------------------------------------------------------------------
+    # 前置运行时的自动安装（JDK / Erlang）
+    # ------------------------------------------------------------------
+    def _install_missing_prereqs(self, keys: List[str]) -> None:
+        """把缺失的前置运行时排队装好，装完自动重跑启动。
+
+        为什么不弹"要不要装"的问询：用户点了「启动」就是"我要它跑起来"，
+        再问一次等于把决定权丢回去；而这里要装的都是**明确的、可复现的**东西
+        （JDK / Erlang 的官方包），装错了也只是多一个版本目录。
+        """
+        comps = MainWindow.current_components()
+        queue: List[Tuple[Component, str]] = []
+        for key in keys:
+            pre = comps.get(key)
+            if pre is None:
+                continue
+            version = pick_prereq_version(pre, prereq_install_versions(self.component))
+            if version is None:
+                QMessageBox.warning(
+                    self, "缺少前置运行时",
+                    f"{self.component.display_name} 需要 {pre.display_name}，"
+                    f"但当前平台没有它的可下载版本。")
+                return
+            if prereq_already_installed(pre, version):
+                continue
+            queue.append((pre, version))
+        if not queue:
+            # 需求已经满足（比如别的卡片刚装上）→ 直接继续
+            self._do_start()
+            return
+        names = "、".join(f"{c.display_name} {v}" for c, v in queue)
+        self._log("info", f"{self.component.display_name} 启动前需要 {names}，"
+                          f"正在自动下载安装（装一次，以后不再重复）…")
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("准备依赖…")
+        self._prereq_queue = queue
+        self._install_next_prereq()
+
+    def _install_next_prereq(self) -> None:
+        """装队列里的下一个前置组件；装完继续下一个，全装完则重跑启动。"""
+        if not self._prereq_queue:
+            self.btn_start.setEnabled(True)
+            self.btn_start.setText("启动")
+            self._log("ok", "前置运行时已就位，继续启动。")
+            self._do_start()
+            return
+        pre, version = self._prereq_queue.pop(0)
+        cv = next((c for c in pre.versions if c.version == version), None)
+        urls = cv.urls_for_current() if cv else []
+        if cv is None or not urls:
+            self._on_prereq_failed(f"{pre.display_name} {version} 没有可用下载地址")
+            return
+        suffix = self._download_suffix(pre, cv, urls)
+        dest = CONFIG_DIR / pre.key / "downloads" / f"{pre.key}-{version}{suffix}"
+        ensure_dir(dest.parent)
+        self._log("info", f"下载 {pre.display_name} {version}（源：{urls[0]}）")
+        self.prereq_worker = DownloadWorker(urls, dest, parent=self)
+        self.prereq_worker.progress.connect(self._on_prereq_progress)
+        self.prereq_worker.log.connect(self._log)
+        self.prereq_worker.finished_ok.connect(
+            lambda p, c=pre, v=version: self._on_prereq_downloaded(c, v, Path(p)))
+        self.prereq_worker.finished_fail.connect(self._on_prereq_failed)
+        self.prereq_worker.start()
+
+    @staticmethod
+    def _download_suffix(comp: "Component", cv: "ComponentVersion", urls: List[str]) -> str:
+        """下载文件名的后缀必须与包体真实形态一致（extract_archive 按后缀选分支）。"""
+        if comp.installer_mode:
+            ext = cv.archive_map.get(CURRENT_OS, "")
+            if not ext:
+                first = urls[0] if urls else ""
+                ext = "exe" if first.endswith(".exe") else ("sh" if first.endswith(".sh") else "bin")
+            return f".{ext}"
+        ext = cv.archive_for_current()
+        return {"zip": ".zip", "tar.gz": ".tar.gz", "tgz": ".tar.gz", "exe": ".exe",
+                "war": ".war", "": "", "bin": ""}.get(ext, f".{ext}")
+
+    def _on_prereq_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            self._log("info", f"依赖下载中：{human_size(done)} / {human_size(total)}"
+                              f"（{int(done * 100 / total)}%）")
+
+    def _on_prereq_downloaded(self, pre: "Component", version: str, path: Path) -> None:
+        try:
+            final = install_downloaded(pre, version, path, _LoggerAdapter(self._log))
+        except Exception as exc:
+            self._on_prereq_failed(f"{pre.display_name} 安装失败：{exc}")
+            return
+        if not prereq_already_installed(pre, version):
+            self._on_prereq_failed(f"{pre.display_name} 装完了但在 {final} 里找不到可执行文件")
+            return
+        self._log("ok", f"{pre.display_name} {version} 已装好：{final}")
+        if pre.env_var:
+            try:
+                EnvManager.set_windows_user_env(pre.env_var, str(final))
+            except Exception as exc:
+                self._log("warn", f"写 {pre.env_var} 失败（不影响启动）：{exc}")
+        self._install_next_prereq()
+
+    def _on_prereq_failed(self, reason: str) -> None:
+        self._prereq_queue = []
+        self.btn_start.setEnabled(True)
+        self.btn_start.setText("启动")
+        self._log("error", f"前置运行时准备失败：{reason}")
+        QMessageBox.warning(self, "前置运行时准备失败",
+                            f"{reason}\n\n装好之后可以再点一次「启动」。")
 
     def _on_launch_ok(self, key: str, console_url: str) -> None:
         # **别对没有 Web 控制台的组件说"控制台：URL"**（2026-10-06 用户报
@@ -8565,58 +9267,10 @@ class ComponentCard(QFrame):
         self.btn_cancel.setVisible(False)
 
         try:
-            target_root = CONFIG_DIR / self.component.key
-            ensure_dir(target_root)
-            final = self.component.install_dir(cv.version)
-
-            if self.component.installer_mode:
-                # 安装器模式：静默执行安装
-                self._log("info", "开始运行安装器（静默安装）…")
-                if final.exists():
-                    shutil.rmtree(final, ignore_errors=True)
-                self._run_installer(path, final)
-                self._log("ok", f"安装完成：{final}")
-            else:
-                self._log("info", "开始解压…")
-                # 解压到临时目录
-                tmp_dir = target_root / f".extract-{cv.version}"
-                if tmp_dir.exists():
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                ensure_dir(tmp_dir)
-                root = extract_archive(path, tmp_dir)
-
-                # 单二进制 / 单文件模式：把下载下来的文件重命名为 exec_name + 平台扩展名
-                # 例：kubectl-1.28.4.exe → kubectl.exe；kubectl-1.28.4 → kubectl；jenkins-2.426.war → jenkins.war
-                # 这样后续 detect() 才能在 install_dir 里通过 exec_path_in_home 找到文件
-                archive_ext = cv.archive_for_current()
-                is_single_binary = archive_ext in ("exe", "war", "", "bin")
-                if is_single_binary and self.component.exec_name:
-                    if archive_ext == "war":
-                        # Jenkins 的 jenkins.war
-                        target_name = (
-                            self.component.exec_name
-                            if self.component.exec_name.endswith(".war")
-                            else self.component.exec_name + ".war"
-                        )
-                    elif archive_ext == "exe" or CURRENT_OS == "Windows":
-                        target_name = self.component.exec_name + ".exe"
-                    else:
-                        # Linux/Mac 无扩展名单二进制
-                        target_name = self.component.exec_name
-                    # 在 root 目录下查找下载下来的单文件并重命名
-                    for f in root.iterdir():
-                        if f.is_file():
-                            new_path = root / target_name
-                            if new_path != f and not new_path.exists():
-                                f.rename(new_path)
-                            break
-
-                if final.exists():
-                    shutil.rmtree(final, ignore_errors=True)
-                shutil.move(str(root), str(final))
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                self._log("ok", f"解压完成：{final}")
-
+            # 落位实现只有一处（模块级 install_downloaded）：界面与真机演练走同一条路径，
+            # 演练绿灯才等价于"用户点下去会成功"。
+            final = install_downloaded(self.component, cv.version, path,
+                                       _LoggerAdapter(self._log))
             self._extracted_path = final
             # 自动尝试配置环境变量
             self._configure_after_extract(final)
@@ -8634,29 +9288,8 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _run_installer(self, installer_path: Path, target_dir: Path) -> None:
-        """静默运行安装器（用于 Miniconda 之类）。"""
-        comp = self.component
-        args = list(comp.installer_args.get(CURRENT_OS, []))
-        ensure_dir(target_dir.parent)
-
-        if CURRENT_OS == "Windows":
-            # Windows Miniconda: 参数末尾 /D=path 不允许带引号
-            cmd = [str(installer_path)] + args + [f"/D={target_dir}"]
-            self._log("info", f"运行：{' '.join(cmd)}")
-            proc = subprocess.run(cmd, check=False)
-        else:
-            # macOS / Linux: bash installer.sh -b -f -p <path>
-            os.chmod(installer_path, 0o755)
-            cmd = ["bash", str(installer_path)] + args + [str(target_dir)]
-            self._log("info", f"运行：{' '.join(cmd)}")
-            proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
-            if proc.stdout:
-                self._log("info", proc.stdout.strip()[:500])
-            if proc.stderr:
-                self._log("warn", proc.stderr.strip()[:500])
-
-        if proc.returncode != 0:
-            raise RuntimeError(f"安装器返回非零退出码：{proc.returncode}")
+        """静默运行安装器（用于 Miniconda 之类）。实现见模块级 _run_installer_for。"""
+        _run_installer_for(self.component, installer_path, target_dir, self._log)
 
     # ------------------------------------------------------------------
     def _on_download_fail(self, msg: str) -> None:

@@ -22,6 +22,10 @@
 - [规则 R3：组件多版本与生效版本切换](#规则-r3组件多版本与生效版本切换)
 - [规则 R4：一键脚本自举契约](#规则-r4一键脚本自举契约)
 - [规则 R5：组件一键启动契约](#规则-r5组件一键启动契约)
+- [规则 R6：前置运行时自举契约（缺 JDK / Erlang 由本工具装好）](#规则-r6前置运行时自举契约缺-jdk--erlang-由本工具装好)
+- [规则 R7：单文件组件的落位文件名契约](#规则-r7单文件组件的落位文件名契约)
+- [规则 R8：动态内容目录要同步进 prefix / BASE](#规则-r8动态内容目录要同步进-prefix--base)
+- [规则 R9：非 ASCII 主机名下的服务节点名](#规则-r9非-ascii-主机名下的服务节点名)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -82,8 +86,23 @@
 | D1 | DaoCloud 文件代理 | `daocloud-files` | `files.m.daocloud.io` | 2026-09-28 新增：把 `dl.k8s.io/…` 作为路径后缀代理，kubectl 唯一可用大陆源（实测 200/58 MB） |
 
 GitHub Release 没有真镜像，只能用反向代理前缀加速，集中维护在 `GH_ACCELERATORS`
-（`ghproxy.net` / `gh-proxy.com` / `ghfast.top` + 裸地址末位），统一走 `_gh_accelerated()`。
+（`ghfast.top` / `gh-proxy.com` / `ghproxy.net` + 裸地址末位），统一走 `_gh_accelerated()`。
 `ghproxy.com` 与 `gh.idayer.com` 实测已停服，不得再引入。
+
+> **加速器顺序 = 实测速度顺序**（2026-10-08 本机复测后重排，原顺序把 `ghproxy.net` 放在首位）。
+> 口径：对同一份资产取 10-13 秒的实际字节数，带 `HTTP_UA`：
+>
+> | 加速器 | PowerShell-7.6.6-win-x64.zip | otp_win64_27.3.4.1.zip |
+> |---|---|---|
+> | `ghfast.top` | **751 KB/s** | **401 KB/s** |
+> | `gh-proxy.com` | 133 KB/s | 117 KB/s |
+> | `ghproxy.net` | 14 KB/s | 28 KB/s |
+> | 裸 `github.com` | 请求超时 | 请求超时 |
+>
+> 两个仓库结论一致，所以这不是单个包的现象。顺序错的代价很具体：Erlang 的 155MB
+> 在旧顺序下只有 6 KB/s（≈7 小时，等于下不下来）。
+> 换顺序后同一台机器实测 1020 KB/s（约 3 分钟）。
+
 **加速器只代理 GitHub**：`dl.k8s.io`、`artifact.elastic.co` 之类非 GitHub 地址加前缀无效，
 kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 
@@ -878,7 +897,147 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 > 后续新增的开发规则以「规则 R6 / R7 / ...」形式追加到本文件，并在「规则索引」中登记。
 > 每条规则必须包含：规则描述、适用范围、实施指引、checklist 四节。
 
-- R6: _待定_
+## 规则 R6：前置运行时自举契约（缺 JDK / Erlang 由本工具装好）
+
+### R6.1 规则描述
+
+「用户点一次启动」必须足够。组件声明的启动前置（`LaunchSpec.needs` 里的 JDK、
+`LaunchSpec.prereq` 里的 Erlang）**在宿主上缺失时，由本工具自动下载并安装**，
+不许以"请先自己装一个 JDK / Erlang"结束流程。
+
+三条硬约束：
+
+1. **判据只有一处**：缺什么由 `prereq_components()` 回答，它复用 `launch_gate` 的
+   同一套判据（`resolve_java_home` / `check_prereq`）—— 两处各写一遍必然漂移。
+2. **版本要配套**：RabbitMQ 4.x 配 Erlang 27.x、3.13 配 26.x（绑死，不能共用一个）；
+   由 `prereq_install_versions()` 给出前缀、`pick_prereq_version()` 在**可下载**的
+   版本里挑（离线清单里可能带着别的平台的版本，挑中一个下不了的等于点一次错一次）。
+3. **自动装完必须能被找到**：Erlang 装在 `~/.env-tools/erlang/erlang-<v>/bin/erl.exe` ——
+   原来的查找 glob（`C:\erlang*` / Program Files）看不到它，于是"刚替用户装好的 Erlang"
+   会被门控判成"没装"，自动安装白做。统一走 `installed_erlang_erl()`（先自家目录、再 glob）。
+
+### R6.2 适用范围
+
+- 所有 `LaunchSpec.needs` 含 `"jdk"` 的组件（jenkins / nacos / activemq / rocketmq / kafka / tomcat / seata）
+- 所有 `LaunchSpec.prereq` 非 None 的组件（目前只有 rabbitmq → erlang）
+- 新增组件时如果它需要任何外部运行时，**必须**在 `LAUNCH_OF` 里声明 `needs` / `prereq`，
+  否则这条规则覆盖不到它。
+
+### R6.3 硬约束
+
+1. `min_java_major` **填数字必须来自实测**（拆包读 `META-INF/MANIFEST.MF` 的
+   `Java-Version:` 或 class 的 major version），没实测就留 `None` —— 留 None 只是
+   退化成"有没有 JDK"，填一个猜的数字会让"版本不够"被静默放过。
+   实测值现状：jenkins 11（war 清单）、nacos 8、tomcat 11、seata 8、activemq/rocketmq/kafka 17。
+2. 宿主上已有 JDK 但**版本低于门槛**时，也要判定为"缺"并装一个够用的；
+   `resolve_java_home()` 的优先级（本工具生效版本 → 本工具已装最高 → 环境变量 `JAVA_HOME`）
+   会保证新装的那个胜出。
+3. 前置组件的下载/落位**复用同一套机制**（`DownloadWorker` + `install_downloaded`），
+   不许为它写平行的下载/解压代码。
+4. 隐藏组件（`Component.hidden=True`，目前只有 erlang）**不进任何界面 Tab**，
+   但仍要登记分类（`COMPONENT_CATEGORY_OF` 漏登记会 `KeyError`）。
+
+### R6.4 失败处理
+
+自动安装失败（网络、磁盘、安装器返回非零）时必须**明确说出失败对象与原因**，
+并把"再点一次启动"作为下一步；不许静默回退到"请自己装"。
+
+### R6.5 真机验证入口
+
+`bt_live_matrix.py --keys autoprereq`：把 `JAVA_HOME` 与 PATH 里的 java 摘掉、
+屏蔽自家 JDK 目录，让判据真的报"缺 jdk"，然后走一遍下载 → 落位 → 读回 major →
+切换生效 → 确认 `launch_gate` 放行。六项全绿才算这条规则立住。
+
+### R6.6 checklist
+
+- [ ] 新组件的前置运行时在 `LAUNCH_OF` 里声明了（`needs` / `prereq`）
+- [ ] 该前置在 `build_components()` 里有可下载版本（或已有宿主依赖兜底）
+- [ ] `min_java_major` 只填实测值，并在注释里写清证据（哪个文件、哪个字段）
+- [ ] 隐藏组件在 `group_components()` 后被排除（新增隐藏组件时验证界面数量没变）
+- [ ] 真机跑过 `--keys autoprereq`，六项全绿
+
+---
+
+## 规则 R7：单文件组件的落位文件名契约
+
+### R7.1 规则描述
+
+单文件形态（`archive_for_current()` 为 `exe` / `war` / `""` / `bin`）的组件，
+**落位时必须改成启动命令会去找的那个文件名**。文件名对不上时症状是
+`[WinError 267] 目录名称无效` —— 用户看到"装好了"，点启动却起不来。
+
+### R7.2 适用范围
+
+- 所有 `exec_name` 非空且归档是单文件形态的组件（kubectl 的 `kubectl.exe` 等）
+- **`exec_name` 为空的单文件组件**（jenkins 的 war）：这类必须靠"通用文件名"兜底 ——
+  `jenkins-2.568.3.war` → `jenkins.war`（名字从下载文件名取，不写死组件 key）
+
+### R7.3 硬约束
+
+1. 改名只在**落位那一刻**做一次，且只在目标名不存在时改（幂等，不覆盖）。
+2. 兜底名只给"确实有通用名"的形态（war）；`exe` / 无扩展名的单文件没有通用名，
+   没有 `exec_name` 就**不许猜**（猜错就是把用户的二进制改成别的名字）。
+3. 落位后必须有一步"启动命令要的文件在不在"的自检（`exec_path_in_home` 对
+   `exec_name=None` 的组件返回 None，所以 jenkins 走 `_detect_by_home_dir` +
+   `JENKINS_HOME` 判定；这条接缝必须真机验一次）。
+
+### R7.4 真机验证入口
+
+`bt_live_matrix.py --keys jenkins --phase all`：装完断言
+`<home>/jenkins.war` 存在、`detect()` 说已配置、然后 `--phase launch` 能起来。
+
+---
+
+## 规则 R8：动态内容目录要同步进 prefix / BASE
+
+### R8.1 规则描述
+
+当组件的**静态内容**（nginx 的 `html/`、tomcat 的 `webapps/`）留在安装目录、
+而运行时根目录被本工具改到 `~/.env-tools/<key>-data` 时，
+**启动前必须把这份内容补进去**，否则：
+- nginx：`root html;` 相对 `-p` 前缀解析 → `nginx-data/html` 不存在 → 首页 404
+- tomcat：`CATALINA_BASE` 指向 data → `apphost` 是空的 `tomcat-data/webapps` → 首页 404
+
+用户看到的是"启动成功了，控制台打不开"，而这两件事在日志里都没有痕迹。
+
+### R8.2 硬约束
+
+1. 同步**只补缺、绝不覆盖**（用户改过的 `index.html`、自己部署的 WAR 不许被冲掉）。
+2. 同步发生在端口准备阶段（`prepare_ports` → conf writer），与"副本已建"的提示同一批 `notes` 里
+   告诉用户，别静默做事。
+3. 任何"运行时根目录 ≠ 安装目录"的组件都要检查这条（新增组件 checklist 里加一项）。
+
+### R8.3 真机验证入口
+
+`bt_live_matrix.py --keys nginx,tomcat --phase launch`：`console_http_ok` 必须 2xx/3xx。
+
+---
+
+## 规则 R9：非 ASCII 主机名下的服务节点名
+
+### R9.1 规则描述
+
+中文（或任何非 ASCII）主机名的机器上，Erlang 分布式节点名会被截断：
+RabbitMQ **服务器起得来、5672/25672 都在听、日志一切正常**，但
+`rabbitmqctl` 的每个子命令都失败（`:badarg` / `rc=70`）——看着成功，实际查不了也停不了。
+
+### R9.2 硬约束
+
+1. `rabbitmq` 的 `extra_env` 必须**固定** `RABBITMQ_NODENAME=rabbit@localhost`
+   （start / stop / status 三处一致）。
+2. 判活要用 `rabbitmqctl status` 这类**真的问服务**的命令（`service_probe`），
+   不能只看端口在听 —— 本条缺陷恰恰是"端口在听但 CLI 全挂"。
+3. 新增组件时若它的 CLI 会连本机节点/守护进程，同样要检查节点名与主机名的关系。
+
+### R9.3 真机验证入口
+
+`bt_live_matrix.py --keys rabbitmq --phase launch`：`service_probe` 必须 rc=0，
+且探针要用**产品注入的那份环境**（`build_launch_plan(...).env`），
+否则会把"产品能跑"误判成"探针失败"。
+
+---
+
+- R10: _待定_
 
 ## 接新组件的流程与经验
 
