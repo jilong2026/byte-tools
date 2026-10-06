@@ -3381,11 +3381,53 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
     "nginx": LaunchSpec(
         # 实测：nginx.exe **无参数、前台阻塞** —— 必须后台化否则终端卡死。
         # 停止用 -s stop，**但它的报错不能当失败判据**（见下方 data_note）。
-        commands={"Windows": ["{home}/nginx.exe"],
-                  "Linux":   ["{home}/sbin/nginx"],
-                  "Darwin":  ["{home}/sbin/nginx"]},
-        stop_kind="port_lookup",
-        main_port=80,
+        # **必须显式 -c 指向我们的配置副本**（2026-10-06 真机实测踩出来的）：
+        # nginx 找配置的规则是「编译时前缀 + conf/nginx.conf」，
+        # 它**不看环境变量、也不看 cwd** —— 我们把端口写进副本之后，
+        # 它照样去读安装目录下那份原版（listen 80），于是：
+        #     [emerg] bind() to 0.0.0.0:80 failed (10013: ...forbidden...)
+        # 端口被占时它报的 10013 就是这个原因（不是权限问题，是那个口真的绑不了）。
+        # -c 会**同时影响停止**（nginx -s stop 也要读到 pid 路径），
+        # 所以 stop_kind 那侧同样要带上 —— 见 stop 侧的处理。
+        # **-p (prefix) 与 -c 都要给**（2026-10-06 真机实测踩出来的）：
+        # -c 只决定读哪个配置文件，而**日志与 pid 文件的路径是相对 prefix 算的**
+        # （不是相对 cwd、也不是相对 -c 那个文件）。不指prefix 时实测报：
+        #     could not open error log file: CreateFile() "logs/error.log" failed
+        #     CreateFile() "D:/.../byte-tools/logs/nginx.pid" failed
+        #  —— pid 找不到就意味着 **-s stop 根本停不掉**，只剩强杀一条路，
+        # 而强杀 master 之后 worker 还活着（多进程结构），会留下占端口的孤儿。
+        # prefix 指向 data_dir，日志与 pid 都落在 ~/.env-tools/nginx-data 下。
+        commands={"Windows": ["{home}/nginx.exe", "-p", "{data_dir}",
+                              "-c", "{conf}"],
+                  "Linux":   ["{home}/sbin/nginx", "-p", "{data_dir}",
+                              "-c", "{conf}"],
+                  "Darwin":  ["{home}/sbin/nginx", "-p", "{data_dir}",
+                              "-c", "{conf}"]},
+        # **用官方的 nginx -s quit，不用端口反查强杀**（2026-10-06 真机实测）：
+        # nginx 是 **master + worker 多进程**结构 —— 强杀 master（= 我们登记的 PID）
+        # 之后 **worker 仍然持有 8080**（实测：taskkill 之后端口仍在听、登记删不掉）。
+        # `-s quit` 是**优雅停**（vs `stop` 是快停），实测有效。
+        # 之前实测它会打 `OpenEvent(...) failed` 却**真的停掉了**、退出码 0——
+        # 那条 stderr 是 Windows 版的正常噪音，判「是否停掉」一律看端口。
+        # -c 也要带上：pid 文件路径是从配置算出来的，不带就找不到 pid。
+        stop_kind="shutdown_command",
+        shutdown_commands={"Windows": ["{home}/nginx.exe", "-p", "{data_dir}",
+                                       "-c", "{conf}", "-s", "quit"],
+                           "Linux":   ["{home}/sbin/nginx", "-p", "{data_dir}",
+                                       "-c", "{conf}", "-s", "quit"],
+                           "Darwin":  ["{home}/sbin/nginx", "-p", "{data_dir}",
+                                       "-c", "{conf}", "-s", "quit"]},
+        # **主端口用 8080 而不是官方的 80**（2026-10-06 真机演练后由用户拍板）。
+        # 原因：Windows 上 80 端口几乎总是被 **System（PID 4，http.sys 内核服务）**
+        # 占着—— 那是 IIS / WinRM 的公共绑定，**任何进程都绑不了、也杀不掉**
+        # （结束它会报 WinError 5拒绝访问，而且它本来就不该被结束）。
+        # 也就是说：按「不平移 + 结束占用者」规则，nginx 在很多 Windows 机器上
+        # 必然启动失败。80 是给对外服务用的，nginx 在开发/测试场景里没人真的需要 80，
+        # 所以这里直接用 8080，并在 risk_note 里说清这个决定。
+        # **注意**：这不违反「不平移」原则 —— 那个原则的原因是
+        # 「外部客户端配置里写死了端口，平移会造成连不上」；
+        # nginx 的 80 没有这个绑定（它是我们自己声明的默认端口，不是被迫继承的）。
+        main_port=8080,
         port_search_span=99,
         port_writeback="conf_copy",
         console_path=None,
@@ -3396,9 +3438,11 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         # 实测起后 2-3 秒 HTTP 200
         startup_timeout=30,
         risk_note=(
-            "nginx 默认监听 80 端口，**对局域网开放**。"
-            "端口 80 经常被 IIS / Apache / Skype 占用；本工具会结束占用者后原地启动。"
-            "只想本机访问的话，把 conf/nginx.conf 里的 listen 改成 127.0.0.1。"
+            "**本工具把 nginx 放在 8080 而不是官方的 80** —— 因为 Windows 上 80 端口"
+            "几乎总被系统内核服务 System（http.sys，IIS/WinRM 共用）占着，"
+            "那个进程绑不了也杀不掉。实际端口以启动日志里那行为准。"
+            "nginx **对局域网开放**（0.0.0.0）；只想本机访问的话，"
+            "把 ~/.env-tools/nginx-data/conf/nginx.conf 里的 listen 改成 127.0.0.1。"
         ),
         data_note=("配置副本与日志都在 ~/.env-tools/nginx-data 下（conf/ 与 logs/），"
                    "卸载只删版本目录，这份会保留。"
@@ -3584,10 +3628,27 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
     "rabbitmq": LaunchSpec(
         # 实测：zip 不含 Erlang，rabbitmq-server.bat 开头硬校验 erl.exe。
         # prereq=erlang 让框架在启动前检查/引导安装。
+        # **RABBITMQ_NODENAME 必须是 ASCII 且固定**（2026-10-06 真机实测踩出来的，
+        # 踩得很隐蔽）：节点名默认取 rabbit@<主机名>，而中文主机名（本机就是
+        # 「鹅城剑仙」）会让 epmd 注册时把名字截断 —— 后果是
+        # **服务器起来、5672/25672 都在听、日志一切正常，但所有 rabbitmqctl
+        # 子命令全挂**（:badarg / rc=70）：看着启动成功，实际查不了状态也停不掉。
+        # 固定成 rabbit@localhost 就绕开了主机名，且三处（start/stop/status）一致。
         commands={"Windows": ["cmd", "/c", "{home}/sbin/rabbitmq-server.bat"],
                   "Linux":   ["{home}/sbin/rabbitmq-server"],
                   "Darwin":  ["{home}/sbin/rabbitmq-server"]},
-        stop_kind="port_lookup",
+        extra_env={"RABBITMQ_NODENAME": "rabbit@localhost",
+                   # 数据只落 RABBITMQ_BASE，%APPDATA%\RabbitMQ 不会被创建（实测）
+                   "RABBITMQ_BASE": "{data_dir}"},
+        # **用官方的 rabbitmqctl 优雅停止**，不用端口反查强杀：
+        # 子代理实测 `rabbitmqctl.bat stop` rc=0、端口 1~4s 释放。
+        # 强杀（port_lookup）会丢未落盘的消息 —— 能优雅停就别强杀。
+        # 注意 ctl 与 server 必须**用同一个 RABBITMQ_NODENAME**（见 extra_env 注释）：
+        # 不一致时 ctl 找不到节点、报 :badarg / rc=70。
+        stop_kind="shutdown_command",
+        shutdown_commands={"Windows": ["cmd", "/c", "{home}/sbin/rabbitmqctl.bat", "stop"],
+                           "Linux":   ["{home}/sbin/rabbitmqctl", "stop"],
+                           "Darwin":  ["{home}/sbin/rabbitmqctl", "stop"]},
         main_port=5672,
         # 15672 管理界面要开 rabbitmq_management 插件才有；这里只登记 AMQP 与 cluster
         extra_ports=(25672,),
@@ -3595,6 +3656,9 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_writeback="cli_only",
         console_path=None,
         health_path=None,
+        # 5672 说 AMQP 二进制协议，HTTP 探不到。用 rabbitmqctl status问它自己：
+        # 它答得上来才说明节点名/Erlang/端口都对（中文主机名那个坑就靠它暴露）。
+        service_probe=["cmd", "/c", "{home}/sbin/rabbitmqctl.bat", "status"],
         needs=(),
         min_java_major=None,
         data_dir_env=None,
@@ -6217,7 +6281,7 @@ def check_prereq(prereq: PrereqSpec) -> Tuple[bool, str]:
     probe = prereq.probe or ""
     if not probe:
         return True, ""
-    found = shutil.which(probe)
+    found = shutil.which(probe) or find_erlang_home_erl()
     if found:
         return True, ""
     # 文案坑（2026-10-06 护栏抓出来的）：我第一版写的是
@@ -6228,6 +6292,30 @@ def check_prereq(prereq: PrereqSpec) -> Tuple[bool, str]:
     # 另外 hint 末尾没跟分隔符，渲染成「去装 Erlang当前状态：…」。
     return False, (f"{prereq.key} 还没就位：找不到 {probe}（当前状态：未找到）。\n\n"
                    f"{prereq.install_hint}")
+
+
+# 免安装版 Erlang 的常见落点（2026-10-06 实测装到了 C:\erlang27）。
+# 官方 zip 版解压后就是这形态，**不需要设任何环境变量** ——
+# rabbitmq 的 rabbitmq-env.bat:25-33 会自己 Get-Command erl.exe 去 PATH 里找，
+# 所以我们只要在拉子进程时把它加进 PATH 就行，不污染用户的系统设置。
+_ERLANG_GLOBS = (r"C:\erlang*", r"C:\Program Files\Erlang OTP\*")
+
+
+def find_erlang_home_erl() -> str:
+    """在免安装 Erlang 的常见落点里找 erl.exe。找不到返回空串。
+
+    不搜全盘（慢且会撞权限），只搜这两个约定位置 ——
+    找���到就让门控说「没装」，用户装到别处时可用 install_hint 指路。
+    """
+    import glob
+    for pattern in _ERLANG_GLOBS:
+        for base in sorted(glob.glob(pattern), reverse=True):
+            for rel in ("bin/erl.exe", "bin" + os.sep + "erl.exe",
+                        "erts-*/bin/erl.exe"):
+                for cand in glob.glob(os.path.join(base, rel)):
+                    if os.path.isfile(cand):
+                        return cand
+    return ""
 
 
 def check_prereq_for(comp: Component, spec: LaunchSpec) -> Tuple[bool, str]:
@@ -6335,6 +6423,17 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
     # 它两个值都要等端口定了、副本建好了才写得出最终值，所以在计划阶段拼）。
     for name, template in (spec.extra_env or {}).items():
         env[name] = template.format(**mapping)
+    # 前置依赖的可执行文件要能被子进程找到（2026-10-06 真机实测）。
+    # Erlang 的免安装版**不设任何环境变量**（实测装到 C:\erlang27 即可用），
+    # 而 rabbitmq 的 rabbitmq-env.bat 会自己 Get-Command erl.exe 去 PATH 里找
+    # ——所以只要把它加进**这个子进程的** PATH 就行，
+    # **不动用户的系统/用户环境变量**（那是别人机器上的既定配置，不该由我们改）。
+    if spec.prereq is not None:
+        erl = find_erlang_home_erl()
+        if erl:
+            erl_bin = str(Path(erl).parent)
+            env["PATH"] = erl_bin + os.pathsep + env.get("PATH", "")
+            env["ERLANG_HOME"] = str(Path(erl_bin).parent)
     argv = [t.format(**mapping) for t in spec.commands[CURRENT_OS]]
     return LaunchPlan(argv=argv, env=env, cwd=home, log_file=log_file,
                       console_url=f"http://127.0.0.1:{port}{spec.console_path or ''}",
@@ -6350,8 +6449,12 @@ def config_file_for(comp: Component, data_dir: Path) -> Path:
         broker 却去副本里找 meta.properties → `No readable meta.properties files found.`。
       - 官方文件卸载就会被删，下次启动读不到。
     """
-    name = "server.properties" if comp.key == "kafka" else "elasticsearch.yml"
-    return data_dir / "conf" / name
+    # 每个组件的配置文件名不同（2026-10-06：nginx 又踩了一次 ——
+    # 之前这个函数只认 kafka/es，其它组件一律返回 elasticsearch.yml）。
+    names = {"kafka": "server.properties", "elasticsearch": "elasticsearch.yml",
+             "nginx": "nginx.conf", "tomcat": "server.xml",
+             "activemq": "jetty-spring.properties"}
+    return data_dir / "conf" / names.get(comp.key, "application.yml")
 
 
 @dataclass
@@ -6587,12 +6690,43 @@ class ServiceManager:
             return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
         spec = comp.launch
         if spec.stop_kind == "shutdown_command" and spec.shutdown_commands.get(CURRENT_OS):
-            # 占位符契约（本期不可达分支，计划二才接线）：这里只喂得出处在 RunRecord 上的三个键，
-            # {java}/{war} 这类要另外补来源，否则 format 直接 KeyError。
-            argv = [t.format(port=rec.port, home=rec.home, data_dir=rec.data_dir)
+            # 占位符契约：这里喂得出 RunRecord 上的键（port/home/data_dir）。
+            #
+            # **env 必须与启动时一致**（2026-10-06 真机实测踩出来的）：
+            # 之前这里 `subprocess.run(argv, cwd=rec.home)` 不传 env，
+            # 于是 rabbitmqctl.bat 找不到 erl.exe（免安装 Erlang 不设系统变量）、
+            # 拿不到 RABBITMQ_NODENAME —— 它**静默失败**（输出被 DEVNULL 吞掉），
+            # 表现是「点了停止，30 秒后弹窗问要不要强杀」。
+            # 能优雅停的组件必须真的优雅停下，否则这条路径等于没接。
+            data_dir = rec.data_dir or str(CONFIG_DIR / f"{comp.key}-data")
+            #占位符要凑齐：stop 侧除了 port/home/data_dir，nginx 还要 {conf}
+            #（它靠 -c 定位配置、不靠 cwd）—— 少一个就 KeyError 崩在停止流程里。
+            argv = [t.format(port=rec.port, home=rec.home, data_dir=data_dir,
+                             conf_dir=str(Path(data_dir) / "conf"),
+                             conf=config_file_for(comp, Path(data_dir)),
+                             java="", war="",
+                             log_file=str(Path(data_dir) / "logs" / "byte-tools.out"))
                     for t in spec.shutdown_commands[CURRENT_OS]]
+            env = dict(os.environ)
+            if spec.extra_env:
+                for name, template in spec.extra_env.items():
+                    try:
+                        env[name] = template.format(
+                            port=rec.port, home=rec.home, data_dir=data_dir,
+                            conf_dir=str(Path(data_dir) / "conf"), war="",
+                            log_file=str(Path(data_dir) / "logs" / "byte-tools.out"))
+                    except (KeyError, IndexError):
+                        pass
+            if spec.prereq is not None:
+                erl = find_erlang_home_erl()
+                if erl:
+                    env["PATH"] = str(Path(erl).parent) + os.pathsep + env.get("PATH", "")
+                    env["ERLANG_HOME"] = str(Path(erl).parent.parent)
             try:
-                subprocess.run(argv, cwd=rec.home, timeout=20,
+                # 45 秒：子代理实测 rabbitmqctl stop 1~4s 就返回，
+                # 但它要先等 broker 把未落盘消息写完；给足余量，
+                # 否则会误判成「停不掉」并弹强杀确认框（能优雅停就别强杀）。
+                subprocess.run(argv, cwd=rec.home, env=env, timeout=45,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except (OSError, subprocess.TimeoutExpired):
                 pass

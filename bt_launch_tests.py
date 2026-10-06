@@ -2877,8 +2877,14 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         prereq = main.LAUNCH_OF["rabbitmq"].prereq
         self.assertIsNotNone(prereq)
         orig = main.shutil.which
-        main.shutil.which = lambda name, *a, **k: None      # 宿主上没装
+        main.shutil.which = lambda name, *a, **k: None      # PATH 里没装
         self.addCleanup(setattr, main.shutil, "which", orig)
+        # 2026-10-06：check_prereq 除了 PATH 还会去扫免安装 Erlang 的约定落点
+        # （main.find_erlang_home_erl），那一条也得桩掉 ——
+        # 否则开发机上真装了 Erlang 时这条用例恒绿，护栏变空。
+        orig_find = main.find_erlang_home_erl
+        main.find_erlang_home_erl = lambda: ""
+        self.addCleanup(setattr, main, "find_erlang_home_erl", orig_find)
         ok, why = main.check_prereq(prereq)
         self.assertFalse(ok, "找不到 erl.exe 却说依赖已就位")
         # 断的是"找不到 erl.exe"这个**从句**，不是"原因里出现过 erl.exe 字样"。
@@ -2928,6 +2934,12 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         # 只让 erl* 找不到：门控里jdk 探测等其他 which 调用仍按真的走
         main.shutil.which = lambda name, *a, **k: (
             None if str(name).lower().startswith("erl") else orig(name, *a, **k))
+        # 2026-10-06：check_prereq 还会扫免安装 Erlang 的约定落点
+        # （find_erlang_home_erl），开发机上真装了 Erlang 时它会绕过 PATH 检查，
+        # 门控就放过了 —— 这条用例会红。桩掉它。
+        orig_find = main.find_erlang_home_erl
+        main.find_erlang_home_erl = lambda: ""
+        self.addCleanup(setattr, main, "find_erlang_home_erl", orig_find)
 
         ok, why = main.launch_gate(comp, comp.launch, java_home=None)
         self.assertFalse(ok, "缺 Erlang 却放过了门控 —— rabbitmq-server.bat 会一闪就退")
@@ -4183,6 +4195,10 @@ class NewSixComponents(unittest.TestCase):
         main.shutil.which = lambda name, *a, **k: (
             None if str(name).lower().startswith("erl") else orig(name, *a, **k))
         self.addCleanup(setattr, main.shutil, "which", orig)
+        # 同上：免安装 Erlang 的落点扫描也得桩掉（见 check_prereq 那条的注释）
+        orig_find = main.find_erlang_home_erl
+        main.find_erlang_home_erl = lambda: ""
+        self.addCleanup(setattr, main, "find_erlang_home_erl", orig_find)
         comp, _home = self._installed("rabbitmq")
         ok, why = main.launch_gate(comp, main.LAUNCH_OF["rabbitmq"], java_home=None)
         self.assertFalse(ok, "缺 Erlang 却放行了 —— rabbitmq-server.bat 会一闪就退")

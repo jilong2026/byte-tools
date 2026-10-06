@@ -255,21 +255,23 @@ def _probe_service(main_mod, comp, rec, url: str, rounds: int = 6,
     """
     spec = comp.launch
     if spec.service_probe:
+        # **直接复用 build_launch_plan 产出的 env**（2026-10-06 真机实测踩出来的）：
+        # rabbitmq 的探活是 `rabbitmqctl.bat status`，它需要
+        #   ① PATH 里有 erl.exe（免安装 Erlang，不设系统变量）
+        #   ② RABBITMQ_NODENAME 与 server 端一致（中文主机名那个坑）
+        # 少任何一条都过不了。之前这里自己拼最小 env，只带 {java}/{home}/{port}，
+        # 于是探活 rc≠0、被误判成"服务不可用"，而其实服务是好的。
         version = main_mod.resolve_launch_version(comp) or comp.versions[0].version
         home = comp.install_dir(version)
         data_dir = main_mod.CONFIG_DIR / f"{comp.key}-data"
         jh = main_mod.resolve_java_home({c.key: c for c in main_mod.build_components()}) or ""
-        mapping = {
-            "java": str(Path(jh) / "bin" / ("java.exe" if main_mod.CURRENT_OS == "Windows" else "java")),
-            "home": str(home), "data_dir": str(data_dir),
-            "conf": str(main_mod.config_file_for(comp, data_dir)),
-            "port": str(rec.port), "cluster_id": "",
-        }
-        argv = [t.format(**mapping) for t in spec.service_probe]
+        plan = main_mod.build_launch_plan(comp, spec, jh, rec.port,
+                                           data_dir / "logs" / "probe.out")
+        argv = [t.format(**_probe_mapping(comp, rec, plan)) for t in spec.service_probe]
         for i in range(max(1, int(rounds))):
             try:
-                p = subprocess.run(argv, cwd=str(home), capture_output=True,
-                                   timeout=60)
+                p = subprocess.run(argv, cwd=plan.cwd, env=plan.env,
+                                   capture_output=True, timeout=90)
                 if p.returncode == 0:
                     return True
                 tail = ((p.stdout or b"").decode("utf-8", "replace")
@@ -283,6 +285,20 @@ def _probe_service(main_mod, comp, rec, url: str, rounds: int = 6,
         return False
     probe = main_mod.http_ok if spec.console_path else main_mod.http_responds
     return _wait_console(main_mod, url, probe=probe)
+
+
+def _probe_mapping(comp, rec, plan) -> dict:
+    """探活命令的占位符替换表。与 build_launch_plan 的 mapping 对齐。"""
+    version = main.resolve_launch_version(comp) or comp.versions[0].version
+    data_dir = main.CONFIG_DIR / f"{comp.key}-data"
+    return {
+        "java": str(Path(plan.java_home or "") / "bin" /
+                    ("java.exe" if main.CURRENT_OS == "Windows" else "java")),
+        "home": str(comp.install_dir(version)),
+        "data_dir": str(data_dir),
+        "conf": str(main.config_file_for(comp, data_dir)),
+        "port": str(rec.port),
+    }
 
 
 def _wait_console(main_mod, url: str, rounds: int = 20, gap: float = 1.5,

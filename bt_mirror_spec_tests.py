@@ -262,10 +262,23 @@ class MeasuredAssetNames(unittest.TestCase):
         self.assertNotIn(default_cv("rabbitmq").version, ("4.0.0", "3.13.7"))
         self.assertEqual(default_cv("rabbitmq").version, "4.0.9")
 
-    def test_rabbitmq_windows_is_documented_exception(self):
-        # generic-unix 包依赖 Erlang，Windows 一律不自动下载，改走引导文案
-        self.assertFalse(urls("rabbitmq", "Windows"))
-        self.assertIn("Erlang", COMPS["rabbitmq"].unsupported_platform_hint or "")
+    def test_rabbitmq_windows_uses_the_windows_zip_not_the_unix_one(self):
+        # 2026-10-06 真机实测改正：Windows **有**官方 zip
+        # （rabbitmq-server-windows-<v>.zip，华为云两个子域都实测 200）。
+        # 原来这里断言「Windows 无源」——那是当时的**错误认知**：
+        # 于是装包时回退到 url_list_map 里的 generic-unix，
+        # 而那个包的 sbin/ 下全是**无扩展名脚本**（rabbitmq-server 而非 .bat），
+        # Windows 上根本跑不起来。实测装出来才发现，对不上产品登记的 .bat 命令。
+        # Erlang 依赖仍然存在，但那是**前置依赖**（PrereqSpec）要解决的事，
+        # 不再是「不下载 Windows 包」的理由。
+        got = urls("rabbitmq", "Windows")
+        self.assertTrue(got, "Windows 现在有官方 zip，不该再断言无源")
+        for u in got:
+            self.assertIn("rabbitmq-server-windows-", u)
+            self.assertNotIn("generic-unix", u,
+                             "装generic-unix 的话 sbin 下全是无扩展名脚本，Windows 跑不了")
+        # Erlang 前置依赖必须仍然登记着 —— 它是 zip 不自带的那部分
+        self.assertEqual(main.LAUNCH_OF["rabbitmq"].prereq.key, "erlang")
 
     def test_elasticsearch_huawei_path_has_version_dir(self):
         # 华为云布局是 /elasticsearch/<version>/<file>；缺版本目录段就是原代码 404 的根因
