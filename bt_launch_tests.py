@@ -4336,6 +4336,47 @@ class ResolveLaunchVersionSemantics(unittest.TestCase):
         """6 个新组件逐个验一遍：fallback 返回值能直接喂给 install_dir。"""
         self.skipTest("由 test_newly_installed_component_without_active_is_startable 覆盖同类语义")
 
+class PortNoCollisionAcrossComponents(unittest.TestCase):
+    """**不同组件的端口簇不许互相重叠**。
+
+    2026-10-06 用户报「Jenkins 显示起来了但打不开」，查出来是端口撞车：
+    8080 同时被 jenkins / tomcat 占着（nginx 后来也来抢）。
+    演练时的症状极具误导性——**两个组件各自看起来都正常**
+    （tomcat 起来了、Jenkins 也"起来了"），只有交叉访问才会暴露：
+    探到的 8080 上跑的是另一个进程。
+
+    **端口冲突不是"谁后启动谁赢"，是两个都坏。**
+    而本项目的端口策略是"只用登记端口、不平移"，所以登记表里撞了就必然出问题。
+    """
+    def test_no_two_launchable_components_share_a_port(self):
+        owner = {}
+        clashes = {}
+        for key in sorted(main.LAUNCH_KEYS):
+            spec = main.LAUNCH_OF[key]
+            for p in [spec.main_port] + list(spec.extra_ports or ()):
+                if p in owner:
+                    clashes.setdefault(p, [owner[p]]).append(key)
+                else:
+                    owner[p] = key
+        self.assertEqual(clashes, {},
+                         f"这些端口被多个可启动组件登记了：{clashes}"
+                         f"（换端口，不要指望'后启动的赢'）")
+
+    def test_a_component_never_lists_its_main_port_twice(self):
+        for key in sorted(main.LAUNCH_KEYS):
+            spec = main.LAUNCH_OF[key]
+            ports = [spec.main_port] + list(spec.extra_ports or ())
+            self.assertEqual(len(ports), len(set(ports)),
+                             f"{key} 的端口簇里自己就重复了：{ports}")
+
+    def test_nginx_keeps_away_from_the_system_http_port(self):
+        """nginx 不用 80：Windows 上它被 System(http.sys) 占着，绑不了也杀不掉。
+
+        这是"结束占用者"规则撞上内核服务的结果（WinError 5 拒绝访问）。
+        """
+        self.assertNotEqual(main.LAUNCH_OF["nginx"].main_port, 80,
+                            "80 在 Windows 上归 http.sys，nginx 绑不上也不该去抢")
+
 
 if __name__ == "__main__":
     unittest.main()

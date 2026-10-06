@@ -3334,6 +3334,20 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         commands={"Windows": ["{home}/bin/mqnamesrv.cmd"],
                   "Linux":   ["{home}/bin/runserver.sh"],
                   "Darwin":  ["{home}/bin/runserver.sh"]},
+        # **ROCKETMQ_HOME 必设**（2026-10-06 用户报"显示启动成功实际起不来"后定位）：
+        # bin\mqnamesrv.cmd 开头就 `if not exist "%ROCKETMQ_HOME%..." EXIT /B 1`，
+        # 缺它时脚本直接退出，端口永远不监听 → 表现为
+        #     「120 秒内端口 9876/10909/10911 未监听」+ 日志里一句
+        #     「Please set the ROCKETMQ_HOME variable in your environment!」
+        #
+        # **为什么之前的真机演练没暴露这个**（这是验证方法的漏洞，记下来）：
+        # 演练时我的 shell 里恰好有 ROCKETMQ_HOME（早期多版本真机测试写进去的），
+        # `dict(os.environ)` 把它带上了 → 演练通过。
+        # 而用户跑 **exe** 时那个进程没有这个变量 → 立刻失败。
+        # → **凡是靠环境变量定位自己的厂商脚本，都必须由我们显式注入**，
+        #    绝不能假设"用户环境里恰好有"（同ES 的 ES_HOME/ES_PATH_CONF、
+        #    rabbitmq 的 ERLANG_HOME）。
+        extra_env={"ROCKETMQ_HOME": "{home}"},
         # broker 是**第二个进程**（实测broker 要向 namesrv 注册才能起，
         # 不起它的话 extra_ports 里的 10909/10911 永远不监听，
         # start() 会卡到超时 → 表现为"点启动没反应"）。
@@ -3376,6 +3390,13 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         data_note=("消息与 commitlog 默认在 **storePathRoot 配置项**指向的位置"
                    "（实测落在 ~/store，不在安装目录内），卸载不会删它。"
                    "多版本并存时务必给每个版本分开设 storePathRoot。"),
+        credentials_hint=(
+            "**RocketMQ 没有网页控制台** —— 9876 是 namesrv 的二进制协议口，"
+            "浏览器打开会连接失败（正常）。"
+            "用它自带的命令行工具查看集群，例如："
+            "  bin" + chr(92) + "mqadmin.cmd clusterList -n 127.0.0.1:9876"
+            "消息数据落在 ~/store（storePathRoot），**卸载不会删它**。"
+        ),
     ),
 
     "nginx": LaunchSpec(
@@ -3417,17 +3438,22 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
                                        "-c", "{conf}", "-s", "quit"],
                            "Darwin":  ["{home}/sbin/nginx", "-p", "{data_dir}",
                                        "-c", "{conf}", "-s", "quit"]},
-        # **主端口用 8080 而不是官方的 80**（2026-10-06 真机演练后由用户拍板）。
-        # 原因：Windows 上 80 端口几乎总是被 **System（PID 4，http.sys 内核服务）**
-        # 占着—— 那是 IIS / WinRM 的公共绑定，**任何进程都绑不了、也杀不掉**
-        # （结束它会报 WinError 5拒绝访问，而且它本来就不该被结束）。
-        # 也就是说：按「不平移 + 结束占用者」规则，nginx 在很多 Windows 机器上
-        # 必然启动失败。80 是给对外服务用的，nginx 在开发/测试场景里没人真的需要 80，
-        # 所以这里直接用 8080，并在 risk_note 里说清这个决定。
-        # **注意**：这不违反「不平移」原则 —— 那个原则的原因是
-        # 「外部客户端配置里写死了端口，平移会造成连不上」；
-        # nginx 的 80 没有这个绑定（它是我们自己声明的默认端口，不是被迫继承的）。
-        main_port=8080,
+        # **主端口用 8888，而不是官方的 80，也不用 8080**（2026-10-06 用户拍板 + 演练修正）。
+        #
+        # 不用 80：Windows 上 80 几乎总被 **System（PID 4，http.sys 内核服务）**占着
+        # ——那是 IIS / WinRM 的公共绑定，绑不了也杀不掉（WinError 5）。
+        # 按「不平移 + 结束占用者」规则，nginx 在很多 Windows 机器上必然启动失败。
+        #
+        # 不用 8080（**这个坑是我自己踩的**）：8080 在本项目里已经被
+        # **jenkins / tomcat / activemq** 三个组件占着。我第一版改到 8080 等于给
+        # 它们埋雷 —— 演练时 jenkins 被 nginx 抢走 8080，探到的是 nginx 而不是
+        # Jenkins，症状是"Jenkins 显示起来了但打不开"。端口冲突不是"谁后启动谁赢"，
+        # 是**两个都坏**。
+        # 8888 是 nginx 生态的惯例（Apache 时代就用它），与本项目其它组件不冲突。
+        #
+        # 这不违反「不平移」原则：那个原则的原因是"外部客户端配置里写死了端口，
+        # 平移会造成连不上"；nginx 的 80 没有这种绑定（它是我们自己声明的默认端口）。
+        main_port=8888,   # 见上：80 被 http.sys 占、8080 被 jenkins/tomcat/activemq 占
         port_search_span=99,
         port_writeback="conf_copy",
         console_path=None,
@@ -3438,7 +3464,8 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         # 实测起后 2-3 秒 HTTP 200
         startup_timeout=30,
         risk_note=(
-            "**本工具把 nginx 放在 8080 而不是官方的 80** —— 因为 Windows 上 80 端口"
+            "**本工具把 nginx 放在 8888**（官方默认 80，而 80 在 Windows 上被系统"
+            "内核服务 System/http.sys 占着绑不了也杀不掉；8080 则归 Jenkins 与 Tomcat） —— 因为 Windows 上 80 端口"
             "几乎总被系统内核服务 System（http.sys，IIS/WinRM 共用）占着，"
             "那个进程绑不了也杀不掉。实际端口以启动日志里那行为准。"
             "nginx **对局域网开放**（0.0.0.0）；只想本机访问的话，"
@@ -3448,6 +3475,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
                    "卸载只删版本目录，这份会保留。"
                    "实测坑：logs/nginx.pid 里是 **worker PID**，与真正监听端口的 master "
                    "不是同一个 —— 所以停止只能走端口反查，不能按 pid 文件里的 PID 杀。"),
+        credentials_hint=(
+            "**nginx 没有管理控制台** —— 8080 是它提供网站服务的端口，"
+            "根路径返回的是默认欢迎页（html/index.html）。"
+            "站点内容在配置副本 ~/.env-tools/nginx-data/html/，"
+            "改完执行 `nginx -s reload` 生效。"
+        ),
     ),
 
     "kafka": LaunchSpec(
@@ -3509,6 +3542,13 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
                    "**不在安装目录里**，卸载不会删它；要彻底清理请手动删除。"
                    "cluster.id 也存在这份数据目录里 —— 换 uuid 会被拒"
                    "（Invalid cluster.id），所以必须复用。"),
+        credentials_hint=(
+            "**Kafka 没有网页控制台** —— 9092 说 Kafka 二进制协议，"
+            "浏览器打开会得到连接失败（正常，不是服务坏了）。"
+            "9093 是集群内部通信口，更不对外。"
+            "用它自带的命令行工具操作，例如："
+            "  bin" + chr(92) + "windows" + chr(92) + "kafka-topics.bat --bootstrap-server localhost:9092 --list"
+        ),
     ),
 
     "tomcat": LaunchSpec(
@@ -3524,7 +3564,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         shutdown_commands={"Windows": ["cmd", "/c", "{home}/bin/shutdown.bat"],
                            "Linux":   ["{home}/bin/shutdown.sh"],
                            "Darwin":  ["{home}/bin/shutdown.sh"]},
-        main_port=8080,
+        # **8081 而不是 8080**（2026-10-06 干净环境演练发现）：
+        # 8080 已经被 **jenkins** 占着（它先接入）。端口冲突不是"谁后启动谁赢"，
+        # 是**两个都坏** —— 演练时 jenkins 被顶掉、探到的是 tomcat，
+        # 症状是"Jenkins 显示起来了但打不开"，而 tomcat 自己看起来也正常。
+        # Tomcat 官方默认是 8080，这里改成 8081 并在 risk_note 里说明。
+        main_port=8081,
         # 8005 是 shutdown 端口。**必须一起改**（实测：只改主端口时若另一实例
         # 占着 8005，新实例 bind 失败自杀，而 shutdown.bat 会杀掉 8005 的真正
         # 持有者并返回 rc=0 —— 看起来完全成功）。
@@ -3542,7 +3587,9 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         data_dir_env="CATALINA_BASE",
         startup_timeout=30,
         risk_note=(
-            "Tomcat 默认监听 0.0.0.0:8080 与 shutdown 口的 8005，**对局域网开放**。"
+            "Tomcat 监听 0.0.0.0:**8081** 与 shutdown 口 8005，**对局域网开放**。"
+            "（官方默认是 8080，但本工具里 8080 归Jenkins —— 端口冲突不是谁后启动谁赢，"
+            "是两个都坏，所以这里分开。）"
             "**启动会弹出一个黑色控制台窗口**（catalina.bat:315 硬编码 start \"Tomcat\"，"
             "无参数可压制）—— 这是厂商行为，不是出故障。"
             "两个端口冲突时本工具会结束占用者；shutdown 端口 8005 被占时，"
@@ -3551,6 +3598,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         data_note=("**已部署的 web 应用都在安装目录的 webapps/ 下，卸载会连应用一起删**"
                    "（实测 Tomcat 会自动解包成 webapps/xxx/，无残留）。"
                    "配置副本在 ~/.env-tools/tomcat-data/conf（server.xml 副本，端口改动只写它）。"),
+        credentials_hint=(
+            "**Tomcat 没有管理控制台** —— 8080 用来跑你部署的web 应用，"
+            "根路径返回 404 是正常的（没放任何应用）。"
+            "把 WAR 放进 webapps/ 后访问 http://127.0.0.1:8080/应用名/。"
+            "部署后别忘了解压产物也在 webapps/ 下，**卸载会连应用一起删**。"
+        ),
     ),
 
     "elasticsearch": LaunchSpec(
@@ -3559,18 +3612,48 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         commands={"Windows": ["{home}/bin/elasticsearch.bat",
                               "-Ediscovery.type=single-node",
                               "-Expack.security.enabled=false",
+                              # **必须关掉 ML**（2026-10-06 干净环境演练定位）：
+                              # ES 9 在 Windows 上加载机器学习的原生库会失败：
+                              #     Failure running machine-learning native code.
+                              #     This could be due to running on an unsupported OS or
+                              #     distribution, missing OS libraries...
+                              # → 整个节点起不来、端口永不监听，表现为启动超时。
+                              # 开发场景本来也用不上 ML（它是给异常检测/forecast 的）。
+                              # 注意这与 CLASSPATH 那条是**两个独立的问题**：
+                              # 修了 CLASSPATH 才走得��这一步，才暴露出 ML。
+                              "-Expack.ml.enabled=false",
                               "-Ehttp.port={port}",
                               "-Epath.data={data_dir}/data",
                               "-Epath.logs={data_dir}/logs"],
                   "Linux":   ["{home}/bin/elasticsearch",
                               "-Ediscovery.type=single-node",
                               "-Expack.security.enabled=false",
+                              # **必须关掉 ML**（2026-10-06 干净环境演练定位）：
+                              # ES 9 在 Windows 上加载机器学习的原生库会失败：
+                              #     Failure running machine-learning native code.
+                              #     This could be due to running on an unsupported OS or
+                              #     distribution, missing OS libraries...
+                              # → 整个节点起不来、端口永不监听，表现为启动超时。
+                              # 开发场景本来也用不上 ML（它是给异常检测/forecast 的）。
+                              # 注意这与 CLASSPATH 那条是**两个独立的问题**：
+                              # 修了 CLASSPATH 才走得��这一步，才暴露出 ML。
+                              "-Expack.ml.enabled=false",
                               "-Ehttp.port={port}",
                               "-Epath.data={data_dir}/data",
                               "-Epath.logs={data_dir}/logs"],
                   "Darwin":  ["{home}/bin/elasticsearch",
                               "-Ediscovery.type=single-node",
                               "-Expack.security.enabled=false",
+                              # **必须关掉 ML**（2026-10-06 干净环境演练定位）：
+                              # ES 9 在 Windows 上加载机器学习的原生库会失败：
+                              #     Failure running machine-learning native code.
+                              #     This could be due to running on an unsupported OS or
+                              #     distribution, missing OS libraries...
+                              # → 整个节点起不来、端口永不监听，表现为启动超时。
+                              # 开发场景本来也用不上 ML（它是给异常检测/forecast 的）。
+                              # 注意这与 CLASSPATH 那条是**两个独立的问题**：
+                              # 修了 CLASSPATH 才走得��这一步，才暴露出 ML。
+                              "-Expack.ml.enabled=false",
                               "-Ehttp.port={port}",
                               "-Epath.data={data_dir}/data",
                               "-Epath.logs={data_dir}/logs"]},
@@ -3623,6 +3706,14 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         ),
         data_note=("数据与日志通过 -Epath.data / -Epath.logs 落在 ~/.env-tools/"
                    "elasticsearch-data 下，卸载只删版本目录，这份会保留。"),
+        credentials_hint=(
+            "**Elasticsearch 没有网页控制台** —— 9200 说 HTTP+JSON 协议，"
+            "浏览器直接访问会看到 JSON 响应（正常），但没有可点的页面。"
+            "本工具**已关闭 xpack.security**（一键启动是无终端后台进程，"
+            "ES 官方明说此时不生成随机密码，我们拿不到也没地方展示），"
+            "所以 9200 **无认证、只适合本机开发用**。"
+            "图形界面请另装 Kibana。"
+        ),
     ),
 
     "rabbitmq": LaunchSpec(
@@ -3679,8 +3770,25 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "**必须先装 Erlang/OTP 27**（4.0.9 要求 26.2~27.x，而 26 已 EOL）。"
             "管理界面（15672）需要额外开 rabbitmq_management 插件，本工具暂不启用。"
         ),
-        data_note=("Mnesia 数据与日志默认落在**用户主目录**（%APPDATA%\\RabbitMQ），"
-                   "**不在安装目录内**，卸载不会删它；要彻底清理请手动删除。"),
+        data_note=("Mnesia 数据与日志落在 ~/.env-tools/rabbitmq-data（RABBITMQ_BASE，"
+                   "我们显式指定的）；**官方默认是 %APPDATA%\\RabbitMQ，"
+                   "而实测那个目录根本不会被创建**。卸载不会删这份数据，"
+                   "要彻底清理请手动删除。"),
+        # **它没有网页控制台**（2026-10-06 用户报「显示启动成功实际无法访问」）：
+        # 5672 是 AMQP 二进制协议，浏览器打开只会失败；管理界面 15672 要另外开
+        # rabbitmq_management 插件才有。所以启动后必须说清"怎么用"——
+        # 否则用户只看到"启动成功"却不知道怎么连，以为是服务坏了。
+        credentials_hint=(
+            "**RabbitMQ 没有网页控制台** —— 5672 说 AMQP 协议（给客户端连的），"
+            "用浏览器打开会失败或空白，这是正常的、不是服务坏了。\n"
+            "三种正常用法：\n"
+            "① 客户端连接：amqp://guest:guest@127.0.0.1:5672/\n"
+            "   （guest 默认只允许本机连接；对局域网开放时需要另建账号）\n"
+            "② 命令行查状态：安装目录下 sbin\\rabbitmqctl.bat status\n"
+            "③ 网页管理界面（15672）：要先执行一次 "
+            "sbin\\rabbitmq-plugins.bat enable rabbitmq_management 才会出现，"
+            "本工具暂未启用。"
+        ),
     ),
 }
 
@@ -6190,10 +6298,18 @@ class StartResult:
 
 
 def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
-    """优先用本工具装的 JDK；没有再退到 JAVA_HOME 环境变量。
+    """按三级找 JDK：**本工具装的生效版本 → 本工具装的已安装最高版本 → JAVA_HOME**。
 
     EnvManager.get 就是 os.environ.get，拿它当"用户装的 JDK"会读到
-    被本工具改脏的进程环境，与 R3 里"回滚要读持久层的真值"是同一个坑。"""
+    被本工具改脏的进程环境，与 R3 里"回滚要读持久层的真值"是同一个坑。
+
+    **第二级是 2026-10-06 补的**（用户报 rocketmq 起不来查出来的）：
+    原来只有「active 登记」与「JAVA_HOME 环境变量」两级，而
+    **exe 启动的进程既没有 JAVA_HOME，用户也未必点过"切换生效版本"**
+    （刚下载安装完JDK 就去点其它组件的启动是最常见的路径）→
+    两级都落空→ 门控报"启动需要先有 JDK"，而磁盘上明明有。
+    这与 `resolve_launch_version` 的「已安装最高版本」兜底是同一个道理。
+    """
     jdk = comps.get("jdk")
     if jdk is not None:
         active = load_active_map().get("jdk")
@@ -6201,10 +6317,29 @@ def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
             home = jdk.install_dir(active)
             if jdk.exec_path_in_home(str(home)) is not None:
                 return str(home)
+        # 第二级：本工具装过、但没登记生效版本 → 取已安装里版本号最高的。
+        # 不走"候选清单首位"—— 那可能压根没装（resolve_launch_version 的注释详述）。
+        for d in sorted(jdk.installed_dirs(),
+                        key=lambda p: _version_key(p.name),
+                        reverse=True):
+            if jdk.exec_path_in_home(str(d)) is not None:
+                return str(d)
     env_home = os.environ.get("JAVA_HOME")
     if env_home and (Path(env_home) / "bin").is_dir():
         return env_home
     return None
+
+
+def _version_key(dir_name: str) -> Tuple[int, ...]:
+    """`jdk-21.0.5` → (21, 0, 5)。用于挑"已安装的最高版本"。
+
+    按数值分段比而不是字符串比：`2.10.0 > 2.9.0`，字符串比会反过来。
+    """
+    tail = dir_name.split("-", 1)[1] if "-" in dir_name else dir_name
+    out: List[int] = []
+    for chunk in tail.split("."):
+        out.append(int(chunk) if chunk.isdigit() else 0)
+    return tuple(out)
 
 
 def resolve_launch_version(comp: Component) -> Optional[str]:
@@ -7588,6 +7723,12 @@ class ComponentCard(QFrame):
         st = self._launch_status()
         running = st.state == "running"
         self.btn_start.setEnabled(self.launch_worker is None)
+        # **没有 Web 控制台的组件要藏掉这个按钮**（2026-10-06 用户报
+        # 「Nginx、Tomcat 访问控制台显示 404」）：它们服务是好的，
+        # 只是没有页面可打开 —— 摆个按钮在那儿只会让人以为服务坏了。
+        # 端口信息改放进 btn_start 的 tooltip，不丢。
+        has_console = self._has_console()
+        self.btn_console.setVisible(has_console)
         self.btn_console.setEnabled(running)
         # 按钮文字就是状态本身：运行中显示「停止」，否则显示「启动」。
         # 正在起/停的过渡态（"启动中…"/"停止中…"）不能被这一行盖掉——
@@ -7607,7 +7748,11 @@ class ComponentCard(QFrame):
             self.btn_start.style().unpolish(self.btn_start)
             self.btn_start.style().polish(self.btn_start)
         if running:
-            self.launch_label.setText(f"● 运行中 · 端口 {st.record.port}")
+            # 「无网页控制台」写在标签里（2026-10-06 用户报「显示启动成功实际无法访问」）：
+            # 服务是好的，只是没有页面可点。把这句话摆在这儿，用户就不会去找
+            # 那个不存在的控制台入口、也不会以为服务坏了。
+            tail = "" if self._has_console() else " · 无网页控制台"
+            self.launch_label.setText(f"● 运行中 · 端口 {st.record.port}{tail}")
             # 运行中禁止卸载：边跑边删目录会把正在写的日志和数据留在半删状态
             self.btn_uninstall.setEnabled(False)
             self.btn_uninstall.setToolTip("请先停止运行中的 %s 再卸载" % self.component.display_name)
@@ -7661,7 +7806,20 @@ class ComponentCard(QFrame):
         self.launch_worker.start()
 
     def _on_launch_ok(self, key: str, console_url: str) -> None:
-        self._log("info", f"已启动，控制台：{console_url}")
+        # **别对没有 Web 控制台的组件说"控制台：URL"**（2026-10-06 用户报
+        # 「RabbitMQ 显示启动成功实际无法访问」后定位）：
+        # console_path 是 None 时 console_url 会被拼成 `http://127.0.0.1:5672`，
+        # 那个地址用浏览器打开只会得到失败/空白 —— 写着"控制台"就是在指路到
+        # 一扇不存在的门。改为说清"服务在哪个端口、用什么工具访问"。
+        if self._has_console():
+            self._log("info", f"已启动，控制台：{console_url}")
+        else:
+            st = self._launch_status()
+            port = st.record.port if st.record else "?"
+            self._log("info",
+                      f"已启动：{self.component.display_name} 在端口 {port} 上服务"
+                      f"（对局域网开放）。")
+            self._log("info", f"它没有网页控制台。{self._no_console_hint()}")
         self._refresh_launch_state()
         # 明说停止按钮在哪：2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。
         # 查下来按钮一直好着（可见可用、文本"停止"、旁边 label 显示"● 运行中 · 端口 8848"），
@@ -7788,9 +7946,46 @@ class ComponentCard(QFrame):
         self.launch_worker.start()
 
     def on_console_clicked(self) -> None:
+        """打开控制台。
+
+        **没有 Web 控制台的组件不该给这个入口**（2026-10-06 用户报
+        「Nginx、Tomcat 显示启动成功，访问控制台显示 404」后定位）：
+        它们的 `console_path` 是 None，console_url被拼成 `http://127.0.0.1:8080`，
+        那个路径本来就不存在 → 浏览器里必然是 404。
+        用户看到「启动成功」就理所当然地点控制台，点开全是 404 ——
+        那不是服务坏了，是这个按钮在这里根本不该存在。
+        """
         st = self._launch_status()
-        if st.record is not None:
-            QDesktopServices.openUrl(QUrl(st.record.console_url))
+        if st.record is None:
+            return
+        if not self._has_console():
+            # 兜底：按钮理论上已被隐藏，这里再挡一层，
+            # 免得"点了没反应"变成"以为服务坏了去重启"。
+            QMessageBox.information(
+                self,
+                f"{self.component.display_name} 没有 Web 控制台",
+                f"{self.component.display_name} 不提供网页界面，"
+                f"它的服务在端口 {st.record.port} 上（对局域网开放）。\n\n"
+                f"要访问它请用对应的客户端工具，例如：\n"
+                f"{self._no_console_hint()}")
+            return
+        QDesktopServices.openUrl(QUrl(st.record.console_url))
+
+    def _has_console(self) -> bool:
+        """该组件是否有可点的 Web 控制台。判据是登记表里的 console_path。"""
+        spec = getattr(self.component, "launch", None)
+        return bool(spec is not None and spec.console_path)
+
+    def _no_console_hint(self) -> str:
+        """没有控制台时，给一句"这个组件该怎么用"的实话。"""
+        return {
+            "tomcat": "把 WAR 放进 webapps/ 后访问 http://127.0.0.1:8080/应用名/",
+            "nginx": "默认站点在 html/ 下，访问 http://127.0.0.1:8080/",
+            "elasticsearch": "用 curl 或 Kibana 访问 9200（Kibana 不在本工具里）",
+            "kafka": "用 kafka-topics.sh 之类的命令行工具操作",
+            "rocketmq": "用 mqadmin 命令行工具操作",
+            "rabbitmq": "管理界面需要额外开 rabbitmq_management 插件，本工具暂未启用",
+        }.get(self.component.key, "请用对应的客户端工具访问")
 
     # ------------------------------------------------------------------
     def _render_status_label(self) -> None:
