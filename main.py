@@ -3084,6 +3084,17 @@ class LaunchSpec:
     # 按 OS 键的启动 argv 模板。允许这些占位符：
     #   {java} {war} {home} {data_dir} {port} {log_file}
     commands: Dict[str, List[str]]
+    # **第二个要拉起的进程**，用于"一个组件由两个进程组成"的情况。
+    #
+    # 2026-10-06 为 rocketmq 加的：实测它有**两个**必须都在跑的进程 ——
+    #   namesrv（`bin\mqnamesrv.cmd`，端口 9876）与 broker（`bin\mqbroker.cmd`，
+    #   端口 10909/10911）。只起 namesrv 的话 extra_ports 里的 10909/10911
+    #   **永远不监听** → start() 会卡在"整簇都在听才算起来"直到超时，
+    #   表现为"点启动没反应"。
+    #
+    # 顺序：先起 commands，再起这个（broker 要向 namesrv 注册）。
+    # 停止：走 port_lookup 的三重闸，一个端口簇覆盖两个进程。
+    extra_processes: List[Dict[str, List[str]]] = field(default_factory=list)
     # 停止手段："pid" = 我们就是服务进程（Jenkins）；
     #           "shutdown_command" = 有可用的正规关闭脚本（本期无人使用，留作计划三位置）；
     #           "port_lookup" = 没有可靠厂商手段，停止走端口反查（Nacos / ActiveMQ）
@@ -3294,6 +3305,16 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         commands={"Windows": ["{home}/bin/mqnamesrv.cmd"],
                   "Linux":   ["{home}/bin/runserver.sh"],
                   "Darwin":  ["{home}/bin/runserver.sh"]},
+        # broker 是**第二个进程**（实测broker 要向 namesrv 注册才能起，
+        # 不起它的话 extra_ports 里的 10909/10911 永远不监听，
+        # start() 会卡到超时 → 表现为"点启动没反应"）。
+        # 端口全走官方默认（broker.conf 里 **0 处** listenPort，实测），
+        # 要改端口得改 conf/container/*.conf 那些模板 —— 不在本期范围。
+        extra_processes=[
+            {"Windows": ["{home}/bin/mqbroker.cmd"],
+             "Linux":   ["{home}/bin/runbroker.sh"],
+             "Darwin":  ["{home}/bin/runbroker.sh"]},
+        ],
         # 两个角色（namesrv + broker）共用同一个 commands 入口不行 ——
         # broker 要单独一条命令，见下方 broker_commands 的说明。
         stop_kind="port_lookup",
@@ -3382,7 +3403,10 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         # **只探主口会把「controller 没起来」显示成运行中**。
         extra_ports=(9093,),
         port_search_span=99,
-        port_writeback="cli_only",
+        # conf_copy：端口全走命令行默认值（实测 --override 改端口会半死），
+        # 但 log.dirs 必须改 —— 官方默认 /tmp/... 在 Windows 落 C:////tmp////，
+        # 不在安装目录也不在数据目录，卸载删不掉、多版本会抢目录。
+        port_writeback="conf_copy",
         console_path=None,
         health_path=None,
         needs=("jdk",),
@@ -3473,7 +3497,9 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         # 9300 是 transport 口（节点间通信），实测与 9200 一起监听
         extra_ports=(9300,),
         port_search_span=99,
-        port_writeback="cli_only",
+        # 建副本但不改任何值：ES 9 的 yml 里 0 条有效配置，全靠 -E 覆盖；
+        # 建副本是为了用户想手工微调时有地方改（官方文件会被卸载删掉）。
+        port_writeback="conf_copy",
         console_path=None,
         health_path=None,
         needs=(),
@@ -5746,7 +5772,10 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
                        f"已放弃启动（不会去猜该怎么改配置）。"), []
 
     version = resolve_launch_version(comp) or comp.versions[0].version
-    src = comp.install_dir(version) / "conf"
+    # 配置目录名按组件定：多数是 conf，但 kafka/elasticsearch 是 **config**
+    # （2026-10-06 实测包结构）。写死 conf 会让这两个的副本源目录不存在、
+    # prepare_conf_copy 拿不到东西 —— 而"拿不到"在R1 里等于该拒改而不是静默通过。
+    src = comp.install_dir(version) / conf_dir_name(comp.key)
     writer = conf_writer_of(comp.key)
     if writer is None:
         return False, (f"{comp.display_name} 没有登记端口回写方式，"
@@ -5755,6 +5784,15 @@ def prepare_ports(comp: Component, spec: LaunchSpec, plan: PortPlan,
     if not ok:
         return False, why, notes
     return True, "", notes
+
+
+# 组件的官方配置目录名。多数厂商包是 conf，实测 kafka 与 elasticsearch 是 config
+# （2026-10-06 打开包核实）。写死 conf 会让这两个组件的副本源目录不存在。
+_CONF_DIR_NAMES = {"kafka": "config", "elasticsearch": "config"}
+
+
+def conf_dir_name(key: str) -> str:
+    return _CONF_DIR_NAMES.get(key, "conf")
 
 
 def conf_writer_of(key: str):
@@ -5827,9 +5865,55 @@ def _write_nginx_ports(src: Path, data_dir: Path,
     return True, "", notes
 
 
+def _write_kafka_props(src: Path, data_dir: Path,
+                       plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """Kafka：把 server.properties 拷成副本，只改 log.dirs（端口全走命令行默认值）。
+
+    **为什么必须改 log.dirs**（实测）：官方默认 `/tmp/kraft-combined-logs`，
+    Windows 解析成 `C:\\tmp\\` —— 不在安装目录也不在我们的数据目录。后果两条：
+      - 卸载删不掉，多版本并存会抢同一个目录；
+      - `risk_note`/`data_note` 里"数据在 ~/.env-tools/kafka-data 下"就是**空话**。
+
+    **为什么端口不改**：实测 `--override` 改端口会半死（只改 listeners 不改
+    advertised.listeners → 19092不开、19093 开了，然后 channel manager 超时）。
+    我们不动端口，端口冲突按既定规则"结束占用者"。
+    """
+    conf = data_dir / "conf"
+    notes: List[str] = []
+    state, diff = prepare_conf_copy(src, conf)
+    if state == "created":
+        notes.append(f"已在 {conf} 建立 Kafka 配置副本，此后数据目录改动只写这份副本。")
+    elif diff:
+        notes.append(f"官方 conf 里有 {len(diff)} 个文件是副本没有的："
+                     f"{', '.join(diff[:5])}。需要时删掉副本目录让它重建。")
+    log_dirs = (data_dir / "kraft-logs").as_posix()      # 正斜杠：反斜杠在 properties 里是转义符
+    ok, why = set_kafka_log_dirs(conf / "server.properties", log_dirs)
+    if not ok:
+        return False, why, notes
+    notes.append(f"数据目录（log.dirs）已指向 {log_dirs}（原默认在 C:\\tmp\\ 下）。")
+    return True, "", notes
+
+
+def _write_elasticsearch_props(src: Path, data_dir: Path,
+                               plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """Elasticsearch：什么都不改（全部靠 -E 命令行覆盖），但要把副本建出来。
+
+    实测 ES 9 的 yml 里**没有任何有效配置项**（82 行全注释），端口/路径/安全开关
+    都能用 `-E` 覆盖 —— 所以这里只建副本、不写任何值，
+    免得用户想手工微调时还要自己去官方文件里改（那份会被卸载删掉）。
+    """
+    conf = data_dir / "conf"
+    notes: List[str] = []
+    state, diff = prepare_conf_copy(src, conf)
+    if state == "created":
+        notes.append(f"已在 {conf} 建立 ES 配置副本（供你手工微调；"
+                     f"端口与数据目录由启动命令的 -E 参数决定，不改这个文件）。")
+    return True, "", notes
+
+
 def _write_none(src: Path, data_dir: Path,
                 plan: PortPlan) -> Tuple[bool, str, List[str]]:
-    """CLI 覆盖型组件（kafka/ES 等）：配置由命令行参数决定，不建副本。"""
+    """CLI 覆盖型组件：配置由命令行参数决定，不建副本。"""
     return True, "", []
 
 
@@ -5837,6 +5921,8 @@ _CONF_WRITERS = {
     "activemq": _write_activemq_ports,
     "tomcat": _write_tomcat_ports,
     "nginx": _write_nginx_ports,
+    "kafka": _write_kafka_props,
+    "elasticsearch": _write_elasticsearch_props,
 }
 
 
@@ -6163,17 +6249,16 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
 
 
 def config_file_for(comp: Component, data_dir: Path) -> Path:
-    """该组件要改的那份配置文件（副本优先，副本没有就指官方那份）。
+    """该组件启动命令要读的那份配置文件。
 
-    2026-10-06 新增：kafka 的启动命令要 `{conf}` 占位符，
-    而 kafka 的端口策略是 cli_only（一个文件都不改）——
-    所以它拿到的是**官方原始配置文件**的路径，这是对的：
-    我们要读它、用 `--standalone -c` 指给 java，不是要改它。
+    **必须指向副本**，不能指官方文件：
+      - kafka 的 `pre_start`（StorageTool format）与 `kafka.Kafka` 要读同一个文件，
+        而我们把 log.dirs 写进副本里；读官方文件的话 format 格式化的是 `/tmp` 那个目录，
+        broker 却去副本里找 meta.properties → `No readable meta.properties files found.`。
+      - 官方文件卸载就会被删，下次启动读不到。
     """
-    if comp.key == "kafka":
-        return comp.install_dir(resolve_launch_version(comp)
-                               or comp.versions[0].version) / "config" / "server.properties"
-    return data_dir / "conf" / "server.properties"
+    name = "server.properties" if comp.key == "kafka" else "elasticsearch.yml"
+    return data_dir / "conf" / name
 
 
 @dataclass
@@ -6332,6 +6417,28 @@ class ServiceManager:
                 proc = subprocess.Popen(plan.argv, **popen_kw)
             except OSError as exc:
                 return StartResult(False, "spawn", f"拉起失败：{exc}")
+
+            # 第二个进程（rocketmq 的 broker）。顺序在主进程之后 ——
+            # broker 要向 namesrv 注册，namesrv 没起来它会反复重试。
+            #
+            # 拉起失败要**连主进程一起收掉**：留下一个"namesrv 在跑、broker 没起来"
+            # 的半死状态，比直接失败更难归因（用户看到 9876 在听就以为服务可用）。
+            for extra in (spec.extra_processes or []):
+                try:
+                    argv_extra = [t.format(**_plan_mapping(comp, spec, plan))
+                                  for t in extra[CURRENT_OS]]
+                except (KeyError, IndexError):
+                    return StartResult(False, "spawn", f"启动命令里的占位符无法替换：{extra}")
+                try:
+                    subprocess.Popen(argv_extra, **popen_kw)
+                except OSError as exc:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    return StartResult(False, "spawn",
+                                       f"第二个进程拉起失败：{exc}"
+                                       f"（命令：{argv_extra[0]}）")
 
         # 有界探活：按"每轮 sleeper(1.0) 至多 startup_timeout 轮"计数而不是纯墙钟
         # deadline —— deadline 写法在 sleeper 被替换成 no-op 时会退化成烧 CPU 的

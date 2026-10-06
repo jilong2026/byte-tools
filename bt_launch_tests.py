@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import platform as _platform
+import re
 import socket
 import sys
 import tempfile
@@ -3101,22 +3102,28 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         self.assertEqual(again, used,
                          "重复点启动时 format 换了 cluster.id —— 等于每次都在换一个集群")
 
-    def test_kafka_conf_placeholder_points_at_the_official_server_properties(self):
-        """`{conf}` 必须指向安装目录里**官方那份** server.properties。
+    def test_kafka_conf_placeholder_points_at_the_managed_copy(self):
+        """`{conf}` 必须指向 **data 目录里那份副本**的 server.properties
+        （2026-10-06 改的契约，原为"官方那份"）。
 
-        kafka 的端口策略是 cli_only（一个文件都不改），所以 {conf} 是给
-        java `-c` 读的启动配置，要的是官方文件而不是 data 目录里的副本 ——
-        指到副本上，副本里连log.dirs 都没有，broker 会拿不到元数据目录。
+        改的原因：kafka 的端口策略从 cli_only 改成了 conf_copy，
+        因为**必须改 log.dirs** —— 官方默认 `/tmp/kraft-combined-logs`
+        在 Windows 上落`C:\\tmp\\`，不在安装目录也不在数据目录
+        （卸载删不掉、多版本并存会抢同一个目录）。
+
+        于是 `{conf}` 必须指向副本，理由有两条，都是实测：
+          - `pre_start`（StorageTool format）与 `kafka.Kafka` 要读**同一份**；
+            读官方文件的话 format 格式化的是 /tmp 那个目录、broker 去副本里找
+            meta.properties → `No readable meta.properties files found.`
+          - 官方文件卸载就被删，下次启动读不到。
         """
-        comp, home = self._ready_kafka()
-        conf = main.config_file_for(comp, main.CONFIG_DIR / "kafka-data")
+        comp, _home = self._ready_kafka()
+        data_dir = main.CONFIG_DIR / "kafka-data"
+        conf = main.config_file_for(comp, data_dir)
         self.assertEqual(conf.name, "server.properties")
-        self.assertIn("kafka", str(conf).lower(),
-                      f"{conf} 不在 kafka 目录里，多半是取错了根")
-        self.assertEqual(conf, home / "config" / "server.properties",
-                         "必须指向安装目录里的官方配置文件")
-        self.assertNotIn("kafka-data", str(conf),
-                         "cli_only 策略下没有配置副本，{conf} 不该指向 data 目录")
+        self.assertEqual(conf.parent, data_dir / "conf",
+                         f"{conf} 应在 data 目录的 conf 下（log.dirs 被写进了副本）")
+        self.assertIn("kafka-data", str(conf))
 
     # ================= pre_start：start() 接线（最关键） =================
 
@@ -3198,6 +3205,1043 @@ class PreStartAndPrereqWiring(unittest.TestCase):
                         f"没有前置准备却报了这种提示：notes={res.notes}")
         self.assertIn("nacos", main.load_running_map(),
                       "nacos 走完整 start() 应该能登记成功（这条钉的是零回归）")
+
+
+class NewSixComponents(unittest.TestCase):
+    """2026-10-06 新接入六个组件（rocketmq/nginx/kafka/tomcat/es/rabbitmq）的坑。
+
+    动机：`LAUNCH_KEYS` 从 3 涨到 9，但既有 170 条护栏**一条都没钉这六个组件**
+    —— 它们全是围绕 jenkins/nacos/activemq 写的。这六个的坑有一个共同特征：
+    **改完文件看起来是对的，运行时不是**（tomcat 改到注释行 / kafka 走 .bat
+    超 8191 / rocketmq 用错入口脚本 FileNotFound），所以护栏必须断言
+    "**去注释之后解析出的生效值**"，而不是"文件里出现了目标字符串"。
+
+    全部离线：不碰网络、不起真实进程。配置 fixture 全部用 tempfile 造，
+    组件安装目录、端口探针、subprocess 全部打桩。
+    """
+
+    # ---------------- fixture：厂商原文形状 ----------------
+
+    # Tomcat 10.1 server.xml 的**关键形状**：5 处 `port=`，只有 2 处生效。
+    # 顺序刻意与真机一致（行号≈真机行号），因为三个naive 写法都依赖这个顺序：
+    #   :22<Server port="8005">            生效（shutdown 口）
+    #   :76<!-- ... port="8080" ... -->注释里那处（naive 的"第 2 处"）
+    #   :70<Connector port="8080" ...>     生效（HTTP 主口）
+    #   :92<!-- port="8443" -->            注释
+    #   :108<!-- port="8009" -->           注释
+    # 注意 :76 在 :70 **之前**—— 报告里naive"改第 2 处"命中的正是它。
+    TOMCAT_SERVER_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<Server port="8005" shutdown="SHUTDOWN">\n'
+        '  <Listener className="org.apache.catalina.startup.Catalina" />\n'
+        '\n'
+        '  <!-- A "Connector" using the shared thread pool -->\n'
+        '  <!--\n'
+        '  <Connector executor="tomcatThreadPool"\n'
+        '             port="8080" protocol="HTTP/1.1"\n'
+        '             connectionTimeout="20000"\n'
+        '             redirectPort="8443"\n'
+        '             maxParameterCount="1000" />\n'
+        '  -->\n'
+        '\n'
+        '  <Connector port="8080" protocol="HTTP/1.1"\n'
+        '             connectionTimeout="20000"\n'
+        '             redirectPort="8443"\n'
+        '             maxParameterCount="1000" />\n'
+        '\n'
+        '  <!-- A "Connector" using an explicit thread pool -->\n'
+        '  <!--\n'
+        '  <Connector port="8443" protocol="HTTP/1.1"\n'
+        '             connectionTimeout="20000"\n'
+        '             redirectPort="8443"\n'
+        '             maxParameterCount="1000" />\n'
+        '  -->\n'
+        '\n'
+        '  <!-- A "Connector" using an shared thread pool -->\n'
+        '  <!--\n'
+        '  <Connector port="8009" protocol="AJP/1.3"\n'
+        '             redirectPort="8449"\n'
+        '             secretRequired="false" />\n'
+        '  -->\n'
+        '</Server>\n'
+    )
+
+    # nginx.conf 的关键形状：`listen 80;` 生效，另有十几行注释示例。
+    # 真机 nginx.conf 的注释 listen 长这样（`#` 开头、缩进对齐）。
+    NGINX_CONF = (
+        'worker_processes  1;\n'
+        '\n'
+        'events {\n'
+        '    worker_connections  1024;\n'
+        '}\n'
+        '\n'
+        'http {\n'
+        '    include       mime.types;\n'
+        '    default_type  application/octet-stream;\n'
+        '\n'
+        '    # 下面是各种listen 的示例，默认都不生效\n'
+        '    #listen 8080;\n'
+        '    #listen 8000;\n'
+        '    #listen 443 ssl;\n'
+        '    #listen localhost:8000;\n'
+        '\n'
+        '    server {\n'
+        '        listen       80;\n'
+        '        server_name  localhost;\n'
+        '        location / {\n'
+        '            root   html;\n'
+        '            index  index.html index.htm;\n'
+        '        }\n'
+        '    }\n'
+        '}\n'
+    )
+
+    # ---------------- 工具 ----------------
+
+    @staticmethod
+    def _strip_xml_comments(text):
+        """把 <!-- --> 块内容替换成**等长空格**（换行保留）。
+
+        这是本类所有 tomcat/nginx 断言的基础：**先去掉注释再解析**。
+        直接在原文里 grep 端口，正是报告 §2.2 实测的那个静默失效的写法。
+        """
+        return re.sub(r"<!--.*?-->",
+                      lambda m: re.sub(r"[^\r\n]", " ", m.group(0)),
+                      text, flags=re.S)
+
+    @classmethod
+    def _effective_tomcat_ports(cls, xml_text):
+        """解析 server.xml 里**真正生效**的端口（注释内的全部忽略）。
+
+        返回 (shutdown 端口 或 None, HTTP 端口 或 None)。
+        断言必须打在它上面 —— 打在"文件里出现了 18081"上，
+        改到注释行的那种错实现照样通过，而那正是要防的坑。
+        """
+        clean = cls._strip_xml_comments(xml_text)
+        shutdown = None
+        m = re.search(r"<Server\b[^>]*>", clean, re.S)
+        if m:
+            pm = re.search(r'\bport="(\d+)"', m.group(0))
+            if pm:
+                shutdown = int(pm.group(1))
+        http = None
+        for cm in re.finditer(r"<Connector\b[^>]*>", clean, re.S):
+            tag = cm.group(0)
+            if 'protocol="HTTP/1.1"' not in tag:
+                continue
+            pm = re.search(r'\bport="(\d+)"', tag)
+            if pm:
+                http = int(pm.group(1))
+            break
+        return shutdown, http
+
+    @classmethod
+    def _commented_ports(cls, xml_text):
+        """原文里所有**注释块内**的 port 值，顺序不变。"""
+        return [int(n) for m in re.finditer(r"<!--.*?-->", xml_text, re.S)
+                for n in re.findall(r'\bport="(\d+)"', m.group(0))]
+
+    @classmethod
+    def _effective_nginx_listens(cls, conf_text):
+        """解析 nginx.conf 里**未被注释**的 listen 端口（行首缩进后直接 listen）。"""
+        return [int(n) for n in
+                re.findall(r"^[ \t]*listen[ \t]+(\d+)", conf_text, re.M)]
+
+    @classmethod
+    def _commented_nginx_listens(cls, conf_text):
+        """原文里所有**注释行**上的 listen 端口。"""
+        return [int(n) for n in
+                re.findall(r"^[ \t]*#[ \t]*listen[ \t]+(\d+)", conf_text, re.M)]
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.tmp = Path(self.dir.name)
+        self.comps = {c.key: c for c in main.build_components()}
+
+        # 落盘位置全部重定向：用例不许往真~/.env-tools 里写文件。
+        self._orig_dir, self._orig_run = main.CONFIG_DIR, main.RUNNING_FILE
+        main.CONFIG_DIR = self.tmp
+        main.RUNNING_FILE = self.tmp / "running.json"
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_run)
+
+        # 不起真实进程、不碰网络。
+        self.spawned = []
+        self._orig_popen = main.subprocess.Popen
+        main.subprocess.Popen = self._record_popen
+        self.addCleanup(setattr, main.subprocess, "Popen", self._orig_popen)
+        self._orig_run_fn = main.subprocess.run
+        main.subprocess.run = self._record_run
+        self.addCleanup(setattr, main.subprocess, "run", self._orig_run_fn)
+
+        # 端口一律答"空闲"，探活一律答"在听" —— 用例成败不许取决于本机端口状态。
+        self._orig_free = main.port_is_free
+        main.port_is_free = lambda port, host="127.0.0.1": True
+        self.addCleanup(setattr, main, "port_is_free", self._orig_free)
+        self._orig_evict = main.evict_port_occupant
+        main.evict_port_occupant = lambda port, label, evicted=None: None
+        self.addCleanup(setattr, main, "evict_port_occupant", self._orig_evict)
+        self._orig_java = main.resolve_java_home
+        main.resolve_java_home = lambda comps: str(self.tmp / "jdk-17")
+        self.addCleanup(setattr, main, "resolve_java_home", self._orig_java)
+
+    def _record_popen(self, argv, **kw):
+        self.spawned.append(list(argv))
+        return FakePopenProc()
+
+    @staticmethod
+    def _record_run(argv, **kw):
+        return FakeRunProc()
+
+    def _installed(self, key):
+        """把某组件造成"磁盘上真装着"并让路径解析可用（走真 start() 时需要）。"""
+        comp = self.comps[key]
+        version = comp.versions[0].version
+        home = self.tmp / key / f"{key}-{version}"
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        # 2026-10-06：kafka/elasticsearch 的端口策略改成了 conf_copy
+        # （kafka 要改 log.dirs、ES 要给用户留个可微调的副本），
+        # 所以它们必须有一份可拷的官方配置，否则 prepare_ports 会拒改、
+        # start() 走不到 pre_start 那一步（护栏表现为"start 没调 pre_start"）。
+        cdir = home / main.conf_dir_name(key)
+        cdir.mkdir(parents=True, exist_ok=True)
+        fname = "server.properties" if key == "kafka" else "elasticsearch.yml"
+        body = "log.dirs=/tmp/x" + chr(10) if key == "kafka" else "# all commented"
+        (cdir / fname).write_text(body, encoding="utf-8")
+        comp.install_dir = lambda v, _h=home: _h
+        orig = main.resolve_launch_version
+        main.resolve_launch_version = lambda c: version
+        self.addCleanup(setattr, main, "resolve_launch_version", orig)
+        return comp, home
+
+    # ================= 共用（3 条） =================
+
+    def test_launch_keys_is_exactly_the_nine_registered_components(self):
+        """`LAUNCH_KEYS` 恰好 9 个，且就是登记表里的那 9 个。
+
+        断言**集合相等**而不是断言长度：只钉长度的话，
+        有人把 rocketmq 换成别的 key 数量不变、护栏照样绿。
+        """
+        self.assertEqual(
+            main.LAUNCH_KEYS,
+            {"jenkins", "nacos", "activemq",
+             "rocketmq", "nginx", "kafka", "tomcat",
+             "elasticsearch", "rabbitmq"})
+        self.assertEqual(len(main.LAUNCH_KEYS), 9)
+        # 登记表与 key 集合不许脱节（多一个 key 却没有 spec 就查不到）。
+        self.assertEqual(set(main.LAUNCH_OF), main.LAUNCH_KEYS)
+
+    def test_every_launchable_component_carries_a_non_empty_risk_note(self):
+        """九个组件每个都要有非空 `risk_note`。
+
+        risk_note 是**启动确认弹窗里唯一**告诉用户"这台机器上会发生什么"的字段
+        （监听 0.0.0.0 =对局域网开放、关掉了认证、弹黑窗……）。
+        空字符串意味着用户点下去之前完全不知道会发生什么，
+        而这些组件全都默认对局域网开放。
+        """
+        for key in sorted(main.LAUNCH_KEYS):
+            with self.subTest(key=key):
+                note = main.LAUNCH_OF[key].risk_note
+                self.assertIsInstance(note, str)
+                self.assertTrue(note.strip(),
+                                f"{key} 的 risk_note 是空的：启动确认弹窗里"
+                                f"没有任何关于'会发生什么'的说明")
+
+    def test_prepare_ports_refuses_when_the_key_has_no_registered_writer(self):
+        """`comp.key` 没登记分派器时**拒改**，并承诺"不会去猜"。
+
+        `prepare_ports` 现在按comp.key 查分派器（不是写死ActiveMQ）。
+        查不到时必须明确放弃 —— 宁可拒绝启动，也不能猜一个改法：
+        猜错的后果是"配置没改、进程按旧端口起来"，界面上却写着新端口。
+        """
+        comp = self.comps["jenkins"]          # jenkins 从未登记过分派器
+        self.assertIsNone(main.conf_writer_of("jenkins"))
+        spec = copy.deepcopy(main.LAUNCH_OF["activemq"])
+        spec.port_writeback = "conf_copy"     # 强行要求改配置
+        data = self.tmp / "data"
+        ok, why, _notes = main.prepare_ports(
+            comp, spec, main.PortPlan(main=8161), data)
+        self.assertFalse(ok, "没有分派器却放行了 —— 等于去猜配置该怎么改")
+        self.assertIn("不会去猜", why,
+                      "拒改时必须承诺不会去猜，让用户知道要自己动手")
+        self.assertEqual(comp.display_name, why.split()[0],
+                         "拒改原因必须指名是哪个组件")
+        self.assertEqual(list(data.rglob("*")) if data.exists() else [],
+                         [], "拒改不许留下任何文件（副本也不许建）")
+
+    def test_conf_writer_registry_and_port_strategy_agree_in_both_directions(self):
+        """`_CONF_WRITERS` 与端口策略**双向**一致。
+
+        两个方向都要钉，否则登记表与分派器会脱节：
+          - `conf_copy` 的组件必须有分派器（否则端口永远改不动，
+            却会告诉用户"已在副本里改好"）；
+          - `cli_only` / `cli_flag` 的组件必须**没有**分派器
+            （有了就意味着会有代码去建副本/改文件，而它们的端口全靠命令行，
+            多改一个文件就是多一个与厂商默认值不一致的风险）。
+        """
+        for key in sorted(main.LAUNCH_KEYS):
+            with self.subTest(key=key):
+                spec = main.LAUNCH_OF[key]
+                writer = main.conf_writer_of(key)
+                if spec.port_writeback == "conf_copy":
+                    self.assertIsNotNone(
+                        writer, f"{key} 声明 conf_copy 却没有分派器："
+                                f"端口永远不会被改，却会报'已改好'")
+                else:
+                    self.assertIn(spec.port_writeback, ("cli_only", "cli_flag"))
+                    self.assertIsNone(
+                        writer, f"{key} 的端口策略是 {spec.port_writeback}，"
+                                f"却有分派器：会多改一个本不该动的文件")
+        # 反向：分派器表里不许出现登记表之外的 key（僵尸分派器）。
+        for key in sorted(main._CONF_WRITERS):
+            with self.subTest(key=key):
+                self.assertIn(key, main.LAUNCH_KEYS,
+                              f"分派器表里有 {key}，但它不是可启动组件")
+
+    # ================= tomcat（6 条） =================
+
+    def test_tomcat_changes_the_live_connector_never_a_commented_one(self):
+        """**改的是生效那行**：去注释后解析出的 HTTP 口必须真的是新值。
+
+        这是 tomcat 最核心的一条。报告 §2.2 实测：只改注释里那处 8080，
+        文件里写着 18081、**运行时仍然听 8080**，零报错零日志、退出码 0。
+        所以断言必须打在"去注释之后解析出的生效端口"上——
+        打"文件里出现了 18081"的话，这个错实现照样通过。
+        """
+        xml = self.tmp / "server.xml"
+        xml.write_text(self.TOMCAT_SERVER_XML, encoding="utf-8")
+        self.assertEqual(self._effective_tomcat_ports(
+            self.TOMCAT_SERVER_XML), (8005, 8080),
+            "fixture 前提不成立：它必须真的有 2 处生效端口")
+
+        ok, why = main.set_tomcat_ports(xml, 18081, 8005)
+        self.assertTrue(ok, why)
+
+        after = xml.read_text(encoding="utf-8")
+        shutdown, http = self._effective_tomcat_ports(after)
+        self.assertEqual(http, 18081,
+                         "去注释后解析出的 HTTP 口不是新值—— 改到注释行了，"
+                         "运行时仍会听 8080（静默失效）")
+        self.assertEqual(shutdown, 8005,
+                         "shutdown 口不该被顺带改掉（本次给的目标值就是 8005）")
+
+    def test_tomcat_never_touches_the_ports_inside_comment_blocks(self):
+        """注释块里的端口值**一个都不许变**。
+
+        与上一条互补：上一条钉"生效口改对了"，这条钉"没顺手污染注释"。
+        `text.replace(...)` 全文替换那种写法会改对HTTP 口，
+        但同时把注释里的 8080/8443/8009 也换成新值——
+        用户打开配置看到"官方示例端口全被改了"，而下一条幂等护栏之外的
+        换版本/比对官方文档都受影响。这条让它红。
+        """
+        xml = self.tmp / "server.xml"
+        xml.write_text(self.TOMCAT_SERVER_XML, encoding="utf-8")
+        before = self._commented_ports(self.TOMCAT_SERVER_XML)
+        self.assertEqual(before, [8080, 8443, 8009],
+                         "fixture 前提不成立：注释块里的端口值应对应真机形状")
+
+        ok, why = main.set_tomcat_ports(xml, 18081, 18085)
+        self.assertTrue(ok, why)
+
+        after = xml.read_text(encoding="utf-8")
+        self.assertEqual(self._commented_ports(after), before,
+                         "注释块里的端口值被动过了 —— 官方示例被污染")
+        # 注释块的**文本**也必须原样保留（不能被抹成空白）。
+        for block in re.findall(r"<!--.*?-->", self.TOMCAT_SERVER_XML, re.S):
+            self.assertIn(block, after,
+                          "注释块内容被抹掉了：用户打开配置看到的是一片空白")
+
+    def test_tomcat_both_ports_land_on_their_own_anchors(self):
+        """两个端口**分别**落到 `<Server>` 与 HTTP `<Connector>`，不许互换。
+
+        报告 §2.3 实测：`re.sub(port=..., count=1)` 命中的是第22 行的
+        **shutdown** 口 —— HTTP 口没变，而停止能力被破坏（对错误实例执行
+        shutdown.bat 会杀掉另一个实例并返回 rc=0，看起来完全成功）。
+
+        所以这里用两个**明显不同**的目标值，并分别断言两个锚点：
+        只钉"某个口变了"的话，两处写反了照样绿。
+        """
+        xml = self.tmp / "server.xml"
+        xml.write_text(self.TOMCAT_SERVER_XML, encoding="utf-8")
+
+        ok, why = main.set_tomcat_ports(xml, 18081, 18085)
+        self.assertTrue(ok, why)
+
+        after = xml.read_text(encoding="utf-8")
+        shutdown, http = self._effective_tomcat_ports(after)
+        self.assertEqual(
+            (http, shutdown), (18081, 18085),
+            "两个端口没分别落到正确的锚点上。"
+            "实测踩过的坑：按出现顺序改第一处 port= 改到的是 shutdown 口，"
+            "结果主口没变、停止能力被破坏")
+
+        # 反向锚定：<Server> 标签里必须是 18085，HTTP Connector 里必须是 18081。
+        clean = self._strip_xml_comments(after)
+        server_tag = re.search(r"<Server\b[^>]*>", clean, re.S).group(0)
+        self.assertIn('port="18085"', server_tag,
+                      "shutdown 端口必须落在 <Server> 上")
+        self.assertNotIn('port="18081"', server_tag,
+                         "HTTP 端口跑到了 <Server> 上 —— 停止端口被主端口顶掉了")
+
+    def test_tomcat_writeback_is_idempotent_in_content_mtime_and_backup_count(self):
+        """幂等：重复点启动时，内容 / mtime / `.bak` 数量**三者都不许变**。
+
+        为什么三者都要钉：
+          - 只钉内容 → 无脑 `write_bytes(同一份)` 的实现能过，
+            但它每次都改 mtime、每次都让杀软/备份软件重新扫一遍；
+          - 只钉 mtime → 忘了 `.bak` 那个实现过不了，
+            而反复点启动会刷出一串 `server.xml.bak.bak.bak`（`_backup_once`
+            本来就是专门防这个的，注释里写着"那是噪音"）。
+        """
+        xml = self.tmp / "server.xml"
+        xml.write_text(self.TOMCAT_SERVER_XML, encoding="utf-8")
+        ok, why = main.set_tomcat_ports(xml, 18081, 18085)
+        self.assertTrue(ok, why)
+
+        text1 = xml.read_text(encoding="utf-8")
+        mtime1 = xml.stat().st_mtime_ns
+        baks1 = sorted(p.name for p in self.tmp.glob("*.bak"))
+
+        # 第二、第三次同参数调用：必须是彻底的 no-op。
+        for attempt in (2, 3):
+            with self.subTest(attempt=attempt):
+                ok, why = main.set_tomcat_ports(xml, 18081, 18085)
+                self.assertTrue(ok, why)
+                self.assertEqual(xml.read_text(encoding="utf-8"), text1,
+                                 f"第 {attempt} 次调用改了内容")
+                self.assertEqual(xml.stat().st_mtime_ns, mtime1,
+                                 f"第 {attempt} 次调用重写了文件（mtime 变了）")
+                self.assertEqual(sorted(p.name for p in self.tmp.glob("*.bak")),
+                                 baks1,
+                                 f"第 {attempt} 次调用又多备份了一份")
+
+        shutdown, http = self._effective_tomcat_ports(text1)
+        self.assertEqual((http, shutdown), (18081, 18085))
+
+    def test_tomcat_refuses_and_writes_nothing_when_no_connector_is_live(self):
+        """生效的 `<Connector>` 一个都没有时**拒改**，且一个字节都不写。
+
+        这是"永远不会被注释骗"的最后一道：官方把 Connector 整段注释掉
+        （或用户改过写法）时，宁可拒绝启动并指名要改哪一行，
+        也不能"改到注释里去"然后报告成功 —— 那样用户会看到
+        "运行中·端口 18081"而实际服务在8080 上（或者压根没起来）。
+        """
+        only_commented = self.TOMCAT_SERVER_XML.replace(
+            '  <Connector port="8080" protocol="HTTP/1.1"\n'
+            '             connectionTimeout="20000"\n'
+            '             redirectPort="8443"\n'
+            '             maxParameterCount="1000" />\n',
+            '  <!-- <Connector port="8080" protocol="HTTP/1.1" /> -->\n')
+        # 前提自检：造出来的 fixture 里生效 HTTP 口必须是 None。
+        self.assertIsNone(self._effective_tomcat_ports(only_commented)[1],
+                          "fixture 前提不成立：应该一个生效 Connector 都不剩")
+        self.assertIn("Connector", only_commented,
+                      "fixture 前提不成立：注释里仍应留着 Connector 示例")
+
+        xml = self.tmp / "server.xml"
+        xml.write_text(only_commented, encoding="utf-8")
+        before = xml.read_bytes()
+        before_mtime = xml.stat().st_mtime_ns
+
+        ok, why = main.set_tomcat_ports(xml, 18081, 18085)
+        self.assertFalse(ok, "生效 Connector 不存在时却报告改成功了")
+        self.assertIn("Connector", why,
+                      "拒改必须指名要找的锚点（protocol=\"HTTP/1.1\"），"
+                      "否则用户不知道该去改哪一行")
+        self.assertEqual(xml.read_bytes(), before,
+                         "拒改却写了文件")
+        self.assertEqual(xml.stat().st_mtime_ns, before_mtime,
+                         "拒改却碰了文件（mtime 变了）")
+        self.assertEqual(list(self.tmp.glob("*.bak")), [],
+                         "拒改却留了 .bak")
+
+    def test_tomcat_registers_8005_as_a_second_port(self):
+        """8005 必须在 `extra_ports` 里 —— 只探主口会漏掉停止能力。
+
+        实测（报告 §5.3）：只改 HTTP 口而留着 8005 时，多实例场景下
+        新实例 bind 失败**自杀**（HTTP 502），而对它执行 shutdown.bat 会杀掉
+        8005 的真正持有者并**返回 rc=0** —— 看起来完全成功。
+        所以 8005 必须和主口一起被纳入端口簇，一起探测、一起改。
+        """
+        spec = main.LAUNCH_OF["tomcat"]
+        self.assertIn(8005, spec.extra_ports,
+                      "8005 不在 extra_ports 里：多实例时会互相抢占 shutdown 口，"
+                      "误杀别的实例还返回 rc=0")
+        # 整簇都必须真的进端口规划（choose_ports 认extra_ports）。
+        plan, why = main.choose_ports(
+            spec, is_free=lambda p, host="127.0.0.1": True, evict=False)
+        self.assertIn(8005, plan.all_ports,
+                      f"8005 没进端口簇：{plan.all_ports} / {why}")
+        # 而 shutdown 端口的取值来源就是 extra_ports 的第一位
+        # （_write_tomcat_ports: plan.extras[0]），所以顺序也有意义。
+        self.assertEqual(spec.extra_ports[0], 8005,
+                         "shutdown 端口取的是 extras[0]，顺序变了就会取错口")
+
+    # ================= nginx（3 条） =================
+
+    def test_nginx_changes_the_live_listen_line_and_leaves_comments_alone(self):
+        """改的是**生效那行** `listen`，注释里的十几行 listen 示例原样保留。
+
+        与 tomcat 同一个坑：nginx.conf 里除生效的 `listen 80;` 外还有
+        `#listen 8080;` `#listen 443 ssl;` 等示例。裸替换打到注释行时，
+        文件显示改了、**运行时仍是 80**，静默失效。
+        """
+        conf = self.tmp / "nginx.conf"
+        conf.write_text(self.NGINX_CONF, encoding="utf-8")
+        self.assertEqual(self._effective_nginx_listens(self.NGINX_CONF), [80],
+                         "fixture 前提不成立：应恰好只有 1 条生效 listen")
+        self.assertEqual(self._commented_nginx_listens(self.NGINX_CONF),
+                         [8080, 8000, 443],
+                         "fixture 前提不成立：注释示例里应有三个纯数字端口")
+
+        ok, why = main.set_nginx_listen(conf, 18081)
+        self.assertTrue(ok, why)
+
+        after = conf.read_text(encoding="utf-8")
+        self.assertEqual(self._effective_nginx_listens(after), [18081],
+                         "生效的 listen 没改成新值 —— 改到注释行去了，"
+                         "运行时仍然听 80（静默失效）")
+        self.assertEqual(self._commented_nginx_listens(after),
+                         [8080, 8000, 443],
+                         "注释里的 listen 示例被改了：官方示例被污染")
+
+    def test_nginx_writeback_is_idempotent_in_content_mtime_and_backup_count(self):
+        """nginx 回写同样要幂等（内容 / mtime / `.bak` 数量三者不变）。
+
+        nginx 每次启动都会重新读配置，用户反复点启动很常见；
+        每次都重写 + 每次都备份会刷出一串 `.bak` 且让 mtime 一直跳。
+        """
+        conf = self.tmp / "nginx.conf"
+        conf.write_text(self.NGINX_CONF, encoding="utf-8")
+        ok, why = main.set_nginx_listen(conf, 18081)
+        self.assertTrue(ok, why)
+
+        text1 = conf.read_text(encoding="utf-8")
+        mtime1 = conf.stat().st_mtime_ns
+        baks1 = sorted(p.name for p in self.tmp.glob("*.bak"))
+        self.assertEqual(baks1, ["nginx.conf.bak"], "首次改动应留一份 .bak")
+
+        ok, why = main.set_nginx_listen(conf, 18081)
+        self.assertTrue(ok, why)
+        self.assertEqual(conf.read_text(encoding="utf-8"), text1,
+                         "同参数第二次调用改了内容")
+        self.assertEqual(conf.stat().st_mtime_ns, mtime1,
+                         "同参数第二次调用重写了文件（mtime 变了）")
+        self.assertEqual(sorted(p.name for p in self.tmp.glob("*.bak")), baks1,
+                         "同参数第二次调用又多备份了一份")
+
+    def test_nginx_refuses_when_every_listen_line_is_commented(self):
+        """所有 listen 都在注释里时**拒改**，且不写文件。
+
+        与 tomcat 同理：没有生效锚点时必须明确放弃，不能"改到注释里去"
+        然后报告成功。（`replace_all` 那种写法在这里会静默通过 ——
+        报告 §2.4 明确说它只是"碰巧"对，一旦目标口只出现在注释里立刻失效。）
+        """
+        conf = self.tmp / "nginx.conf"
+        conf.write_text(self.NGINX_CONF.replace(
+            "        listen       80;\n",
+            "        #listen       80;\n"), encoding="utf-8")
+        self.assertEqual(self._effective_nginx_listens(
+            conf.read_text(encoding="utf-8")), [],
+            "fixture 前提不成立：应一个生效 listen 都不剩")
+        before = conf.read_bytes()
+        before_mtime = conf.stat().st_mtime_ns
+
+        ok, why = main.set_nginx_listen(conf, 18081)
+        self.assertFalse(ok, "生效 listen 不存在时却报告改成功了")
+        self.assertIn("listen", why, "拒改必须指名要找的指令")
+        self.assertEqual(conf.read_bytes(), before, "拒改却写了文件")
+        self.assertEqual(conf.stat().st_mtime_ns, before_mtime,
+                         "拒改却碰了文件（mtime 变了）")
+        self.assertEqual(list(self.tmp.glob("*.bak")), [],
+                         "拒改却留了 .bak")
+
+    # ================= kafka（5 条） =================
+
+    def test_kafka_start_command_avoids_bat_and_uses_the_libs_wildcard(self):
+        """启动命令**不含 `.bat`**，含 `libs/*` 与 `kafka.Kafka`（三个 OS 都要）。
+
+        两条硬理由（2026-10-06 实测，框架真实安装路径下）：
+          ① `kafka-run-class.bat:188` 把 109 个 jar 拼成一行= 8650 字符，
+             **超过 cmd.exe 的 8191 上限** → rc=255「输入行太长」；
+          ② `kafka-server-start.bat:28` 调 `wmic os get osarchitecture`，
+             wmic 在 Win11 已弃用（本机沙箱直接拦截）。
+
+        直接 spawn java，`-cp` 的 `libs/*` 由 JVM 展开，不受 8191 限制。
+        """
+        for os_name in ("Windows", "Linux", "Darwin"):
+            with self.subTest(os=os_name):
+                cmd = main.LAUNCH_OF["kafka"].commands[os_name]
+                joined = " ".join(cmd).lower()
+                self.assertNotIn(".bat", joined,
+                                 "启动命令里出现 .bat：8191 上限 + wmic 已弃用，"
+                                 "实测 rc=255 起不来")
+                self.assertNotIn("kafka-run-class", joined,
+                                 "启动命令绕回了 kafka-run-class.bat")
+                self.assertNotIn("wmic", joined, "启动命令里出现 wmic（Win11 已弃用）")
+                self.assertTrue(any("libs/*" in t for t in cmd),
+                                f"-cp 必须是 libs/* 通配符：{cmd}")
+                self.assertIn(main.KAFKA_MAIN_CLASS, cmd,
+                              f"必须直接调 {main.KAFKA_MAIN_CLASS}：{cmd}")
+                # classpath 必须在主类之前，否则 JVM 找不到主类。
+                cp_at = next(i for i, t in enumerate(cmd) if "libs/*" in t)
+                self.assertLess(cp_at, cmd.index(main.KAFKA_MAIN_CLASS),
+                                f"classpath 必须排在主类之前：{cmd}")
+
+    def test_kafka_pre_start_formats_kraft_storage_and_stays_idempotent(self):
+        """`pre_start` 含 StorageTool `format` / `--standalone` / `--ignore-formatted`。
+
+        Kafka 4.x 是纯 KRaft，不format 直接 `No readable meta.properties files
+        found.` 起不来。而重复 format 必须幂等 —— 实测**同 uuid + 该 flag ⇒ rc=0**；
+        换成新 uuid 则 `rc=1 Invalid cluster.id`。所以 flag 与 cluster_id 占位符
+        两个都要钉。
+        """
+        pre = main.LAUNCH_OF["kafka"].pre_start
+        self.assertTrue(pre, "kafka 没登记pre_start：不 format 起不来"
+                             "（No readable meta.properties files found.）")
+        joined = " ".join(pre)
+        self.assertIn(main.KAFKA_STORAGE_TOOL, joined,
+                      f"pre_start 必须用 {main.KAFKA_STORAGE_TOOL}：{joined}")
+        self.assertIn("format", pre, "pre_start 必须真的执行 format 子命令")
+        self.assertIn("--standalone", pre,
+                      "单节点必须显式 --standalone（KRaft 单机模式）")
+        self.assertIn("--ignore-formatted",
+                      pre,
+                      "缺 --ignore-formatted 时重复点启动会第二次 format "
+                      "而失败 —— 实测同 uuid + 该 flag 才幂等（rc=0）")
+        self.assertIn("{cluster_id}", pre,
+                      "必须用持久化的 cluster_id 占位符：换 uuid 会被拒"
+                      "（Invalid cluster.id）")
+        # cluster.id 必须落在 data_dir 里由我们管，不能在安装目录。
+        with tempfile.TemporaryDirectory() as td:
+            data = Path(td)
+            first = main.read_or_create_cluster_id(data)
+            second = main.read_or_create_cluster_id(data)
+        self.assertEqual(first, second, "cluster.id 每次都变：broker 会认不出自己的元数据")
+        self.assertEqual(main.kafka_cluster_id_file(self.tmp), self.tmp / "cluster.id")
+
+    def test_kafka_registers_9093_so_a_dead_controller_is_not_reported_running(self):
+        """9093（KRaft controller）必须在 `extra_ports` 里。
+
+        实测 9092 与 9093 同时起、9093 恒先于 9092。只探主口的话，
+        "controller 没起来"这种半死状态会被显示成**运行中**——
+        而 broker 恰恰依赖 controller，这个状态下客户端连得上却发不了消息。
+        """
+        spec = main.LAUNCH_OF["kafka"]
+        self.assertIn(9093, spec.extra_ports,
+                      "9093（KRaft controller）不在 extra_ports 里："
+                      "只探主口会把'controller 没起来'显示成运行中")
+        plan, why = main.choose_ports(
+            spec, is_free=lambda p, host="127.0.0.1": True, evict=False)
+        self.assertIn(9093, plan.all_ports, f"9093 没进端口簇：{plan.all_ports} / {why}")
+        # 方向：9093 是独立基准口（KRaft 固定值），不是主口的偏移。
+        self.assertEqual(spec.port_offsets, (),
+                         "KRaft 的 9093 是独立基准口，不该写成主口偏移")
+
+    def test_kafka_requires_java_17(self):
+        """`min_java_major == 17`。
+
+        实测 jar 内 469 个 class 的 major version 全部 = 61（即 Java 17）。
+        门控值填错的后果是双向的：填 8 会让Java 8 用户点启动后拿到
+        满屏 class 文件版本错误；填 21 则把 17 用户挡在门外。
+        """
+        self.assertEqual(main.LAUNCH_OF["kafka"].min_java_major, 17,
+                         "Kafka 4.x 的 class major version 全是 61(=17)，"
+                         "门控值填错会放行或拦掉错误的 JDK")
+
+    def test_kafka_log_dirs_is_written_as_an_absolute_forward_slash_path(self):
+        """`log.dirs` 必须写成**绝对路径 + 正斜杠**。
+
+        官方默认 `/tmp/kraft-combined-logs` 在 Windows 上解析成 `C:\\tmp\\...`：
+        既不在安装目录也不在数据目录（卸载删不掉、多版本抢同一个目录）。
+        而且目录不存在时 `kafka.Kafka` 直接 rc=1起不来（只有 format 会建目录）。
+
+        正斜杠的另一层理由：properties 里反斜杠是转义符，
+        写 `C:\\tmp` 会被吃掉一段。
+        """
+        conf = self.tmp / "server.properties"
+        conf.write_text("broker.id=1\nlog.dirs=/tmp/kraft-combined-logs\n",
+                        encoding="utf-8")
+        want = (self.tmp / "kafka-data" / "kraft-logs").as_posix()
+        ok, why = main.set_kafka_log_dirs(conf, want)
+        self.assertTrue(ok, why)
+
+        line = [ln for ln in conf.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("log.dirs=")]
+        self.assertEqual(line, [f"log.dirs={want}"],
+                         f"log.dirs 没被写成绝对正斜杠路径：{line}")
+        self.assertNotIn("\\", line[0],
+                         "properties 里反斜杠是转义符，写 C:\\tmp 会被吃掉一段")
+        self.assertFalse(line[0].endswith("/tmp/kraft-combined-logs"),
+                         "仍是官方默认：Windows 上会落到 C:\\tmp\\，"
+                         "既不在安装目录也不在数据目录")
+        self.assertTrue(Path(line[0].split("=", 1)[1]).is_absolute(),
+                        f"log.dirs 必须是绝对路径：{line[0]}")
+
+        # 幂等 + 锚不到就拒改（官方默认写法被改过时必须明确放弃）。
+        text1, mtime1 = conf.read_text(encoding="utf-8"), conf.stat().st_mtime_ns
+        ok, why = main.set_kafka_log_dirs(conf, want)
+        self.assertTrue(ok, why)
+        self.assertEqual(conf.read_text(encoding="utf-8"), text1,
+                         "同值重复调用不该重写文件")
+        self.assertEqual(conf.stat().st_mtime_ns, mtime1,
+                         "同值重复调用不该改 mtime")
+        conf.write_text("broker.id=1\n", encoding="utf-8")
+        ok, why = main.set_kafka_log_dirs(conf, want)
+        self.assertFalse(ok, "文件里没有 log.dirs= 这一行却报告改成功")
+        self.assertIn("log.dirs", why, "拒改必须指名要改哪一行")
+
+    # ================= elasticsearch（5 条） =================
+
+    def test_elasticsearch_disables_xpack_security_on_all_three_os_explained(self):
+        """三个 OS 都带 `-Expack.security.enabled=false`，且 `risk_note` 说明理由。
+
+        这不是"我们图省事"：一键启动是**后台无终端进程**，ES 官方明说此时
+        它无法生成随机密码（`we cannot determine if there is a terminal attached`）。
+        开着认证的后果是**既拿不到密码、也没地方展示** —— 用户看到"运行中"
+        却登不进去。所以必须关掉，且必须在弹窗里说清"启动后没有认证"。
+
+        三个 OS 都要查：只给 Windows 加flag 而漏了 Linux，
+        在别的机器上就是"莫名其妙要密码"。
+        """
+        for os_name in ("Windows", "Linux", "Darwin"):
+            with self.subTest(os=os_name):
+                cmd = main.LAUNCH_OF["elasticsearch"].commands[os_name]
+                self.assertIn("-Expack.security.enabled=false", cmd,
+                              f"{os_name} 的启动命令没关掉 xpack.security："
+                              f"后台无终端进程时 ES 不生成随机密码，"
+                              f"用户既拿不到也没地方展示")
+        note = main.LAUNCH_OF["elasticsearch"].risk_note
+        self.assertIn("xpack", note,
+                      "risk_note 必须说明关掉了 xpack.security —— "
+                      "这是用户点启动前唯一能看到'没有认证'的地方")
+        self.assertTrue("密码" in note or "认证" in note,
+                        "risk_note 必须说清为什么（拿不到随机密码 / 没有认证）")
+        self.assertTrue("终端" in note or "后台" in note,
+                        "risk_note 必须说清关认证的原因是一键启动没有终端")
+
+    def test_elasticsearch_creates_a_copy_but_writes_no_value_into_it(self):
+        """ES 建副本，但**一个值都不往里写**（2026-10-06 改的契约）。
+
+    原契约是 `cli_only` / 一个文件都不建，理由是 `-E` 能覆盖一切 —— 那部分对。
+    但改成 `conf_copy`（只建副本、不写值）之后有个实际好处：
+    用户想手工微调（堆内存、discovery 等）时有地方可改，
+    而**官方那份文件卸载就会被删**。所以断言的是「副本存在但值未被动」。
+
+    端口 / 路径 / 安全开关仍然全靠 `-E`：
+    - `-Ediscovery.type=single-node`（实测不设也能起，只是多 3 秒 + 告警）
+    - `-Expack.security.enabled=false`（无终端进程时 ES 不生成密码）
+    - `-Ehttp.port` / `-Epath.data` / `-Epath.logs`
+    """
+        spec = main.LAUNCH_OF["elasticsearch"]
+        self.assertEqual(spec.port_writeback, "conf_copy")
+        comp, _home = self._installed("elasticsearch")
+        data = self.tmp / "es-data"
+        ok, why, _notes = main.prepare_ports(
+            comp, spec, main.PortPlan(main=9200, extras=(9300,)), data)
+        self.assertTrue(ok, why)
+        copied = data / "conf" / "elasticsearch.yml"
+        self.assertTrue(copied.exists(), "没建副本")
+        # 副本内容必须与官方一致 —— 我们没往里写任何端口/路径
+        original = (_home / "config" / "elasticsearch.yml").read_text(encoding="utf-8")
+        self.assertEqual(copied.read_text(encoding="utf-8"), original,
+                         "ES 的副本必须与官方逐字一致（我们不写任何值，"
+                         "改配置请用启动命令的 -E 参数）")
+
+    def test_elasticsearch_points_path_data_and_logs_at_the_data_dir(self):
+        """`path.data` / `path.logs` 指向 data_dir（数据落在 `~/.env-tools`）。
+
+        不指的后果：数据落在**安装目录内**，卸载/删版本目录会连带删掉，
+        多版本并存还会互相踩（三个版本都能同时起，但抢同一个 data 就废了）。
+        """
+        for os_name in ("Windows", "Linux", "Darwin"):
+            with self.subTest(os=os_name):
+                cmd = main.LAUNCH_OF["elasticsearch"].commands[os_name]
+                self.assertIn("-Epath.data={data_dir}/data", cmd,
+                              f"{os_name} 没把 path.data 指到 data_dir："
+                              f"数据会落在安装目录里，卸载连带删掉")
+                self.assertIn("-Epath.logs={data_dir}/logs", cmd,
+                              f"{os_name} 没把 path.logs 指到 data_dir")
+        # 占位符真的会被展开成 data_dir（而不是原样留着 {data_dir}）。
+        comp, _home = self._installed("elasticsearch")
+        plan = main.build_launch_plan(
+            comp, comp.launch, str(self.tmp / "jdk-17"), 9200,
+            self.tmp / "byte-tools.out")
+        # 注意 `{data_dir}/data` 里斜杠是模板里的字面量，Windows 上仍留正斜杠
+        # —— ES 的path.* 接受混用，断言按真实展开值比对。
+        want_data = f"-Epath.data={self.tmp / 'elasticsearch-data'}/data"
+        self.assertIn(want_data, plan.argv,
+                      "path.data 占位符没展开成真实的 data_dir")
+        self.assertIn(f"-Epath.logs={self.tmp / 'elasticsearch-data'}/logs",
+                      plan.argv, "path.logs 占位符没展开成真实的 data_dir")
+        self.assertNotIn("{data_dir}", " ".join(plan.argv),
+                         "有占位符没被展开：ES 会把字面量 {data_dir} 当目录名")
+
+    def test_elasticsearch_needs_no_external_jdk(self):
+        """`needs == ()` 且 `min_java_major is None`。
+
+        ES **自带 JDK 25 且强制使用、忽略 JAVA_HOME**。填上 `needs=("jdk",)`
+        会让门控在没有外部 JDK 时拦住启动（实测根本不需要），
+        填上 `min_java_major` 则会让版本门控去比对一个 ES 根本不用的 JDK ——
+        两个方向都是把用户挡在门外。
+        """
+        spec = main.LAUNCH_OF["elasticsearch"]
+        self.assertEqual(spec.needs, (),
+                         "ES 自带 JDK 25 且忽略 JAVA_HOME，不该依赖外部 jdk："
+                         "填上 needs 会让没装 JDK 的用户被门控拦住")
+        self.assertIsNone(spec.min_java_major,
+                          "ES 不使用外部 JDK，不该有 JDK 版本门控")
+        # 门控侧的反证：java_home=None 也必须放行。
+        comp = self.comps["elasticsearch"]
+        orig = main.resolve_launch_version
+        main.resolve_launch_version = lambda c: comp.versions[0].version
+        self.addCleanup(setattr, main, "resolve_launch_version", orig)
+        (self.tmp / "es" / f"elasticsearch-{comp.versions[0].version}").mkdir(
+            parents=True, exist_ok=True)
+        ok, why = main.launch_gate(comp, spec, java_home=None)
+        self.assertTrue(ok, f"没有外部 JDK 却拦住 ES：{why}")
+
+    def test_elasticsearch_registers_9300_transport_port(self):
+        """9300（节点间transport）必须在 `extra_ports` 里。
+
+        实测 9200 与 9300 两个都监听。9300 是 transport 口，
+        **不能当探活口**（它是集群内部通信协议，不是 HTTP）——
+        但它没起来时 ES 节点是不完整的，所以要纳入端口簇一起探测。
+        """
+        spec = main.LAUNCH_OF["elasticsearch"]
+        self.assertIn(9300, spec.extra_ports,
+                      "9300（transport）不在 extra_ports 里："
+                      "ES 节点没起全却会被显示成运行中")
+        self.assertEqual(spec.health_path, None,
+                         "ES 的探活口是 HTTP 9200，不该把 9300 当探活路径")
+        plan, why = main.choose_ports(
+            spec, is_free=lambda p, host="127.0.0.1": True, evict=False)
+        self.assertIn(9300, plan.all_ports, f"9300 没进端口簇：{plan.all_ports} / {why}")
+
+    # ================= rocketmq（6 条） =================
+
+    def test_rocketmq_windows_entry_is_the_primary_script_not_run_wrapper(self):
+        """Windows 入口必须是**一级入口 `mqnamesrv.cmd`**，不含 run*.cmd。
+
+        厂商脚本分两级，用错必炸：
+          - 一级 `bin\\mq*.cmd`：开头检查并设置 `ROCKETMQ_HOME`，没设就 `EXIT /B 1`；
+          - 二级 `bin\\runbroker.cmd` / `runserver.cmd`：**纯 `%*` 透传、不设环境变量**，
+            而 BrokerStartup 靠 `ROCKETMQ_HOME` 找 `conf/broker.conf`
+            → 直接 `FileNotFoundException`。
+
+        Linux/Darwin 用 `runserver.sh` 是对的（那边没有 .cmd 两级结构），
+        所以这条只查Windows。
+        """
+        cmd = main.LAUNCH_OF["rocketmq"].commands["Windows"]
+        joined = " ".join(cmd).lower()
+        self.assertIn("mqnamesrv.cmd", joined,
+                      f"Windows 入口必须是一级脚本 mqnamesrv.cmd：{cmd}")
+        self.assertNotIn("runbroker.cmd", joined,
+                         "用了二级脚本 runbroker.cmd：纯 %* 透传、不设 "
+                         "ROCKETMQ_HOME，BrokerStartup 找不到 conf/broker.conf "
+                         "（FileNotFoundException）")
+        self.assertNotIn("runserver.cmd", joined,
+                         "用了二级脚本 runserver.cmd：同上，纯 %* 透传")
+
+    def test_rocketmq_port_lookup_stop_kind_registers_a_launcher_pid(self):
+        """`stop_kind == "port_lookup"` ⇒ `pid_role` 是 **launcher**。
+
+        这条走**真实 `start()`**：只断言 spec 字段的话，
+        有人把 `pid_role="server" if stop_kind == "pid" else "launcher"`
+        改成硬编码 `"server"`，spec 断言照样绿，而登记里会存下一个
+        不能代表服务进程的 PID —— 停止时按它去taskkill 会杀错进程。
+        """
+        self.assertEqual(main.LAUNCH_OF["rocketmq"].stop_kind, "port_lookup",
+                         "RocketMQ 没有可靠的厂商停止手段，只能走端口反查")
+        comp, _home = self._installed("rocketmq")
+        mgr = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": True,
+            http_ok=lambda u, timeout=2.0: True,
+            process_alive=lambda pid: True)
+        res = mgr.start(comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, f"start() 应该成功：{res.state} / {res.reason}")
+        rec = main.load_running_map()["rocketmq"]
+        self.assertEqual(rec.pid_role, "launcher",
+                         "port_lookup 的组件必须登记 launcher："
+                         "mqnamesrv.cmd 是壳进程，登记成 server 会让停止时"
+                         "按错误的 PID 去杀")
+        # 镜像：**真的跑一遍** stop_kind=="pid" 的组件（kafka）。
+        # 这半边不是冗余 —— 它防的是"把 pid_role 硬编码成 launcher"那个变异：
+        # 那样 rocketmq 这条照样绿，但 kafka 会被登记成 launcher，
+        # 而 kafka 的 Popen.pid 就是 broker 进程本身（实测），
+        # 登记成 launcher 就再也没人按这个 PID 去停它了。
+        kcomp, _khome = self._installed("kafka")
+        mgr2 = main.ServiceManager(
+            is_listening=lambda p, host="127.0.0.1": True,
+            http_ok=lambda u, timeout=2.0: True,
+            process_alive=lambda pid: True)
+        kres = mgr2.start(kcomp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(kres.ok, f"kafka start() 应该成功：{kres.state} / {kres.reason}")
+        krec = main.load_running_map()["kafka"]
+        self.assertEqual(main.LAUNCH_OF["kafka"].stop_kind, "pid",
+                         "前提不成立：kafka 是 stop_kind==pid 的那一类")
+        self.assertEqual(krec.pid_role, "server",
+                         "stop_kind=='pid' 的组件必须登记 server："
+                         "它的 Popen.pid 就是服务进程本身（实测 kafka.Kafka "
+                         "直接就是监听 9092 的 java 进程），"
+                         "登记成 launcher 之后就没人按这个 PID 去停它了")
+
+    def test_rocketmq_registers_10909_and_10911_but_not_the_ha_port(self):
+        """10909 + 10911 在 `extra_ports` 里，而 **10912 不在**。
+
+        实测 broker 起来后三个口同时监听，但 10912 是 HA（主备复制）用的，
+        standalone 单机不需要它。列进去的后果是每次启动都要等一个
+        永远不会来的口。
+        """
+        spec = main.LAUNCH_OF["rocketmq"]
+        for port in (10909, 10911):
+            with self.subTest(port=port):
+                self.assertIn(port, spec.extra_ports,
+                              f"{port} 不在 extra_ports 里：broker 端口没纳入探测")
+        self.assertNotIn(10912, spec.extra_ports,
+                         "10912（HA 主备复制口）不该登记：standalone 单机不监听它，"
+                         "列进去会让启动永远等不到")
+        plan, why = main.choose_ports(
+            spec, is_free=lambda p, host="127.0.0.1": True, evict=False)
+        self.assertIn(10909, plan.all_ports, f"10909 没进端口簇：{plan.all_ports}")
+        self.assertIn(10911, plan.all_ports, f"10911 没进端口簇：{plan.all_ports}")
+        self.assertNotIn(10912, plan.all_ports,
+                         f"10912 进了端口簇：{plan.all_ports}")
+
+    def test_rocketmq_needs_no_configuration_writeback(self):
+        """`port_writeback == "cli_only"` —— 不需要改任何配置。
+
+        实测 `conf/broker.conf` 里 **0 处** `listenPort`
+        （端口是代码默认值，只有 `conf/container/*.conf` 那些容器模板才写）。
+        所以既不该建副本，也不该有任何写配置的动作。
+        """
+        spec = main.LAUNCH_OF["rocketmq"]
+        self.assertEqual(spec.port_writeback, "cli_only",
+                         "RocketMQ 的 broker.conf 里0 处 listenPort，"
+                         "不需要改配置（列conf_copy 会平白多建一份副本）")
+        self.assertIsNone(main.conf_writer_of("rocketmq"),
+                          "RocketMQ 不该有端口回写分派器")
+        comp = self.comps["rocketmq"]
+        data = self.tmp / "rmq-data"
+        ok, why, _notes = main.prepare_ports(
+            comp, spec, main.PortPlan(main=9876, extras=(10909, 10911)), data)
+        self.assertTrue(ok, why)
+        self.assertEqual(list(data.rglob("*")) if data.exists() else [], [],
+                         "cli_only 却建了文件：RocketMQ 不需要改任何配置")
+
+    def test_rocketmq_data_note_names_the_store_dir_outside_the_install_dir(self):
+        """`data_note` 提到 `~/store` —— 消息数据不在安装目录内，卸载不删。
+
+        这是卸载确认里必须显示的一句。不写它就是在拿"卸载会清理干净"
+        的承诺说假话：用户卸载完发现 `~/store` 还在那儿，
+        下次装新版本会读到旧消息（storePathRoot 没分开时尤其明显）。
+        """
+        for field in ("data_note", "risk_note"):
+            with self.subTest(field=field):
+                note = getattr(main.LAUNCH_OF["rocketmq"], field)
+                self.assertIn("~/store", note,
+                              f"{field} 必须提到消息数据落在 ~/store："
+                              f"卸载不会删它，不说就是拿承诺说假话")
+                self.assertTrue("卸载" in note,
+                                f"{field} 必须说清卸载会不会删它")
+
+    def test_rocketmq_requires_java_17(self):
+        """`min_java_major == 17`。
+
+        实测 `bin/mqbroker.cmd:14` 有 `if %JAVA_MAJOR_VERSION% lss 17` 分叉。
+        """
+        self.assertEqual(main.LAUNCH_OF["rocketmq"].min_java_major, 17,
+                         "实测 mqbroker.cmd 有 `lss 17` 分叉，门控值必须是 17")
+
+    # ================= rabbitmq（4 条） =================
+
+    def test_rabbitmq_declares_erlang_prereq_and_probes_for_erl(self):
+        """`prereq` 非空、`prereq.key == "erlang"`、probe 探 `erl`。
+
+        实测：Windows zip（31MB）**不含 Erlang**，官方也没有免 Erlang 的
+        Windows 产物；而 `rabbitmq-server.bat` 开头就硬校验
+        `if not exist "!ERLANG_HOME!" + 反斜杠 + `bin` + 反斜杠 + `erl.exe" exit /B 1`
+        —— 缺了它进程**一闪就退**，用户只看到"启动了但没反应"。
+
+        这条钉的是 **key 与 probe 都对**：key 决定"去哪儿装"，
+        probe 决定"怎么判断装没装"。只对一半的话，要么装不上，
+        要么永远判定为"没装"。
+        """
+        prereq = main.LAUNCH_OF["rabbitmq"].prereq
+        self.assertIsNotNone(prereq, "rabbitmq 必须声明 prereq："
+                                     "官方 zip 不含 Erlang")
+        self.assertEqual(prereq.key, "erlang",
+                         "前置依赖的 key 必须是 erlang —— 它决定去哪儿装")
+        self.assertIn("erl", prereq.probe.lower(),
+                      f"probe 必须探 erl，实际是 {prereq.probe!r}："
+                      f"官方脚本自己也是查PATH 里的 erl.exe")
+        self.assertTrue(prereq.install_hint.strip(),
+                        "install_hint 不能为空：用户要靠它判断要不要现在去下 139MB")
+        # 接线反证：缺依赖时门控真的会拦（桩掉 which 制造"没装"）。
+        orig = main.shutil.which
+        main.shutil.which = lambda name, *a, **k: (
+            None if str(name).lower().startswith("erl") else orig(name, *a, **k))
+        self.addCleanup(setattr, main.shutil, "which", orig)
+        comp, _home = self._installed("rabbitmq")
+        ok, why = main.launch_gate(comp, main.LAUNCH_OF["rabbitmq"], java_home=None)
+        self.assertFalse(ok, "缺 Erlang 却放行了 —— rabbitmq-server.bat 会一闪就退")
+        self.assertIn("erl", why.lower(),
+                      f"拦截原因必须指向缺失的可执行文件：{why}")
+
+    def test_rabbitmq_install_hint_warns_about_non_ascii_paths(self):
+        """`prereq.install_hint` 同时提到**中文**与**空格**。
+
+        官方明文：非ASCII 路径会报 `Erlang machine stopped instantly`
+        直接失败。Erlang 默认装到 `C:\\Program Files\\Erlang OTP` ——
+        那个**路径本身带空格**，所以这不是"理论上"的提醒，是绝大多数
+        Windows 用户都会撞上的默认情形。不提前说，用户装完还是起不来，
+        而报错信息(`Erlang machine stopped instantly`) 完全指不出真因。
+        """
+        hint = main.LAUNCH_OF["rabbitmq"].prereq.install_hint
+        self.assertIn("中文", hint,
+                      "install_hint 必须提到中文路径：官方明文非 ASCII 路径会"
+                      "报 `Erlang machine stopped instantly` 直接失败，"
+                      "而那个报错完全指不出真因")
+        self.assertIn("空格", hint,
+                      "install_hint 必须提到空格：Erlang 默认装在"
+                      "C:\\Program Files\\ 下（路径自带空格），"
+                      "这是绝大多数 Windows 用户的默认情形")
+        # 真实报错串要透出来，否则用户搜不到。
+        self.assertTrue("Erlang machine stopped instantly" in hint
+                        or "非 ASCII" in hint,
+                        "install_hint 要给出可搜索的线索"
+                        "（官方原文报错串或'非 ASCII'）")
+
+    def test_rabbitmq_risk_note_pins_otp_27_and_says_26_is_eol(self):
+        """`risk_note` 提到 **27** 与 **EOL**。
+
+        版本联动是硬约束：rabbitmq 4.0.9 要 Erlang 26.2~27.x，
+        而 **26 已 EOL** ⇒ 实际必须 27.x（3.13.7 只能配 26.x，
+        两个 rabbitmq 版本**不能共用一个 Erlang**）。
+        只写"需要 Erlang"的话，用户装 26（当年还是主流）就起不来。
+        """
+        note = main.LAUNCH_OF["rabbitmq"].risk_note
+        self.assertIn("27", note,
+                      "risk_note 必须点名 27：4.0.9 要 26.2~27.x 而 26 已 EOL，"
+                      "实际必须 27.x —— 只写'需要 Erlang'会让装 26 的用户起不来")
+        self.assertIn("EOL", note,
+                      "risk_note 必须说明 26 已 EOL —— 否则用户不明白为什么"
+                      "不能装当年最主流的 26")
+
+    def test_rabbitmq_data_note_names_appdata_outside_the_install_dir(self):
+        """`data_note` 提到 `%APPDATA%` —— Mnesia 数据落在用户主目录。
+
+        不在安装目录里 ⇒ **卸载不会删它**。这条必须显示在卸载确认里：
+        用户卸载完发现 `~/AppData/Roaming/RabbitMQ` 还在，
+        而节点名/队列残留会让下次启动行为诡异（尤其集群相关配置）。
+        """
+        note = main.LAUNCH_OF["rabbitmq"].data_note
+        self.assertIn("%APPDATA%", note,
+                      "data_note 必须提到 %APPDATA%：Mnesia 数据落在用户主目录，"
+                      "不在安装目录内")
+        self.assertTrue("卸载" in note,
+                        "data_note 必须说清卸载不会删它")
 
 
 if __name__ == "__main__":
