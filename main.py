@@ -3790,6 +3790,82 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "本工具暂未启用。"
         ),
     ),
+
+    # ================= 2026-10-06 seata（双进程：控制台 + TC）=================
+    # 每一处的值都来自当天的拆包与真机实测，不是按厂商惯例推的。
+    "seata": LaunchSpec(
+        # ============================================================
+        # 实测（2026-10-06，apache-seata-2.2.0 真机装起来跑通）：
+        # **2.2.0 是单进程**，进程自己带控制台 —— 与 Nacos 同构，不需要第二个进程。
+        #   seata-server（一个进程）= HTTP 控制台 7091 + Netty RPC 8091
+        # 实测证据：
+        #   Tomcat started on port(s): 7091 (http)
+        #   Server started, service listen port: 8091
+        #   GET /            → 200（static/index.html 在 server/lib/seata-console-2.2.0.jar）
+        #   GET /health      → "ok" 200（免鉴权，ignore-urls 里写着它）
+        #   POST /api/v1/auth/login (seata/seata) → 200 + Bearer token
+        #
+        # ⚠️ **2.6.0 不是这个架构**（实测拆包确认）：2.6.0 把控制台拆进了
+        # 独立的 seata-namingserver（8081），server 自己变成 web-application-type: none
+        # （不启 HTTP）。同一份 LaunchSpec 描述不了两种布局，
+        # 所以版本清单里现在只有 2.2.0 —— 见 _seata_cv 那处的注释。
+        # ============================================================
+        commands={"Windows": ["{home}/seata-server/bin/seata-server.bat"],
+                  "Linux":   ["{home}/seata-server/bin/seata-server.sh"],
+                  "Darwin":  ["{home}/seata-server/bin/seata-server.sh"]},
+        # **端口靠环境变量注入，不是命令行 flag**（这是实测逼出来的，别改回去）：
+        # 1. `--server.port=7091` **不行** —— seata-server 有自己的 joptsimple CLI，
+        #    只认 `-p`/`--port`/`--host`/`--storeMode`/…；传 --server.port 会打
+        #      Option error Was passed main parameter '--server.port=7091'
+        #      but no main parameter was defined in your arg class
+        #    然后**进程退出、端口不监听**（和 ActiveMQ 的 task 坑同类）。
+        # 2. 什么都不传也**不行** —— 它有个硬编码兜底口 **7056**
+        #    （conf/application.yml 明明写的 7091，实测照样起在 7056；
+        #     `-p 7091` 也压不住它，改的是 netty 侧）。
+        # 3. `SERVER_PORT=7091` **实测有效**：Spring Boot 的 relaxed binding 认它，
+        #    且优先级压得住那个硬编码兜底（实测 Tomcat initialized with port 7091）。
+        # → 这是本项目第一个"靠 extra_env 传端口"的组件，port_writeback 仍是
+        #   cli_only（我们不碰任何厂商文件）。
+        extra_env={"SERVER_PORT": "{port}"},
+        # 脚本**没有 stop 子命令**（实测 bin 下只有启动入口），走端口反查 + 三重闸。
+        stop_kind="port_lookup",
+        main_port=7091,              # HTTP 控制台口
+        # RPC 口 = server.port + 1000（实测 8091，与 Nacos 的 gRPC 派生同构）。
+        # 整簇探活会等 7091 与 8091 都在听才认定启动成功。
+        port_offsets=(1000,),
+        port_search_span=99,
+        port_writeback="cli_only",   # 不碰厂商文件；端口由上面的 SERVER_PORT 注入
+        console_path="/",            # 实测 GET / 返回 200
+        # 实测 GET /health 返回 "ok"（200，免鉴权）。与 console_path（/）不同，
+        # 所以这里要填 —— 两者相同时填了会被拼成双份（/nacos/nacos 那个坑）。
+        health_path="/health",
+        needs=("jdk",),
+        # 实测 2.2.0 用 **JDK 8 与 JDK 21 都能起来**（class 52，两个版本都跑通了）。
+        min_java_major=8,
+        data_dir_env=None,
+        # 实测启动耗时约 10 秒（Tomcat 就绪 7s + netty 1s），90 秒宽裕。
+        startup_timeout=90,
+        risk_note=(
+            "Seata 监听 0.0.0.0 的 **7091（控制台）与 8091（事务 RPC）**，"
+            "对局域网开放；脚本写死 -Xmx2048m，约占 2GB 内存。"
+            "控制台出厂账号 **seata/seata**（实测 conf/application.yml 的 console.user，"
+            "且实测登录能拿到 token）—— 请尽快改掉。"
+            "事务数据默认走 file 存储（seata.store.mode），卸载组件会**连带删除版本目录**。"
+        ),
+        credentials_hint=(
+            "控制台：http://127.0.0.1:7091/　用户名：seata　密码：seata"
+            "（2.2.0 出厂默认，实测登录成功）。"
+            "改密码：编辑安装目录下 seata-server/conf/application.yml 的 "
+            "console.user.username / password，改完重启生效。\n"
+            "另有一个端口 8091 是事务 RPC（Netty 二进制协议），给微服务客户端连的，"
+            "浏览器打不开属正常。"
+        ),
+        data_note=("事务会话与全局锁默认走 file 存储（conf/application.yml 的 "
+                   "seata.store.mode: file），落点由该配置项决定；"
+                   "日志默认在 ~/logs/seata（实测启动日志里写明了这个路径）。"
+                   "**卸载只删版本目录** —— 若你把 store 配到了安装目录内，"
+                   "那份数据会跟着没；配在外面则不受影响。"),
+    ),
 }
 
 LAUNCH_KEYS = set(LAUNCH_OF)
@@ -4290,20 +4366,37 @@ def build_components() -> List[Component]:
 
     # ------------------ Seata ------------------
     # 按 R1 规则：URL 走国内 GitHub 加速优先 + 末位 GitHub releases 回退（共 2 加速 + 1 官网）
-    # Seata 是 Apache 孵化项目（分布式事务），在 GitHub releases 发布，国内无官方镜像；
-    # 解压后根目录为 apache-seata-<v>-incubating-bin/（2.x），内部含 bin/ 子目录
-    # exec_name="seata-server"：对应 seata-server.sh / seata-server.bat
+    # Seata 是 Apache 孵化项目（分布式事务），在 GitHub releases 发布，国内无官方镜像。
+    #
+    # **包结构（2026-10-06 实测，两个版本都拆开看过）**：
+    #   2.6.0：tar 里有一个统一顶层目录 apache-seata-2.6.0-incubating-bin/；
+    #   2.2.0：tar 里**没有**统一顶层目录，直接是 seata-server/ + seata-namingserver/。
+    #   两种情况下最终 install_dir 内都是 `seata-server/` 与 `seata-namingserver/`
+    #   两个子目录 —— **顶层没有 bin/**。
+    #
+    # 所以 path_subdir 必须是 "seata-server/bin"。原来写 "bin" 是从 1.x 的布局
+    # 凭印象推的，实测后 seata-server.bat 根本不在那个位置：装完 seata 会被判成
+    # 未安装（绿勾不显示），启停门控也直接拦住。
     components.append(
         Component(
             key="seata",
             display_name="Seata",
             env_var="SEATA_HOME",
-            path_subdir="bin",
+            path_subdir="seata-server/bin",
             exec_name="seata-server",  # Seata 启动脚本（seata-server.sh / seata-server.bat）
             version_args=["--version"],
             # seata-server 脚本一执行就会拉起 Seata 服务，探测阶段绝不执行
             version_probe=False,
-            versions=[_seata_cv(v) for v in ("2.6.0", "2.2.0")],
+            # **版本清单只有 2.2.0**（2026-10-06 决定）：
+            # 实测发现 **2.6.0 与 2.2.0 是两个不同的架构** ——
+            #   2.2.0：单进程，server 自己带 HTTP 控制台（7091）+ RPC（8091）；
+            #   2.6.0：控制台被拆进独立的 seata-namingserver（8081），
+            #          server 变成 web-application-type: none，自己不启 HTTP。
+            # 一个 LaunchSpec 只能描述一种布局，登记 2.6.0 会让启动探活
+            # 等一个根本不存在的 7091，表现为"启动超时、控制台打不开"。
+            # 要加回 2.6.0 就得先让 spec 支持**按版本分叉**，在那之前不放进来 ——
+            # 宁可少一个版本，也不给用户一个装了就起不来的选项。
+            versions=[_seata_cv("2.2.0")],
             data_note=("事务日志（undo_log）与 server 存储落在各实例配置指定的存储里；"
                        "本工具未实测默认落点，以你的配置为准。"
                        "切换生效版本不会动它，多版本并存时各版本的配置互不覆盖。"),

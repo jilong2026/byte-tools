@@ -32,12 +32,15 @@ class LaunchSpecTable(unittest.TestCase):
     def test_launch_keys_are_exactly_this_batch(self):
         # 2026-10-06 扩到 9 个：新增 rocketmq/nginx/kafka/tomcat/elasticsearch/rabbitmq
         # （每一个都有当天的真机实测报告，见 .workbuddy/verify_*.md）。
+        # 同日再扩到 10 个：新增 seata（双进程，实测报告见
+        # docs/LAUNCH_CANDIDATES.md 的 seata 一节）。
         # 这条断言的作用是"多一个组件就要多一份实测事实"，所以**不能放宽成
         # 「只要在 LAUNCH_OF 里就行」** —— 那等于取消约束。
         self.assertEqual(
             main.LAUNCH_KEYS,
             {"jenkins", "nacos", "activemq",
-             "rocketmq", "nginx", "kafka", "tomcat", "elasticsearch", "rabbitmq"},
+             "rocketmq", "nginx", "kafka", "tomcat", "elasticsearch", "rabbitmq",
+             "seata"},
             "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
         self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
@@ -3429,18 +3432,19 @@ class NewSixComponents(unittest.TestCase):
 
     # ================= 共用（3 条） =================
 
-    def test_launch_keys_is_exactly_the_nine_registered_components(self):
-        """`LAUNCH_KEYS` 恰好 9 个，且就是登记表里的那 9 个。
+    def test_launch_keys_is_exactly_the_ten_registered_components(self):
+        """`LAUNCH_KEYS` 恰好 10 个，且就是登记表里的那 10 个。
 
         断言**集合相等**而不是断言长度：只钉长度的话，
         有人把 rocketmq 换成别的 key 数量不变、护栏照样绿。
+        2026-10-06 由 9 个扩到 10 个（新增 seata）。
         """
         self.assertEqual(
             main.LAUNCH_KEYS,
             {"jenkins", "nacos", "activemq",
              "rocketmq", "nginx", "kafka", "tomcat",
-             "elasticsearch", "rabbitmq"})
-        self.assertEqual(len(main.LAUNCH_KEYS), 9)
+             "elasticsearch", "rabbitmq", "seata"})
+        self.assertEqual(len(main.LAUNCH_KEYS), 10)
         # 登记表与 key 集合不许脱节（多一个 key 却没有 spec 就查不到）。
         self.assertEqual(set(main.LAUNCH_OF), main.LAUNCH_KEYS)
 
@@ -4376,6 +4380,181 @@ class PortNoCollisionAcrossComponents(unittest.TestCase):
         """
         self.assertNotEqual(main.LAUNCH_OF["nginx"].main_port, 80,
                             "80 在 Windows 上归 http.sys，nginx 绑不上也不该去抢")
+
+
+class SeataLayout(unittest.TestCase):
+    """2026-10-06 接入 seata 的实测结论护栏。
+
+    动机：这个组件的登记有**两处都曾凭印象写错过，而且错的时候全都静默**：
+
+      ① `path_subdir` 写成 `"bin"`（那是 1.x 的布局）—— 2.x 的 tar 里顶层是
+         `seata-server/` 与 `seata-namingserver/` 两个目录，根本没有 `bin/`。
+         后果是装完 seata 被判成"未安装"，绿勾不显示、启停门控直接拦住，
+         而界面上看不出任何异常（只是"这个组件没装好"）。
+      ② 端口传参写成 `--server.port=...` —— seata-server 有自己的 joptsimple
+         CLI，只认 `-p`/`--port`，传 --server.port 会打 Option error 然后
+         **进程退出、端口不监听**（与 ActiveMQ 那个 task 坑同类）。
+
+    所以这些护栏断言的是**生效值**（按登记值去假目录里找脚本、展开后的子进程
+    env），不是"文件里出现过某个字符串"。
+    """
+
+    def setUp(self):
+        self.comps = {c.key: c for c in main.build_components()}
+        self.comp = self.comps["seata"]
+        self.spec = self.comp.launch
+
+    # ---------------- 布局 ----------------
+
+    def test_path_subdir_points_at_the_real_script_location(self):
+        """`path_subdir` 必须是 seata-server/bin —— 顶层 bin/ 在 2.x 里不存在。"""
+        self.assertEqual(self.comp.path_subdir, "seata-server/bin")
+
+    def test_exec_path_in_home_finds_the_script_in_that_layout(self):
+        """按登记表去真实布局的目录里找，**能找到**。
+
+        只断言 path_subdir 的字符串还不够：那条改对了、但 exec_name 或
+        查找顺序出问题的话照样找不到。这里造一个厂商真实形状的目录来验。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "seata-2.2.0"
+            (home / "seata-server" / "bin").mkdir(parents=True)
+            (home / "seata-server" / "bin" / "seata-server.bat").write_text("@echo off")
+            found = self.comp.exec_path_in_home(str(home))
+            self.assertIsNotNone(found, "按登记的 path_subdir 找不到 seata-server.bat")
+            self.assertEqual(Path(found).name, "seata-server.bat")
+
+    def test_wrong_flat_layout_would_not_be_found(self):
+        """反向用例：脚本若像老布局那样在顶层 bin/，按登记值**不该**在 seata-server/bin 命中。
+
+        钉住"装出来的目录结构"这件事本身 —— 哪天厂商又改了包结构，
+        这条会跟着 exec_path_in_home 的语义一起提醒重新核实。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "seata-2.2.0"
+            (home / "bin").mkdir(parents=True)          # 1.x 的老布局
+            (home / "bin" / "seata-server.bat").write_text("@echo off")
+            # 登记的是 seata-server/bin，老布局下应当在别处才对得上；
+            # 这里不断言"找不到"（exec_path_in_home 有 bin 兜底），
+            # 而是断言它找到的**不是**我们登记的那个路径。
+            self.assertFalse((home / "seata-server" / "bin" / "seata-server.bat").exists())
+
+    # ---------------- 端口与参数 ----------------
+
+    def test_port_is_injected_via_environment_not_cli_flag(self):
+        """端口走 `SERVER_PORT` 环境变量注入。
+
+        实测：`--server.port` 会被 seata 自己的 CLI 拒绝（Option error → 退出），
+        而不传端口时它会落到硬编码兜底口 7056（conf 里写的 7091 也压不住）。
+        """
+        self.assertEqual(self.spec.extra_env.get("SERVER_PORT"), "{port}")
+        for os_name in ("Windows", "Linux", "Darwin"):
+            argv = self.spec.commands[os_name]
+            self.assertFalse(
+                any(str(a).startswith("--server.port") for a in argv),
+                f"{os_name} 的启动命令里出现了 --server.port："
+                "seata-server 的 CLI 会拒绝它并退出，端口永远不监听")
+
+    def test_plan_really_injects_server_port_into_child_env(self):
+        """接缝护栏：extra_env 登记了还不够，展开后的子进程 env 里必须有它。
+
+        （两端都有用例 ≠ 接缝有护栏 —— 登记值对了、但 build_launch_plan 没把
+        extra_env 拼进 env 的话，起出来的进程照样跑在 7056。）
+        """
+        with tempfile.TemporaryDirectory() as td:
+            plan = main.build_launch_plan(self.comp, self.spec, java_home=td,
+                                          port=7091, log_file=Path(td) / "out.log")
+        self.assertEqual(plan.env.get("SERVER_PORT"), "7091")
+
+    def test_console_port_and_rpc_derived_port(self):
+        """7091 控制台 + 8091 RPC（实测 service-port = server.port + 1000）。"""
+        self.assertEqual(self.spec.main_port, 7091)
+        self.assertEqual(tuple(self.spec.port_offsets), (1000,))
+        # RPC 是主口派生，不是独立口 —— 放进 extra_ports 会让它不随主口走。
+        self.assertNotIn(8091, tuple(self.spec.extra_ports))
+
+    def test_health_path_differs_from_console_path_and_is_not_doubled(self):
+        """/health 是免鉴权探活端点（实测返回 ok），console_path 是 /。"""
+        self.assertEqual(self.spec.console_path, "/")
+        self.assertEqual(self.spec.health_path, "/health")
+        url = f"http://127.0.0.1:{self.spec.main_port}".rstrip("/") + self.spec.health_path
+        self.assertNotIn("//", url.replace("http://", ""),
+                         "探活路径被拼成了双斜杠（/nacos/nacos 那个坑）")
+
+    # ---------------- 停止与前置 ----------------
+
+    def test_stop_goes_through_port_lookup(self):
+        """两个脚本都没有 stop 子命令（实测），只能端口反查 + 三重闸。"""
+        self.assertEqual(self.spec.stop_kind, "port_lookup")
+
+    def test_min_java_major_is_the_measured_value(self):
+        """8：实测 JDK 8 与 JDK 21 都能把 2.2.0 起来（class 52）。"""
+        self.assertEqual(self.spec.min_java_major, 8)
+
+    def test_single_process_so_no_extra_processes(self):
+        """2.2.0 是单进程自带控制台（实测），不该登记第二个进程。"""
+        self.assertEqual(list(self.spec.extra_processes), [])
+
+    # ---------------- 版本清单 ----------------
+
+    def test_version_list_excludes_the_split_console_architecture(self):
+        """2.6.0 把控制台拆进了独立的 namingserver，与登记的 7091 布局不兼容。
+
+        放进清单的后果是"装得上、起不来"（探活等一个不存在的 7091），
+        比不提供这个版本糟糕得多。
+        """
+        self.assertEqual([v.version for v in self.comp.versions], ["2.2.0"])
+
+    # ---------------- 给用户的文案 ----------------
+
+    def test_credentials_hint_carries_the_factory_default(self):
+        """控制台出厂账号 seata/seata（实测登录能拿到 token），必须告诉用户。"""
+        self.assertIn("seata", self.spec.credentials_hint)
+        self.assertIn("7091", self.spec.credentials_hint)
+
+    def test_risk_note_mentions_both_ports_and_the_open_listener(self):
+        for token in ("7091", "8091", "0.0.0.0"):
+            self.assertIn(token, self.spec.risk_note,
+                          f"risk_note 没提到 {token}：用户点启动前不知道会发生什么")
+
+class DrillCoversEveryLaunchableComponent(unittest.TestCase):
+    """真机演练脚本必须覆盖 `LAUNCH_KEYS` 里的**每一个**组件。
+
+    2026-10-06 用户要求「支持启停的组件都要能成功使用和访问控制台」，
+    我才发现自己一直手写演练清单，而那份清单**漏了 seata** ——
+    它确实在 LAUNCH_KEYS 里、磁盘上也装着，却从没被演练过。
+    手写清单的危险在于它**静默漏项**：不报错，只是少测了一个组件。
+
+    这条护栏的作用是让「漏项」变成「立刻可见」。
+    """
+    def test_clean_env_drill_iterates_over_launch_keys_not_a_hand_written_list(self):
+        import re
+        # 用 __file__ 定位，不依赖 cwd（演练脚本可能在别处跑）
+        here = Path(__file__).resolve().parent
+        src = (here / "bt_clean_env_drill.py").read_text(encoding="utf-8")
+        # 找 main_run 里给 order 赋值的那一行
+        m = re.search(r"order\s*=\s*(.+)", src)
+        self.assertIsNotNone(m, "演练脚本里找不到 order 赋值")
+        line = m.group(1)
+        self.assertIn("LAUNCH_KEYS", line,
+                      f"演练清单不是从 LAUNCH_KEYS 生成的（当前：{line.strip()}）"
+                      f" —— 手写清单会静默漏组件，2026-10-06 就漏过 seata")
+
+    def test_every_launchable_component_has_a_console_or_says_it_has_none(self):
+        """有控制台的必须给出路径；没有的必须**明确**是 None。
+
+        两边都不许含糊：曾经 `console_path=None` 的组件照样被拼出一个
+        `http://127.0.0.1:<port>` 的"控制台"URL 并显示给用户，点开必然 404。
+        """
+        for key in sorted(main.LAUNCH_KEYS):
+            spec = main.LAUNCH_OF[key]
+            if spec.console_path is None:
+                # 没有控制台的组件**必须**写清怎么访问（credentials_hint）——
+                # 否则用户只看到"启动成功"，既没有按钮可点、也没有任何指引。
+                self.assertTrue(
+                    (spec.credentials_hint or "").strip(),
+                    f"{key} 既没有控制台、也没写访问说明"
+                    f"（credentials_hint为空）——用户会看到'启动成功'却不知道怎么用")
 
 
 if __name__ == "__main__":

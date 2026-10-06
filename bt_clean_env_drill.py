@@ -75,7 +75,7 @@ def run_one(key: str) -> tuple:
         ok = _probe_cmd(spec, comp, rec)
         detail.append(f"协议探活={ok}")
     else:
-        url = f"http://127.0.0.1:{rec.port}{spec.console_path or ''}"
+        url = _probe_url(rec.port, spec)
         ok = _wait_http(rec.port, spec)
         detail.append(f"{url} = {ok}")
 
@@ -97,16 +97,34 @@ def run_one(key: str) -> tuple:
     return verdict, " | ".join(detail)
 
 
-def _wait_http(port: int, spec, rounds: int = 30, gap: float = 4.0) -> bool:
+def _probe_url(rec_port: int, spec) -> str:
+    """探活 URL：探活路径与控制台路径**不同时**要拼上 health_path。
+
+    2026-10-06 用户报「Jenkins 显示起来了但打不开」后定位：
+    Jenkins 未初始化时根路径 `/` 返回 **403**（要引导去解锁向导），
+    而 `/login` 返回 200 —— 产品登记表里 `health_path="/login"` 就是为此存在的
+    （LaunchSpec.health_path 的字段说明：「探活路径与控制台路径不同时才填」）。
+    我这个演练脚本一开始直接探 `/`，于是把一个**完全正常的 Jenkins**
+    判成"打不开"。产品侧 `ServiceManager.status()` 走的是对的（它会用 health_path），
+    是演练脚本没照做。
+    """
+    base = f"http://127.0.0.1:{rec_port}{spec.console_path or ''}"
+    health = spec.health_path or ""
+    if health and health != spec.console_path:
+        return base.rstrip("/") + health
+    return base
+
+
+def _wait_http(port: int, spec, rounds: int = 45, gap: float = 4.0) -> bool:
     """有界重试 HTTP 探活。
 
-    轮数是按**实测最慢的组件**定的：Jenkins 要 1-2 分钟（Jetty 先 bind、
-    后端还在初始化）。30 轮 x 4 秒 = 120 秒，够用。
+    轮数按**实测最慢的组件**定：Jenkins 要 1-2 分钟（Jetty 先 bind、
+    后端还在初始化）。45 轮 x 4 秒 = 180 秒，够用。
     有控制台的用 http_ok（页面能用），没控制台的用 http_responds（404 也算活）。
     """
-    url = f"http://127.0.0.1:{port}{spec.console_path or ''}"
+    url = _probe_url(port, spec)
     check = main.http_ok if spec.console_path else main.http_responds
-    for i in range(rounds):
+    for _ in range(rounds):
         try:
             if check(url):
                 return True
@@ -149,8 +167,11 @@ def _probe_cmd(spec, comp, rec) -> bool:
 
 
 def main_run() -> int:
-    order = ["nacos", "activemq", "jenkins", "tomcat", "kafka",
-             "rocketmq", "elasticsearch", "rabbitmq", "nginx"]
+    # **以 LAUNCH_KEYS 为准，不要手写清单**（2026-10-06 用户要求
+    # 「支持启停的组件都要能成功使用」时发现的）：我手写的清单漏了 seata，
+    # 而它确实在 LAUNCH_KEYS 里、磁盘上也装着 —— 手写清单会静默漏掉组件。
+    # 排序只为输出好看一点，不影响覆盖。
+    order = sorted(main.LAUNCH_KEYS)
     if len(sys.argv) > 1:
         order = [k for k in sys.argv[1:] if k in order]
     print(f"干净环境：已剔除 {len(DIRTY)} 个 *_HOME/CLASSPATH 变量")
