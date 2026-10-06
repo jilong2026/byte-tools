@@ -3139,9 +3139,6 @@ class LaunchSpec:
     # 一个持久化的 cluster.id —— 换 uuid 会 `rc=1 Invalid cluster.id`，
     # 所以这个命令的产物要落在 data_dir 里由我们管。
     pre_start: List[str] = field(default_factory=list)
-    # 前置命令跑完之后必须为真的判定（如"启动成功"标志串出现在日志里）。
-    # 空列表表示不判定；探活只看端口。
-    pre_start_ready_markers: List[str] = field(default_factory=list)
     # 前置依赖（rabbitmq → Erlang）。为空表示不需要外部运行时。
     prereq: Optional["PrereqSpec"] = None
 
@@ -5388,29 +5385,59 @@ def set_tomcat_ports(server_xml: Path, http_port: int,
         return False, f"读不到 {server_xml.name}：{exc}"
     text = raw.decode("utf-8", errors="replace")
 
-    # 1) 抹掉注释块（等长空格替换 → 行号/偏移不变，文件不会因为我们而变形）
-    def blank(m) -> str:
-        return re.sub(r"[^\r\n]", " ", m.group(0))
-    clean = _re.sub(r"<!--.*?-->", blank, text, flags=_re.S)
+    # 1) 记下注释块的区间，**但原文本一个字节都不动**。
+    #    第一版这里把 <!--...--> 整块替换成等长空格再整体写回——
+    #    端口是改对了，可**注释内容全被抹掉**（8 个注释块变 0 个）。
+    #    字节数不变不等于没破坏：用户打开配置看到的是一片空白。
+    spans = [m.span() for m in _re.finditer(r"<!--.*?-->", text, flags=_re.S)]
 
-    # 2) 找 HTTP Connector 的 port（按 protocol 锚，不靠出现顺序）
-    http_re = _re.compile(
-        r'(<Connector\b[^>]*?protocol="HTTP/1\.1"[^>]*?\bport=")(\d+)(")', re.S)
-    m = http_re.search(clean)
-    if not m:
-        return False, (f"{server_xml.name} 里找不到 protocol=\"HTTP/1.1\" 的 Connector"
-                       f"（官方默认写法被改过）。请手工把 HTTP 端口改成 {http_port} 后再启动。")
-    if m.group(2) != str(http_port):
-        clean = clean[:m.start(2)] + str(http_port) + clean[m.end(2):]
+    def in_comment(pos: int) -> bool:
+        """该偏移是否落在注释块内。注释里的候选一律跳过 —— 改它不生效还污染文件。"""
+        return any(a <= pos < b for a, b in spans)
 
-    # 3) shutdown 端口：注释外**第一个** port=（实测就是 :22 那一行）。
-    #    必须一起改 —— 只改主端口时，若另一实例占着 8005，
-    #    新实例会 bind 失败自杀，而 shutdown.bat 会去杀掉 8005 的真正持有者
+    # 2) 找 HTTP Connector 的 port（取**第一个未被注释的** <Connector>）。
+    #    先摘出整个标签再在标签内找 port：厂商原文是
+    #    `<Connector port="8080" protocol="HTTP/1.1"`（**port 在 protocol 之前**），
+    #    写成 `protocol=...port=` 那种顺序依赖的正则会一个都匹配不上、
+    #    返回"找不到 Connector"，端口永远改不动。属性顺序不是厂商承诺。
+    out = text
+    conn = next((cm for cm in _re.finditer(r"<Connector\b[^>]*>", text, _re.S)
+                 if not in_comment(cm.start())), None)
+    if conn is None:
+        # 措辞要指名要找的锚（protocol="HTTP/1.1"）：说"找不到 Connector"，
+        # 用户不知道该去改哪一行。护栏 test_tomcat_refuses_and_writes_nothing_
+        # when_no_live_http_connector 钉的就是这一句。
+        return False, (f"{server_xml.name} 里找不到**未被注释的** "
+                       f"<Connector port=... protocol=\"HTTP/1.1\"> 标签"
+                       f"（官方默认写法被改过，或整段被注释掉了）。"
+                       f"请手工把生效的那个 HTTP Connector 端口改成 {http_port} 后再启动。")
+    tag = conn.group(0)
+    if 'protocol="HTTP/1.1"' not in tag:
+        return False, (f"{server_xml.name} 里第一个生效的 <Connector> 不是 "
+                       f"protocol=\"HTTP/1.1\"（实际是 {tag[:80]}）。"
+                       f"本工具不猜该改哪个，请手工把 HTTP 端口改成 {http_port} 后再启动。")
+    pm = _re.search(r'\bport="(\d+)"', tag)
+    if not pm:
+        return False, (f"{server_xml.name} 的 HTTP Connector 里没有 port 属性"
+                       f"（官方默认写法被改过）。请手工改成 {http_port} 后再启动。")
+    if pm.group(1) != str(http_port):
+        at = conn.start() + pm.start(1)
+        out = out[:at] + str(http_port) + out[at + len(pm.group(1)):]
+
+    # 3) shutdown 端口：未被注释的 <Server ...> 里的 port（实测是第22 行那一处）。
+    #    **必须一起改** —— 只改主端口时，若另一实例占着 8005，
+    #    新实例 bind 失败自杀，而 shutdown.bat 会去杀掉 8005 的真正持有者
     #    并返回 rc=0，看起来完全成功。
-    sd = _re.search(r'<Server\b[^>]*?\bport="(\d+)"', clean, _re.S)
-    if sd and sd.group(1) != str(shutdown_port):
-        clean = clean[:sd.start(1)] + str(shutdown_port) + clean[sd.end(1):]
+    for sm in _re.finditer(r"<Server\b[^>]*>", text, _re.S):
+        if in_comment(sm.start()):
+            continue
+        sp = _re.search(r'\bport="(\d+)"', sm.group(0))
+        if sp and sp.group(1) != str(shutdown_port):
+            at = sm.start() + sp.start(1)
+            out = out[:at] + str(shutdown_port) + out[at + len(sp.group(1)):]
+        break
 
+    clean = out
     if clean == text:
         return True, ""                        # 已经是目标值：一个字节都不写
     _backup_once(server_xml)
@@ -5887,7 +5914,11 @@ def process_is_alive(pid: int) -> bool:
 @dataclass
 class LaunchStatus:
     """组件当前运行状态。state 取值：
-    not_installed_or_stopped / running / zombie（登记在但端口不在听了）"""
+    not_installed_or_stopped / running / zombie（登记在但端口不在听了）
+
+    注意别和 StartResult.state 混：后者的枚举是
+    gate / port / writeback / **prestart** / running / timeout / spawn，
+    其中 prestart（前置准备失败，如 kafka 的 KRaft format 没过）是 2026-10-06 加的。"""
     state: str
     record: Optional[RunRecord] = None
     reason: str = ""
@@ -5901,6 +5932,13 @@ class LaunchPlan:
     cwd: Path
     log_file: Path
     console_url: str
+    # 实际用的端口。2026-10-06 加：pre_start（如 kafka 的 format）要与命令
+    # 共享同一份 mapping，端口从 argv 里反解不可靠（有的命令根本不传端口），
+    # 所以由 build_launch_plan 显式记下来。
+    port: int = 0
+    # 实际使用的 JAVA_HOME。2026-10-06 加：pre_start 与命令必须用**同一个** java，
+    # 各解析一次可能拿到不同结果（JAVA_HOME 环境变量可能在两秒内被改）。
+    java_home: str = ""
 
 
 @dataclass
@@ -5969,6 +6007,14 @@ def launch_gate(comp: Component, spec: LaunchSpec,
         return False, "启动需要先有 JDK：在本工具里装一个 JDK（推荐 17），再回来点启动。"
     if not comp.versions:
         return False, "该组件还没有可启动的版本"
+    # 前置依赖（2026-10-06 新增，目前只有 rabbitmq → Erlang）。
+    # 必须在门控就拦：rabbitmq-server.bat 开头 `if not exist erl.exe exit /B 1`，
+    # 缺依赖时它会**一闪就退**，用户只看到"启动了但没反应"。
+    # 与"起不来"不同，这类必须在按启动之前就说清要装什么。
+    if spec.prereq is not None:
+        ok_prereq, why_prereq = check_prereq(spec.prereq)
+        if not ok_prereq:
+            return False, why_prereq
     if resolve_launch_version(comp) is None:
         # 这条以前不存在，于是"候选清单里有、磁盘上没装"会一路走到 spawn 才炸。
         # 现在在门控就说清是"没装"，并直接给出可点的下一步。
@@ -5977,6 +6023,103 @@ def launch_gate(comp: Component, spec: LaunchSpec,
                        f"没法启动（可选版本：{shown}）。"
                        f"请先在本工具里点「下载并安装」装一个版本，再回来点启动。")
     return True, ""
+
+
+def check_prereq(prereq: PrereqSpec) -> Tuple[bool, str]:
+    """前置依赖是否就位。
+
+    判据是"宿主上能不能找到那个可执行文件"（`shutil.which`）——
+    官方脚本自己也是这么查的（rabbitmq 的 `rabbitmq-env.bat` 会用 PowerShell
+    探测 PATH 里的 erl.exe），所以我们与它的判断口径一致。
+
+    实测背景：Erlang **国内镜像站没有**（阿里云 /erlang/ 是源码镜像、清华 404），
+    只能走 GitHub 的 139MB 安装包 —— 慢是已知的honest，不能假装它不存在。
+    """
+    probe = prereq.probe or ""
+    if not probe:
+        return True, ""
+    found = shutil.which(probe)
+    if found:
+        return True, ""
+    # 文案坑（2026-10-06 护栏抓出来的）：我第一版写的是
+    #     where = f"已装（{probe}）"     ← 走到这里必然是"没找到"
+    # 于是渲染成「找不到 erl.exe。…当前状态：已装（erl.exe）」——
+    # **同一句话里既说找不到又说已装**。三目也写反了，且 `if probe else ""` 是死条件
+    # （上面已 return 掉空 probe）。
+    # 另外 hint 末尾没跟分隔符，渲染成「去装 Erlang当前状态：…」。
+    return False, (f"{prereq.key} 还没就位：找不到 {probe}（当前状态：未找到）。\n\n"
+                   f"{prereq.install_hint}")
+
+
+def check_prereq_for(comp: Component, spec: LaunchSpec) -> Tuple[bool, str]:
+    """按组件查前置依赖，没有就返回 (True, "")。给 UI 层复用。"""
+    if spec.prereq is None:
+        return True, ""
+    return check_prereq(spec.prereq)
+
+
+def run_pre_start(comp: Component, spec: LaunchSpec, plan: LaunchPlan,
+                  timeout: int = 300) -> Tuple[bool, str, List[str]]:
+    """跑 LaunchSpec.pre_start 里的前置命令（如 kafka 的 KRaft format）。
+
+    返回 (是否成功, 失败原因, 提示行)。
+
+    为什么必须在这里、且必须在 spawn 之前：
+      - kafka 不 format 直接起不来（实测 `No readable meta.properties files found.`）；
+      - 配了 `--ignore-formatted` 所以**重复 format 是幂等的**（实测 rc=0），
+        不必担心"点两次启动会不会搞坏"；
+      - cluster.id 存在 data_dir 里、复用同一个 uuid
+        （换 uuid 会被拒：`Invalid cluster.id`）。
+
+    失败时**不 spawn**：宁可明确告诉用户"format 失败"，也不要拉起一个必然起不来的进程。
+    """
+    notes: List[str] = []
+    if not spec.pre_start:
+        return True, "", notes
+    mapping = _plan_mapping(comp, spec, plan)
+    argv = [t.format(**mapping) for t in spec.pre_start]
+    try:
+        proc = subprocess.run(argv, cwd=plan.cwd, env=plan.env,
+                              capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"前置准备超过 {timeout} 秒没结束，已放弃启动。", notes
+    except OSError as exc:
+        return False, f"跑前置准备失败：{exc}", notes
+    if proc.returncode != 0:
+        tail = ((proc.stdout or b"").decode("utf-8", "replace")
+                + (proc.stderr or b"").decode("utf-8", "replace")).strip()
+        return False, (f"前置准备失败（退出码 {proc.returncode}），已放弃启动。"
+                       f"命令：{' '.join(argv[:3])} …"
+                       f"输出末尾：{tail[-400:]}"), notes
+    notes.append("已完成存储/存储目录初始化（前置准备）。")
+    return True, "", notes
+
+
+def _plan_mapping(comp: Component, spec: LaunchSpec, plan: LaunchPlan) -> dict:
+    """重建 build_launch_plan 用的 mapping，让 pre_start 与命令共享同一份替换表。
+
+    单独抽出来是因为两处必须给出一致的值 —— 尤其 {cluster_id}：
+    format 用了uuid A 而 kafka.Kafka 用 uuid B 的话，broker 认自己的 meta.properties，
+    format 白做（实测会 `Invalid cluster.id`）。
+    """
+    version = resolve_launch_version(comp) or comp.versions[0].version
+    home = comp.install_dir(version)
+    data_dir = CONFIG_DIR / f"{comp.key}-data"
+    # java_home 必须复用 plan 上的（2026-10-06 护栏抓出来的）：start() 已经算好并
+    # 传给 build_launch_plan 了，我若再解析一次，① {java} 可能与实际 spawn 的
+    # java 不是同一个；② 每个组件每点一次启动就多构建一次全量组件表。
+    java_home = plan.java_home or resolve_java_home({c.key: c for c in build_components()}) or ""
+    return {
+        "java": str(Path(java_home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")),
+        "war": str(home / "jenkins.war"),
+        "home": str(home),
+        "data_dir": str(data_dir),
+        "conf_dir": str(data_dir / "conf"),
+        "conf": str(config_file_for(comp, data_dir)),
+        "port": str(plan.port),
+        "log_file": str(plan.log_file),
+        "cluster_id": read_or_create_cluster_id(data_dir),
+    }
 
 
 def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
@@ -6002,8 +6145,12 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
         "home": str(home),
         "data_dir": str(data_dir),
         "conf_dir": str(data_dir / "conf"),
+        "conf": str(config_file_for(comp, data_dir)),
         "port": str(port),
         "log_file": str(log_file),
+        # kafka 的 KRaft format 需要一个**持久化**的 cluster.id：换 uuid 会被拒
+        # （Invalid cluster.id）。所以它进 mapping 而不是每次现生成。
+        "cluster_id": read_or_create_cluster_id(data_dir),
     }
     # 计划二的额外 env（ActiveMQ 的 ACTIVEMQ_CONF/DATA 走这条路；
     # 它两个值都要等端口定了、副本建好了才写得出最终值，所以在计划阶段拼）。
@@ -6011,7 +6158,22 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
         env[name] = template.format(**mapping)
     argv = [t.format(**mapping) for t in spec.commands[CURRENT_OS]]
     return LaunchPlan(argv=argv, env=env, cwd=home, log_file=log_file,
-                      console_url=f"http://127.0.0.1:{port}{spec.console_path}")
+                      console_url=f"http://127.0.0.1:{port}{spec.console_path or ''}",
+                      port=port, java_home=java_home)
+
+
+def config_file_for(comp: Component, data_dir: Path) -> Path:
+    """该组件要改的那份配置文件（副本优先，副本没有就指官方那份）。
+
+    2026-10-06 新增：kafka 的启动命令要 `{conf}` 占位符，
+    而 kafka 的端口策略是 cli_only（一个文件都不改）——
+    所以它拿到的是**官方原始配置文件**的路径，这是对的：
+    我们要读它、用 `--standalone -c` 指给 java，不是要改它。
+    """
+    if comp.key == "kafka":
+        return comp.install_dir(resolve_launch_version(comp)
+                               or comp.versions[0].version) / "config" / "server.properties"
+    return data_dir / "conf" / "server.properties"
 
 
 @dataclass
@@ -6144,6 +6306,13 @@ class ServiceManager:
         if not ok:
             return StartResult(False, "writeback", why, notes=notes)
         plan = build_launch_plan(comp, spec, java_home, port_plan.main, log_file)
+        # 前置准备（kafka 的 KRaft format 等）。必须在 spawn 之前：
+        # 配了 --ignore-formatted 所以重复跑幂等（实测 rc=0），
+        # 而漏了它 kafka 会直接 `No readable meta.properties files found.`。
+        ok_pre, why_pre, pre_notes = run_pre_start(comp, spec, plan)
+        notes = notes + list(pre_notes)
+        if not ok_pre:
+            return StartResult(False, "prestart", why_pre, notes=notes)
 
         # 重定向句柄在 Popen 把它交给子进程后立刻由父进程关掉（with 退出）：
         # Windows 上父进程留着一个打开的日志句柄，既漏句柄又会让临时目录删不掉；

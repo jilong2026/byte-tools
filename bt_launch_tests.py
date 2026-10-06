@@ -2727,5 +2727,478 @@ class RunningTabMarker(unittest.TestCase):
         self.assertNotIn("●", "".join(titles), f"没有在跑却标了：{titles}")
 
 
+class FakeRunProc:
+    """`subprocess.run` 的替身：只回 rc 与输出，不起进程。
+
+    run_pre_start 只读 returncode / stdout / stderr，所以这三个属性就够；
+    真实执行会碰磁盘与网络（kafka 的 format 会真的建 kraft-logs），必须替掉。
+    """
+
+    def __init__(self, returncode=0, stdout=b"", stderr=b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class FakePopenProc:
+    """`subprocess.Popen` 的替身：只报一个 pid，不起进程。
+
+    start() 拿返回值读 `.pid` 登记 RunRecord，超时分支还会 `terminate()` 收尸，
+    所以这几个方法都要在—— 少一个就会在收尾时AttributeError，
+    而那种红是"替身不称职"，不是被测代码的缺陷。
+    """
+
+    def __init__(self, pid=43210):
+        self.pid = pid
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode or 0
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+
+class PreStartAndPrereqWiring(unittest.TestCase):
+    """前置准备（pre_start）与前置依赖（prereq）的**接线**护栏。
+
+    这个类要钉的不是"字段填对了"，而是"框架真的会执行它们"。
+    之前有一版护栏只测`run_pre_start()` 函数本身怎么跑命令，
+    结果把 `start()` 里那三行调用变异掉之后仍然全绿 —— 护栏是空的：
+    函数被测得再透，只要没人调它，kafka 就会带着空目录起来报
+    `No readable meta.properties files found.`。
+    所以下面有两条真的走完整 `start()` 路径（test_start_*_pre_start*）。
+
+    全部离线：不碰网络、不起真实进程，连 shutil.which 都桩掉
+    （它会真的去翻 PATH，用例成败不能取决于这台机器装没装 Erlang）。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        # 落盘位置（cluster.id / 配置副本 / 运行登记）全部重定向到临时目录，
+        # 否则用例会往真 ~/.env-tools 里写 cluster.id 与 running.json。
+        self._orig_dir, self._orig_run_file = main.CONFIG_DIR, main.RUNNING_FILE
+        main.CONFIG_DIR = Path(self.dir.name)
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_run_file)
+        self.comps = {c.key: c for c in main.build_components()}
+
+        # 两个执行入口各一个记录器。分开记是刻意的：
+        # 前置准备走 run（同步、要退出码），拉服务走 Popen（异步、只要 pid），
+        # 断言"前置失败不许 spawn"必须能证明 Popen一次都没被碰过。
+        self.runs = []
+        self.spawned = []
+        self._orig_run = main.subprocess.run
+        self._orig_popen = main.subprocess.Popen
+        main.subprocess.run = self._record_run
+        main.subprocess.Popen = self._record_popen
+        self.addCleanup(setattr, main.subprocess, "run", self._orig_run)
+        self.addCleanup(setattr, main.subprocess, "Popen", self._orig_popen)
+
+        # 用例成败不许取决于这台机器恰好有没有 JAVA_HOME / 有没有装 jdk。
+        self._orig_java = main.resolve_java_home
+        main.resolve_java_home = lambda comps: str(Path(self.dir.name) / "jdk-17")
+        self.addCleanup(setattr, main, "resolve_java_home", self._orig_java)
+
+        # 端口一律答"空闲"。不打桩的话 choose_ports 会真去 bind、真去杀占用者，
+        # 于是 9092 上有没有东西在跑决定了用例的生死。
+        self._orig_free = main.port_is_free
+        main.port_is_free = lambda port, host="127.0.0.1": True
+        self.addCleanup(setattr, main, "port_is_free", self._orig_free)
+        self._orig_evict = main.evict_port_occupant
+        main.evict_port_occupant = lambda port, label, evicted=None: None
+        self.addCleanup(setattr, main, "evict_port_occupant", self._orig_evict)
+
+    # ---------------- 替身 ----------------
+
+    def _record_run(self, argv, **kw):
+        self.runs.append((list(argv), kw))
+        return FakeRunProc()
+
+    def _record_popen(self, argv, **kw):
+        self.spawned.append((list(argv), kw))
+        return FakePopenProc()
+
+    def _stub_run(self, proc):
+        """把某一次 run 的结果钉死（回退出码 / 抛超时），并记录调用。"""
+        def fake(argv, **kw):
+            self.runs.append((list(argv), kw))
+            if isinstance(proc, BaseException):
+                raise proc
+            return proc
+        main.subprocess.run = fake
+
+    def _ready_kafka(self):
+        """把 kafka 造成"磁盘上真装着"的样子，并让 mapping 能算出真实路径。
+
+        `_plan_mapping` 与 `config_file_for` 都依赖 `resolve_launch_version` 与
+        `install_dir`，不铺好这两样，测的就只是"占位符没展开"这种小事，
+        而不是"format 与 broker 拿到的是同一份配置与同一个 cluster.id"。
+        """
+        comp = self.comps["kafka"]
+        version = comp.versions[0].version
+        home = Path(self.dir.name) / "kafka" / f"kafka-{version}"
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        (home / "config").mkdir(parents=True, exist_ok=True)
+        (home / "config" / "server.properties").write_text("log.dirs=x\n", encoding="utf-8")
+        comp.install_dir = lambda v: home
+        orig = main.resolve_launch_version
+        main.resolve_launch_version = lambda c: version
+        self.addCleanup(setattr, main, "resolve_launch_version", orig)
+        return comp, home
+
+    def _plan_for(self, comp, port=9092):
+        """走真实 build_launch_plan，让 argv/替换表都是真的。"""
+        self._ready_kafka_version = True
+        return main.build_launch_plan(
+            comp, comp.launch, str(Path(self.dir.name) / "jdk-17"), port,
+            Path(self.dir.name) / "byte-tools.out")
+
+    # ================= prereq =================
+
+    def test_check_prereq_names_the_missing_executable_and_the_hint(self):
+        """缺依赖时必须说清**缺哪个可执行文件**，并把 install_hint 原文给用户。
+
+        只说"前置依赖没就位"等于把排查成本推给用户：官方 zip 不含Erlang、
+        国内镜像站还没有，只能走 GitHub 的 139MB 安装包 —— 这些是用户决定
+        要不要现在就去下的唯一依据，吞掉就没法行动了。
+        """
+        prereq = main.LAUNCH_OF["rabbitmq"].prereq
+        self.assertIsNotNone(prereq)
+        orig = main.shutil.which
+        main.shutil.which = lambda name, *a, **k: None      # 宿主上没装
+        self.addCleanup(setattr, main.shutil, "which", orig)
+        ok, why = main.check_prereq(prereq)
+        self.assertFalse(ok, "找不到 erl.exe 却说依赖已就位")
+        # 断的是"找不到 erl.exe"这个**从句**，不是"原因里出现过 erl.exe 字样"。
+        # 只assertIn(prereq.probe, why) 是不够的：check_prereq 现在会在结尾
+        # 拼一句"当前状态：已装（erl.exe）"（main.py:6039，逻辑写反了），
+        # 那半句里同样有 erl.exe，于是把"找不到 {probe}"整句删掉都测不出来。
+        self.assertIn("找不到", why,
+                      "必须明确说清是**找不到**这个可执行文件，"
+                      "而不是让用户自己从'已装/没装'里猜")
+        self.assertIn(prereq.probe, why,
+                      "必须点名缺的是哪个可执行文件（用户不知道要装什么）")
+        self.assertIn("Erlang", why)
+        # install_hint 的关键信息要透出来：官方 zip 不含它 + 没有国内镜像
+        self.assertIn("官方 zip", why)
+        self.assertIn("GitHub", why)
+
+    def test_check_prereq_passes_when_the_executable_exists(self):
+        """装了就必须放行 —— 否则装完Erlang 点启动还是被拦在门控外。"""
+        prereq = main.LAUNCH_OF["rabbitmq"].prereq
+        orig = main.shutil.which
+        main.shutil.which = lambda name, *a, **k: r"C:\Program Files\Erlang\bin\erl.exe"
+        self.addCleanup(setattr, main.shutil, "which", orig)
+        ok, why = main.check_prereq(prereq)
+        self.assertTrue(ok, f"erl.exe 明明在 PATH里却被拦住：{why}")
+
+    def test_launch_gate_actually_blocks_on_prereq_and_only_on_prereq(self):
+        """**接线**：`launch_gate()` 真的会查 prereq。
+
+        这条要能区分"被prereq 拦住"与"因为别的理由被拦"：
+        所以先把 rabbitmq 造成已安装（否则门控会因为"磁盘上没装"先返回，
+        断言里的 "erl" 恰好出现不了、测试就成了自欺），再把 which 桩成找不到。
+
+        后半段反向断言是它的镜像：which 一放行门控就必须过。
+        少了后半段，"门控恒返回 False"这种实现也能让前半段变绿。
+        """
+        comp = self.comps["rabbitmq"]
+        version = comp.versions[0].version
+        home = Path(self.dir.name) / "rabbitmq" / f"rabbitmq-{version}"
+        home.mkdir(parents=True, exist_ok=True)
+        comp.install_dir = lambda v: home
+        orig_ver = main.resolve_launch_version
+        main.resolve_launch_version = lambda c: version
+        self.addCleanup(setattr, main, "resolve_launch_version", orig_ver)
+
+        orig = main.shutil.which
+        self.addCleanup(setattr, main.shutil, "which", orig)
+        # 只让 erl* 找不到：门控里jdk 探测等其他 which 调用仍按真的走
+        main.shutil.which = lambda name, *a, **k: (
+            None if str(name).lower().startswith("erl") else orig(name, *a, **k))
+
+        ok, why = main.launch_gate(comp, comp.launch, java_home=None)
+        self.assertFalse(ok, "缺 Erlang 却放过了门控 —— rabbitmq-server.bat 会一闪就退")
+        self.assertIn("erl", why.lower(), f"拦截原因必须指向缺失的可执行文件：{why}")
+        self.assertNotIn("下载并安装", why,
+                         "已经装了，只是缺 Erlang；原因不许说成'没装'")
+
+        # 镜像：Erlang 就位后必须放行，否则这条护栏钉不住真正的因果
+        main.shutil.which = lambda name, *a, **k: (
+            r"C:\Program Files\Erlang\bin\erl.exe"
+            if str(name).lower().startswith("erl") else orig(name, *a, **k))
+        ok2, why2 = main.launch_gate(comp, comp.launch, java_home=None)
+        self.assertTrue(ok2, f"Erlang 已就位却仍被拦：{why2}")
+
+    def test_only_rabbitmq_declares_a_prereq(self):
+        """只有 rabbitmq 需要外部运行时。
+
+        反过来也钉：其余组件一旦被填上 prereq 就是登记错——
+        比如给 kafka 填了 prereq="erlang"，于是"装没装 Kafka"这件事
+        会被"装没装 Erlang"顶替掉，提示语指向完全无关的东西。
+        """
+        declared = sorted(k for k, spec in main.LAUNCH_OF.items()
+                          if getattr(spec, "prereq", None) is not None)
+        self.assertEqual(declared, ["rabbitmq"],
+                         "声明了 prereq 的组件集合变了：登记错会让门控拦住/放过错的组件")
+        self.assertEqual(main.LAUNCH_OF["rabbitmq"].prereq.key, "erlang")
+
+    # ================= pre_start：函数自身 =================
+
+    def test_components_without_pre_start_spawn_nothing(self):
+        """没有 pre_start 的组件：不许产生任何子进程，notes 为空，返回 True。
+
+        这三个组件走 start() 时若被无端塞一条前置命令，用户会看到
+        一个莫名其妙的"已完成…初始化"提示，而实际什么都没初始化。
+        """
+        for key in ("nacos", "activemq", "jenkins"):
+            with self.subTest(key):
+                comp = self.comps[key]
+                self.assertEqual(comp.launch.pre_start, [],
+                                 f"{key} 不该有 pre_start")
+                before_popen = len(self.spawned)
+                plan = main.LaunchPlan(
+                    argv=["{java}", "-jar", "x.jar"], env={}, cwd=Path(self.dir.name),
+                    log_file=Path(self.dir.name) / "o.out", console_url="", port=8080)
+                ok, why, notes = main.run_pre_start(comp, comp.launch, plan)
+                self.assertTrue(ok, why)
+                self.assertEqual(why, "")
+                self.assertEqual(notes, [], f"{key} 没有前置准备却报了提示行")
+                self.assertEqual(self.runs, [], f"{key} 没有 pre_start 却执行了命令")
+                self.assertEqual(len(self.spawned), before_popen,
+                                 f"{key} 没有 pre_start 却 spawn 了进程")
+
+    def test_kafka_pre_start_runs_format_exactly_once_with_idempotent_flags(self):
+        """kafka 的 format 必须**恰好跑一次**，且带幂等标志。
+
+        两个坑各自会致命：
+        - 跑两次 = 用户点两次启动就多跑一次 StorageTool；
+        - 少了 `--ignore-formatted`，第二次点启动时 format 因"已格式化"直接
+          报错，前置准备失败 → 明明在运行却报"前置准备失败"，用户无从下手。
+        所以断言的是**集合里恰好一个 format 且带这两个标志**，
+        不是"跑过一次"（跑两次也能满足后者）。
+        """
+        comp, _home = self._ready_kafka()
+        plan = self._plan_for(comp)
+        ok, why, notes = main.run_pre_start(comp, comp.launch, plan)
+        self.assertTrue(ok, why)
+        self.assertEqual(len(self.runs), 1, f"前置准备必须恰好跑一次：{self.runs}")
+        argv = self.runs[0][0]
+        self.assertIn("format", argv)
+        self.assertIn("--standalone", argv,
+                      "KRaft 单机模式必须显式声明，否则 format 不知道拓扑")
+        self.assertIn("--ignore-formatted", argv,
+                      "少了它，重复点启动就会因'已格式化'失败")
+        self.assertTrue(any("前置准备" in n for n in notes),
+                        f"成功时要告诉用户前置准备做了什么：notes={notes}")
+
+    def test_pre_start_failure_carries_the_output_tail_into_the_reason(self):
+        """前置失败必须把输出末尾带进原因，否则用户只看到"失败"两个字。
+
+        真机踩到的就是这类：format 失败时真正的原因（磁盘满、目录权限、
+        cluster.id 不匹配）只出现在 stderr 里。rc=1 而不给出 stdout/stderr，
+        用户只能自己去翻日志文件猜。
+        """
+        comp, _home = self._ready_kafka()
+        plan = self._plan_for(comp)
+        self._stub_run(FakeRunProc(returncode=1,
+                                  stderr=b"java.io.IOException: disk full"))
+        ok, why, _notes = main.run_pre_start(comp, comp.launch, plan)
+        self.assertFalse(ok, "rc=1 却当成功 —— 会拉起一个必然起不来的进程")
+        self.assertIn("disk full", why,
+                      "失败原因必须带上 stderr/stdout 末尾的真实报错")
+        self.assertIn("1", why, "失败原因要点明退出码")
+
+    def test_pre_start_timeout_is_bounded(self):
+        """超时必须有界：卡住的前置准备不能把界面永久挂住。
+
+        format 卡住的现实原因不少（磁盘 IO 异常、JVM 卡在网络探测）。
+        没有 timeout 的话点一次启动就再也点不动，且用户看不到任何解释。
+        """
+        comp, _home = self._ready_kafka()
+        plan = self._plan_for(comp)
+
+        def only_timeout_when_forwarded(argv, **kw):
+            """只在实现真把 timeout 交给 subprocess.run 时才超时。
+
+            否则"实现忘了传 timeout"会伪装成超时通过 —— 桩无条件抛异常时，
+            传不传timeout 都是同一个结果，这条护栏就钉不住那个坑了。
+            """
+            self.runs.append((list(argv), kw))
+            if kw.get("timeout") is None:
+                return FakeRunProc()          # 没传 timeout → 假装命令成功
+            raise main.subprocess.TimeoutExpired(cmd=list(argv), timeout=kw["timeout"])
+
+        main.subprocess.run = only_timeout_when_forwarded
+        ok, why, _notes = main.run_pre_start(comp, comp.launch, plan, timeout=7)
+        self.assertFalse(ok, "超时了却当成功")
+        self.assertEqual(self.runs[0][1].get("timeout"), 7,
+                         "timeout 必须原样传给 subprocess.run，否则界面上就是永久挂住")
+        self.assertIn("7", why, f"原因里要点明等了多久：{why}")
+        self.assertIn("放弃启动", why, "超时的正确处置是放弃启动而不是继续")
+
+    def test_cluster_id_is_created_once_then_reused(self):
+        """同一数据目录两次调用必须拿到**同一个** uuid。
+
+        kafka 的 cluster.id 写在 data_dir 里被 broker 认；换 uuid 会被拒
+        （`Invalid cluster.id`）。所以 format 用了A、broker 用 B 时，
+        format 就是白做 —— 而这种错配在界面上完全看不出来
+        （命令跑成功了、端口也起来了，直到 broker 读自己的 meta 才炸）。
+
+        这条只钉函数本身；"start()/run_pre_start() 到底有没有用它"由下面那条钉。
+        """
+        data_dir = Path(self.dir.name) / "kafka-data"
+        first = main.read_or_create_cluster_id(data_dir)
+        second = main.read_or_create_cluster_id(data_dir)
+        self.assertEqual(first, second,
+                         "第二次读出了新的 cluster.id —— format 与 broker 会互相不认")
+        self.assertEqual(len(first), 36, f"不是标准 uuid：{first!r}")
+        self.assertEqual(first.count("-"), 4, f"uuid 分隔符不对：{first!r}")
+        # 另一个数据目录必须是另一个 id（否则说明是写死的常量，不是"按目录持久化"）
+        other = main.read_or_create_cluster_id(Path(self.dir.name) / "other-data")
+        self.assertNotEqual(other, first,
+                            "所有目录共用同一个 id：说明它根本没落盘，只是现生成")
+
+    def test_pre_start_argv_carries_the_persisted_cluster_id_not_a_fresh_one(self):
+        """**接线**：format 命令里的 `-t` 必须是**落盘那个** cluster.id。
+
+        这条是上面那条的补充，也是真正会咬人的那条：
+        只测 `read_or_create_cluster_id()` 的话，把 `_plan_mapping` 里的
+        `read_or_create_cluster_id(data_dir)` 换成 `str(uuid.uuid4())` 全绿——
+        函数被测得再透，只要调用点换成现生成的 uuid，
+        format 用的A、broker 认的 B 就是白做（`Invalid cluster.id`）。
+        而这种错配在界面上完全看不出来：命令跑成功了、端口也起来了。
+
+        所以断的是**真正进了 argv 的那个值**：两次调用（=用户点两次启动）
+        必须是同一个，且必须等于盘上那个。
+        """
+        comp, _home = self._ready_kafka()
+        plan = self._plan_for(comp)
+        self.assertTrue(main.run_pre_start(comp, comp.launch, plan)[0])
+        first_argv = self.runs[0][0]
+        self.assertIn("-t", first_argv, "format 必须显式带 cluster.id（-t）")
+        used = first_argv[first_argv.index("-t") + 1]
+
+        persisted = main.read_or_create_cluster_id(main.CONFIG_DIR / "kafka-data")
+        self.assertEqual(used, persisted,
+                         "format 用的 cluster.id 与盘上那个不是同一个 —— "
+                         "broker 会认自己的 meta，format 白做（Invalid cluster.id）")
+
+        # 再点一次启动：--ignore-formatted 让它幂等，但 uuid 绝不能变
+        self.assertTrue(main.run_pre_start(comp, comp.launch, plan)[0])
+        again = self.runs[1][0][self.runs[1][0].index("-t") + 1]
+        self.assertEqual(again, used,
+                         "重复点启动时 format 换了 cluster.id —— 等于每次都在换一个集群")
+
+    def test_kafka_conf_placeholder_points_at_the_official_server_properties(self):
+        """`{conf}` 必须指向安装目录里**官方那份** server.properties。
+
+        kafka 的端口策略是 cli_only（一个文件都不改），所以 {conf} 是给
+        java `-c` 读的启动配置，要的是官方文件而不是 data 目录里的副本 ——
+        指到副本上，副本里连log.dirs 都没有，broker 会拿不到元数据目录。
+        """
+        comp, home = self._ready_kafka()
+        conf = main.config_file_for(comp, main.CONFIG_DIR / "kafka-data")
+        self.assertEqual(conf.name, "server.properties")
+        self.assertIn("kafka", str(conf).lower(),
+                      f"{conf} 不在 kafka 目录里，多半是取错了根")
+        self.assertEqual(conf, home / "config" / "server.properties",
+                         "必须指向安装目录里的官方配置文件")
+        self.assertNotIn("kafka-data", str(conf),
+                         "cli_only 策略下没有配置副本，{conf} 不该指向 data 目录")
+
+    # ================= pre_start：start() 接线（最关键） =================
+
+    def test_start_calls_pre_start_and_never_spawns_when_it_fails(self):
+        """**接线**：`start()` 真的会调用 `run_pre_start`，且失败就不许 spawn。
+
+        这是本类的核心一条。之前那版护栏只测 `run_pre_start()` 自己怎么跑命令，
+        把下面这三行删掉它仍然全绿：
+            ok_pre, why_pre, pre_notes = run_pre_start(comp, spec, plan)
+            notes = notes + list(pre_notes)
+            if not ok_pre: return StartResult(False, "prestart", why_pre, notes=notes)
+        删掉之后 kafka 会直接去 spawn，然后在 broker 读元数据时才炸
+        `No readable meta.properties files found.` —— 用户看到的是"启动失败"，
+        而根因（前置没跑）被永久隐藏。
+
+        自检：把这三行删掉，本条断言 pre_start_calls == 1 立刻红。
+        """
+        comp, _home = self._ready_kafka()
+        pre_calls = []
+
+        def spy(c, spec, plan, *a, **kw):
+            pre_calls.append((c.key, list(spec.pre_start)))
+            return False, "前置故意失败", ["note"]
+
+        orig_pre = main.run_pre_start
+        main.run_pre_start = spy
+        self.addCleanup(setattr, main, "run_pre_start", orig_pre)
+
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True)
+        res = mgr.start(comp, self.comps, sleeper=lambda s: None)
+
+        self.assertEqual(len(pre_calls), 1,
+                         "start() 没调用 run_pre_start —— 前置准备是空的，"
+                         "kafka 会带着空数据目录起来报 No readable meta.properties")
+        self.assertEqual(pre_calls[0][0], "kafka")
+        self.assertIn("format", pre_calls[0][1],
+                      "传给 run_pre_start 的 spec 必须带着 format 命令")
+        self.assertFalse(res.ok)
+        self.assertEqual(res.state, "prestart")
+        self.assertEqual(res.reason, "前置故意失败",
+                         "失败原因必须原样透出，用户要靠它知道 format 报了什么")
+        self.assertEqual(self.spawned, [],
+                         "前置准备失败了还 spawn 了服务进程 —— 会拉起一个必然起不来的实例")
+        self.assertIn("note", res.notes,
+                      "前置准备的提示行必须跟着StartResult回到卡片")
+        self.assertEqual(main.load_running_map(), {},
+                         "前置失败不许留登记，否则界面显示'运行中'而实际没有进程")
+
+    def test_start_of_a_component_without_pre_start_spawns_no_prep_command(self):
+        """**接线（反向）**：没有 pre_start 的组件走 start() 时零回归。
+
+        `start()` 是**无条件**调run_pre_start 的（main.py:6300），
+        空 pre_start 的短路在函数内部（main.py:6068）。
+        所以这里钉的是可观测行为——**一条前置命令都不许执行**，
+        而不是"那个函数没被调用"（那样写会与实现不符、也钉不住真正的坑）。
+        """
+        comp = self.comps["nacos"]
+        version = comp.versions[0].version
+        home = Path(self.dir.name) / "nacos" / f"nacos-{version}"
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        comp.install_dir = lambda v: home
+        orig_ver = main.resolve_launch_version
+        main.resolve_launch_version = lambda c: version
+        self.addCleanup(setattr, main, "resolve_launch_version", orig_ver)
+
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                  http_ok=lambda u, timeout=2.0: True,
+                                  process_alive=lambda pid: True)
+        res = mgr.start(comp, self.comps, sleeper=lambda s: None)
+
+        self.assertTrue(res.ok, res.reason)
+        self.assertEqual(self.runs, [],
+                         "nacos 没有 pre_start，却执行了一条前置命令")
+        self.assertEqual(len(self.spawned), 1,
+                         "只该拉起服务进程本身，不许有第二个进程")
+        self.assertTrue(all("前置准备" not in n for n in res.notes),
+                        f"没有前置准备却报了这种提示：notes={res.notes}")
+        self.assertIn("nacos", main.load_running_map(),
+                      "nacos 走完整 start() 应该能登记成功（这条钉的是零回归）")
+
+
 if __name__ == "__main__":
     unittest.main()
