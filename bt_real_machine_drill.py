@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 APPLY_FLAG = "--yes" in sys.argv   # 必须在清 argv 之前取，否则演练模式永远进不去
 if "--launch" in sys.argv:
@@ -237,7 +238,55 @@ def main_drill(apply: bool) -> int:
     return 0 if ok else 1
 
 
-def _wait_console(main_mod, url: str, rounds: int = 20, gap: float = 1.5) -> bool:
+def _probe_service(main_mod, comp, rec, url: str, rounds: int = 6,
+                   gap: float = 3.0) -> bool:
+    """判据一：这个服务**真的可用**，而不只是端口在听。
+
+    三档判据按LaunchSpec 的登记来选（2026-10-06 真机实测逼出来的）：
+
+    1. **`service_probe`**（协议级，kafka）：它的端口说二进制协议，
+       HTTP 请求会得到 `RemoteDisconnected`。用它自带的 API 工具问一句
+       "你支持哪些 API 版本"，答得上来才算真的可服务。
+    2. **`console_path` 非空**（有 Web 控制台）→ `http_ok`：要求 2xx/3xx。
+       这里"页面能用"才是真的能用（Nacos/jenkins/activemq）。
+    3. **`console_path` 为空**（tomcat/nginx/ES）→ `http_responds`：
+       404/403 也算活着。实测 Tomcat 10.1.60 启动后 `/` 就是 404
+       （没挂 web 应用），它完全正常地在服务。
+    """
+    spec = comp.launch
+    if spec.service_probe:
+        version = main_mod.resolve_launch_version(comp) or comp.versions[0].version
+        home = comp.install_dir(version)
+        data_dir = main_mod.CONFIG_DIR / f"{comp.key}-data"
+        jh = main_mod.resolve_java_home({c.key: c for c in main_mod.build_components()}) or ""
+        mapping = {
+            "java": str(Path(jh) / "bin" / ("java.exe" if main_mod.CURRENT_OS == "Windows" else "java")),
+            "home": str(home), "data_dir": str(data_dir),
+            "conf": str(main_mod.config_file_for(comp, data_dir)),
+            "port": str(rec.port), "cluster_id": "",
+        }
+        argv = [t.format(**mapping) for t in spec.service_probe]
+        for i in range(max(1, int(rounds))):
+            try:
+                p = subprocess.run(argv, cwd=str(home), capture_output=True,
+                                   timeout=60)
+                if p.returncode == 0:
+                    return True
+                tail = ((p.stdout or b"").decode("utf-8", "replace")
+                        + (p.stderr or b"").decode("utf-8", "replace")).strip()
+                print(f"      协议探活未通过（rc={p.returncode}）：{tail[-200:]}")
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                print(f"      协议探活异常：{type(exc).__name__}")
+            if i == 0:
+                print(f"      协议探活有界重试（最多 {rounds} 轮）…")
+            time.sleep(gap)
+        return False
+    probe = main_mod.http_ok if spec.console_path else main_mod.http_responds
+    return _wait_console(main_mod, url, probe=probe)
+
+
+def _wait_console(main_mod, url: str, rounds: int = 20, gap: float = 1.5,
+                  probe=None) -> bool:
     """控制台可达性要有界重试，不能只探一次。
 
     端口在听≠ 服务可用：Jenkins 2.580.1 实测（2026-10-05 真机）里 Jetty 在
@@ -249,10 +298,17 @@ def _wait_console(main_mod, url: str, rounds: int = 20, gap: float = 1.5) -> boo
     与 start() 返回几乎同时）。30 秒窗口有30 倍余量，够用。
 
     这里用与 start() 相同的有界轮次约定（固定轮数 + 每轮 sleep），不用墙钟 deadline：
-    deadline 在 sleep 被注入时会静默缩短宽限期。"""
+    deadline 在 sleep 被注入时会静默缩短宽限期。
+
+    **probe 参数**（2026-10-06 真机实测逼出来的）：默认判据是 `http_ok`（要求 2xx/3xx），
+    但 Tomcat 10.1.60 启动后 `/` 返回的是 **404**（没挂 web 应用，ROOT 也没解包）——
+    服务完全正常地在服务。用 http_ok 判会稳定误报"控制台不可达"
+    （实测第一次演练就是这样被判 FAIL 的，而 tomcat 启停其实都正常）。
+    所以"有端口但不提供 Web 控制台"的组件要传 `main.http_responds`。"""
     import time
+    check = probe or main_mod.http_ok
     for i in range(max(1, int(rounds))):
-        if main_mod.http_ok(url):
+        if check(url):
             return True
         if i == 0:
             print(f"      控制台暂未就绪，有界重试（最多 {rounds} 轮）…")
@@ -301,8 +357,18 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     base = rec.console_url.rstrip("/")
     health = comp.launch.health_path or ""
     url = base if not health or health == comp.launch.console_path else base + health
-    got = _wait_console(main, url)
-    print(f"[1/4] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} 控制台可达={got}")
+    # 判据分三档（2026-10-06 真机实测逼出来的）：
+    #  1) 登记了 service_probe → 用它（协议级）。kafka 的 9092 说二进制协议，
+    #     HTTP 请求得到 RemoteDisconnected，HTTP 判据对它完全无效；
+    #  2) 有 console_path（有 Web 控制台）→ http_ok（要求 2xx/3xx，"页面能用"才算能用）
+    #  3) 无 console_path（tomcat/nginx/ES）→ http_responds（404/403 也算活着）。
+    #     实测 Tomcat 启动后 `/` 就是 404 —— 它在正常服务，
+    #     用 http_ok 判会误报"控制台不可达"，第一次演练就是这样被判 FAIL 的。
+    got = _probe_service(main, comp, rec, url)
+    probe_kind = ("service_probe" if comp.launch.service_probe
+                  else ("http_ok" if comp.launch.console_path else "http_responds"))
+    print(f"[1/4] 已启动 pid={rec.pid}({rec.pid_role}) port={rec.port} "
+          f"服务可用={got}（判据 {probe_kind}）")
 
     def cluster_state(ports, label):
         """端口簇逐个体检。计划一只看 rec.port 一个口，本期两个组件是三口/两口，

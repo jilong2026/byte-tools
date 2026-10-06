@@ -1676,10 +1676,20 @@ def _rabbitmq_urls(v: str) -> Dict[str, List[str]]:
     urls = [f"{base}/rabbitmq-server-generic-unix-{v}.tar.xz" for base in mirror_bases]
     urls += _gh_accelerated(github)
 
+    # **Windows 有官方 zip，不要再装generic-unix**（2026-10-06 真机踩出来的）：
+    # 原来 Windows 键根本不配URL，于是 urls_for_current() 在 Windows 上返回空
+    # ——而子代理装包时回退到 url_list_map 里的 generic-unix，
+    # 那个包的 sbin/ 下**全是无扩展名的脚本**（rabbitmq-server 而不是 .bat），
+    # Windows 上根本跑不起来。产品登记的 commands 写的是 .bat，与包内容不符。
+    # 实测华为云两个子域的 rabbitmq-server-windows-<v>.zip 都是 200。
+    win_urls = [f"{base}/rabbitmq-server-windows-{v}.zip" for base in mirror_bases]
+    win_github = (f"https://github.com/rabbitmq/rabbitmq-server/releases/download/"
+                  f"v{v}/rabbitmq-server-windows-{v}.zip")
+    win_urls += _gh_accelerated(win_github)
     return {
+        "Windows": win_urls,
         "Linux":   urls,
         "Darwin":  urls,
-        # Windows 不支持自动下载（依赖 Erlang）
     }
 
 
@@ -3152,6 +3162,16 @@ class LaunchSpec:
     pre_start: List[str] = field(default_factory=list)
     # 前置依赖（rabbitmq → Erlang）。为空表示不需要外部运行时。
     prereq: Optional["PrereqSpec"] = None
+    # **协议级服务探活**（不是 HTTP）。
+    #
+    # 为什么需要（2026-10-06 真机实测）：有些组件的端口说的是二进制协议，
+    # 用 HTTP 探必然失败 —— kafka 的 9092 是 Kafka 协议，
+    # 请求它会得到 `RemoteDisconnected`（实测），HTTP 判据对它完全无效。
+    # 而 kafka 恰恰是最需要「端口在听 ≠ broker 可服务」这个验证的组件。
+    #
+    # 语义：argv 前缀 + {port} 占位符；退出码 0 = 服务真的可服务。
+    # 演练层（bt_real_machine_drill.py）在 HTTP 判据不适用时改用它。
+    service_probe: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3178,8 +3198,17 @@ class PrereqSpec:
 # 直接 `rc=255 输入行太长`。而且 `kafka-server-start.bat:28` 调 `wmic os get osarchitecture`，
 # wmic 在 Win11 已弃用（本机沙箱直接拦截）。
 KAFKA_MAIN_CLASS = "kafka.Kafka"
-KAFKA_STORAGE_TOOL = "org.apache.kafka.tools.StorageTool"
+# 类名**以真机实测为准**（2026-10-06）：我第一版按探针报告写成
+# `org.apache.kafka.tools.StorageTool`，实测直接
+# `ClassNotFoundException: org.apache.kafka.tools.StorageTool`——
+# jar 里的真实路径是 `kafka/tools/StorageTool.class`（扫 jar tf 确认的）。
+KAFKA_STORAGE_TOOL = "kafka.tools.StorageTool"
 KAFKA_API_VERSIONS = "org.apache.kafka.tools.BrokerApiVersionsCommand"
+# rocketmq 的 CLI 入口（扫 jar tf 确认：rocketmq-tools-5.3.1.jar 里
+# org/apache/rocketmq/tools/command/MQAdminStartup.class）。
+# 用它跑 `clusterList -n <namesrv>` 就能问namesrv「集群里有谁」——
+# 答得上来说明 namesrv 与 broker 都真的在服务，而不只是端口在听。
+ROCKETMQ_ADMIN = "org.apache.rocketmq.tools.command.MQAdminStartup"
 
 
 LAUNCH_OF: Dict[str, LaunchSpec] = {
@@ -3328,6 +3357,11 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_writeback="cli_only",
         console_path=None,
         health_path=None,
+        # 9876 说 RocketMQ 二进制协议，HTTP 请求它不会得到 HTTP 响应。
+        # 用自带 CLI 问 namesrv「集群里有谁」—— 它答得上来才说明
+        # **namesrv 与 broker 都真的注册好了**（只探 9876 会漏掉 broker 没起来）。
+        service_probe=["{java}", "-cp", "{home}/lib/*",
+                       ROCKETMQ_ADMIN, "clusterList", "-n", "localhost:{port}"],
         needs=("jdk",),
         # 实测 bin/mqbroker.cmd:14 有 `if%JAVA_MAJOR_VERSION% lss 17` 分叉
         min_java_major=17,
@@ -3409,6 +3443,11 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_writeback="conf_copy",
         console_path=None,
         health_path=None,
+        # 9092 说 Kafka 二进制协议，HTTP 请求得到 RemoteDisconnected（实测），
+        # 所以只能用 kafka 自带的 API 工具做判据。
+        # 它真的在问 broker"你支持哪些 API 版本"——答得上来才算真的可服务。
+        service_probe=["{java}", "-cp", "{home}/libs/*",
+                       KAFKA_API_VERSIONS, "--bootstrap-server", "localhost:{port}"],
         needs=("jdk",),
         # 实测 jar 内 469 个 class 的 major version 全部 = 61（即 Java 17）
         min_java_major=17,
@@ -3502,6 +3541,28 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         port_writeback="conf_copy",
         console_path=None,
         health_path=None,
+        # **ES_HOME 与 ES_PATH_CONF 必设**（2026-10-06 真机实测踩出来的）：
+        # bin/elasticsearch.bat 只是壳，它 call 的 elasticsearch-cli.bat 里是
+        #     set LAUNCHER_CLASSPATH=%ES_HOME%/lib/*;%ES_HOME%/lib/cli-launcher/*
+        #     -Des.path.home="%ES_HOME%" -Des.path.conf="%ES_PATH_CONF%"
+        # 两个都不设 → classpath 变成字面量 "%ES_HOME%/lib/*" →
+        # JVM 找不到 jar，报出来的是一条**看不出原因**的错：
+        #     NoSuchFileException: ...\logs\%JAVA_HOME%\lib\dt.jar
+        # （那个 %JAVA_HOME% 是它的兜底分支，不是我们的问题；
+        #   真因是 ES_HOME 没设，排查时被这条误导过一次。）
+        extra_env={"ES_HOME": "{home}", "ES_PATH_CONF": "{conf_dir}",
+                   # **CLASSPATH 必须清空**（2026-10-06 真机实测定位）：
+                   # 这台机器的系统级 CLASSPATH 是 JDK 8 时代的遗留值
+                   #     .;%JAVA_HOME%\lib\dt.jar;%JAVA_HOME%\lib	ools.jar
+                   # （%JAVA_HOME% 字面量未展开，而 dt.jar/tools.jar 在现代 JDK 早没了）。
+                   # JVM 不做 %VAR% 替换，会把它原样进 java.class.path；
+                   # ES 9 启动时的 JarHell 校验逐个 new JarFile(classpath 里的项)
+                   # → fatal，报出来的是一条**指向错误文件**的错：
+                   #     NoSuchFileException: ...\logs\%JAVA_HOME%\lib\dt.jar
+                   # 2x2 对照实验证实唯一自变量就是 CLASSPATH（清空即起得来）。
+                   # 这不是 ES 的 bug 也不是本工具的 bug，但**本工具要能起来**，
+                   # 所以 spawn 前把它清掉（子进程 env，不改用户的系统设置）。
+                   "CLASSPATH": ""},
         needs=(),
         # **ES 自带 JDK 25 且强制使用、忽略 JAVA_HOME** → 不依赖外部 JDK
         min_java_major=None,
@@ -5967,6 +6028,30 @@ def _http_fetch_status(url: str, timeout: float = 2.0) -> int:
 
 def http_ok(url: str, timeout: float = 2.0) -> bool:
     return _http_status_with(lambda u: _http_fetch_status(u, timeout), url)
+
+
+def http_responds(url: str, timeout: float = 2.0) -> bool:
+    """只要 HTTP 有响应就算活着（**404 / 403 / 5xx 都算**）。
+
+    与 `http_ok` 的区别：`http_ok` 只认 2xx/3xx/401（"这个页面能用"），
+    而这个只认"服务端在应答"。
+
+    2026-10-06 真机实测逼出来的差别：Tomcat 10.1.60 启动后
+    `http://127.0.0.1:8080/` 返回 **404**（没挂任何 web 应用，ROOT 也没解包）
+    —— 但 tomcat **完全正常地在服务**。用 `http_ok` 判会稳定误报"启动失败"，
+    而用户看到的是一个工作正常的 Tomcat。
+
+    这类"有端口但不提供 Web 控制台"的组件（tomcat / nginx / elasticsearch）
+    就该用这个判据；有控制台的（nacos / jenkins / activemq）仍用 `http_ok`
+    —— 那里"页面能用"才是真的能用。
+    """
+    try:
+        _http_fetch_status(url, timeout)
+        return True
+    except urllib.error.HTTPError:
+        return True               # 有 HTTP 响应 = 服务端在应答
+    except Exception:
+        return False
 
 
 def process_is_alive(pid: int) -> bool:
