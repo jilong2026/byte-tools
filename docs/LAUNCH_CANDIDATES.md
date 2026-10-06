@@ -168,6 +168,62 @@ rocketmq 对应的是「一个 namesrv + 一个 broker」，少一半。
 
 ---
 
+## ✅ 2026-10-06：六个组件全部真机验证通过
+
+| 组件 | 端口 | 停止方式 | 真机结论 |
+|------|------|---------|---------|
+| **tomcat** | 8080 + 8005 | `shutdown.bat`（官方） | PASS |
+| **kafka** | 9092 + 9093 | 按登记 PID | PASS（KRaft 4.x **不需要 ZooKeeper**） |
+| **rocketmq** | 9876 + 10909 + 10911 | 端口反查（三重闸） | PASS（**两个进程**，已支持双进程） |
+| **elasticsearch** | 9200 + 9300 | 端口反查 | PASS（自带 JDK 25，**不需要外部 JDK**） |
+| **rabbitmq** | 5672 + 25672 | `rabbitmqctl stop`（官方） | PASS（**需前置 Erlang 27**） |
+| **nginx** | **8080** | `nginx -s quit`（官方） | PASS（**主端口由 80 改成 8080**） |
+
+演练命令：`bt_real_machine_drill.py --launch <key> --yes`。
+9 套护栏全绿（含 33 条新组件护栏 + 13 条接线护栏），真机 6/6 PASS。
+
+### 演练逼出来的 6 个真缺陷（都已修，且都有护栏钉住）
+
+1. **`resolve_launch_version()` 两个分支语义不一致**
+   active 分支返回裸版本号、fallback 返回完整目录名 → 调用方二次拼前缀 →
+   `[WinError 267]`。**触发条件是「刚下载安装完、还没点过切换生效版本」**
+   —— 也就是最常见的那个状态，一键启动必然失败。
+2. **ES 起不来：系统级 `CLASSPATH` 是 JDK 8 遗留**
+   （`.;%JAVA_HOME%\lib\dt.jar;...`，`%JAVA_HOME%` 是字面量、`dt.jar` 早已不存在）。
+   JVM 不做 `%VAR%` 替换，ES 9 的 JarHell 校验会逐个 `new JarFile(classpath 里的项)` → fatal。
+   报出来的错指向 `%JAVA_HOME%\lib\dt.jar`，**极具误导性**（我被它带偏查过一次）。
+   已在 spawn 前清空子进程的 CLASSPATH（**不动用户的系统设置**）。
+3. **中文主机名 → rabbitmq 节点名非 ASCII** → epmd 注册截断 →
+   **服务器起来、端口在听、日志一切正常，但所有 `rabbitmqctl` 子命令全挂**
+   （`:badarg` / rc=70）：UI 上看着启动成功，实际停不掉也查不了状态。
+   已固定 `RABBITMQ_NODENAME=rabbit@localhost`（本机主机名是「鹅城剑仙」）。
+4. **nginx 必须给 `-p`（prefix）**
+   `-c` 只决定读哪个配置文件，而**日志与 pid 文件路径是相对 prefix 算的**
+   （不是 cwd、也不是 -c 那个文件的位置）。不给 prefix 时 pid 找不到 →
+   `-s stop` 彻底停不掉；退到强杀则 master 死、**worker 还活着** → 孤儿占端口。
+5. **产品装的是 rabbitmq 的 Linux 包**
+   `url_list_map` 里只有 `generic-unix`，而它 `sbin/` 下全是**无扩展名脚本**，
+   Windows 上跑不起来（与产品登记的 `rabbitmq-server.bat` 对不上）。
+   Windows 官方 zip（`rabbitmq-server-windows-<v>.zip`）华为云实测 200，已配。
+6. **stop侧的 `subprocess.run` 不传 env**
+   → `rabbitmqctl` 找不到 `erl.exe`、拿不到 NODENAME → **静默失败**
+   （输出被 DEVNULL 吞掉），表现是「点了停止，30 秒后弹强杀确认框」。
+
+### 三个「厂商脚本」类别的通用教训
+
+- **不是所有组件都能用 HTTP 探活**：kafka（Kafka 协议）、rocketmq、rabbitmq（AMQP）
+  都不能，要用它们自带的 CLI（`BrokerApiVersionsCommand` / `clusterList` /
+  `rabbitmqctl status`）。为此加了 `LaunchSpec.service_probe` 字段。
+  反过来，**有端口但没有控制台**的（tomcat/nginx/ES）要用「有响应就算活」
+  （`http_responds`，404 也算）—— tomcat 启动后 `/` 就是 404，它在正常服务。
+- **`-c`/`-p` 这类参数不是可选的**：nginx 与 ES 都靠环境变量或命令行参数定位
+  自己的文件，`extra_env`（ES_HOME / ES_PATH_CONF）与 `-p`（nginx prefix）缺一不可。
+- **多进程组件不能只登记一个 PID**：nginx（master+worker）、
+  rocketmq（namesrv+broker）都是。nginx 用官方 `-s quit`；
+  rocketmq 走了新的 `extra_processes` 双进程机制。
+
+---
+
 ## 我的建议：分批做（按「已实测程度」排）
 
 1. **第一批（最省事，实测已通）**：**rocketmq**、**nginx**
