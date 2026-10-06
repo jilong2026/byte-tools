@@ -148,10 +148,67 @@ broker 起来约 **25-30 秒**（比 nacos/activemq 慢），`startup_timeout` �
 |------|------|-------------|
 | **kafka** | 9092 | **强依赖 ZooKeeper**（5.x 已切KRaft，要确认本项目那几个版本用哪种模式）；端口在 `server.properties` |
 | **pulsar** | 8080/6650/6651 | 8080 撞 Tomcat；standalone 启动慢（之前实测过就绪耗时）；数据在 `pulsar/standalone/data` |
-| **seata** | 8091/9848/9849 | **依赖注册中心**（nacos/eureka），单独起停意义有限 |
+| ~~**seata**~~ | — | **已于 2026-10-06 实测**（见下节）。原表填的 `9848/9849` 是 Nacos 的 gRPC 口，与 Seata 无关 |
 
 **注意 kafka 的复杂度被低估了**：要管 zookeeper + broker 两个进程、两套端口。
 rocketmq 对应的是「一个 namesrv + 一个 broker」，少一半。
+
+## seata —— **已接入**（2026-10-06 真机演练 PASS）
+
+**本次最关键的发现：两个大版本的架构根本不是一回事**，所以"seata 有没有控制台"
+这个问题在 2.2.0 和 2.6.0 上的答案是相反的。
+
+| | **2.2.0（已接入）** | **2.6.0（未接入）** |
+|---|---|---|
+| 进程数 | **单进程**：server 自己带控制台 | **双进程**：控制台被拆进 namingserver |
+| 控制台 | server 自己，**7091** | seata-namingserver，**8081** |
+| RPC 口 | **8091**（= server.port + 1000） | 8091 |
+| server 启 HTTP？ | **是**（日志 `Adding welcome page: static/index.html`） | **否**（`web-application-type: none`） |
+| 控制台出厂账号 | **seata / seata**（实测登录拿到 token） | 留空，要自己配 |
+| JDK 门槛 | class 52 → **JDK 8 起得来**（8 与 21 都实测通过） | class 69 → **要 JDK 25**（本机 21 直接 `UnsupportedClassVersionError`） |
+
+### 接入形态：单进程，控制台 7091 + RPC 8091（与 Nacos 同构）
+
+实测证据：
+
+```
+Tomcat started on port(s): 7091 (http)
+Server started, service listen port: 8091
+GET /                 → 200（前端在 seata-server/lib/seata-console-2.2.0.jar）
+GET /health           → "ok"（200，免鉴权，ignore-urls 里写着它）
+POST /api/v1/auth/login 用 seata/seata → 200 + Bearer token
+```
+
+### 端口**必须**用环境变量注入（四条实测，别改回去）
+
+1. `--server.port=7091` **不行** —— seata-server 有自己的 joptsimple CLI，只认
+   `-p` / `--port` / `--host` / `--storeMode` / …；传 `--server.port` 会打
+   `Option error … but no main parameter was defined in your arg class` 然后**退出、端口不监听**。
+2. `-p 7091` 也不行（它改的是 netty 侧，压不住 HTTP 口）。
+3. **什么都不传更不行** —— 它有个硬编码兜底口 **7056**，`conf/application.yml`
+   里写的 7091 压不住它（2.6.0 的 namingserver 同样落到 7056，写 8081 也没用）。
+4. ✅ **`SERVER_PORT=7091` 实测有效**（Spring Boot 的 relaxed binding，优先级压得住硬编码）。
+   → 登记为 `extra_env={"SERVER_PORT": "{port}"}` + `port_writeback="cli_only"`。
+   **这是本项目第一个靠环境变量传端口的组件。**
+
+### 目录结构（顺带修掉的既有缺陷）
+
+产品原来登记 `path_subdir="bin"`（那是 1.x 的布局），而 2.x 包顶层是
+`seata-server/` + `seata-namingserver/` 两个目录 —— 装完 seata 被判成"未安装"，
+`SEATA_HOME` 与 PATH 条目指向不存在的目录（本机当时就是这种空壳状态）。
+已改为 `seata-server/bin`，装完实测 `exec_path_in_home` 能找到脚本。
+
+### 版本清单为什么只有 2.2.0
+
+同一份 `LaunchSpec` 描述不了两种布局。登记 2.6.0 会让探活去等一个根本不存在的 7091
+→ **"装得上、起不来"**，比不提供这个版本糟糕得多。
+要加回 2.6.0，得先让 spec 支持**按版本分叉**。
+
+### 演练结果
+
+`bt_real_machine_drill.py --launch seata --yes` ——
+启动后 7091/8091 全簇在听、控制台可达、停止后端口全释放、无登记残留。
+护栏 13 条（含 5 组变异自检，全部 CAUGHT）。
 
 ---
 
@@ -224,6 +281,80 @@ rocketmq 对应的是「一个 namesrv + 一个 broker」，少一半。
 
 ---
 
+## ✅ 2026-10-06：十个组件全部在「干净环境」真机验证通过
+
+演练命令：`bt_clean_env_drill.py`（**主动剔掉组件类 `*_HOME` 与 `CLASSPATH`** 再跑，
+模拟 exe 的干净环境 —— 详见下面「为什么必须剔干净」）。
+结果 **10/10 PASS**，护栏 226 条全绿。
+
+| 组件 | 端口簇 | 有网页控制台 | 停止方式 |
+|------|--------|-------------|---------|
+| **jenkins** | 8080 | ✅ `/login` | 按登记 PID |
+| **nacos** | 8848 + 9848 + 9849 | ✅ `/nacos` | 端口反查 |
+| **activemq** | 8161 + 61616 | ✅ `/admin` | 端口反查 |
+| **seata** | 7091 + 8091 | ✅ `/` | 按登记 PID |
+| **tomcat** | **8081** + 8005 | ❌ | `shutdown.bat`（官方） |
+| **kafka** | 9092 + 9093 | ❌ | 按登记 PID |
+| **rocketmq** | 9876 + 10909 + 10911 | ❌ | 端口反查（**两个进程**） |
+| **elasticsearch** | 9200 + 9300 | ❌ | 端口反查 |
+| **rabbitmq** | 5672 + 25672 | ❌ | `rabbitmqctl stop`（官方） |
+| **nginx** | **8888** | ❌ | `nginx -s quit`（官方） |
+
+**只有 4 个组件有网页控制台**（jenkins / nacos / activemq / seata）。
+另外 6 个的卡片上**不显示「打开控制台」按钮**，状态标签写
+「● 运行中 · 端口 N · 无网页控制台」，启动日志与 `credentials_hint`
+说清各自的实际用法 —— 因为给一个不存在的控制台指路，用户点开只会看到 404，
+然后以为服务坏了。
+
+### ⚠️ 端口分配（改过两轮，最终版）
+
+| 组件 | 端口 | 为什么不是别的 |
+|------|------|--------------|
+| jenkins | 8080 | 官方默认 |
+| tomcat | **8081** | 8080 归 jenkins —— 端口冲突不是"谁后启动谁赢"，是**两个都坏** |
+| nginx | **8888** | 官方 80 在 Windows 上被 `System`（http.sys，IIS/WinRM 共用）占着，绑不了也杀不掉（WinError 5）；8080 已被占 |
+| 其余 | 见上表 | 官方默认 |
+
+护栏 `PortNoCollisionAcrossComponents` 遍历 `LAUNCH_KEYS` 两两比对端口簇。
+
+### 演练逼出来的 8 个真缺陷（都已修+ 钉护栏）
+
+1. **`ROCKETMQ_HOME` 没注入** → RocketMQ 拒绝启动
+2. **无控制台的组件照样显示「控制台：URL」** → 浏览器打开必然 404
+3. **端口撞车**（jenkins/tomcat/nginx 都想用 8080）→ 两个组件各自看起来都正常，
+   只有交叉访问才暴露
+4. **ES 的 `Failure running machine-learning native code`** → ES 9 在 Windows 上
+   加载 ML 原生库失败，节点起不来、端口永不监听 → 加 `-Expack.ml.enabled=false`
+   （这与之前修的 `CLASSPATH` 污染是**两个独立问题**，修一个才看得见下一个）
+5. **`resolve_java_home()` 只认 active 登记或 `JAVA_HOME`** → 用户装完 JDK
+   但没点过「切换生效版本」时，java 系组件一律报"需要先有 JDK"
+6. **rabbitmq 的 `data_note` 说错了**：官方默认落 `%APPDATA%\RabbitMQ`，
+   而实测**那个目录根本不会被创建**（我们指定了 `RABBITMQ_BASE`）
+7. **`shutdown_commands` 不传 env** → `rabbitmqctl` 找不到 erl.exe、
+   静默失败 →「点了停止 30 秒后弹强杀框」
+8. **rabbitmq 装的是 Linux 包**（`url_list_map` 里只有 `generic-unix`）
+
+### ⭐ 验证方法本身的三条坑（本轮最重要的产出）
+
+这三条会让你的验证结果全是**假绿灯**：
+
+1. **演练环境必须等于（或严于）真实使用环境。**
+   我做源码演练时 shell 里带着 4 个 `*_HOME`（早期多版本测试写进去的），
+   `dict(os.environ)` 顺手带给了子进程 → **演练全过**；
+   而 **exe 启动的进程没有这些变量** → 用户那边立刻失败。
+   → `bt_clean_env_drill.py` 主动剔掉组件类 `*_HOME` 与 `CLASSPATH`。
+   **但保留 `JAVA_HOME`**：产品里压根没装 jdk（`~/.env-tools/jdk` 是空的），
+   java 系组件靠用户系统自带的 JDK，剔掉它等于在测另一台机器。
+2. **探活必须用 `health_path`，不能直接探 `console_path`。**
+   Jenkins 未初始化时根路径 `/` 返回 **403**（要引导去解锁向导），`/login` 才是 200。
+   演练脚本直接探 `/` → 把一个**完全正常的 Jenkins** 判成"打不开"。
+3. **演练清单不要手写。**
+   我手写的清单**漏了 seata** —— 它确实在 `LAUNCH_KEYS` 里、磁盘上也装着，
+   却从没被演练过。手写清单**静默漏项**：不报错，只是少测一个。
+   → 改为 `sorted(main.LAUNCH_KEYS)`，并加护栏钉住这一点。
+
+---
+
 ## 我的建议：分批做（按「已实测程度」排）
 
 1. **第一批（最省事，实测已通）**：**rocketmq**、**nginx**
@@ -238,10 +369,10 @@ rocketmq 对应的是「一个 namesrv + 一个 broker」，少一半。
 
 ## 必须说清的诚实边界
 
-**已实测的：nginx、rocketmq**（2026-10-06 本机跑通）；
-已接入并实测过的是 Nacos / ActiveMQ / Jenkins。
-**B档剩余（mysql/postgresql/mongodb/elasticsearch/rabbitmq）与整个 C 档
-的端口、配置键名、启动命令全是按厂商惯例推的，本机没装过、没跑过。**
+**已实测的：nginx、rocketmq、seata**（2026-10-06 本机跑通）；
+已接入并实测过的是 Nacos / ActiveMQ / Jenkins / tomcat / kafka / elasticsearch / rabbitmq。
+**B档剩余（mysql/postgresql/mongodb）与 C 档剩余（pulsar）的端口、配置键名、启动命令
+全是按厂商惯例推的，本机没装过、没跑过。**
 
 按本项目铁律「不这样就真的出过问题」，这些必须**打开包 grep + 跑一次厂商命令**核实：
 
