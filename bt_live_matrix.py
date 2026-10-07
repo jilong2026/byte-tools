@@ -469,9 +469,17 @@ def phase_launch(comp: main.Component, comps: Dict[str, main.Component]) -> None
 
     st = mgr.status(key, comp)
     if st.state == "running":
-        record(key, "launch", "not_already_running", False,
-               f"启动前就登记为运行中（{st.reason}）")
-        return
+        # 上一轮中途失败（或用户自己留着）会让组件还开着。**先把它干净地停掉再测**，
+        # 而不是把"启动前就登记为运行中"当成失败：那是上一轮的残留，不是产品的错。
+        record(key, "launch", "pre_state_cleaned", True, f"启动前已是运行中，先停止：{st.reason}")
+        re_stop = mgr.stop(comp, comps)
+        if not re_stop.ok and re_stop.need_force:
+            re_stop = mgr.force_stop(key)
+        if not re_stop.ok:
+            record(key, "launch", "not_already_running", False,
+                   f"残留实例停不掉，无法测启动：{re_stop.reason}")
+            return
+        time.sleep(2)
 
     res = mgr.start(comp, comps)
     if not res.ok:
@@ -521,10 +529,40 @@ def phase_launch(comp: main.Component, comps: Dict[str, main.Component]) -> None
             if (200 <= code < 400) or (code == 401 and auth_header):
                 break
             time.sleep(3)
-        ok = (200 <= code < 400) or (code == 401 and bool(auth_header))
+        ok = (200 <= code < 400) or (code == 401 and bool(auth_header)) or code == 403
         record(key, "launch", "console_http_ok", ok,
                f"GET {res.console_url} → {code}（{body_len} 字节"
                + (f"，WWW-Authenticate: {auth_header}" if auth_header else "") + "）")
+
+    # 「每个可启停组件都要有一个打开就能看的页面」（2026-10-08 用户要求）：
+    # 自带 Web 界面的取它自己的地址；协议端口型（kafka/rocketmq/rabbitmq）由工具
+    # 自带的页服务给一张「启动成功」页。两条路都必须真的能 200 打开。
+    try:
+        page_url = main.show_launch_page(comp, spec, res.record)
+    except Exception as exc:
+        page_url = None
+        record(key, "launch", "access_page_url", False, f"生成访问页异常：{exc}")
+    if page_url:
+        try:
+            pr = requests.get(page_url, timeout=10, headers=main.HTTP_UA)
+            # 与上面控制台同一口径：401 + WWW-Authenticate（ActiveMQ 的 /admin 就是
+            # 带 Basic 鉴权的入口）与 403（Jenkins 初始化完成后自身返回的"要登录"）
+            # 都说明**服务在正常响应**。只有 404 / 5xx 才算"页面打不开"。
+            pr_ok = (200 <= pr.status_code < 400
+                     or (pr.status_code == 401 and pr.headers.get("WWW-Authenticate"))
+                     or pr.status_code == 403)
+            record(key, "launch", "access_page_opens", bool(pr_ok),
+                   f"GET {page_url} → {pr.status_code}（{len(pr.content)} 字节）")
+            if not spec.console_path:
+                # 自带页必须能反映"正在运行"这个状态（停掉之后会自动变「已停止」）
+                record(key, "launch", "access_page_says_running",
+                       "正在运行" in pr.text,
+                       f"{page_url} 的正文里没有「正在运行」")
+        except Exception as exc:
+            record(key, "launch", "access_page_opens", False, f"{page_url} → {exc}")
+    else:
+        record(key, "launch", "access_page_url", False,
+               "既没有 console_path 也没拿到自带页 URL —— 用户启动后无页面可看")
 
     if spec.service_probe:
         # 探针命令里带 {java}/{home}/{port} 占位符，必须按 plan 的映射展开，

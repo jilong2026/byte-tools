@@ -3539,7 +3539,12 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         main_port=8888,   # 见上：80 被 http.sys 占、8080 被 jenkins/tomcat/activemq 占
         port_search_span=99,
         port_writeback="conf_copy",
-        console_path=None,
+        # **nginx 是有可点控制台的**（2026-10-08 用户报「启动后访问不了页面」后改正）：
+        # 它的根路径就是站点首页（`root html` + 默认 index.html），
+        # 写成 None 会走 _has_console() 的"没有网页控制台"分支 —— 卡片上不给
+        # 「打开控制台」按钮，用户只能自己猜端口（他猜的是 8080，而这里是 8888）。
+        # 控制台路径就是根路径，所以填 "/"。
+        console_path="/",
         health_path=None,
         needs=(),
         min_java_major=None,
@@ -5672,6 +5677,306 @@ def _atomic_write_config(data: Dict[str, object]) -> None:
     os.replace(tmp, CONFIG_FILE)
 
 
+# ---------------------------------------------------------------------------
+# 「启动成功访问页」：**每个可启停组件都要有一个打开就能看的页面**
+#
+# 用户要求（2026-10-08）："每个可启动停止的组件启动后…不管有没有控制台，都要有个
+# 访问页面能够让用户访问，让他知道确实已经启动成功了。"
+#
+# 两类组件分别满足：
+#   ① 自带 Web 界面的（jenkins / nacos / activemq / seata / tomcat / nginx）：
+#      页面就是它自己的界面或首页，直接用 `console_path` —— 不做任何转发，
+#      用户看到的是真东西。
+#   ② 没有 Web 界面的（elasticsearch / rabbitmq / kafka / rocketmq）：
+#      ES 的根路径本来就回一段人可读的 JSON 状态，直接指它；
+#      其余三个（协议端口，浏览器打开只会失败）由本工具**自己起一个小 HTTP 服务**，
+#      在 127.0.0.1 的随机空闲端口上回一个「启动成功」页：组件名、运行状态、
+#      各端口、控制台地址、登录凭据、日志路径、当前时间。
+#
+# 为什么由工具自己起服务而不是写一个静态 HTML 文件：静态文件没有"现在还在跑吗"
+# 这层信息 —— 本服务的 /status 与页面每次都现算端口监听状态，
+# 服务已停时页面会明说"已停止"，不会变成一张永久说"成功"的假告示。
+# 只监听 127.0.0.1，不对外网暴露；端口取 OS 分配的空闲口（绝不撞用户端口）。
+# ---------------------------------------------------------------------------
+PAGE_SERVER_PORT: int = 0            # 0 = 让 OS 分配；运行期不改
+_PAGE_SERVER: Optional["ComponentPageServer"] = None
+
+
+class ComponentPageServer:
+    """工具自带的"启动成功"页服务（仅 127.0.0.1，随机空闲端口）。
+
+    用法：`show_launch_page(...)` 拿 URL；URL 形如
+    `http://127.0.0.1:<port>/page/<key>`，`/page/<key>.html` 是同一个页面，
+    `/<key>.html` 也能打开（把"HTML 文件"这个习惯也兼容掉）。
+    """
+
+    def __init__(self, host: str = "127.0.0.1") -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.host = host
+        self._lock = threading.Lock()
+        self._pages: Dict[str, str] = {}      # key → 已完成渲染的 HTML 片段
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "byte-tools-page/1.0"
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
+                path = self.path.split("?", 1)[0]
+                name = ""
+                if path.startswith("/page/"):
+                    name = path[len("/page/"):]
+                elif path in ("/", "/index.html", "/index.htm"):
+                    name = "index"
+                else:
+                    name = path.lstrip("/")
+                if name.endswith(".html"):
+                    name = name[:-len(".html")]
+                if name == "index":
+                    body = outer._index_html()
+                else:
+                    body = outer._page_for(name)
+                if body is None:
+                    body = error_page("没有这个组件的访问页",
+                                      f"路径 {path} 不对。可用的组件页："
+                                      f"{'、'.join(sorted(outer._pages)) or '（还没有）'}。")
+                    return self._send(404, body)
+                return self._send(200, body)
+
+            def _send(self, code: int, body: str) -> None:
+                raw = body.encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, fmt: str, *args) -> None:  # noqa: A002
+                return None          # 别把访问日志刷到用户终端
+
+        try:
+            self._httpd = ThreadingHTTPServer((host, PAGE_SERVER_PORT), Handler)
+        except OSError:
+            # 起不来也不该拖累启动流程：调用方拿不到 URL 会退化成"只打日志"
+            self._httpd = None
+            return
+        self.port = self._httpd.server_address[1]
+        threading.Thread(target=self._httpd.serve_forever,
+                         name="byte-tools-page-server", daemon=True).start()
+
+    # -- 对外 ---------------------------------------------------------------
+    def register(self, key: str, section_html: str) -> Optional[str]:
+        """登记/更新一个组件的页面片段，返回它的可访问 URL。服务没起来返回 None。"""
+        if self._httpd is None:
+            return None
+        with self._lock:
+            self._pages[key] = section_html
+        return f"http://{self.host}:{self.port}/page/{key}"
+
+    def shutdown(self) -> None:
+        if self._httpd is not None:
+            self._httpd.shutdown()
+
+    # -- 页面渲染 -----------------------------------------------------------
+    def _index_html(self) -> str:
+        with self._lock:
+            keys = sorted(self._pages)
+        if not keys:
+            return error_page("还没有启动过任何组件",
+                              "启动一个组件后，这里会列出它的访问页。")
+        cards = "".join(
+            f'<li><a href="/page/{k}">{html_escape(k)}</a></li>' for k in keys)
+        return page_shell("已启动的组件", f"<ul class='links'>{cards}</ul>")
+
+    def _page_for(self, key: str) -> Optional[str]:
+        with self._lock:
+            return self._pages.get(key)
+
+
+def launch_success_lines(comp: "Component", spec: "LaunchSpec", rec: "RunRecord",
+                         page_url: Optional[str] = None) -> List[str]:
+    """启动成功后要打进组件日志的**访问指引**（用户要求：每件都要有能打开的页面）。
+
+    对自带 Web 界面的组件，这一页就是它自己的界面；对协议端口型组件（kafka/rocketmq/
+    rabbitmq），是工具自带的那张"启动成功"页 —— 无论哪种，用户都能**点一个地址就看到
+    "确实起来了"**，不用自己去翻端口、猜工具。
+
+    返回多行文本，由调用方逐行写进日志（保持既有日志渲染方式不变）。
+    """
+    ports = tuple(rec.ports) or (rec.port,)
+    port_text = "、".join(str(p) for p in ports)
+    url = page_url or rec.console_url
+    lines = [
+        "──────── 启动成功，访问地址 ────────",
+        f"  {comp.display_name} 已在端口 {port_text} 上运行",
+    ]
+    if spec.console_path and page_url is None:
+        lines.append(f"  控制台/首页：{url}")
+    elif url:
+        lines.append(f"  访问页（能看到运行状态）：{url}")
+        if spec.console_path:
+            lines.append(f"  它自己的控制台：{rec.console_url}")
+    else:
+        lines.append(f"  访问方式：{_access_hint_for(comp, spec, rec.port)}")
+    if not spec.console_path and not url:
+        lines.append(f"  {_access_hint_for(comp, spec, rec.port)}")
+    lines.append(f"  启动日志：{Path(rec.data_dir or (CONFIG_DIR / f'{rec.key}-data')) / 'logs' / 'byte-tools.out'}")
+    lines.append("────────────────────────────────────")
+    return lines
+
+
+def page_shell(title: str, body: str) -> str:
+    """所有自带页面共用的外壳（内联样式：不依赖任何外部资源，离线可用）。"""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_escape(title)}</title>
+<style>
+ :root {{ color-scheme: light dark; }}
+ body {{ font-family: "Microsoft YaHei", system-ui, sans-serif; margin: 0;
+        padding: 28px; line-height: 1.7; background: #f6f7f9; color: #1f2328; }}
+ .card {{ max-width: 760px; margin: 0 auto; background: #fff; border-radius: 10px;
+         padding: 26px 30px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }}
+ h1 {{ font-size: 21px; margin: 0 0 6px; }}
+ .ok {{ color: #1a7f37; font-weight: 700; }}
+ .stopped {{ color: #b3261e; font-weight: 700; }}
+ table {{ border-collapse: collapse; width: 100%; margin-top: 14px; }}
+ th, td {{ text-align: left; padding: 7px 10px; border-bottom: 1px solid #e6e8eb;
+           font-size: 14px; vertical-align: top; }}
+ th {{ width: 132px; color: #57606a; font-weight: 600; }}
+ code {{ background: #f0f1f3; padding: 1px 6px; border-radius: 4px; font-size: 13px; }}
+ a {{ color: #0969da; }}
+ .links li {{ margin: 4px 0; }}
+ .note {{ margin-top: 16px; font-size: 13px; color: #57606a; }}
+</style></head><body><div class="card">{body}
+<p class="note">这一页由 byte-tools 自带的小服务生成，只监听 127.0.0.1。
+刷新可以看到最新的运行状态。</p></div></body></html>"""
+
+
+def html_escape(text: object) -> str:
+    """最小 HTML 转义（不引入第三方依赖）。"""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def plain_text(text: str) -> str:
+    """去掉给界面日志用的 Markdown 装饰（**粗体**、`代码`），再 HTML 转义。
+
+    卡片日志是纯文本，写 `**KRaft 模式**` 是为了醒目；但同一段文案进网页后
+    星号会原样露出来（"**Kafka 没有网页控制台** —— …"），读起来像坏了。
+    只处理这两个最常用的标记，不做通用 Markdown 解析。
+    """
+    out = str(text).replace("**", "")
+    return html_escape(out.replace("`", ""))
+
+
+def error_page(title: str, detail: str) -> str:
+    return page_shell(title, f"<h1>{html_escape(title)}</h1><p>{html_escape(detail)}</p>")
+
+
+def _is_listening_any(ports: Sequence[int]) -> bool:
+    return any(port_is_listening(p) for p in ports)
+
+
+def launch_page_html(comp: "Component", spec: "LaunchSpec", rec: "RunRecord",
+                     checked_at: Optional[float] = None) -> str:
+    """渲染某个可启停组件的「启动成功访问页」正文。
+
+    状态是**现算**的：每次请求都重新探端口，所以服务停掉之后这张页会自己变成
+    「已停止」—— 不会留下一张永远说"成功"的假告示。
+    """
+    ports = tuple(rec.ports) or (rec.port,)
+    running = _is_listening_any(ports)
+    status = ("<span class='ok'>✔ 正在运行</span>" if running
+              else "<span class='stopped'>✘ 已停止（端口已释放）</span>")
+    native = spec.console_path
+    rows: List[Tuple[str, str]] = [
+        ("组件", html_escape(comp.display_name)),
+        ("状态", status),
+        ("版本", html_escape(rec.version)),
+        ("端口", "、".join(str(p) for p in ports)),
+        ("安装目录", f"<code>{html_escape(rec.home)}</code>"),
+    ]
+    if native:
+        rows.append(("控制台", f'<a href="{html_escape(rec.console_url)}">'
+                               f'{html_escape(rec.console_url)}</a>'))
+    else:
+        rows.append(("访问方式", html_escape(_access_hint_for(comp, spec, rec.port))))
+    if spec.data_dir_env and rec.data_dir:
+        rows.append(("数据目录", f"<code>{html_escape(rec.data_dir)}</code>"))
+    log_file = Path(rec.data_dir or (CONFIG_DIR / f"{rec.key}-data")) / "logs" / "byte-tools.out"
+    rows.append(("启动日志", f"<code>{html_escape(log_file)}</code>"))
+    if spec.risk_note:
+        rows.append(("留意", plain_text(spec.risk_note.split("。")[0]) + "。"))
+    try:
+        creds = credentials_for(comp, spec, rec.port)
+        if creds:
+            rows.append(("登录信息", "<br>".join(plain_text(c) for c in creds)))
+    except Exception:
+        pass
+    when = time.strftime("%Y-%m-%d %H:%M:%S",
+                         time.localtime(checked_at or time.time()))
+    rows.append(("本页刷新时间", html_escape(when)))
+    table = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in rows)
+    head = (f"<h1>{html_escape(comp.display_name)} 启动成功</h1>" if running
+            else f"<h1>{html_escape(comp.display_name)} 已停止</h1>")
+    return page_shell(f"{comp.display_name} 访问页",
+                      head + f"<table>{table}</table>")
+
+
+def _access_hint_for(comp: "Component", spec: "LaunchSpec", port: int) -> str:
+    """没有 Web 界面的组件"该怎么访问"的实话（按组件给，不写死端口）。"""
+    return {
+        "elasticsearch":
+            f"http://127.0.0.1:{port}/ 用浏览器或 curl 打开会返回集群 JSON 状态"
+            f"（这是 ES 的正常形态，它没有图形界面）；图形界面请另装 Kibana。",
+        "kafka":
+            f"Kafka 的 {port} 说 Kafka 二进制协议，浏览器打不开是正常的。"
+            f"用安装目录 bin/windows/kafka-topics.bat --bootstrap-server "
+            f"localhost:{port} --list 验证。",
+        "rocketmq":
+            f"RocketMQ 的 {port} 说 RocketMQ 二进制协议，浏览器打不开是正常的。"
+            f"用安装目录 bin/mqadmin clusterList -n localhost:{port} 验证"
+            f"（能列出 broker 才算真的起来了）。",
+        "rabbitmq":
+            f"RabbitMQ 的 {port} 说 AMQP 协议，浏览器打不开是正常的。"
+            f"客户端连接串：amqp://guest:guest@127.0.0.1:{port}/"
+            f"（guest 默认只允许本机）；查状态用 sbin/rabbitmqctl.bat status。",
+    }.get(comp.key, f"该组件在端口 {port} 上服务，请用对应的客户端工具访问。")
+
+
+def get_page_server() -> Optional["ComponentPageServer"]:
+    """惰性取页服务：失败返回 None（调用方要能接受"没有页面"这条路）。"""
+    global _PAGE_SERVER
+    if _PAGE_SERVER is None:
+        try:
+            _PAGE_SERVER = ComponentPageServer()
+        except Exception:
+            return None
+        if _PAGE_SERVER._httpd is None:      # 端口被占/权限问题：不重试、不报错
+            return None
+    return _PAGE_SERVER
+
+
+def show_launch_page(comp: "Component", spec: "LaunchSpec", rec: "RunRecord") -> Optional[str]:
+    """登记该组件的访问页并返回 URL；服务起不来返回 None。
+
+    **每个可启停组件都会拿到一个 URL**：
+      - 自带 Web 界面（含 ES 的 JSON 根路径）：URL 就是该组件自己的地址；
+      - 没有 Web 界面：URL 指向本工具自带的"启动成功"页。
+    所以"启动后一定有个能打开的页面"这件事对 10 个组件都成立。
+    """
+    if spec.console_path:
+        return rec.console_url
+    server = get_page_server()
+    if server is None:
+        return None
+    return server.register(comp.key, launch_page_html(comp, spec, rec))
+
+
 @dataclass
 class RunRecord:
     """一条运行登记。
@@ -5680,7 +5985,6 @@ class RunRecord:
     会自己后台化，脚本返回的 PID 几秒后就不是服务进程了。把"这个 PID 是什么身份"
     写下来，才不至于以后有人拿 launcher 的 PID 判生死。
     """
-
     key: str
     version: str
     home: str
@@ -8190,6 +8494,9 @@ class ComponentCard(QFrame):
         # 未运行时把 btn_uninstall 一律设成可用会顶掉 _detect_status 按"选中版本
         # 装没装"算出的状态，给出一张未安装也能点卸载的卡片（做不到的承诺）。
         self._uninstall_locked_by_launch: bool = False
+        # 最近一次启动生成的「启动成功访问页」URL（没有自带控制台的组件用它，
+        # 供「打开访问页」按钮与状态栏使用；进程内缓存，登记表里也写了一份）。
+        self._launch_page_url: Optional[str] = None
 
         self.setObjectName("card")
         self.setFrameShape(QFrame.NoFrame)
@@ -8400,11 +8707,16 @@ class ComponentCard(QFrame):
         st = self._launch_status()
         running = st.state == "running"
         self.btn_start.setEnabled(self.launch_worker is None)
-        # **没有 Web 控制台的组件要藏掉这个按钮**（2026-10-06 用户报
-        # 「Nginx、Tomcat 访问控制台显示 404」）：它们服务是好的，
-        # 只是没有页面可打开 —— 摆个按钮在那儿只会让人以为服务坏了。
-        # 端口信息改放进 btn_start 的 tooltip，不丢。
+        # **每个可启停组件都有一个能打开的地址**（2026-10-08 用户要求）：
+        #   自带 Web 界面 → 按钮文字「打开控制台」，指向它自己的页面；
+        #   协议端口型（kafka/rocketmq/rabbitmq）→ 文字「打开访问页」，
+        #   指向工具自带的「启动成功」页（卡片销毁前若还留着上次的 URL 就用它，
+        #   否则由 _has_console() 从登记表里读）。
         has_console = self._has_console()
+        spec = getattr(self.component, "launch", None)
+        self.btn_console.setText("打开控制台"
+                                 if (spec is not None and spec.console_path)
+                                 else "打开访问页")
         self.btn_console.setVisible(has_console)
         self.btn_console.setEnabled(running)
         # 按钮文字就是状态本身：运行中显示「停止」，否则显示「启动」。
@@ -8601,20 +8913,37 @@ class ComponentCard(QFrame):
                             f"{reason}\n\n装好之后可以再点一次「启动」。")
 
     def _on_launch_ok(self, key: str, console_url: str) -> None:
-        # **别对没有 Web 控制台的组件说"控制台：URL"**（2026-10-06 用户报
-        # 「RabbitMQ 显示启动成功实际无法访问」后定位）：
-        # console_path 是 None 时 console_url 会被拼成 `http://127.0.0.1:5672`，
-        # 那个地址用浏览器打开只会得到失败/空白 —— 写着"控制台"就是在指路到
-        # 一扇不存在的门。改为说清"服务在哪个端口、用什么工具访问"。
-        if self._has_console():
-            self._log("info", f"已启动，控制台：{console_url}")
-        else:
-            st = self._launch_status()
-            port = st.record.port if st.record else "?"
-            self._log("info",
-                      f"已启动：{self.component.display_name} 在端口 {port} 上服务"
-                      f"（对局域网开放）。")
-            self._log("info", f"它没有网页控制台。{self._no_console_hint()}")
+        """启动成功后的统一收尾：**给用户一个能打开的地址** + 说清停止按钮在哪。
+
+        2026-10-08 用户要求：不管组件有没有自带控制台，启动后都要有个能访问的页面，
+        让用户确认"确实起来了"。所以这里分两路：
+          - 自带 Web 界面（含 ES 的 JSON 根路径）：地址就是它自己的；
+          - 协议端口型（kafka / rocketmq / rabbitmq）：用工具自带的
+            「启动成功」页（见 ComponentPageServer），并把 URL 写回登记，
+            这样卡片上的「打开访问页」按钮也能直接打开它。
+        """
+        st = self._launch_status()
+        rec = st.record
+        spec = self.component.launch
+        page_url: Optional[str] = None
+        if rec is not None and spec is not None:
+            try:
+                page_url = show_launch_page(self.component, spec, rec)
+            except Exception as exc:      # 页面服务不该影响"启动成功"这件事
+                self._log("warn", f"生成访问页失败（不影响服务运行）：{exc}")
+            if page_url and page_url != rec.console_url:
+                # 把访问页写回登记：刷新界面/重开工具后「打开访问页」按钮仍可用
+                try:
+                    records = load_running_map()
+                    if self.component.key in records:
+                        records[self.component.key].console_url = page_url
+                        save_running_map(records)
+                except Exception:
+                    pass
+                self._launch_page_url = page_url
+        if spec is not None and rec is not None:
+            for line in launch_success_lines(self.component, spec, rec, page_url):
+                self._log("ok", line)
         self._refresh_launch_state()
         # 明说停止按钮在哪：2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。
         # 查下来按钮一直好着（可见可用、文本"停止"、旁边 label 显示"● 运行中 · 端口 8848"），
@@ -8741,44 +9070,72 @@ class ComponentCard(QFrame):
         self.launch_worker.start()
 
     def on_console_clicked(self) -> None:
-        """打开控制台。
+        """打开访问页。
 
-        **没有 Web 控制台的组件不该给这个入口**（2026-10-06 用户报
-        「Nginx、Tomcat 显示启动成功，访问控制台显示 404」后定位）：
-        它们的 `console_path` 是 None，console_url被拼成 `http://127.0.0.1:8080`，
-        那个路径本来就不存在 → 浏览器里必然是 404。
-        用户看到「启动成功」就理所当然地点控制台，点开全是 404 ——
-        那不是服务坏了，是这个按钮在这里根本不该存在。
+        **每个可启停组件都有一个能打开的地址**（2026-10-08 用户要求）：
+          - 自带 Web 界面：它自己的控制台/首页（nginx 是 8888、tomcat 是 8081，
+            都由登记表里的实际端口给出，不再写死 8080）；
+          - 协议端口型（kafka / rocketmq / rabbitmq / ES）：工具自带的
+            「启动成功」页，上面写着运行状态、端口、日志路径与访问方式。
+
+        历史坑（2026-10-06）：nginx/tomcat 的 console_path 曾是 None，
+        console_url 被拼成 `http://127.0.0.1:8080` → 点开必然 404，
+        用户以为"启动成功是假的"。现在这两件都有真实首页，且对没有界面的组件
+        改指自带页，不会再指到一扇不存在的门。
         """
         st = self._launch_status()
         if st.record is None:
             return
+        target = st.record.console_url
         if not self._has_console():
-            # 兜底：按钮理论上已被隐藏，这里再挡一层，
-            # 免得"点了没反应"变成"以为服务坏了去重启"。
             QMessageBox.information(
                 self,
-                f"{self.component.display_name} 没有 Web 控制台",
+                f"{self.component.display_name} 没有网页控制台",
                 f"{self.component.display_name} 不提供网页界面，"
                 f"它的服务在端口 {st.record.port} 上（对局域网开放）。\n\n"
                 f"要访问它请用对应的客户端工具，例如：\n"
                 f"{self._no_console_hint()}")
             return
-        QDesktopServices.openUrl(QUrl(st.record.console_url))
+        QDesktopServices.openUrl(QUrl(target))
 
     def _has_console(self) -> bool:
-        """该组件是否有可点的 Web 控制台。判据是登记表里的 console_path。"""
+        """该组件是否有可点的访问页。
+
+        判据有两条（任一成立即可点）：
+          ① 登记表里有 `console_path` —— 组件自带的 Web 界面/首页；
+          ② 登记里的 `console_url` 指向本工具自带的「启动成功」页
+             （协议端口型组件走这条，见 show_launch_page）。
+        2026-10-08 之前只认①，于是 kafka/rocketmq/rabbitmq 的卡片上
+        根本没有这个按钮 —— 而用户现在**要求**每件都有能打开的页面。
+        """
         spec = getattr(self.component, "launch", None)
-        return bool(spec is not None and spec.console_path)
+        if spec is None:
+            return False
+        if spec.console_path:
+            return True
+        try:
+            st = self._launch_status()
+        except Exception:
+            return False
+        return bool(st.record is not None and st.record.console_url)
 
     def _no_console_hint(self) -> str:
-        """没有控制台时，给一句"这个组件该怎么用"的实话。"""
+        """没有控制台时，给一句"这个组件该怎么用"的实话。
+
+        **端口不能写死**（2026-10-08 改正）：原来这里写着 8080，而 tomcat 实际是
+        8081、nginx 是 8888 —— 一句写错端口的指引比不给指引更坏，用户会照它去连
+        一个根本没人听的端口。现在按登记表里的 main_port 现算。
+        """
+        spec = getattr(self.component, "launch", None)
+        port = getattr(spec, "main_port", None) or "?"
         return {
-            "tomcat": "把 WAR 放进 webapps/ 后访问 http://127.0.0.1:8080/应用名/",
-            "nginx": "默认站点在 html/ 下，访问 http://127.0.0.1:8080/",
-            "elasticsearch": "用 curl 或 Kibana 访问 9200（Kibana 不在本工具里）",
-            "kafka": "用 kafka-topics.sh 之类的命令行工具操作",
-            "rocketmq": "用 mqadmin 命令行工具操作",
+            "tomcat": f"把 WAR 放进 ~/.env-tools/tomcat-data/webapps/ 后访问 "
+                      f"http://127.0.0.1:{port}/应用名/（放安装目录那份不生效）",
+            "nginx": f"默认站点在 ~/.env-tools/nginx-data/html/ 下，"
+                     f"访问 http://127.0.0.1:{port}/",
+            "elasticsearch": f"用 curl 访问 http://127.0.0.1:{port}/（图形界面 Kibana 不在本工具里）",
+            "kafka": "用 kafka-topics.bat（安装目录 bin/windows/ 下）之类的命令行工具操作",
+            "rocketmq": "用 mqadmin（安装目录 bin/ 下）命令行工具操作",
             "rabbitmq": "管理界面需要额外开 rabbitmq_management 插件，本工具暂未启用",
         }.get(self.component.key, "请用对应的客户端工具访问")
 
