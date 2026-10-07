@@ -27,13 +27,10 @@ if REPO_ROOT not in sys.path:
 import main  # noqa: E402
 
 # 26 个组件的完整归属（24 个存量 + powershell + nginx）
-EXPECTED_MEMBERSHIP = {
-    "开发环境": {"jdk", "python", "node", "go", "bun", "conda", "git", "maven",
-               "gradle", "powershell"},
-    "开发软件": {"tomcat", "mysql", "mongodb", "postgresql", "elasticsearch", "nacos",
-               "seata", "kafka", "rocketmq", "pulsar", "activemq", "rabbitmq", "nginx"},
-    "其它软件": {"docker", "kubectl", "jenkins"},
-}
+# 分类基线只有**一份**：本文件与 bt_component_category_tests.py 各写一张表的话，
+# 改 Tab 结构时必然出现"一个文件绿、另一个文件红"的假分裂（2026-10-08 加「一键启停」时
+# 就撞上了：那边更新了，这张还是三个 Tab）。所以直接复用对面那份。
+from bt_component_category_tests import EXPECTED_MEMBERSHIP  # noqa: E402
 ALL_KEYS = {k for g in EXPECTED_MEMBERSHIP.values() for k in g}
 TOTAL = sum(len(g) for g in EXPECTED_MEMBERSHIP.values())
 

@@ -1,9 +1,13 @@
-"""组件三类分组 + Tab 页布局的规格测试（离线，不联网）。
+"""组件四类分组 + Tab 页布局的规格测试（离线，不联网）。
 
-分类标准（2026-09-28 与用户确认）：
+分类标准（2026-09-28 与用户确认；2026-10-08 增加「一键启停」）：
   开发环境 = 装完进 PATH、直接用来写/编译/打包代码（语言运行时 + 构建与版本工具）
-  开发软件 = 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索 / 容器运行时宿主）
-  其它软件 = 不参与写代码的运维与交付外围（容器 / 编排 / CI）
+  开发软件 = 本地跑起来给项目当依赖、但本工具**还不能一键启停**的服务（数据库 / 消息队列）
+  一键启停 = 卡片上有「启动 / 停止」按钮的组件，成员由 LAUNCH_KEYS 派生，不是第二张表
+  其它软件 = 不参与写代码的运维与交付外围（容器 / 编排）
+
+「一键启停」排在「其它软件」之前（2026-10-08 用户要求）：它是本工具最能干活的一组长，
+埋在倒数第二个 Tab 里等于藏起来。
 """
 import os
 import sys
@@ -30,9 +34,16 @@ import main  # noqa: E402
 EXPECTED_MEMBERSHIP = {
     "开发环境": {"jdk", "python", "node", "go", "bun", "conda", "git", "maven",
                "gradle", "powershell"},
-    "开发软件": {"tomcat", "mysql", "mongodb", "postgresql", "elasticsearch", "nacos",
-               "seata", "kafka", "rocketmq", "pulsar", "activemq", "rabbitmq", "nginx"},
-    "其它软件": {"docker", "kubectl", "jenkins"},
+    # 剩下的服务型组件还不能一键启停（数据目录/端口/前置运行时的收尾还没做），
+    # 留在「开发软件」里 —— 它们接进框架后会自动挪到「一键启停」。
+    "开发软件": {"mysql", "mongodb", "postgresql", "pulsar"},
+    # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS），
+    # 位置固定在「其它软件」之前（2026-10-08 用户要求）。这里手写一份清单是为了让
+    # "扩白名单 = 必须同时改这张表"变成一次可见的改动：
+    # 下面 test_launch_tab_membership_is_derived_from_the_whitelist 会把两边钉在一起。
+    "一键启停": {"jenkins", "nacos", "activemq", "rocketmq", "nginx", "kafka",
+               "tomcat", "elasticsearch", "rabbitmq", "seata"},
+    "其它软件": {"docker", "kubectl"},
 }
 
 ALL_KEYS = {k for group in EXPECTED_MEMBERSHIP.values() for k in group}
@@ -80,6 +91,21 @@ class GroupComponentsHelper(unittest.TestCase):
         for name, keys in groups.items():
             self.assertTrue(keys, f"分类 {name} 是空的，Tab 会是空白页")
 
+    def test_launch_tab_membership_is_derived_from_the_whitelist(self):
+        """「一键启停」的成员**必须**等于 LAUNCH_KEYS，而不是第二张手写表。
+
+        这张 Tab 的准入条件是"卡片上有启动/停止按钮"，那个条件由 LAUNCH_OF 决定；
+        再维护一份分类清单的话，接进第 11 个组件时就会出现"能启动、但人在别的 Tab 里"
+        —— 那正是本次要消灭的现象（计划二的账本里记着同一件事）。
+        """
+        groups = main.group_components(main.build_components())
+        self.assertEqual({c.key for c in groups["一键启停"]}, set(main.LAUNCH_KEYS))
+
+    def test_launch_tab_sits_right_before_the_other_software_tab(self):
+        names = list(main.COMPONENT_CATEGORIES)
+        self.assertEqual(names.index("一键启停") + 1, names.index("其它软件"),
+                         "「一键启停」必须紧贴在「其它软件」前面")
+
 
 class MainWindowUsesTabs(unittest.TestCase):
     """真实构造 MainWindow，只把「联网抓版本」和「探测已装版本」两件事停下——
@@ -109,7 +135,7 @@ class MainWindowUsesTabs(unittest.TestCase):
         from PySide6.QtWidgets import QTabWidget
         self.assertEqual(self.win.tabs.tabPosition(), QTabWidget.North)
 
-    def test_three_tabs_in_the_agreed_order_with_counts(self):
+    def test_four_tabs_in_the_agreed_order_with_counts(self):
         self.assertIsInstance(self.win.tabs, self.QTabWidget)
         self.assertEqual(self._tab_labels(), [
             f"{name}（{len(EXPECTED_MEMBERSHIP[name])}）"

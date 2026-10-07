@@ -430,7 +430,14 @@ class Component:
                 shutil.rmtree(install_path)
                 summary_parts.append(f"已删除安装目录：{install_path}")
             except Exception as exc:
-                summary_parts.append(f"删除安装目录失败：{exc}")
+                # 目录删不掉多半是有进程占着它（真机 2026-10-07 rabbitmq：内容全删光、
+                # 顶层目录删不掉，而当时还在跑的只有 epmd.exe）。这里必须把三件事说清：
+                # 内容已经没了、环境变量与 PATH 照旧往下清、空壳目录等占用结束后再删一次。
+                # 绝不能因为它就中断后续清理 —— 那正是"永久卸载不了"的起点。
+                summary_parts.append(
+                    f"安装目录没删干净（内容已删除，顶层目录疑似被别的进程占用）：{exc}；"
+                    f"环境变量与 PATH 仍照常清理，残留的空目录 {install_path} "
+                    f"请结束占用它的进程（或重启）后再点一次卸载清掉")
 
         # 2. 删除 XXX_HOME：只有它正指向本次被删的版本才删；指向同组件其他版本时保留，
         #    交给第 4 步的生效重排处理，避免"删了 17，把 21 的 JAVA_HOME 也清了"。
@@ -589,6 +596,38 @@ def version_from_install_dir(comp: "Component", path: Path) -> Optional[str]:
     return name[len(prefix):] or None
 
 
+def install_dir_is_hollow(path: Path) -> bool:
+    """安装目录里一个条目都没有 = 卸载被"目录正被别的进程占用"打断后留下的**空壳**。
+
+    真机 2026-10-07 rabbitmq：`shutil.rmtree` 把内容全删光了，顶层目录删不掉，于是
+    `installed_versions()` 仍然报"已装 4.0.9"、下拉框给它挂着绿勾，而 `uninstall()`
+    第 4 步看到生效版本还在"剩余版本"里，就把 RABBITMQ_HOME 与 PATH **重建**回这个空壳
+    —— 每次卸载都是白清一遍环境再写回去，用户看到的是永久"卸载不了"。
+    判据只用"目录空"这一条：更严的判据（比如要求可执行文件在场）会把 jenkins/war
+    这类落地形状特殊的真安装误判成没装，代价比收益大。
+    """
+    try:
+        return path.is_dir() and not any(path.iterdir())
+    except OSError:
+        return False
+
+
+def residue_install_dirs(comp: "Component") -> List[Tuple[str, Path]]:
+    """磁盘上还留着、内容已被删空的残留目录，按版本降序。
+
+    它们**不算已装**：不进 `installed_versions()`，因此不进绿勾、状态胶囊，
+    也不会成为生效版本重排的目标。之所以要单独列出来，是因为界面必须还能
+    选中并卸载它 —— 否则那个删不掉的目录就成了谁都不碰的死角。
+    """
+    pairs = []
+    for path in comp.installed_dirs():
+        ver = version_from_install_dir(comp, path)
+        if ver and install_dir_is_hollow(path):
+            pairs.append((ver, path))
+    order = {v: i for i, v in enumerate(_sort_semver_desc([v for v, _p in pairs]))}
+    return sorted(pairs, key=lambda p: order[p[0]])
+
+
 def installed_versions(comp: "Component") -> List[Tuple[str, Path]]:
     """该组件在磁盘上真实装着的版本，按语义版本**降序**（最新在前）。
 
@@ -597,11 +636,13 @@ def installed_versions(comp: "Component") -> List[Tuple[str, Path]]:
 
     说明: 排序必须走 _sort_semver_desc。用 str.sort() 会得到 jdk-8 > jdk-21 的错序，
           "配置环境变量"和"卸载后自动切到剩余最高版本"都会挑错版本。
+          空壳目录（install_dir_is_hollow）不算已装，走 residue_install_dirs 那条通道：
+          把它们算进来会让卸载永远无法收敛（见那两个函数各自的注释）。
     """
     pairs: List[Tuple[str, Path]] = []
     for path in comp.installed_dirs():
         ver = version_from_install_dir(comp, path)
-        if ver:
+        if ver and not install_dir_is_hollow(path):
             pairs.append((ver, path))
     order = {v: i for i, v in enumerate(_sort_semver_desc([v for v, _p in pairs]))}
     return sorted(pairs, key=lambda p: order[p[0]])
@@ -3109,13 +3150,14 @@ class VersionFetchWorker(QThread):
 
 
 # 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "其它软件")
+COMPONENT_CATEGORIES = ("开发环境", "开发软件", "一键启停", "其它软件")
 
 # 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
 # build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。
 #   开发环境：装完进 PATH、直接用来写 / 编译 / 打包代码
 #   开发软件：本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）
-#   其它软件：不参与写代码的容器、编排与 CI 外围
+#   一键启停：卡片上有「启动/停止」按钮的组件 —— 成员由 LAUNCH_KEYS 派生，不写在这里
+#   其它软件：不参与写代码的容器、编排外围
 COMPONENT_CATEGORY_OF = {
     "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
     "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
@@ -3181,6 +3223,13 @@ class LaunchSpec:
     # 顺序：先起 commands，再起这个（broker 要向 namesrv 注册）。
     # 停止：走 port_lookup 的三重闸，一个端口簇覆盖两个进程。
     extra_processes: List[Dict[str, List[str]]] = field(default_factory=list)
+    # **启动脚本会留下、而停止手段管不到的辅助进程**的映像名（与 extra_processes 不同：
+    # 那个是"我们要多起的进程"，这个是"厂商脚本自己留下、我们停不掉也不该停的进程"）。
+    # 真机 2026-10-07 rabbitmq：`rabbitmqctl stop` 只停 server，Erlang 的 epmd.exe 一直活着。
+    # 它不监听业务端口 → 按簇判定会正常报"已停止"；但它的工作目录还留在版本目录里，
+    # Windows 上让后续 `rmdir` 失败，用户于是看到永久"卸载不了"。
+    # 这个清单**只用于停止后提示**：绝不自动结束别人的进程（要结束由用户决定）。
+    leftover_processes: tuple = ()
     # 停止手段："pid" = 我们就是服务进程（Jenkins）；
     #           "shutdown_command" = 有可用的正规关闭脚本（本期无人使用，留作计划三位置）；
     #           "port_lookup" = 没有可靠厂商手段，停止走端口反查（Nacos / ActiveMQ）
@@ -3834,6 +3883,10 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         main_port=5672,
         # 15672 管理界面要开 rabbitmq_management 插件才有；这里只登记 AMQP 与 cluster
         extra_ports=(25672,),
+        # rabbitmqctl stop 只停 server，**Erlang 的 epmd.exe 会一直活着**（真机 2026-10-07）。
+        # 它不监听业务端口，所以按簇判定会正常报"已停止"，但它的工作目录还在版本目录里，
+        # Windows 上会让之后的卸载删不掉那个目录 → 停止成功后必须提示，由用户决定要不要结束。
+        leftover_processes=("epmd.exe",),
         port_search_span=99,
         port_writeback="cli_only",
         console_path=None,
@@ -4581,7 +4634,13 @@ def build_components() -> List[Component]:
     )
 
     for comp in components:
-        comp.category = COMPONENT_CATEGORY_OF[comp.key]        # 已有：漏登记直接 KeyError
+        # 可一键启停的组件全部集中到「一键启停」Tab（2026-10-08 用户要求），
+        # 成员**由 LAUNCH_KEYS 派生**而不是再写一张表：那张表的准入条件本来就是
+        # "卡片上有启动/停止按钮"，两处各写一份迟早会出现"能启动、卡片却在别的 Tab"。
+        # COMPONENT_CATEGORY_OF 里的旧分类保留作 fallback —— 组件哪天从白名单退下来，
+        # 它会自动回到原来那一组，不用改两处。
+        comp.category = ("一键启停" if comp.key in LAUNCH_KEYS
+                         else COMPONENT_CATEGORY_OF[comp.key])   # 漏登记直接 KeyError
         # 多版本一律为 True（2026-06-06 起全量开放）。MULTI_VERSION_KEYS 为空集时
         # 全部组件都算多版本；白名单里再写 key 也不会被排除——它现在只作为
         # "历史上哪些组件是原生多版本"的记录留着，护栏用例靠它标注哪些是新增覆盖的。
@@ -6173,6 +6232,46 @@ def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
     return _pick_unique_pids(parse_netstat_listeners(done.stdout or ""), ports)
 
 
+def running_process_images(image_names: Sequence[str]) -> List[str]:
+    """这些映像名里，哪些此刻正在本机跑着（返回命中的名字，顺序同入参）。
+
+    用 `tasklist /FO CSV /NH` 而不是默认的表格输出：CSV 第一列恒为映像名，
+    而中文系统上那句"没有运行的任务匹配指定标准"是本地化的散文，按形状就进不了判定。
+    只按名字**精确**比对（大小写不敏感）—— "erl.exe" 不该匹配上 "erlsrv.exe"。
+
+    **这又是一次子进程调用，与端口反查同一类**：只允许出现在停止路径的收尾提示里，
+    出现在 status / adopt / reconcile 就等于放掉"状态检测绝不执行进程"。
+    非 Windows 上没有 tasklist → OSError → 空表：提示自然消失，绝不无中生有。
+    """
+    hits: List[str] = []
+    for name in image_names or ():
+        try:
+            kw = dict(capture_output=True, timeout=10,
+                      text=True, encoding="utf-8", errors="replace")
+            if CURRENT_OS == "Windows":
+                kw["creationflags"] = CREATE_NO_WINDOW
+            done = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}",
+                                   "/FO", "CSV", "/NH"], **kw)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for line in (done.stdout or "").splitlines():
+            first = line.split('","')[0].strip('"').lower()
+            if first == name.lower():
+                hits.append(name)
+                break
+    return hits
+
+
+def _leftover_process_note(found: Sequence[str]) -> str:
+    """停止成功后的残留辅助进程提示；没查到东西就返回空串（不许每次都念一遍）。"""
+    if not found:
+        return ""
+    return (f"注意：{'、'.join(found)} 还在运行 —— 它是该组件启动脚本留下的辅助进程，"
+            f"本工具不会去结束它。"
+            f"它的工作目录一般仍在版本目录里，Windows 上会让随后的卸载删不掉那个目录；"
+            f"要彻底卸载请先结束该进程（或重启机器）再点卸载。")
+
+
 # ActiveMQ 回写的两个锚点，全部来自 2026-10-05 真包实测（spec 计划二 §2.1）。
 # 写成常量是为了"锚不上"时的报错能指名道姓，而不是泛泛一句"配置不认识"。
 AMQ_CONSOLE_FILE = "jetty-spring.properties"
@@ -7515,7 +7614,8 @@ class ServiceManager:
     """本机进程生命周期的唯一入口。探针全部可注入，测试因此不碰网络也不碰进程。"""
 
     def __init__(self, is_listening=port_is_listening, http_ok=http_ok,
-                 process_alive=process_is_alive, terminate=None, lookup_pids=None):
+                 process_alive=process_is_alive, terminate=None, lookup_pids=None,
+                 process_images=None):
         self._is_listening = is_listening
         self._http_ok = http_ok
         self._process_alive = process_alive
@@ -7524,6 +7624,9 @@ class ServiceManager:
         # 默认参数在 def 时求值，测试 patch main.netstat_listener_pids 就会失效
         # （这个坑计划一的 start() 已经踩过并写进注释）。
         self._lookup_pids = lookup_pids or (lambda ports: netstat_listener_pids(ports))
+        # 同上：残留辅助进程的查询也是子进程调用，只给停止路径收尾用（见 LaunchSpec.leftover_processes）。
+        self._process_images = process_images or (
+            lambda names: running_process_images(names))
 
     @staticmethod
     def _terminate_by_pid(rec: RunRecord) -> None:
@@ -7793,7 +7896,8 @@ class ServiceManager:
                 save_running_map(records)
                 return StopResult(True,
                                   reason=f"{comp.display_name} 已经不在监听 "
-                                         f"{'/'.join(str(p) for p in ports)}，登记已清。")
+                                         f"{'/'.join(str(p) for p in ports)}，登记已清。"
+                                         f"{self._leftover_note(spec)}")
             if spec.stop_kind != "port_lookup":
                 # **登记的 PID 已经死了、端口却还在听**（2026-10-08 真机实测定位）：
                 # java -jar 在 Windows 上由 java.exe 先起一个子 JVM（或启动器先退），
@@ -7842,12 +7946,20 @@ class ServiceManager:
                 records.pop(comp.key, None)
                 save_running_map(records)
                 return StopResult(True, reason=f"{comp.display_name} 已停止，端口 "
-                                               f"{'/'.join(str(p) for p in ports)} 已释放。")
+                                               f"{'/'.join(str(p) for p in ports)} 已释放。"
+                                               f"{self._leftover_note(spec)}")
             sleeper(1.0)
         return StopResult(False, need_force=True,
                           reason=(f"{comp.display_name} 在 {int(deadline)} 秒内没停下来（端口 "
                                   f"{'/'.join(str(p) for p in ports)} 仍在听）。"
                                   f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
+
+    def _leftover_note(self, spec: Optional[LaunchSpec]) -> str:
+        """停止成功后附在 reason 里的残留辅助进程提示；没登记或没查到就是空串。"""
+        names = tuple(getattr(spec, "leftover_processes", ()) or ())
+        if not names:
+            return ""
+        return _leftover_process_note(self._process_images(names))
 
     def _console_readiness_note(self, spec: LaunchSpec, port: int) -> str:
         """启动成功后探一次控制台，返回给用户的提示行（没问题时返回空串）。
@@ -7936,7 +8048,8 @@ class ServiceManager:
                 records = load_running_map()
                 records.pop(key, None)
                 save_running_map(records)
-                return StopResult(True, reason="已强制结束并释放端口。")
+                return StopResult(True, reason="已强制结束并释放端口。"
+                                               f"{self._leftover_note(LAUNCH_OF.get(key))}")
             sleeper(1.0)
         left = [p for p in ports if self._is_listening(p)]
         # 归因要分清两种"还在听"：我们杀过 → 大概率是进程还没退出完；
@@ -9283,6 +9396,7 @@ class ComponentCard(QFrame):
         # 而不是单一的"已配置/未配置"；生效以 active 登记表为准，探测只用于回填版本号。
         if self.component.multi_version:
             ordered = installed_versions(self.component)
+            residue = residue_install_dirs(self.component)
             # 磁盘上的已装集合刚变过（装完/卸完），"已装但清单里没有"的合成项要跟着增减。
             # 必须放在 `if ordered` 之前：最后一个额外版本被卸掉时 ordered 为空，
             # 会直接落到下面的通用探测分支，放里面就永远摘不掉那一行。
@@ -9313,6 +9427,11 @@ class ComponentCard(QFrame):
                 else:
                     tail = f" · 生效 {active}" if active else " · 均未生效"
                     capsule = f"● 已装 {len(ordered)} 个版本{tail}（{names}）"
+                if residue:
+                    # 磁盘上还有内容被删空的目录：必须报出来，否则它既不算已装、
+                    # 又没人知道要清理，就成了永久死角（胶囊是用户唯一的入口线索）。
+                    warned = True
+                    capsule += f" · 另有 {len(residue)} 个残留空目录待清理"
                 self._mv_capsule = capsule
                 self._mv_orange = warned
                 self.status_label.setText(capsule)
@@ -9327,7 +9446,8 @@ class ComponentCard(QFrame):
                 # 用户换选另一个版本，没人重算，按钮一直灰着点不动。
                 self._mv_active = active
                 self._mv_warned = warned
-                self._mv_installed_set = {v for v, _p in ordered}
+                self._mv_installed_set = ({v for v, _p in ordered}
+                                          | {v for v, _p in residue})
                 self._mv_buttons_ready = True
                 self._sync_action_buttons()
                 # 探测回填只在确有生效版本、且没有未对齐时开放闸门，并把上一轮
@@ -9346,6 +9466,31 @@ class ComponentCard(QFrame):
                             if exe:
                                 self._schedule_version_probe(str(exe))
                             break
+                self._refresh_installed_marks()
+                return
+            elif residue:
+                # 只剩空壳目录（真机 2026-10-07 rabbitmq 的收尾状态）：说"未安装"是假话
+                # ——磁盘上确实有个删不掉的目录；说"已装"也是假话 —— 里面一个文件都没有。
+                # 所以这一支单独说清"残留待清理"，并且**不能**落到下面的通用探测分支：
+                # 那一支会按 PATH/HOME 判定，而空壳的 HOME 刚被这次卸载清掉，
+                # 结果是卡片显示"未安装"、卸载按钮置灰，那个目录就永远清不掉了。
+                vers = "、".join(v for v, _p in residue)
+                capsule = (f"● {len(residue)} 个残留空目录待清理（{vers}）"
+                           f" · 内容已删除、不算已装")
+                self._mv_capsule = capsule
+                self._mv_orange = True
+                self.status_label.setText(capsule)
+                self.status_label.setStyleSheet(
+                    "color:#ef6c00;font-weight:600;padding:2px 8px;"
+                    "background:#fff3e0;border-radius:10px;")
+                self._mv_active = None
+                self._mv_warned = True
+                self._mv_installed_set = {v for v, _p in residue}
+                self._mv_buttons_ready = True
+                self._sync_action_buttons()
+                self._status_shows_configured = False
+                self._status_version = ""
+                self._version_worker = None
                 self._refresh_installed_marks()
                 return
 
@@ -9438,7 +9583,11 @@ class ComponentCard(QFrame):
         """
         result = list(self.component.versions)
         known = {cv.version for cv in result}
-        extras = [v for v, _p in installed_versions(self.component) if v not in known]
+        # 已装的 + 只剩空壳的都合成进来：空壳必须还能被选中并卸载，
+        # 否则它既不算已装、又不在下拉框里，就没人能清掉它（residue_install_dirs 的用途）。
+        on_disk = [v for v, _p in installed_versions(self.component)]
+        on_disk += [v for v, _p in residue_install_dirs(self.component)]
+        extras = [v for v in dict.fromkeys(on_disk) if v not in known]
         for ver in extras:
             cv = ComponentVersion(version=ver, url_map={}, archive_map={})
             key = _semver_key(ver)
@@ -10258,7 +10407,7 @@ class MainWindow(QMainWindow):
         body = QSplitter(Qt.Vertical)
         body.setObjectName("bodySplitter")
 
-        # 卡片区域：按 COMPONENT_CATEGORIES 分三个 Tab，每个 Tab 一条独立滚动栏。
+        # 卡片区域：按 COMPONENT_CATEGORIES 分四个 Tab，每个 Tab 一条独立滚动栏。
         # self.cards 仍是全量平铺列表——刷新版本 / 存取配置 / 关窗等探测都靠它遍历。
         self.cards: List[ComponentCard] = []
         self._tab_cards: List[List[ComponentCard]] = []
@@ -10293,7 +10442,7 @@ class MainWindow(QMainWindow):
             self._tab_cards.append(tab_cards)
             self._tab_layouts.append(cards_layout)
 
-        # 统一搜索结果面板：搜索时收起三个 Tab，把所有命中的组件按分类归并到
+        # 统一搜索结果面板：搜索时收起四个 Tab，把所有命中的组件按分类归并到
         # 同一个滚动列表里（带分类小标题），一眼看全、不用切页——这就是「全组件搜索」。
         self.results_area = QScrollArea()
         self.results_area.setObjectName("resultsArea")
@@ -10431,7 +10580,7 @@ class MainWindow(QMainWindow):
         """
         全组件搜索：命中跨所有分类，结果归并到统一面板。
 
-        入参 query: str  搜索框当前内容；空串（或全空白）表示退出搜索、恢复三个 Tab。
+        入参 query: str  搜索框当前内容；空串（或全空白）表示退出搜索、恢复四个 Tab。
 
         行为:
         - 退出搜索: 卡片全部回到各自 Tab、恢复可见，显示三个分类 Tab，Tab 标题恢复「总数」。
@@ -10491,8 +10640,10 @@ class MainWindow(QMainWindow):
         """Tab 标题后标 `●` 表示"这一页有组件在运行"，清空搜索/退出搜索时都要重算。
 
         2026-10-06 用户反馈"启动了 nacos，没看到停止选项"—— 按钮一直是好的，
-        但三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「开发软件」、Jenkins 在「其它软件」），
+        但当时三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「开发软件」、Jenkins 在「其它软件」），
         界面默认停在「开发环境」。用户在自己的启动页上找不到刚才那个卡片。
+        （2026-10-08 起可启停组件已集中到「一键启停」Tab，这一条分散找卡的起因消了；
+        `●` 仍然保留 —— 同时跑着两三个组件时，还是要知道哪一页上有活的。）
         标题上挂个 `●`，无论停在哪一页都能一眼看出"有东西在跑，去那页找"。
         """
         tabs = getattr(self, "tabs", None)
@@ -10512,9 +10663,11 @@ class MainWindow(QMainWindow):
 
         2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。查下来按钮一直是好的
         （btn_stop 可见可用、文本"停止"、label 显示"● 运行中 · 端口 8848"），
-        真正的原因是**三个启动组件分在两个 Tab**：
-        Jenkins 在「其它软件」（Tab2），Nacos/ActiveMQ 在「开发软件」（Tab1），
+        真正的原因是**当时三个启动组件分在两个 Tab**：
+        Jenkins 在「其它软件」，Nacos/ActiveMQ 在「开发软件」，
         而界面默认停在 Tab0「开发环境」。用户自然找不到自己刚启动的那个卡片。
+        （2026-10-08 起它们都在「一键启停」一页；跳页与这句说明留着，是因为
+        同时跑多个组件、或用户停在别的页上时，症状会一模一样地复发。）
 
         这不是"找不到按钮"，是"服务跑着却看不见"——比按钮缺失更容易让人以为没启动成功。
         所以这里主动跳页+ 点名在日志里说清，不指望用户自己 Tab 翻一遍。

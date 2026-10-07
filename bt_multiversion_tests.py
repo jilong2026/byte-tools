@@ -1371,7 +1371,11 @@ class UninstallDeadHomeCleanup(EnvSandbox):
         # setUp 夹具：JAVA_HOME 正指着要删的 21.0.4，active=21.0.4
         summary = self.comp.uninstall("21.0.4")
         self.assertTrue(self.comp.install_dir("21.0.4").is_dir())   # 目录确实还在磁盘
-        self.assertIn("删除安装目录失败", summary)
+        # 文案（2026-10-07 改）：只说"删除安装目录失败"不够用 —— 用户接着会问"那我环境
+        # 还在不在、还要不要管这个目录"。新文案必须同时给出"疑似被进程占用"与
+        # "结束占用后再点一次卸载清理残留"。本条守的仍是那条护栏：目录还在 → HOME 不许被清。
+        self.assertIn("疑似被别的进程占用", summary)
+        self.assertIn("再点一次卸载清掉", summary)
         self.assertNotIn("已清理指向不存在目录的环境变量", summary)
         # 目录还在 → HOME 不许被清成死值/指空：持久层里它必须仍指向一个存在的目录。
         self.assertTrue(Path(self.win_env["JAVA_HOME"]).is_dir(),
@@ -2774,6 +2778,94 @@ class ShellRefreshNotification(EnvSandbox):
         self.as_windows()
         main.EnvManager._broadcast_env_change()
         self.assertTrue(self.broadcast_calls, "写完成后再也不通知外壳 = 用户重开终端永远拿旧环境")
+
+
+class HollowInstallDir(EnvSandbox):
+    """真机 2026-10-07 rabbitmq：卸载时 rmtree 把内容全删了，顶层目录被别的进程占着删不掉，
+    磁盘上留下一个**空壳目录**。当时的后果是"永远卸载不了"：
+
+      · `installed_versions()` 把空壳算成"已装" → 胶囊说已装、下拉框还给它是绿勾；
+      · `uninstall()` 第 4 步看到 active 仍在"剩余版本"里，于是把 XXX_HOME 与 PATH
+        **重建**回那个空壳 —— 第 2/3 步刚清掉的环境被自己写回去，再点一次卸载重来一遍。
+
+    本类钉住收敛：空壳**不算已装、不挂绿勾、绝不成为 HOME/PATH 的重建目标**；
+    但它仍然出现在下拉框里、卸载按钮仍然可点 —— 磁盘事实不许变成谁都碰不到的死角，
+    否则那个删不掉的目录就永远留在那儿。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # 卡片用例要构造 QWidget；没有 QApplication 时 Qt 是直接 abort 进程的
+        # （表现为整轮测试"断流"，而不是报一个能读的错）。
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        super().setUp()
+        self.as_windows()
+        self.comp = next(c for c in main.build_components() if c.key == "jdk")
+        self.shell = self.comp.install_dir("21.0.4")
+        self.shell.mkdir(parents=True, exist_ok=True)     # 空壳：里面一个文件都没有
+        self.win_path[:] = [str(self.shell / "bin"), r"C:\Windows\system32"]
+        self.win_env["JAVA_HOME"] = str(self.shell)
+        main.save_active_version("jdk", "21.0.4")
+
+    def _rmtree_that_leaves_the_shell(self):
+        """把 rmtree 换成"清空内容、顶层删不掉"，复刻目录被别的进程占用的现场。
+
+        只桩这一个调用点，不碰 EnvManager / 落盘路径 —— 断言看的全是持久层真值。
+        """
+        orig = main.shutil.rmtree
+
+        def fake(path, *args, **kwargs):
+            p = Path(path)
+            for child in sorted(p.iterdir()):
+                orig(child) if child.is_dir() else child.unlink()
+            raise OSError(13, "另一个进程正在使用此文件，进程无法访问。")
+
+        main.shutil.rmtree = fake
+        self.addCleanup(setattr, main.shutil, "rmtree", orig)
+
+    def test_hollow_dir_is_not_counted_as_installed(self):
+        self.assertEqual(main.installed_versions(self.comp), [],
+                         "空壳目录被算成已装 → 胶囊、绿勾、生效重排全部跟着错")
+        # 磁盘事实不撒谎：目录确实在，只是没内容。它走"残留"这条通道，不走"已装"。
+        self.assertIn(self.shell, self.comp.installed_dirs())
+        self.assertEqual([v for v, _p in main.residue_install_dirs(self.comp)], ["21.0.4"],
+                         "空壳必须被认成待清理残留，否则没人能把它删掉")
+
+    def test_uninstall_clears_env_and_never_rebuilds_it_into_the_shell(self):
+        """这一条就是用户看到的"卸载不了"：环境与 PATH 必须留在清干净的状态。"""
+        self._rmtree_that_leaves_the_shell()
+        summary = self.comp.uninstall("21.0.4")
+        self.assertNotIn("JAVA_HOME", self.win_env,
+                         "第 4 步不许按 active 把 XXX_HOME 重建回空壳目录")
+        self.assertEqual([p for p in self.win_path if "jdk-" in p.lower()], [],
+                         "PATH 里指向空壳的条目必须清掉")
+        self.assertNotIn("jdk", main.load_active_map(), "磁盘上已无真安装，生效登记该清")
+        self.assertTrue(self.shell.is_dir(), "桩里顶层删不掉，目录该还在")
+        self.assertIn("占用", summary,
+                      "删不掉时要说清是目录被占着，既不能报「卸载成功」，也不能只留一句含糊的失败")
+
+    def test_hollow_version_is_selectable_and_uninstallable_but_has_no_check(self):
+        """空壳在下拉框里可选、卸载按钮可点（要能清理），但**不该挂绿勾**（不算已装）。"""
+        # 默认桩把 _detect_status 换成 no-op（见 EnvSandbox.setUp），这里要的是真实
+        # 的多版本分支判定，所以按本套件既有做法显式放开探测。
+        self.enable_detect()
+        card = main.ComponentCard(self.comp, lambda lvl, msg: None)
+        combo = card.version_combo
+        labels = [combo.itemText(i) for i in range(combo.count())]
+        self.assertIn("21.0.4", labels, "空壳版本不许从下拉框里消失")
+        idx = labels.index("21.0.4")
+        combo.setCurrentIndex(idx)
+        card._refresh_installed_marks()
+        data = combo.itemData(idx, Qt.DecorationRole)
+        self.assertFalse(data is not None and not data.isNull(),
+                         "空壳不算已装，不该显示绿色对勾骗用户")
+        card._detect_status()
+        self.assertIn("残留", card.status_label.text(),
+                      "只剩空壳时胶囊要说清是残留待清理，既不能报「未安装」也不能报「已装」")
+        self.assertTrue(card.btn_uninstall.isEnabled(),
+                        "残留目录必须还能点卸载去清理")
 
 
 if __name__ == "__main__":

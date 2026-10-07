@@ -501,6 +501,28 @@ class NoExecInvariant(unittest.TestCase):
         self.assertEqual(set(calls[0]), {8848, 9848, 9849})
 
 
+    def test_detection_paths_never_query_the_process_table(self):
+        """进程表查询（tasklist）是子进程调用，和端口反查同一类：出现在
+        status / adopt / reconcile 里就等于从后门放掉"状态检测绝不执行进程"。"""
+        calls = []
+        orig = main.running_process_images
+        main.running_process_images = lambda names: calls.append(tuple(names)) or []
+        self.addCleanup(setattr, main, "running_process_images", orig)
+        comps = {c.key: c for c in main.build_components()}
+        with tempfile.TemporaryDirectory() as td:
+            main.save_running_map({"rabbitmq": main.RunRecord(
+                key="rabbitmq", version="4.0.9", home=td, data_dir=td, port=5672,
+                console_url="http://127.0.0.1:15672/", pid=1088, pid_role="launcher",
+                started_at=0.0, launcher_cmd=["cmd"], ports=(5672, 15672))})
+            mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": True,
+                                      http_ok=lambda u, timeout=2.0: True,
+                                      process_alive=lambda pid: True)
+            mgr.status("rabbitmq", comps["rabbitmq"])
+            mgr.adopt(comps)
+            mgr.reconcile(comps)
+        self.assertEqual(calls, [], "检测路径查了进程表")
+
+
 class ZombieMatrix(unittest.TestCase):
     """spec §5：PID 死 / PID 活端口不在 / 端口在听但 PID 不符 / 坏 JSON，
     四种情形都不许触发任何进程动作。"""
@@ -1150,6 +1172,57 @@ class StopFlow(unittest.TestCase):
         self.assertEqual(killed, [], "Windows 上停止第一步不许杀进程")
         self.assertIn("jenkins", main.load_running_map())
 
+    def test_stop_reports_the_helper_process_the_launcher_left_behind(self):
+        """真机 2026-10-07 rabbitmq：`rabbitmqctl stop` 只停 server，Erlang 的 epmd.exe
+        一直活着。它不监听业务端口，所以按簇判定会报"已停止"；但它的工作目录还在版本目录里，
+        Windows 上后续 `rmdir` 会失败 —— 用户看到的"卸载不了"就是这么来的。
+        停止成功时必须把它说出来并讲清后果，同时**绝不自动结束**（那是用户机器上的进程）。
+        """
+        comp = self.comp
+        comp.launch = main.LaunchSpec(
+            commands={os_name: ["x"] for os_name in ("Windows", "Linux", "Darwin")},
+            main_port=8080, stop_kind="pid", leftover_processes=("epmd.exe",))
+        asked, killed = [], []
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: killed.append(rec.pid),
+                                  process_images=lambda names: asked.append(tuple(names)) or ["epmd.exe"])
+        res = mgr.stop(comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertIn("epmd.exe", res.reason, "残留的辅助进程必须报出来")
+        self.assertIn("卸载", res.reason, "要说清后果：版本目录可能因此删不掉")
+        self.assertEqual(asked, [("epmd.exe",)],
+                         "只许查该组件登记过的辅助进程，不许全表扫进程名")
+
+    def test_stop_stays_quiet_when_no_helper_process_is_left(self):
+        """没留下辅助进程就别报 —— 每次都提一句 epmd 会让用户以为哪儿坏了。"""
+        comp = self.comp
+        comp.launch = main.LaunchSpec(
+            commands={os_name: ["x"] for os_name in ("Windows", "Linux", "Darwin")},
+            main_port=8080, stop_kind="pid", leftover_processes=("epmd.exe",))
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: None,
+                                  process_images=lambda names: [])
+        res = mgr.stop(comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertNotIn("epmd", res.reason)
+        self.assertNotIn("残留", res.reason)
+
+    def test_components_without_helper_processes_are_never_queried(self):
+        """没登记 leftover_processes 的组件（jenkins 就是）一次都不该去查进程表：
+        这条挡住"顺手给所有组件都加一次 tasklist"的做法。"""
+        mgr = main.ServiceManager(is_listening=lambda p, host="127.0.0.1": False,
+                                  http_ok=lambda u, timeout=2.0: False,
+                                  process_alive=lambda pid: False,
+                                  terminate=lambda rec: None,
+                                  process_images=lambda names: self.fail("不该查询进程表"))
+        res = mgr.stop(self.comp, self.comps, sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+
+
     def test_windows_stop_cleans_stale_record_without_scaring(self):
         """登记还在、端口其实早空了（进程自己死掉过）：Windows 路线要按"已经停了"处理，
         不许回一句"这会打断正在进行的任务，要强制结束吗" —— 端口才是真相（spec §4）。"""
@@ -1490,6 +1563,10 @@ class CardLaunchUi(unittest.TestCase):
             comp = next(c for c in main.build_components() if c.key == "jenkins")
             home = Path(td) / "jenkins" / "jenkins-9.9.9"
             home.mkdir(parents=True)
+            # 目录里必须有东西：2026-10-07 起"空目录 = 卸载删不掉的残留空壳"，
+            # 不再算已装（见 main.py 的 install_dir_is_hollow）。本条测的是"真装了
+            # 一个候选清单里没有的版本"，所以夹具要造出真实落地形状。
+            (home / "jenkins.war").write_bytes(b"x")
             orig_cfg, main.CONFIG_DIR = main.CONFIG_DIR, Path(td)
             self.addCleanup(setattr, main, "CONFIG_DIR", orig_cfg)
             card = main.ComponentCard(comp, lambda msg, level: None)
