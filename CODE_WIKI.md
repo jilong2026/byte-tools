@@ -188,7 +188,7 @@ byte-tools/
 ├── .gitignore               # Git 忽略规则
 ├── .github/workflows/       # 发布工作流（release.yml：三平台打包 + Gitee 同步）
 ├── bt_multiversion_tests.py       # 离线回归测试：多版本并存与生效版本切换（见 4.9，覆盖清单与用例数以运行输出为准）
-├── bt_component_category_tests.py # 离线回归测试：组件三类分组（9 个用例，见 R2）
+├── bt_component_category_tests.py # 离线回归测试：组件四类分组与 Tab（11 个用例，见 R2）
 ├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
 ├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
 ├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（见 4.9，全量回归 9 套件之一）
@@ -313,7 +313,7 @@ byte-tools/
 | `multi_version` | bool | 是否允许并存多个版本并切换「生效版本」。**只有 7 个组件为 True**：jdk / python / node / go / maven / gradle / bun（真源 `MULTI_VERSION_KEYS`，`main.py:2916`）。**不在 `Component(...)` 构造处手写**：`build_components()` 末尾统一执行 `comp.multi_version = comp.key in MULTI_VERSION_KEYS`（`main.py:3409`），不在白名单就是 False。它是所有多版本分支的唯一门控（状态胶囊、绿勾、按钮启用、卸载范围），非多版本组件的行为与文案必须与改造前逐字一致（见 DEVELOPMENT.md R3.9） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
-| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 其它软件）。**不在构造处手写**：`build_components()` 末尾统一按 `COMPONENT_CATEGORY_OF[comp.key]` 赋值，漏登记即 KeyError |
+| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 一键启停 / 其它软件）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
 
 方法：
 - `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`（`main.py:203`）；**这个 `<key>-<version>` 命名是多版本模型的唯一契约**，反解靠模块函数 `version_from_install_dir()`
@@ -708,8 +708,8 @@ UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
 3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 26 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了
-4. **主体 QSplitter（垂直）**：   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分三个 Tab，**标题带组件数量**：`开发环境（10）` / `开发软件（13）` / `其它软件（3）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起三个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 26 项
+4. **主体 QSplitter（垂直）**：   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分四个 Tab，**标题带组件数量**：`开发环境（10）` / `开发软件（4）` / `一键启停（10）` / `其它软件（2）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 26 项
    - 下部日志区 `QTextEdit`（深色主题、等宽字体）
 5. **底部状态栏**：显示当前系统信息、工作目录与 `组件总数：N 个`（N=26，方便用户一眼掌握支持范围）
 
@@ -762,7 +762,7 @@ def main() -> int:
 | 文件 | 盯住的东西 |
 |------|-----------|
 | `bt_multiversion_tests.py` | 组件多版本与生效版本切换（规则 R3，见下文覆盖面） |
-| `bt_component_category_tests.py` | 三类分组与 Tab（R2；`EXPECTED_MEMBERSHIP` 是分类基线） |
+| `bt_component_category_tests.py` | 四类分组与 Tab（R2；`EXPECTED_MEMBERSHIP` 是分类基线，另有一条用例把「一键启停」钉成 `LAUNCH_KEYS` 的派生） |
 | `bt_search_and_newcmp_tests.py` | 组件搜索匹配与新增组件的自动登记（R2.5） |
 | `bt_mirror_spec_tests.py` | R1 镜像规范（镜像基址集中在 `MIRROR_BASES`、官网末位等） |
 | `bt_refresh_versions_tests.py` | 刷新版本链路 |
@@ -1384,7 +1384,7 @@ def fetch_foo_versions() -> List[ComponentVersion]:
 3. 注册到 `FETCHERS`：`"foo": fetch_foo_versions`
 4. 在 `build_components()` 末尾 `components.append(Component(key="foo", ...))`
 5. 若该组件在特定平台不支持自动下载（如 Docker 在 Windows），设 `unsupported_platform_hint="Windows 下请安装 Docker Desktop"`，对应 OS 的 `url_list_map` 返回空列表
-6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`开发环境` / `开发软件` / `其它软件`）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
+6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`开发环境` / `开发软件` / `其它软件`；能一键启停的组件会被 `LAUNCH_KEYS` 自动改归「一键启停」，所以这里给它们写的是「退出白名单之后回哪儿」）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
 7. UI 会自动在对应 Tab 下出现一张新卡片，无需改动布局代码
 
 > **R1 硬性要求**（见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.1）：新增组件的**下载 URL** 未配置 ≥2 个国内镜像地址，不予合入；确实凑不出 2 个源时（实测国内无该制品镜像，如 MongoDB / PostgreSQL 二进制包），必须在 R1.5 登记实测结论并保留官网单源，不得用猜测的镜像路径凑数。版本**索引页**不适用本要求（见 R1.7 第 4 节，镜像索引版本数残缺）。

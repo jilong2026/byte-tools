@@ -18,7 +18,7 @@
 ## 规则索引
 
 - [规则 R1：国内镜像优先 + 多源故障转移](#规则-r1国内镜像优先--多源故障转移)
-- [规则 R2：组件三类分组与界面 Tab](#规则-r2组件三类分组与界面-tab)
+- [规则 R2：组件四类分组与界面 Tab](#规则-r2组件四类分组与界面-tab)
 - [规则 R3：组件多版本与生效版本切换](#规则-r3组件多版本与生效版本切换)
 - [规则 R4：一键脚本自举契约](#规则-r4一键脚本自举契约)
 - [规则 R5：组件一键启动契约](#规则-r5组件一键启动契约)
@@ -372,19 +372,21 @@ tmp.replace(self.dest)
 
 ---
 
-## 规则 R2：组件三类分组与界面 Tab
+## 规则 R2：组件四类分组与界面 Tab
 
 ### R2.1 规则描述
 
-26 个组件在界面上归入且仅归入三个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+26 个可见组件在界面上归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（10 / 13 / 3） |
+| 分类 | 判定标准 | 组件（10 / 4 / 10 / 2） |
 |------|----------|--------------------|
 | **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
-| **开发软件** | 本地跑起来给项目当依赖的服务 | tomcat、nginx、mysql、mongodb、postgresql、elasticsearch、nacos、seata、kafka、rocketmq、pulsar、activemq、rabbitmq |
-| **其它软件** | 不参与写代码的容器 / 编排 / CI 外围 | docker、kubectl、jenkins |
+| **开发软件** | 本地跑起来给项目当依赖、但本工具**还不能一键启停**的服务 | mysql、mongodb、postgresql、pulsar |
+| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | jenkins、nacos、activemq、rocketmq、nginx、kafka、tomcat、elasticsearch、rabbitmq、seata |
+| **其它软件** | 不参与写代码的容器 / 编排外围 | docker、kubectl |
 
-边界争议按此顺序裁决：**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件；都不是则其它软件。
+边界争议按此顺序裁决：**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件；都不是则其它软件。
+（「一键启停」放在「其它软件」之前：它是本工具最能干活的一组，埋在倒数第二页等于藏起来。2026-10-08 用户要求。）
 （例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；Nginx 与 Tomcat 同理，本地跑起来当 Web / 反向代理依赖，属开发软件。）
 
 ### R2.2 适用范围
@@ -395,19 +397,24 @@ tmp.replace(self.dest)
 
 ### R2.3 实施指引
 
-分类**只有一个真源**：`COMPONENT_CATEGORY_OF`（`main.py`，`build_components()` 之前）。
+分类**只有一个真源**：`COMPONENT_CATEGORY_OF`（`main.py`，`build_components()` 之前）；
+可启停那一组**由 `LAUNCH_KEYS` 派生**，不在分类表里重复登记。
 
 ```python
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "其它软件")   # Tab 顺序即此顺序
+COMPONENT_CATEGORIES = ("开发环境", "开发软件", "一键启停", "其它软件")   # Tab 顺序即此顺序
 COMPONENT_CATEGORY_OF = {
     ...
-    "foo": "开发软件",          # 新增组件在这里加一行
+    "foo": "开发软件",          # 新增组件在这里加一行（它接进 LAUNCH_OF 后会自动进「一键启停」）
 }
 ```
 
-`build_components()` 末尾统一执行 `comp.category = COMPONENT_CATEGORY_OF[comp.key]`——
+`build_components()` 末尾统一执行
+`comp.category = "一键启停" if comp.key in LAUNCH_KEYS else COMPONENT_CATEGORY_OF[comp.key]`——
+写成第二张表的话，接入第 11 个可启停组件时会出现"能启动、卡片却在别的 Tab"；
+而分类表里的旧归属保留作 fallback，组件从白名单退下来时会自动回到原来那一组。
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
-漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
+**不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
+（上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
 `MainWindow.cards` 必须保持**全量平铺**（26 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
@@ -432,7 +439,7 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
   空查询（或全空白）返回 `True` 表示不过滤。**不要**把分类名纳入匹配——分类已由 Tab 表达，
   搜"开发"会命中全部卡片，等于没搜
 - 过滤**只改 `card.setVisible()` 与卡片在布局里的归属**，绝不从 `MainWindow.cards` 里摘项（原因见 R2.3 的全量平铺不变量）
-- **全组件搜索的呈现方式**：搜索时收起三个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
+- **全组件搜索的呈现方式**：搜索时收起四个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
   把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
   清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
   右侧 `#searchHint` 仍显示"匹配 N / 26 个组件"（0 命中转警示红）。数字一律现算

@@ -33,15 +33,17 @@ A cross-platform desktop GUI tool built with Python + PySide6 that automates the
 
 > The component count is now **26**, covering language runtimes, shells, build tools, app servers / web servers, databases, containers & orchestration, CI/CD, message queues, service discovery / transaction, search engines, version control and Python distributions.
 
-The UI groups them into **three tabs** along the top, each titled with its component count; a search box above the tabs filters cards by name across all three tabs (the subsections below still describe them by technology category):
+The UI groups them into **four tabs** along the top, each titled with its component count; a search box above the tabs filters cards by name across all four tabs (the subsections below still describe them by technology category):
 
 | Tab | Count | Rule | Components |
 |-----|-------|------|------------|
 | **开发环境** (Dev environment) | 10 | Goes on PATH, used to write / compile / package code | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7 |
-| **开发软件** (Dev services) | 13 | Runs locally as a project dependency | Tomcat, Nginx, MySQL, MongoDB, PostgreSQL, Elasticsearch, Nacos, Seata, Kafka, RocketMQ, Pulsar, ActiveMQ, RabbitMQ |
-| **其它软件** (Other) | 3 | Container / orchestration / CI periphery, not part of coding | Docker, kubectl, Jenkins |
+| **开发软件** (Dev services) | 4 | Runs locally as a project dependency, but this tool cannot start/stop it yet | MySQL, MongoDB, PostgreSQL, Pulsar |
+| **一键启停** (Start & stop) | 10 | The card has a Start / Stop button and it really works (membership is derived from the launch whitelist `LAUNCH_KEYS`) | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins |
+| **其它软件** (Other) | 2 | Container / orchestration periphery, not part of coding | Docker, kubectl |
 
 > To re-assign a component, edit the single `COMPONENT_CATEGORY_OF` map in `main.py`; the tabs follow automatically.
+> The **一键启停** tab needs no entry: registering a component in the launch table (`LAUNCH_OF`) moves it there, and dropping it moves it back.
 
 ### Language Runtimes
 
