@@ -783,12 +783,12 @@ MongoDB 支持 Windows / Linux 自动下载；macOS 官方只提供源码或 Hom
 
 ## 📄 许可证
 
-本项目采用 **MIT License** 开源发布，版权归作者 **rgh** 所有。
+本项目采用 **MIT License** 开源发布，版权归作者 **jilong2026** 所有。
 
 ```
 MIT License
 
-Copyright (c) 2026 rgh
+Copyright (c) 2026 jilong2026
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -814,6 +814,6 @@ SOFTWARE.
 ---
 
 <p align="center">
-  Made with ❤️ by <b>rgh</b><br/>
+  Made with ❤️ by <b>jilong2026</b><br/>
   <sub>如果觉得有用，别忘了给个 ⭐ Star！</sub>
 </p>

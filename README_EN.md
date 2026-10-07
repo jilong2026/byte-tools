@@ -1,9 +1,9 @@
-# Byte Tools — by rgh
+# Byte Tools — by jilong2026
 
 A cross-platform desktop GUI tool built with Python + PySide6 that automates the download, extraction and environment-variable configuration of common developer toolchains. Save yourself from tedious manual installation.
 
 > Project: **byte-tools**
-> Author: **rgh**
+> Author: **jilong2026**
 > Platforms: Windows 10/11, macOS 12+, Ubuntu 20.04+
 > License: MIT License
 
@@ -144,7 +144,7 @@ The UI groups them into **four tabs** along the top, each titled with its compon
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  Byte Tools By rgh                            ★ GitHub — ▢ × │
+│  Byte Tools By jilong2026                     ★ GitHub — ▢ × │
 ├───────────────────────────────────────────────────────────────┤
 │  ┌─ JDK (Temurin) ────────────────────────────────────────┐   │
 │  │  ● 2 versions installed · active 17 (17, 11)          │   │
@@ -467,12 +467,12 @@ byte-tools/
 
 ## 10. License
 
-This project is released under the **MIT License**. Copyright (c) 2026 **rgh**.
+This project is released under the **MIT License**. Copyright (c) 2026 **jilong2026**.
 
 ```
 MIT License
 
-Copyright (c) 2026 rgh
+Copyright (c) 2026 jilong2026
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

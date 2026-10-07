@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-编程开发环境自动装配小工具 By rgh
+编程开发环境自动装配小工具 By jilong2026
 ==========================
 
-Copyright (c) 2026 rgh
+Copyright (c) 2026 jilong2026
 Licensed under the MIT License. See LICENSE file (or the README) for details.
 
 一个基于 PySide6 的跨平台桌面 GUI 工具，用于自动下载、解压并配置常用开发环境组件，
