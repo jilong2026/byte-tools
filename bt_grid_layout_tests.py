@@ -67,12 +67,23 @@ _COMPONENTS = main.build_components()
 
 # 抓取版本列表（联网）与探测已装版本（起子进程）在本文件里一律停掉：
 # 本文件要验的是布局与文案，不是网络与探测。
-# 这两个桩是**类方法级**替换，必须在 tearDownModule 里恢复（见下面那段说明）：
-# 本文件跑完之后它们仍留在类上，后续套件造出来的卡片就再也不会探测状态了。
-_ORIG_FETCH_VERSIONS = main.MainWindow._start_fetch_versions
-_ORIG_DETECT_STATUS = main.ComponentCard._detect_status
-main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
-main.ComponentCard._detect_status = lambda self, *a, **k: None
+#
+# **这两个桩必须在 `setUpModule()` 里替换，绝不能在模块级替换**：
+# unittest 会先 import 全部模块、再按模块顺序跑。写在模块级的话，替换在 import
+# 那一刻就生效，而 tearDownModule 要等本模块跑完才恢复 —— 这中间排在本文件后面的
+# 套件造出来的卡片就再也不会探测状态了。
+# 实测：写在模块级时，全量 536 条里 multiversion 红 52、refresh 红 4、launch 多红 1；
+# 而这三个套件单独跑全都绿（launch 排在最前面还多红，正是"import 即污染"的铁证）。
+_ORIG_FETCH_VERSIONS = None
+_ORIG_DETECT_STATUS = None
+
+
+def setUpModule():  # noqa: N802  unittest 规定的驼峰钩子名
+    global _ORIG_FETCH_VERSIONS, _ORIG_DETECT_STATUS
+    _ORIG_FETCH_VERSIONS = main.MainWindow._start_fetch_versions
+    _ORIG_DETECT_STATUS = main.ComponentCard._detect_status
+    main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
+    main.ComponentCard._detect_status = lambda self, *a, **k: None
 
 # ----------------------------------------------------------------------
 # 全局路径的隔离与恢复
@@ -91,8 +102,11 @@ _ORIG_CONFIG_FILE = main.CONFIG_FILE
 
 
 def tearDownModule():  # noqa: N802  unittest 规定的驼峰钩子名
-    main.MainWindow._start_fetch_versions = _ORIG_FETCH_VERSIONS
-    main.ComponentCard._detect_status = _ORIG_DETECT_STATUS
+    # 只在 setUpModule 真的替换过时才还原：否则会把方法设成 None，比不还原更糟。
+    if _ORIG_FETCH_VERSIONS is not None:
+        main.MainWindow._start_fetch_versions = _ORIG_FETCH_VERSIONS
+    if _ORIG_DETECT_STATUS is not None:
+        main.ComponentCard._detect_status = _ORIG_DETECT_STATUS
     main.CONFIG_DIR = _ORIG_CONFIG_DIR
     main.CONFIG_FILE = _ORIG_CONFIG_FILE
 
