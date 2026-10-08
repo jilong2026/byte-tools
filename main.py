@@ -8725,6 +8725,13 @@ class ComponentCard(QFrame):
         title = QLabel(self.component.display_name)
         title.setObjectName("cardTitle")
         title.setFont(QFont("", 13, QFont.Bold))
+        # 标题不许把卡片撑爆：QLabel 的 minimumSizeHint 是**整串文本**的宽度，
+        # "Apache RocketMQ" 一渲染就要 255px，加上「可多版本」角标 71px 早就超过
+        # 309px 的格子 → 网格里出现横向滚动条（真机 2026-10-08 实测踩中）。
+        # 显式把最小宽压到 1，布局才允许压缩它；超宽的部分被裁掉，全名进 tooltip。
+        title.setMinimumWidth(1)
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        title.setToolTip(self.component.display_name)
         top.addWidget(title)
 
         # 多版本能力角标：一个版本都没装时，这张卡片跟其它组件长得一样，
@@ -10813,6 +10820,21 @@ class MainWindow(QMainWindow):
                 self.relayout_cards(idx)
         self._position_log_overlay()
 
+    def showEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
+        super().showEvent(e)
+        # 首次显示时必须强制重排一次：_build_ui 末尾那次 relayout 跑在窗口 show
+        # 之前，QScrollArea 的 viewport 宽度还没就绪，grid_columns_for 会算出 1 列
+        # —— 卡片全排成"一行一张"。而窗口尺寸在构造期就已 resize 到 1000×680，
+        # show() 不改变尺寸就**不会触发 resizeEvent**，这个错排没有任何机会被纠正，
+        # 用户只有手动拖一下窗口大小才能看到网格（真机 2026-10-08 实测踩中）。
+        # resizeEvent 那套"列数变了才重排"的防抖在这里反而是障碍，所以直接重排。
+        if not getattr(self, "_first_show_done", False):
+            self._first_show_done = True
+            self._last_columns = self._card_columns()
+            for idx in range(len(self._tab_cards)):
+                self.relayout_cards(idx)
+            self._position_log_overlay()
+
     # ------------------------------------------------------------------
     # 日志浮层
     # ------------------------------------------------------------------
@@ -11163,6 +11185,12 @@ class MainWindow(QMainWindow):
                     if home is not None:
                         w.setParent(home)     # 卡片稍后由 _restore_browse 重排归位
                 else:
+                    # deleteLater 是**异步**的：takeAt 之后布局不再管它，但 widget 的
+                    # parent 还挂在 results_content 上、几何也没变，在 deferred delete
+                    # 真正执行前会以"幽灵"形态残留在原地 —— 用户连续改搜索词时，上一轮
+                    # 的分类标题会和这一轮的内容叠在一起（真机 2026-10-08 实测踩中）。
+                    # 先 hide 立即从屏幕上消失，删除交给事件循环。
+                    w.hide()
                     w.deleteLater()           # 分类小标题等临时标签
                 continue
             sp = item.spacerItem()
@@ -11246,6 +11274,7 @@ class MainWindow(QMainWindow):
             #compTabs { background: transparent; border: none; }
 
             #compTabs::pane { border: none; background: transparent; }
+            #compTabs > QTabBar { background: transparent; }
             #compTabs > QTabBar::tab {
                 background: #cfd8e3;
                 color: #33465c;
