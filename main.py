@@ -10724,23 +10724,21 @@ class MainWindow(QMainWindow):
     # 卡片网格：分列、重排
     # ------------------------------------------------------------------
     def _card_columns(self) -> int:
-        """当前卡片区该排几列：列表模式恒 1 列，网格模式按视口净宽算。
+        """当前卡片区该排几列：列表模式恒 1 列，网格模式按可用净宽算。
 
-        宽度取的是 QScrollArea **视口**宽度再减掉左右边距，不是窗口宽度——
-        窗口 1000 宽、视口 990，减掉左右 18 的边距后净宽 954（offscreen 实测）。
+        宽度**不能**取"当前 Tab 的 viewport"——有竖滚动条的页（10 张卡要滚）
+        比没有的页窄十几像素，正好骑在列数边界上：切一次 Tab 列数就变，
+        再叠加"切 Tab 不触发重排"，同一页就会出现两种列数混排、末行溢出
+        （真机 2026-10-08 用户 125% 缩放截图实测）。改用 tabs 本身的宽度
+        （四个 Tab 恒相同）减去固定开销：左右边距 36 + 竖滚动条 10 预留。
+        切 Tab、滚动条出现消失都不影响列数。
         """
         if getattr(self, "view_mode", "grid") == "list":
             return 1
         tabs = getattr(self, "tabs", None)
-        if tabs is None or tabs.currentIndex() < 0:
+        if tabs is None:
             return 1
-        scroll = tabs.currentWidget()
-        lay = self._tab_layouts[tabs.currentIndex()]
-        if scroll is None or lay is None:
-            return 1
-        m = lay.contentsMargins()
-        return grid_columns_for(scroll.viewport().width() - m.left() - m.right(),
-                                MIN_CARD_WIDTH_PX)
+        return grid_columns_for(tabs.width() - 36 - 10, MIN_CARD_WIDTH_PX)
 
     def relayout_cards(self, container_key) -> None:
         """把一个容器里的卡片按当前列数重排成"行"。
@@ -10811,7 +10809,10 @@ class MainWindow(QMainWindow):
                 card.setParent(root)
         self._drop_rows(layout)
         layout.row_widgets = []
-        rows = self._make_rows(root, chunks)
+        # pad_to 必须给：半行不补占位的话，QHBoxLayout 的 addWidget(card, 1) 会把
+        # 末行的卡片**拉伸占满整行** —— 「其它软件」2 张各半行、「开发软件」的 Pulsar
+        # 独占一行，跟满行格子的 309px 完全不同宽（真机 2026-10-08 用户截图实测）。
+        rows = self._make_rows(root, chunks, pad_to=columns)
         for row in rows:
             layout.addWidget(row)
             layout.row_widgets.append(row)
