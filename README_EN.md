@@ -1,6 +1,6 @@
 # Byte Tools — by jilong2026
 
-A cross-platform desktop GUI tool built with Python + PySide6. It **installs common developer software in one click and configures the environment variables for you** — no more repetitive manual setup. It also provides **one-click start/stop** and **direct access pages** for supported services, with URLs, usernames and passwords printed to the log automatically.
+A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 common developer components** such as **JDK, Python, Node.js, Maven, MySQL and Docker** — each one installed in a single click with the environment variables configured for you. **Tomcat, Nginx, Kafka, Jenkins** and 6 other services additionally get **one-click start/stop** and **direct access pages**, with URLs, usernames and passwords printed to the log automatically.
 
 > Project: **byte-tools**
 > Author: **jilong2026**
@@ -17,14 +17,14 @@ A cross-platform desktop GUI tool built with Python + PySide6. It **installs com
 - 🇨🇳 **China mirror priority.** Since v2.0 the tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top). Downloads try China sources first with multi-source failover — the official site is only used after all China sources fail (404 / timeout). Full Chinese logs report which source failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration. Per-component exceptions measured on 2026-09-28: mongodb and postgresql have **no** China mirror (official site only); nacos, bun, powershell and the macOS/Linux source tarballs of git go through the GitHub accelerators (no true mirror exists); nginx ships Windows-only binaries and only the two Huawei Cloud sub-domains carry them (Tsinghua / BFSU / NJU / Aliyun / Tencent all 404); kubectl prefers the DaoCloud `files.m.daocloud.io` proxy; seata is served from the Apache distribution directory via eight China mirrors.
 - 🛡️ **Reliable downloads.** Every request carries a custom `byte-tools` User-Agent (several university mirrors return 403 for the default UA), and each finished download is checked against the declared byte count — a "fake 200" empty file from a mirror automatically triggers a switch to the next source instead of leaving a broken archive behind.
 - 🔍 **Smart detection.** Checks whether `JAVA_HOME` and friends already exist and are valid; missing/invalid entries are flagged for reconfiguration.
-- 🔀 **Multiple versions + active-version switching.** Seven components (JDK / Python / Node.js / Go / Maven / Gradle / Bun) can keep several versions on disk at the same time, each in its own `~/.env-tools/<component>/<component>-<version>/` directory, and one of them is explicitly marked as the **active version**. Clicking **"Configure Only"** ("配置环境变量") makes the selected version active: `XXX_HOME` is repointed and this component's `PATH` entries are collapsed into the single entry of the active version. Any failure mid-switch is rolled back to the pre-switch state, so you never end up with `XXX_HOME` pointing at one version and `PATH` at another. In the version drop-down, a **green check mark** means that version is already installed on disk.
+- 🔀 **Multiple versions + active-version switching.** Seven components (JDK / Python / Node.js / Go / Maven / Gradle / Bun) can keep several versions on disk at the same time, each in its own `~/.env-tools/<component>/<component>-<version>/` directory, and one of them is explicitly marked as the **active version**. Clicking **"Switch"** ("切换") makes the selected version active: `XXX_HOME` is repointed and this component's `PATH` entries are collapsed into the single entry of the active version. Any failure mid-switch is rolled back to the pre-switch state, so you never end up with `XXX_HOME` pointing at one version and `PATH` at another. In the version drop-down, a **green check mark** means that version is already installed on disk.
 - 🧹 **Safe uninstall and stale-entry cleanup.** Uninstall always targets a directory that really exists on disk. For the seven multi-version components it removes **only the version selected in the drop-down** — its directory and its own `PATH` entries — and leaves the sibling versions untouched; `XXX_HOME` is deleted only when it points at the version being removed. Only when no installed version of that component is left does the cleanup fall back to sweeping the whole component directory (which also clears dead entries left by manual deletions). The "Clean stale PATH entries" button in the title bar removes entries that point into this tool's folder but no longer exist.
 - 🛠️ **Environment-variable management.**
     - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
     - macOS / Linux: appends idempotent `export` blocks (with begin/end markers) to `.zshrc` / `.bash_profile` / `.bashrc` / `.profile`.
-- 📊 **Live feedback.** Progress bar with real-time byte counts, cancel support, colour-coded log output (info / ok / warn / error).
-- 🎨 **Modern UI.** Frameless custom title bar with a window icon (visible in the taskbar / Alt+Tab), rounded cards with drop shadows, gradient progress bars, hover/press animations, a component search box above the tabs, and a bottom status bar showing "Total components: 26".
-- 🚀 **One-stop install.** The "Download & Install" button runs the whole flow in one shot — download → extract → auto-configure env vars → refresh card status — so you no longer need to click "Configure" afterwards.
+- 📊 **Live feedback.** Progress bar with real-time byte counts, cancel support, and a collapsible **log overlay** with colour-coded output (info / ok / warn / error; warn / error auto-open it and attach an unread count to the "Log" button).
+- 🎨 **Modern UI.** Frameless custom title bar with a window icon (visible in the taskbar / Alt+Tab), rounded cards with drop shadows **arranged in an adaptive grid** (`▦` / `☰` toggles between grid and single-column list), gradient progress bars, hover/press animations, a component search box above the tabs, a **collapsible log overlay** that floats over the cards, and a bottom status bar showing "Total components: 26".
+- 🚀 **One-stop install.** The "Install" button runs the whole flow in one shot — download → extract → auto-configure env vars → refresh card status — so you no longer need to click "Switch" afterwards.
 - 🧠 **Preferences memory.** Remembers the last selected version per component.
 
 ---
@@ -144,24 +144,35 @@ The UI groups them into **four tabs** along the top, each titled with its compon
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  Byte Tools By jilong2026                     ★ GitHub — ▢ × │
+│  Byte Tools By jilong2026                     ★ GitHub — ▢ ×  │
 ├───────────────────────────────────────────────────────────────┤
-│  ┌─ JDK (Temurin) ────────────────────────────────────────┐   │
-│  │  ● 2 versions installed · active 17 (17, 11)          │   │
-│  │  Version [✓ 17 ▾]  [Install] [Configure] [Uninstall]   │   │
-│  │  ████████████████░░░░░  85%                            │   │
-│  └────────────────────────────────────────────────────────┘   │
-│                                                                │
-│  Log:                                                          │
-│  [JDK] Downloading https://api.adoptium.net/v3/binary/...      │
-│  [JDK] Extracted to /Users/x/.env-tools/jdk/jdk-17             │
-│  [JDK] JAVA_HOME set                                           │
+│  [ Search components          ]  ▦ ☰  Log                     │
+│  [ Dev Env 10 ][ Dev Tools 4 ][ One-click 10 ][ Others 2 ]    │
+│                                                               │
+│  ┌─ JDK (Temurin) ───────────┐ ┌─ Python ──────────────────┐  │
+│  │ ● active 17 (17, 11)      │ │ ● not configured          │  │
+│  │ [✓17 ▾] [Install] [Switch]│ │ [ 3.12 ▾ ] [Install]      │  │
+│  │ ████████████░░░░░  85%    │ │                           │  │
+│  └───────────────────────────┘ └───────────────────────────┘  │
+│  ┌─ Node.js ─────────────────┐ ┌─ Maven ───────────────────┐  │
+│  │ ● configured · system     │ │ ● not configured          │  │
+│  │ [ 20.11 ▾] [Switch]       │ │ [ 3.9 ▾ ] [Install]       │  │
+│  │                           │ │                           │  │
+│  └───────────────────────────┘ └───────────────────────────┘  │
+├───────────────────────────────────────────────────────────────┤
+│  ┌─ Log ──────────────────────────────────────────────── × ┐  │
+│  │ [JDK] Downloading https://api.adoptium.net/v3/...       │  │
+│  │ [JDK] Extracted to ~/.env-tools/jdk/jdk-17              │  │
+│  │ [JDK] JAVA_HOME set                                     │  │
+│  └─────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────┘
 ```
 
 > The sketch is illustrative: every label in the real UI is Chinese
-> (`● 已装 2 个版本 · 生效 17（17、11）`, `下载并安装` / `配置环境变量` / `卸载`); the `✓` in front of `17`
+> (`● 已装 2 个版本 · 生效 17（17、11）`, `安装` / `切换` / `卸载`); the `✓` in front of `17`
 > marks a version that is already installed on disk — see [Multiple versions and the active version](#multiple-versions-and-the-active-version).
+> Cards are arranged in a **grid** (`▦`) that can be collapsed to a single column (`☰`), and the log is an
+> **overlay** — expanding it floats over the cards instead of squeezing them.
 
 ---
 
@@ -242,14 +253,14 @@ The working directory `~/.env-tools/` is created automatically on first launch a
    (The pill texts above are quoted verbatim — the UI itself is Chinese-only.)
 2. Choose a version from the drop-down.
     - A version with a **green check mark** in front of it is already installed on disk; entries without the mark are not.
-3. Click **"Download & Install"** — a one-stop flow that runs automatically:
+3. Click **"Install"** — a one-stop flow that runs automatically:
     - the archive is streamed to `~/.env-tools/<component>/downloads/` (China mirrors first, automatic source failover; cancelable at any time);
     - it is extracted to `~/.env-tools/<component>/<component>-<version>/` (Miniconda runs its silent installer);
     - the corresponding `XXX_HOME` variable is written and the `bin` directory is appended to `PATH`;
-    - the card status is refreshed automatically — no need to click "Configure" afterwards;
-    - previously installed versions of the same component are **not** deleted, so installing a second one gives you side-by-side versions. Installation repoints the environment variables at the version just installed; click **"Configure Only"** once more if you want the pill to state that version as the active one and this component's `PATH` entries collapsed into a single entry.
-    - if the version selected in the drop-down **is already installed on disk**, **"Download & Install" is greyed out** and its tooltip says to uninstall first. This applies to all 26 components, so a finished install can never be overwritten by a second click; to reinstall, uninstall then install again.
-4. Click **"Configure Only"** ("配置环境变量") to only write the environment variables:
+    - the card status is refreshed automatically — no need to click "Switch" afterwards;
+    - previously installed versions of the same component are **not** deleted, so installing a second one gives you side-by-side versions. Installation repoints the environment variables at the version just installed; click **"Switch"** once more if you want the pill to state that version as the active one and this component's `PATH` entries collapsed into a single entry.
+    - if the version selected in the drop-down **is already installed on disk**, **"Install" is greyed out** and its tooltip says to uninstall first. This applies to all 26 components, so a finished install can never be overwritten by a second click; to reinstall, uninstall then install again.
+4. Click **"Switch"** ("切换") to only write the environment variables:
     - **Multi-version components**: it makes the version selected in the drop-down the **active version** (`XXX_HOME` repointed, this component's `PATH` entries collapsed into that one entry). The button is greyed out when the selected version already is the active one, and its tooltip tells you to pick another version in the drop-down first.
     - **All other components**: it configures the highest version found among the locally extracted directories, without re-downloading (handy when you fetched the archive yourself).
 5. All actions are echoed to the log panel (full Chinese logs, including mirror switching / failover).
@@ -266,7 +277,7 @@ The **active version** is the one the operating system actually uses.
   version you have installed can drop out of them. When that happens the drop-down re-inserts it at its semver position
   with the green check — otherwise such a version could not be selected, switched or uninstalled from the UI at all.
   This synthesis applies only to the seven multi-version components; every other component's list stays exactly as published.
-- **"Configure Only" = make the selected version active.** It repoints `XXX_HOME` at that version's directory and
+- **"Switch" = make the selected version active.** It repoints `XXX_HOME` at that version's directory and
   collapses this component's `PATH` entries into the active version's single entry; entries belonging to other
   components (and your own) are left alone. If any step fails mid-switch, everything already written is rolled back
   from the pre-switch snapshot, so a half-configured state ("`JAVA_HOME` says 21, `PATH` says 17") cannot appear —
@@ -285,7 +296,7 @@ The **active version** is the one the operating system actually uses.
   over a copy you installed elsewhere yourself.
 - **Setups that predate this feature keep working.** For components installed before the active version was ever
   recorded, the card infers the active version from the `XXX_HOME` the system already has; clicking
-  "Configure Only" once records it explicitly.
+  "Switch" once records it explicitly.
 - The tool does **not** rewrite `pom.xml` / `build.gradle` in your projects and does not touch IDE SDK settings —
   multi-version setups are handled purely at the "active version" level. If an IDE needs a specific JDK, point its
   SDK setting at that version's directory yourself.
@@ -416,15 +427,15 @@ RabbitMQ depends on Erlang at runtime. On Windows you must install Erlang first 
 **Q8. Are downloads slow inside China?**
 Mostly no. Since v2.0 the built-in China-mirror-priority rule provides **11 mainland mirror bases** (Huawei Cloud / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud, etc.) plus **3 GitHub accelerators**. Downloads try them in order and automatically switch to the next one on 404 / timeout, with full Chinese logs (which source failed, which one it switched to, which one finally served the file). Every request also carries a custom User-Agent (some university mirrors block the default one with 403), and finished downloads are byte-count verified so a "fake 200" empty file switches to the next source instead of leaving a broken archive. Ordinary users do not need to configure anything manually. The exceptions: **mongodb and postgresql have no mainland mirror at all** (official site only), and **nacos, bun, powershell and the macOS/Linux source tarballs of git** rely on the GitHub accelerators; **nginx** ships Windows-only zips mirrored solely by the two Huawei Cloud sub-domains. kubectl, previously served only by the official `dl.k8s.io`, now uses the DaoCloud `files.m.daocloud.io` proxy as its first source.
 
-**Q9. After clicking "Download & Install", do I still need to configure env vars manually?**
-No. The "Download & Install" button is a **one-stop flow**: download → extract → auto-write `XXX_HOME` / `PATH` → refresh the card status. Once the flow finishes, the component is considered installed; you do not need to click "Configure Only" afterwards. That button is only for the case where you have already downloaded the archive manually and just want to write the environment variables.
+**Q9. After clicking "Install", do I still need to configure env vars manually?**
+No. The "Install" button is a **one-stop flow**: download → extract → auto-write `XXX_HOME` / `PATH` → refresh the card status. Once the flow finishes, the component is considered installed; you do not need to click "Switch" afterwards. That button is only for the case where you have already downloaded the archive manually and just want to write the environment variables.
 
 **Q10. I switched the active version, but `java -version` in my terminal still shows the old one.**
 First click **"🖥 Open verification terminal"** in the title bar: that window is started with the environment block Windows builds for a *new* process, so the version you see there is what any freshly opened terminal will report. If it is correct and your old window is not, that window simply predates the switch (see step 1 below).
 Check these three things:
 1. **The window was not reopened** — a switch only reaches newly started processes. Close and reopen terminals; fully restart IntelliJ IDEA / Eclipse / VS Code. After a successful switch the log names every terminal window still older than that switch (pid plus start time), so you can tell which window to close; entries marked as an administrator window cannot be reached by this tool's refresh notification at all — only closing the whole window and reopening it works. Windows Terminal tabs and IDE terminals inherit the host process' environment, so closing a tab is not reopening a terminal — a fresh tab even prints the PowerShell banner again while still carrying the host's old environment.
 2. **Oracle's javapath wins.** If the *system* `PATH` contains `C:\Program Files\Common Files\Oracle\Java\javapath`, it is searched before user variables, so plain `java` still runs that copy. Run `where java` from the [Verifying](#verifying) section — the first line is what actually executes — and use `%JAVA_HOME%\bin\java -version` to confirm the copy this tool installed is healthy.
-3. **The switch itself failed.** A log line containing "切换失败" means the tool rolled back from the pre-switch snapshot, so nothing effectively changed; click "Configure Only" again. If that log also says the rollback was not fully successful, it lists exactly which item could not be restored and what value it should have — fix those by hand and retry.
+3. **The switch itself failed.** A log line containing "切换失败" means the tool rolled back from the pre-switch snapshot, so nothing effectively changed; click "Switch" again. If that log also says the rollback was not fully successful, it lists exactly which item could not be restored and what value it should have — fix those by hand and retry.
 
 **Q11. Will uninstalling one version break the other installed versions of the same component?**
 No. For the multi-version components, uninstall removes only the directory of the version selected in the drop-down plus that version's own `PATH` entries; sibling versions' directories, variables and entries stay as they are, and `XXX_HOME` is cleared only when it points at the version being deleted. If the removed version was the active one, the tool immediately makes the highest remaining version active and says so in the log (`生效版本已自动切到 …`). A version that is not on disk has no green check mark in the drop-down and cannot be uninstalled — the button is greyed out.
