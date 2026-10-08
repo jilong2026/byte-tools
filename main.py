@@ -85,7 +85,6 @@ try:
         QScrollArea,
         QSizePolicy,
         QSpacerItem,
-        QSplitter,
         QStackedWidget,
         QTabWidget,
         QTextEdit,
@@ -8570,8 +8569,91 @@ def open_clean_console(env: Dict[str, str]) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# 卡片网格：列宽锚点与分块（纯函数，不碰几何，可离线测）
+#
+# 卡片原来是"一行一张占满宽"，640px 视口下只能露 3 个半。改成网格后列数只由
+# 视口宽度决定：宽了自动 3 列，窄了退回 1 列。日志做成浮层就是为了不参与这场
+# 计算——它不占布局空间，展开/收起都不会让列数忽大忽小。
+# ---------------------------------------------------------------------------
+MIN_CARD_WIDTH_PX = 300          # 格子最小宽度：一张卡片信息不砍的下限
+CARD_ROW_SPACING = 14            # 同行两格的间距（与卡片区原 spacing 一致）
+
+# 统一搜索结果面板在 `_tab_rows` 里的键；四个 Tab 用 0..N-1 的序号。
+RESULTS_KEY = "results"
+
+# 告警把日志浮层自动弹开后，静默多久自动收起（毫秒）。用户手动点开的不自动收。
+LOG_AUTO_HIDE_MS = 8000
+
+
+def grid_columns_for(available_px, min_card_px) -> int:
+    """给定可用宽度与格子最小宽度，返回列数（恒 ≥ 1）。
+
+    入参 available_px: int|None  卡片区视口去掉左右边距后的净宽
+          min_card_px: int|None  单格最小宽度；取不到（None/0/负）时退化成 1 列
+
+    说明: 视口宽度在窗口最小化、布局尚未生效时会是 0，除零或负列数会让整片
+          卡片消失，所以所有非法入参一律兜底成 1 列而不是抛异常。
+    """
+    try:
+        available = int(available_px)
+        minimum = int(min_card_px)
+    except (TypeError, ValueError):
+        return 1
+    if available <= 0 or minimum <= 0:
+        return 1
+    # n 列要占 n 个格子 + (n-1) 个间距，所以可用宽度先"补"一个间距再整除
+    return max(1, (available + CARD_ROW_SPACING) // (minimum + CARD_ROW_SPACING))
+
+
+def chunk_visible(cards, columns) -> list:
+    """把卡片按 columns 列切成若干"行"，只排得进"没被隐藏"的卡片。
+
+    入参 cards:   可迭代的卡片序列（顺序即界面顺序）
+          columns: int 列数；<1 或非数字时按 1 列处理
+
+    返回: List[List[card]]  除最后一行外每行都排满；没有可见卡片时返回 []
+
+    说明: 判可见用 `isHidden()` 而不是 `isVisible()`——后者还要看父级是否可见，
+          而卡片所在 Tab 页没被翻到时父级就是不可见的（实测：非当前页的卡片
+          isVisible() 恒为 False）。用 isVisible() 会让"切到第二页"变成"整页
+          卡片排不出来"。搜索隐藏走的正是 `setVisible(False)`，isHidden() 判得准。
+    """
+    try:
+        cols = max(1, int(columns))
+    except (TypeError, ValueError):
+        cols = 1
+    visible = [c for c in cards if not c.isHidden()]
+    return [visible[i:i + cols] for i in range(0, len(visible), cols)]
+
+
+# ---------------------------------------------------------------------------
 # UI 组件：卡片
 # ---------------------------------------------------------------------------
+class CardColumnLayout(QVBoxLayout):
+    """Tab 里装"行"的外层竖向布局。
+
+    为什么不让裸 QVBoxLayout 直接干这事：改成行容器后，卡片的直接父级是行控件，
+    而 QLayout.indexOf **不会**钻进子控件自己的布局里找（实测恒为 -1）。于是
+    "这张卡片属于哪个 Tab"这类按 indexOf 判归属的既有代码会静默失效 ——
+    `_reveal_running_tabs`（"有组件在跑就自动跳到那一页"）就是这么哑掉的。
+    这里把 indexOf 补成"先查自己、再逐行查"，归属判断继续成立。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.row_widgets: list = []
+
+    def indexOf(self, widget) -> int:  # noqa: N802  Qt 规定的驼峰签名
+        idx = super().indexOf(widget)
+        if idx != -1:
+            return idx
+        for n, row in enumerate(self.row_widgets):
+            lay = row.layout() if row is not None else None
+            if lay is not None and lay.indexOf(widget) != -1:
+                return n
+        return -1
+
+
 class ComponentCard(QFrame):
     """展示一个组件的卡片。"""
 
@@ -10318,6 +10400,9 @@ class MainWindow(QMainWindow):
         self._fetch_pending: int = 0
         # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面
         self._closing: bool = False
+        # 视图模式：grid（按宽度自动分列）/ list（恒 1 列）；_load_settings 会按
+        # config.json 覆盖它，老配置没有这个键时留在 grid，即"老用户自动获得新默认"。
+        self.view_mode: str = "grid"
 
         self._build_ui()
         self._apply_qss()
@@ -10471,18 +10556,46 @@ class MainWindow(QMainWindow):
         self.search_hint = QLabel("")
         self.search_hint.setObjectName("searchHint")
         sb.addWidget(self.search_hint)
+
+        # 视图切换与日志开关放在搜索条右侧的空白处，**不放标题栏**：标题栏已有
+        # 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽，再加必然
+        # 把已有的按钮压到裁字。
+        self.btn_view_mode = QPushButton("▦ 网格")
+        self.btn_view_mode.setObjectName("toolBtn")
+        self.btn_view_mode.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_view_mode.setToolTip(
+            "网格：按窗口宽度自动分成 2 列 / 3 列；列表：恒 1 列（卡片内容不变）")
+        self.btn_view_mode.clicked.connect(self._on_view_mode_clicked)
+        sb.addWidget(self.btn_view_mode)
+
+        self.btn_log = QPushButton("📋 日志")
+        self.btn_log.setObjectName("toolBtn")
+        self.btn_log.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_log.setToolTip("展开/收起运行日志（浮层，盖在卡片上，不挤压网格）")
+        self.btn_log.clicked.connect(self._on_log_button_clicked)
+        sb.addWidget(self.btn_log)
+
         sb.addStretch(1)
         outer.addWidget(self.search_bar)
 
-        # ------- 主体：卡片列表 + 日志区 -------
-        body = QSplitter(Qt.Vertical)
-        body.setObjectName("bodySplitter")
+        # ------- 主体：卡片区（吃满中部）+ 日志浮层 -------
+        # 日志原先和卡片区按 3:2 分在同一个 QSplitter 里，展开/收起都会挤压网格。
+        # 现在卡片区独占中部，日志改成浮在它上面的浮层：不占布局空间，于是
+        # 列数与行数只由窗口宽度决定，开关日志不会让格子忽大忽小。
 
         # 卡片区域：按 COMPONENT_CATEGORIES 分四个 Tab，每个 Tab 一条独立滚动栏。
         # self.cards 仍是全量平铺列表——刷新版本 / 存取配置 / 关窗等探测都靠它遍历。
         self.cards: List[ComponentCard] = []
         self._tab_cards: List[List[ComponentCard]] = []
+        # `_tab_layouts[i]` 的语义从"直接装卡片"改成"装行的外层竖向布局"：
+        # 行本身是一个 QWidget，行里的 QHBoxLayout 才装格子。
+        # 用行容器而不是 QGridLayout，是因为 _reparent / _restore_browse /
+        # _build_unified 三处全靠 QBoxLayout 的 indexOf / insertWidget / 末尾 stretch。
         self._tab_layouts: list = []
+        # `_tab_rows[key]`：Tab 用 0..N-1 的序号，统一结果面板用 RESULTS_KEY。
+        # Tab 里存的是"行控件"，结果面板存的是"每行一张卡"的卡片序列。
+        self._tab_rows: dict = {}
+        self._tab_wraps: List[QWidget] = []
         # Tab 标题的"干净"形态（分类名 + 组件数）。运行标记 `●` 是叠在它上面的，
         # 搜索/退出搜索会重设标题，所以必须留着底稿，不能靠 tabText() 反推。
         self._tab_base_titles: List[str] = []
@@ -10496,22 +10609,24 @@ class MainWindow(QMainWindow):
             scroll.setObjectName("cardsScroll")
             cards_wrap = QWidget()
             cards_wrap.setObjectName("cardsWrap")
-            cards_layout = QVBoxLayout(cards_wrap)
+            cards_layout = CardColumnLayout(cards_wrap)
             cards_layout.setContentsMargins(18, 18, 18, 18)
-            cards_layout.setSpacing(14)
+            cards_layout.setSpacing(CARD_ROW_SPACING)
             tab_cards: List[ComponentCard] = []
             for comp in comps:
                 card = ComponentCard(comp, self._append_log)
-                cards_layout.addWidget(card)
+                # 先挂进容器，具体排在哪个格子里由 relayout_cards 决定
+                card.setParent(cards_wrap)
                 self.cards.append(card)
                 tab_cards.append(card)
-            cards_layout.addStretch(1)
             scroll.setWidget(cards_wrap)
             base_title = f"{cat_name}（{len(comps)}）"
             self.tabs.addTab(scroll, base_title)
             self._tab_base_titles.append(base_title)
             self._tab_cards.append(tab_cards)
             self._tab_layouts.append(cards_layout)
+            self._tab_wraps.append(cards_wrap)
+            self._tab_rows[len(self._tab_cards) - 1] = []
 
         # 统一搜索结果面板：搜索时收起四个 Tab，把所有命中的组件按分类归并到
         # 同一个滚动列表里（带分类小标题），一眼看全、不用切页——这就是「全组件搜索」。
@@ -10524,32 +10639,51 @@ class MainWindow(QMainWindow):
         self.results_layout.setContentsMargins(18, 18, 18, 18)
         self.results_layout.setSpacing(6)
         self.results_area.setWidget(self.results_content)
+        # 结果面板保持"小标题 + 卡片"的单列列表：搜索命中通常是两三个组件，
+        # 排成网格反而要在窄结果里补空位。这里按"每行一张"登记进 _tab_rows，
+        # 好让"命中数 < 列数时有没有空洞"有统一的判据。
+        self._tab_rows[RESULTS_KEY] = []
 
         # 浏览模式用 Tab，搜索模式用统一结果面板，二者互斥地放进一个栈
         self.top_stack = QStackedWidget()
         self.top_stack.setObjectName("topStack")
         self.top_stack.addWidget(self.tabs)           # index 0：浏览
         self.top_stack.addWidget(self.results_area)   # index 1：搜索结果
-        body.addWidget(self.top_stack)
 
-        # 日志
-        log_wrap = QWidget()
-        log_wrap.setObjectName("logWrap")
-        log_layout = QVBoxLayout(log_wrap)
-        log_layout.setContentsMargins(18, 6, 18, 18)
-        log_layout.setSpacing(6)
+        self.body = QWidget()
+        self.body.setObjectName("bodyArea")
+        body_lay = QVBoxLayout(self.body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(0)
+        body_lay.addWidget(self.top_stack)
+        outer.addWidget(self.body, stretch=1)
+
+        # 日志浮层：与卡片区同一个父级，靠 raise_() 叠在上面，几何随 resize 跟随。
+        # 它不在 body 的布局里，所以 show/hide 都不会让卡片区尺寸变化 ——
+        # 这是"展开日志不重排网格"这条承诺的实现基础。
+        self.log_overlay = QWidget(self.body)
+        self.log_overlay.setObjectName("logOverlay")
+        overlay_lay = QVBoxLayout(self.log_overlay)
+        overlay_lay.setContentsMargins(18, 8, 18, 14)
+        overlay_lay.setSpacing(6)
+        overlay_head = QHBoxLayout()
         log_title = QLabel("运行日志")
-        log_title.setStyleSheet("font-weight:600;color:#333;")
-        log_layout.addWidget(log_title)
+        log_title.setStyleSheet("color:#e6e9ef;font-weight:600;")
+        overlay_head.addWidget(log_title)
+        overlay_head.addStretch(1)
+        self.btn_log_close = QPushButton("×")
+        self.btn_log_close.setObjectName("overlayCloseBtn")
+        self.btn_log_close.setFixedSize(26, 26)
+        self.btn_log_close.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_log_close.setToolTip("收起日志浮层")
+        self.btn_log_close.clicked.connect(self._close_log_by_user)
+        overlay_head.addWidget(self.btn_log_close)
+        overlay_lay.addLayout(overlay_head)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setObjectName("logView")
-        log_layout.addWidget(self.log_view)
-        body.addWidget(log_wrap)
-
-        body.setStretchFactor(0, 3)
-        body.setStretchFactor(1, 2)
-        outer.addWidget(body, stretch=1)
+        overlay_lay.addWidget(self.log_view)
+        self.log_overlay.hide()
 
         # 底部状态条（含组件总数，方便用户一眼掌握支持范围）
         self.status_bar = QLabel(
@@ -10558,6 +10692,203 @@ class MainWindow(QMainWindow):
         )
         self.status_bar.setObjectName("statusBar")
         outer.addWidget(self.status_bar)
+
+        # 日志浮层的未读计数与自动收起定时器（QTimer 挂在窗口上，测试可注入时钟）
+        self._log_unread = 0
+        self._log_user_open = False
+        self._log_auto_hide = QTimer(self)
+        self._log_auto_hide.setSingleShot(True)
+        self._log_auto_hide.setInterval(LOG_AUTO_HIDE_MS)
+        self._log_auto_hide.timeout.connect(self._on_log_auto_hide)
+
+        # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）
+        self._last_columns = 0
+        for idx in range(len(self._tab_cards)):
+            self.relayout_cards(idx)
+        self._refresh_view_button()
+        self._refresh_log_button()
+
+    # ------------------------------------------------------------------
+    # 卡片网格：分列、重排
+    # ------------------------------------------------------------------
+    def _card_columns(self) -> int:
+        """当前卡片区该排几列：列表模式恒 1 列，网格模式按视口净宽算。
+
+        宽度取的是 QScrollArea **视口**宽度再减掉左右边距，不是窗口宽度——
+        窗口 1000 宽、视口 990，减掉左右 18 的边距后净宽 954（offscreen 实测）。
+        """
+        if getattr(self, "view_mode", "grid") == "list":
+            return 1
+        tabs = getattr(self, "tabs", None)
+        if tabs is None or tabs.currentIndex() < 0:
+            return 1
+        scroll = tabs.currentWidget()
+        lay = self._tab_layouts[tabs.currentIndex()]
+        if scroll is None or lay is None:
+            return 1
+        m = lay.contentsMargins()
+        return grid_columns_for(scroll.viewport().width() - m.left() - m.right(),
+                                MIN_CARD_WIDTH_PX)
+
+    def relayout_cards(self, container_key) -> None:
+        """把一个容器里的卡片按当前列数重排成"行"。
+
+        入参 container_key: int → 第几个 Tab；RESULTS_KEY → 统一搜索结果面板。
+
+        重排只排"没被隐藏"的卡片（搜索命中的反面），所以命中数少于列数时
+        不会留下空洞；隐藏的卡片被收回到容器宿主上，不占任何格子。
+        """
+        if container_key == RESULTS_KEY:
+            self._relayout_results()
+            return
+        idx = int(container_key)
+        layout = self._tab_layouts[idx]
+        root = self._tab_wraps[idx]
+        cards = self._tab_cards[idx]
+        # 只排"此刻真的住在这个 Tab 里"的卡片：搜索时命中的卡片已搬到结果面板，
+        # 不判归属就会把它们从结果面板里拽回 Tab，搜索结果当场散架。
+        own = [c for c in cards if root.isAncestorOf(c)]
+        self._tab_rows[idx] = self._fill_rows(layout, root, own, self._card_columns())
+
+    def _relayout_results(self) -> None:
+        """统一结果面板：单列列表，只把"每行一张卡"的行登记刷新一遍。"""
+        cards = [c for c in self.cards
+                 if not c.isHidden() and self.results_content.isAncestorOf(c)]
+        self._tab_rows[RESULTS_KEY] = [[c] for c in cards]
+
+    def _fill_rows(self, layout, root, cards, columns) -> list:
+        """销毁旧行、按 columns 重建行，返回新建的行控件列表。
+
+        两步都不能省：先把这个容器的卡片全部收回到宿主，否则销毁行控件时
+        会把还住在里面的卡片一起带走；收回之后 addWidget 的顺序才等于
+        子控件顺序（findChildren 读出来的行内顺序才是对的）。
+        """
+        # 分块必须在搬家**之前**算完：setParent 会把控件显式隐藏（isHidden 变 True），
+        # 先搬再算就一张可见卡片都不剩，整页排空。
+        chunks = chunk_visible(cards, columns)
+        for card in cards:
+            if root.isAncestorOf(card):
+                card.setParent(root)
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+            else:
+                sp = item.spacerItem()
+                if sp is not None:
+                    del sp
+        layout.row_widgets = []
+        rows: list = []
+        for row_cards in chunks:
+            row = QWidget(root)
+            row.setObjectName("cardRow")
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(CARD_ROW_SPACING)
+            for card in row_cards:
+                row_lay.addWidget(card, 1)      # 同一行的格子等分宽度
+                # setParent 会把控件**显式隐藏**（实测 isHidden 变 True），搬一次家
+                # 就把卡片弄没了，所以进格子后必须再放出来一次。
+                card.show()
+            # 行控件是新建的，加到布局里不会自动显示（实测 isVisible 仍为 False），
+            # 必须显式 show 一次，否则重排之后整页卡片会"消失"；
+            # show() 会顺着子控件往下走，把行里的卡片一起带出来。
+            row.show()
+            layout.addWidget(row)
+            layout.row_widgets.append(row)
+            rows.append(row)
+        layout.addStretch(1)
+        return rows
+
+    def resizeEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
+        super().resizeEvent(e)
+        # resize 是"每变一个像素一次"的事件，每次都重建行控件会把拖动窗口卡死，
+        # 所以只在列数真的变化时才重排。
+        columns = self._card_columns()
+        if columns != self._last_columns:
+            self._last_columns = columns
+            for idx in range(len(self._tab_cards)):
+                self.relayout_cards(idx)
+        self._position_log_overlay()
+
+    # ------------------------------------------------------------------
+    # 日志浮层
+    # ------------------------------------------------------------------
+    def _position_log_overlay(self) -> None:
+        """浮层贴在卡片区底部，高度取中部高度的 45%（夹在 160~300px）。"""
+        host = getattr(self, "body", None)
+        overlay = getattr(self, "log_overlay", None)
+        if host is None or overlay is None:
+            return
+        height = min(300, max(160, int(host.height() * 0.45)))
+        overlay.setGeometry(0, host.height() - height, host.width(), height)
+
+    def _set_log_open(self, open_: bool) -> None:
+        """展开/收起日志浮层。
+
+        浮层不在卡片区的布局里，所以这里**不会**触发 relayout —— 网格的行数
+        与每行卡片数在开关前后完全一致（这是浮层相对"挤压式折叠"的关键差别）。
+        """
+        overlay = getattr(self, "log_overlay", None)
+        if overlay is None:
+            return
+        if open_:
+            self._position_log_overlay()
+            overlay.show()
+            overlay.raise_()
+        else:
+            overlay.hide()
+        self._refresh_log_button()
+
+    def _on_log_button_clicked(self) -> None:
+        """点「📋 日志」：toggle 一次；点开即视为已读，未读计数清零。"""
+        if self.log_overlay.isHidden():
+            self._log_unread = 0
+            self._log_user_open = True
+            self._log_auto_hide.stop()
+            self._set_log_open(True)
+        else:
+            self._close_log_by_user()
+
+    def _close_log_by_user(self) -> None:
+        self._log_user_open = False
+        self._log_auto_hide.stop()
+        self._set_log_open(False)
+
+    def _on_log_auto_hide(self) -> None:
+        """告警自动弹开的浮层，静默 LOG_AUTO_HIDE_MS 后自己收起。
+
+        用户手动点开的那一侧不做自动收起（_log_user_open），免得看着日志
+        正看到一半被关掉。
+        """
+        if getattr(self, "_log_user_open", False):
+            return
+        self._set_log_open(False)
+
+    def _refresh_log_button(self) -> None:
+        btn = getattr(self, "btn_log", None)
+        if btn is None:
+            return
+        unread = getattr(self, "_log_unread", 0)
+        # 未读条数直接写在按钮文字里：不新增控件，标题栏也用不着再挤一个位置
+        btn.setText(f"📋 日志 ({unread})" if unread else "📋 日志")
+
+    def _on_view_mode_clicked(self) -> None:
+        """网格 ⇄ 列表。列表模式就是"强制 1 列"，卡片内容一模一样。"""
+        self.view_mode = "list" if self.view_mode == "grid" else "grid"
+        self._refresh_view_button()
+        for idx in range(len(self._tab_cards)):
+            self.relayout_cards(idx)
+        self._save_settings()
+
+    def _refresh_view_button(self) -> None:
+        btn = getattr(self, "btn_view_mode", None)
+        if btn is None:
+            return
+        grid = getattr(self, "view_mode", "grid") != "list"
+        btn.setText("▦ 网格" if grid else "☰ 列表")
 
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
@@ -10673,23 +11004,18 @@ class MainWindow(QMainWindow):
         self._build_unified(q)
 
     def _restore_browse(self) -> None:
-        """把全部卡片放回各自 Tab 并恢复可见，切回浏览模式。"""
-        # 从统一结果面板卸下所有卡片
+        """把全部卡片放回各自 Tab 并恢复可见，切回浏览模式，然后按列数重排。"""
+        # 从统一结果面板卸下所有卡片（卡片先回到自己 Tab 的容器，小标题才销毁）
+        self._clear_results_layout()
+        # 搜索时被隐藏的卡片要一起放出来，否则重排会因为"看不见"把它们漏掉
         for card in self.cards:
-            if self.results_layout.indexOf(card) != -1:
-                self.results_layout.removeWidget(card)
-        # 切回 Tab 浏览
+            card.setVisible(True)
         self.top_stack.setCurrentIndex(0)
-        # 把每个 Tab 的卡片按原顺序插回（layout 末尾有一个 stretch，插到它前面）
-        for i, layout in enumerate(self._tab_layouts):
-            for j, card in enumerate(self._tab_cards[i]):
-                if layout.indexOf(card) == -1:
-                    layout.insertWidget(j, card)
-                card.setVisible(True)
+        for idx in range(len(self._tab_cards)):
+            self.relayout_cards(idx)
         # Tab 标题恢复成「分类（总数）」，并重新标出哪些页有组件在运行
         self._mark_running_tabs()
-        # 清掉结果面板里残留的分类小标题
-        self._clear_results_layout()
+        self._tab_rows[RESULTS_KEY] = []
 
     def _log_credentials_of(self, key: str, port: int) -> None:
         """主窗侧：把某个正在运行的组件的登录凭据写进全局日志。
@@ -10746,14 +11072,18 @@ class MainWindow(QMainWindow):
         self._mark_running_tabs()
         tabs = getattr(self, "tabs", None)
         layouts = getattr(self, "_tab_layouts", None)
-        if tabs is None or not layouts:
+        tab_cards = getattr(self, "_tab_cards", None)
+        if tabs is None or not layouts or not tab_cards:
             return
         for card in self.cards:
             if not hasattr(card, "btn_start"):
                 continue
             if not card._running_per_ui():
                 continue                     # 没在运行，不用跳
-            idx = next((n for n, li in enumerate(layouts) if li.indexOf(card) != -1), -1)
+            # 按 _tab_cards 判归属，不按 layout.indexOf：改成行容器后卡片不在
+            # 外层布局里（它的父级是行控件），indexOf 恒为 -1，跳页会静默失效。
+            idx = next((n for n, cards in enumerate(tab_cards)
+                        if any(c is card for c in cards)), -1)
             if idx >= 0 and idx != tabs.currentIndex():
                 tabs.setCurrentIndex(idx)
                 base = self._tab_base_titles[idx] if idx < len(self._tab_base_titles) \
@@ -10788,6 +11118,12 @@ class MainWindow(QMainWindow):
         self.results_layout.addStretch(1)
         self.top_stack.setCurrentIndex(1)
 
+        # 结果面板是单列列表，重排只是把"每行一张"登记刷新；四个 Tab 也要跟着
+        # 重排一次，把被搬走的命中卡片从旧行里摘掉（不然归属判断还认旧行）。
+        for idx in range(len(self._tab_cards)):
+            self.relayout_cards(idx)
+        self.relayout_cards(RESULTS_KEY)
+
         self.search_hint.setText(f"匹配 {hits} / {len(self.cards)} 个组件")
         # 一个都没命中时换个警示色，免得用户以为列表加载坏了
         self.search_hint.setProperty("empty", "true" if hits == 0 else "false")
@@ -10795,26 +11131,50 @@ class MainWindow(QMainWindow):
         self.search_hint.style().polish(self.search_hint)
 
     def _reparent(self, card, target_layout, index) -> None:
-        """把卡片从任何已知 layout 摘下，再插入目标 layout 的指定位置。"""
-        for li in (self.results_layout, *self._tab_layouts):
-            if li.indexOf(card) != -1:
-                li.removeWidget(card)
+        """把卡片从任何已知容器摘下，再插入目标 layout 的指定位置。
+
+        卡片现在住在"行"里（Tab）或直接住在结果面板里，所以摘除要连行的布局
+        一起找 —— 只查外层布局是找不到的。
+        """
+        containers = [self.results_layout]
+        for rows in self._tab_rows.values():
+            for row in rows:
+                if isinstance(row, QWidget):
+                    lay = row.layout()
+                    if lay is not None:
+                        containers.append(lay)
+        for lay in containers:
+            if lay.indexOf(card) != -1:
+                lay.removeWidget(card)
         target_layout.insertWidget(index, card)
 
     def _clear_results_layout(self) -> None:
-        """清空统一结果面板里的所有条目（分类小标题等临时控件）。"""
+        """清空统一结果面板里的所有条目（分类小标题等临时控件）。
+
+        卡片不在这里销毁：它们只是被摘出布局并回到自己 Tab 的容器，
+        随后由 _restore_browse 统一重排。
+        """
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             w = item.widget()
             if w is not None:
-                if w in self.cards:
-                    w.setParent(None)        # 卡片稍后由 _restore_browse 归位
+                if any(w is card for card in self.cards):
+                    home = self._home_wrap_of(w)
+                    if home is not None:
+                        w.setParent(home)     # 卡片稍后由 _restore_browse 重排归位
                 else:
-                    w.deleteLater()          # 分类小标题等临时标签
+                    w.deleteLater()           # 分类小标题等临时标签
                 continue
             sp = item.spacerItem()
             if sp is not None:
                 del sp
+
+    def _home_wrap_of(self, card):
+        """这张卡片所属 Tab 的容器（搜索结束要按它归位）。"""
+        for idx, cards in enumerate(self._tab_cards):
+            if any(c is card for c in cards):
+                return self._tab_wraps[idx]
+        return None
 
     def _apply_qss(self) -> None:
         """应用 QSS 样式表。"""
@@ -10870,6 +11230,18 @@ class MainWindow(QMainWindow):
             #compSearch QToolButton { background: transparent; border: none; }
             #searchHint { color: #66788c; font-size: 12px; padding-left: 2px; }
             #searchHint[empty="true"] { color: #c0392b; }
+
+            /* 搜索条右侧的两个工具按钮（视图切换 / 日志开关） */
+            #toolBtn {
+                background: #ffffff;
+                color: #33465c;
+                border: 1px solid #d5dfea;
+                border-radius: 8px;
+                padding: 5px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #toolBtn:hover { border-color: #90caf9; color: #1976d2; }
 
             #compTabs { background: transparent; border: none; }
 
@@ -11036,7 +11408,22 @@ class MainWindow(QMainWindow):
                     stop:0 #26c6da, stop:1 #1976d2);
             }
 
-            #logWrap { background: transparent; }
+            /* 日志浮层：盖在卡片区上面，不占布局空间（展开不会挤压网格） */
+            #logOverlay {
+                background: #26303f;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                border-top: 1px solid #3d4a5d;
+            }
+            #logOverlay QLabel { color: #e6e9ef; }
+            #overlayCloseBtn {
+                background: transparent;
+                color: #9fb0c4;
+                border: none;
+                font-size: 16px;
+                border-radius: 6px;
+            }
+            #overlayCloseBtn:hover { background: rgba(255,255,255,0.12); color: #ffffff; }
             #logView {
                 background: #1e1e2e;
                 color: #dcdcdc;
@@ -11237,6 +11624,16 @@ class MainWindow(QMainWindow):
             "error": "#FF6B6B",
         }.get(level, "#dcdcdc")
         self.log_view.append(f'<span style="color:{color};">{msg}</span>')
+        # 只有 warn/error 才自动弹开浮层：下载/安装这类常规进度在卡片上已有进度条，
+        # 每来一条都弹会把用户正在操作的那张卡盖住。弹开同时在按钮上挂未读条数，
+        # 点开一次即清零。
+        if level in ("warn", "error"):
+            overlay = getattr(self, "log_overlay", None)
+            if overlay is not None and overlay.isHidden():
+                self._log_unread += 1
+                self._set_log_open(True)
+                self._log_auto_hide.start()
+            self._refresh_log_button()
 
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:
@@ -11245,7 +11642,13 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            selections = data.get("selections", {})
+        except Exception:
+            return
+        # 视图模式：老配置没有这个键，取新默认 grid（不报错、不回退整个加载）
+        mode = data.get("view_mode") if isinstance(data, dict) else None
+        self.view_mode = mode if mode in ("grid", "list") else "grid"
+        try:
+            selections = data.get("selections", {}) if isinstance(data, dict) else {}
             for card in self.cards:
                 v = selections.get(card.component.key)
                 if not v:
@@ -11288,6 +11691,8 @@ class MainWindow(QMainWindow):
             }
             if not isinstance(data.get("active"), dict):
                 data["active"] = {}
+            # 视图模式与 selections 一起合并写回，不整体覆盖（active 是切换那侧的数据）
+            data["view_mode"] = getattr(self, "view_mode", "grid")
             _atomic_write_config(data)
         except Exception:
             pass
