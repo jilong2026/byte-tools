@@ -1,6 +1,6 @@
 # Byte Tools — by jilong2026
 
-A cross-platform desktop GUI tool built with Python + PySide6 that automates the download, extraction and environment-variable configuration of common developer toolchains. Save yourself from tedious manual installation.
+A cross-platform desktop GUI tool built with Python + PySide6. It **installs common developer software in one click and configures the environment variables for you** — no more repetitive manual setup. It also provides **one-click start/stop** and **direct access pages** for supported services, with URLs, usernames and passwords printed to the log automatically.
 
 > Project: **byte-tools**
 > Author: **jilong2026**
