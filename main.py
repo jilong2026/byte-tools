@@ -715,6 +715,29 @@ class VersionProbeWorker(QThread):
         self.done.emit(_probe_version(self.exe, self.args))
 
 
+class ExternalDiscoveryWorker(QThread):
+    """后台扫一遍"系统里还有哪些这个组件的安装"（§5.1）。
+
+    为什么必须是线程、而且必须**按需**触发：这一步要对每个外部候选真跑一次版本命令
+    （java -version / mvn -v …）。7 个白名单组件 × 每个 2~4 个候选，启动时全量扫一遍
+    就是同时在用户机器上起十几个进程 —— 所以只在该卡片的折叠区被展开时才起。
+    """
+
+    done = Signal(list)      # List[DiscoveredVersion]（含工作区那份）
+
+    def __init__(self, component: Component,
+                 parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self.component = component
+
+    def run(self) -> None:
+        try:
+            cands = discover_version_candidates(self.component)
+            self.done.emit(probe_discovered_versions(self.component, cands))
+        except Exception:      # noqa: BLE001  发现失败不该把界面拖垮
+            self.done.emit([])
+
+
 # ---------------------------------------------------------------------------
 # R1 镜像源与故障转移参数（详见 DEVELOPMENT.md 规则 R1）
 # ---------------------------------------------------------------------------
@@ -8070,6 +8093,1858 @@ class ServiceManager:
 SERVICE_MANAGER = ServiceManager()
 
 
+# ---------------------------------------------------------------------------
+# 「接管用户自装版本」的数据层
+# 设计：docs/superpowers/specs/2026-09-30-external-version-discovery-switching-design.md §4
+#
+# 背景（v2 的核心让步）：Windows 把进程 PATH 合成成「系统段在前 + 用户段在后」，
+# 所以只往 HKCU 写用户级条目，**永远压不住** HKLM 里那条更靠前的老版本 ——
+# 实测 E6 显示 jdk / maven / bun / node 四个组件当前全被压住。要"真切换"就必须
+# 动 HKLM，而那是需要提权、且可能把整机 PATH 改坏的高危操作，所以：
+#   · 任何一次接管都先留**原文快照**（未展开、含类型），并存一份独立备份文件；
+#   · 还原按快照逐 hive 写回原文，existed=false 的键要**删除**而不是写空串；
+#   · active（工作区登记）与 takeover（外部接管）**两条键互斥**，不允许同时存在。
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DiscoveredVersion:
+    """一处「可用的组件安装」：本工具工作区里的，或系统里用户自己装的。
+
+    home 是**安装根目录**（不是 bin 目录）；source 记录发现来源，界面据此标注。
+    外部候选的 version 必须来自真跑一次版本命令（§5.1 第 6 步）——探测不出来就
+    不列入，宁可不显示，也不显示一个"认错了的目录"。
+    """
+
+    home: Path
+    source: str          # "workspace" | "env:<变量名>" | "path:<HKCU|HKLM>" | "registry:py"
+    version: str = ""
+
+
+@dataclass
+class ActiveTarget:
+    """当前生效目标（单一真源）：可能落在工作区版本，也可能落在被接管的外部版本。
+
+    kind 决定界面上那句"生效 X"该怎么写，也决定卸载/切换时要清哪一侧的登记。
+    """
+
+    kind: str            # "workspace" | "external"
+    version: str
+    home: Path
+    level: str = ""      # "user" | "machine"；工作区固定 user，外部取决于是否动过 HKLM
+
+
+def _update_config(mutate) -> None:
+    """config.json 的合并写通用入口：读出 → 交给 mutate 就地改 → 原子写回。
+
+    必须是"读-改-写"而不是整体覆盖：active / takeover / selections / view_mode
+    是四个互不相干的写入方，任何一方整体覆盖都会把别人的数据抹掉
+    （R3.2 的教训：_save_settings 曾经整体覆盖，把 active 登记表清了）。
+    """
+    data: Dict[str, object] = {}
+    if CONFIG_FILE.exists():
+        try:
+            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception:
+            data = {}
+    mutate(data)
+    _atomic_write_config(data)
+
+
+def load_takeover_map() -> Dict[str, dict]:
+    """读「接管登记表」；形状不合法的条目一律跳过，绝不把脏数据往下传。
+
+    返回: Dict[str, dict]  {组件 key: {home, version, level, snapshot, backup_file}}
+
+    读侧要挑剔的理由：还原整条链路都靠它，读进来一个半截快照比"没有这条"
+    更危险——那会让还原拿一份错的原值去写 HKLM。
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    raw = data.get("takeover") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, dict] = {}
+    for key, entry in raw.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        home, version = entry.get("home"), entry.get("version")
+        if not isinstance(home, str) or not home:
+            continue
+        if not isinstance(version, str) or not version:
+            continue
+        if not isinstance(entry.get("snapshot"), dict) or not entry["snapshot"]:
+            continue
+        if entry.get("level") not in ("user", "machine"):
+            continue
+        out[key] = entry
+    return out
+
+
+def save_takeover_entry(comp_key: str, entry: dict) -> None:
+    """登记一次「接管外部版本」，并**清掉同一组件的 active 登记**。
+
+    合并写：不动 selections / view_mode / 其他组件的条目。
+    active 与 takeover 是互斥的两条键（§4.3）：接管生效期间必须没有 active[key]，
+    否则界面按 active 显示"生效 3.10.0（工作区）"、而实际命令行跑的是外部版本 ——
+    正是设计里点名要避免的"两边都不认的孤儿态"。
+    """
+    def _mutate(data: Dict[str, object]) -> None:
+        takeover = data.get("takeover")
+        if not isinstance(takeover, dict):
+            takeover = {}
+        takeover[comp_key] = entry
+        data["takeover"] = takeover
+        active = data.get("active")
+        if isinstance(active, dict) and comp_key in active:
+            active.pop(comp_key, None)
+            data["active"] = active
+
+    _update_config(_mutate)
+
+
+def has_external_takeover(comp: Component) -> bool:
+    """该组件当前是否处在"接管了外部版本"的状态（界面据此显示还原按钮）。"""
+    return comp.key in load_takeover_map()
+
+
+def drop_takeover_entry(comp_key: str) -> Optional[dict]:
+    """删除 takeover[comp_key] 并返回被删的那一条（不存在则 None）。
+
+    切回工作区版本时必须调它（§4.3 两条键互斥）：不允许出现"登记表说工作区 17、
+    快照还挂着外部 home"这种两边都不认的孤儿态。
+    """
+    removed: Optional[dict] = None
+
+    def _mutate(data: Dict[str, object]) -> None:
+        nonlocal removed
+        takeover = data.get("takeover")
+        if isinstance(takeover, dict) and comp_key in takeover:
+            removed = takeover.pop(comp_key)
+            data["takeover"] = takeover
+
+    _update_config(_mutate)
+    return removed
+
+
+def load_machine_fix_map() -> Dict[str, dict]:
+    """读「为工作区版本提权改过系统变量」的登记表（R3.19）；形状不合法一律跳过。
+
+    返回: Dict[str, dict]  {组件 key: {home, version, level, snapshot, added, backup_file}}
+
+    为什么需要**另一张**表、而不复用 takeover：这两件事的语义完全不同。
+    takeover 记的是"把用户在别处装的那一份设为生效版本"，所以它必须与 active 互斥
+    （否则界面按 active 说工作区版本生效、命令行跑的却是外部版本）。而这里记的是
+    "为了让**工作区版本**赢过系统级同名条目，我们动过 HKLM"—— 生效版本仍是工作区
+    那一个，active[key] 照常存在，两条键**并存才是正确状态**。
+
+    读侧同样挑剔：还原整条链路都靠它，半截快照比"没有这条"更危险。
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    raw = data.get("machine_fix") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, dict] = {}
+    for key, entry in raw.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        home, version = entry.get("home"), entry.get("version")
+        if not isinstance(home, str) or not home:
+            continue
+        if not isinstance(version, str) or not version:
+            continue
+        snapshot = entry.get("snapshot")
+        # 只要 HKLM 那一半：用户级的改动由 apply_active_version / 还原链路自己管，
+        # 这里混进 HKCU 会在还原时把用户变量也写回一遍（越权改动）。
+        if not isinstance(snapshot, dict) or not snapshot.get("HKLM"):
+            continue
+        out[key] = entry
+    return out
+
+
+def save_machine_fix_entry(comp_key: str, entry: dict) -> None:
+    """登记一次「为工作区版本改过系统变量」；**刻意不动 active**（两条键可以并存）。"""
+    def _mutate(data: Dict[str, object]) -> None:
+        table = data.get("machine_fix")
+        if not isinstance(table, dict):
+            table = {}
+        table[comp_key] = entry
+        data["machine_fix"] = table
+
+    _update_config(_mutate)
+
+
+def drop_machine_fix_entry(comp_key: str) -> Optional[dict]:
+    """删除 machine_fix[comp_key] 并返回被删的那一条（不存在则 None）。"""
+    removed: Optional[dict] = None
+
+    def _mutate(data: Dict[str, object]) -> None:
+        nonlocal removed
+        table = data.get("machine_fix")
+        if isinstance(table, dict) and comp_key in table:
+            removed = table.pop(comp_key)
+            data["machine_fix"] = table
+
+    _update_config(_mutate)
+    return removed
+
+
+def has_machine_fix(comp: Component) -> bool:
+    """该组件是否有"为工作区版本提权改过系统变量"的欠账（界面据此显示还原按钮）。"""
+    return comp.key in load_machine_fix_map()
+
+
+def write_takeover_backup(comp_key: str, snapshot: dict) -> str:
+    """把同一份快照另存为一个独立文件，返回相对 CONFIG_DIR 的路径。
+
+    这是 §4.2 要求 backup_file 的全部理由：config.json 万一被写坏、或被用户手改成
+    非法形状，读侧会跳过该条 —— 那时只有这个文件还能把原值找回来。
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    rel = f"takeover-backups/{comp_key}-{stamp}.json"
+    target = CONFIG_DIR / rel
+    ensure_dir(target.parent)
+    target.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False),
+                      encoding="utf-8")
+    return rel
+
+
+def resolve_active_target(comp: Component) -> Optional[ActiveTarget]:
+    """解析生效目标（不含"PATH 实际命中"那一级，那一级要卡片上下文）。
+
+    顺序（§4.3）：takeover（外部）→ active 登记（工作区）→ 持久层 HOME 反推。
+    为什么 takeover 排最前：接管生效期间 active[key] 必须已被删掉（互斥），
+    真出现两条并存时，以"用户最后一次动作"为准——接管是更晚、更显式的动作。
+    """
+    if not comp.multi_version:
+        return None
+    takeover = load_takeover_map().get(comp.key)
+    if takeover:
+        return ActiveTarget(kind="external", version=takeover["version"],
+                            home=Path(takeover["home"]),
+                            level=str(takeover.get("level") or ""))
+    ver = load_active_map().get(comp.key) or infer_active_from_env(comp)
+    if ver:
+        return ActiveTarget(kind="workspace", version=ver,
+                            home=comp.install_dir(ver), level="user")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# §5.1 外部版本发现：把"用户自己装的版本"找出来
+#
+# 只对 7 个 multi_version 组件运行。四类来源：
+#   ① 工作区（installed_versions，版本号现成）
+#   ② 环境变量：枚举两 hive 全部值（**排除 Path 本身**），值指向的目录里有该组件
+#      可执行文件即为候选。本机的 jdk8/jdk17/jdk21 三个变量靠这条被发现。
+#   ③ PATH 条目：条目下直接有可执行文件即命中；若条目名是 bin/Scripts/cmd 之类，
+#      说明它指的是 bin 目录，要退一级才是 home。
+#   ④ Python 专属登记处：py -0p（拿不到就退回读注册表 InstallPath）。
+#      **只有这条能发现"既不在 PATH、也没有 PYTHON_HOME"的版本**（本机 uv 那份）。
+#
+# 外部候选必须**真跑一次版本命令**才算数（probe_discovered_versions）：探测不出、
+# 超时、解析不出的候选一律丢弃并记一行 warn —— 宁可不显示，也不显示一个认错了的目录。
+# ---------------------------------------------------------------------------
+
+# PATH 条目若以这些名字结尾，它指的是"可执行文件所在目录"而不是安装根目录。
+_BIN_DIR_NAMES = {"bin", "scripts", "cmd", "condabin"}
+
+# 外部版本发现 / 接管的**适用组件白名单**（设计 §5.1 第 1 句、§9 的 R-5）。
+#
+# 为什么不能直接用 comp.multi_version 当条件：自 2026-06-06 起 multi_version 恒为
+# True（MULTI_VERSION_KEYS 已成空集），拿它当门槛等于对全部 27 个组件都开外部接管；
+# 而这里每打开一个组件，就多一个"用户点一下我们就要改他系统 PATH"的入口。
+# 用户要的是"语言/构建工具装了好几个版本时能切"，也就是下面这 7 个 —— 与
+# bt_multiversion_tests.EXPECTED_MULTI_VERSION 是同一份名单（第二处登记处，
+# 改这里必须同步改那里，否则测试会红）。
+EXTERNAL_TAKEOVER_KEYS = {"jdk", "python", "node", "go", "maven", "gradle", "bun"}
+
+
+def supports_external_takeover(comp: Component) -> bool:
+    """该组件是否支持"识别并切换用户自己装的版本"。"""
+    return comp.key in EXTERNAL_TAKEOVER_KEYS
+
+
+def _extract_version_text(text: str) -> str:
+    """从版本命令输出里抽出第一个像版本号的片段；抽不到返回原文截断。"""
+    m = _re.search(r"\d+(?:\.\d+)+(?:[-._a-zA-Z]\w*)?", text or "")
+    return m.group(0) if m else (text or "").strip()[:40]
+
+
+def _enum_registry_values(root, subkey: str, extra_flags: int = 0) -> Dict[str, str]:
+    """枚举注册表某个键下的全部字符串值；键不存在/读不到一律返回空表。"""
+    import winreg  # type: ignore
+
+    out: Dict[str, str] = {}
+    try:
+        with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | extra_flags) as key:
+            index = 0
+            while True:
+                try:
+                    name, value, _type = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                index += 1
+                if isinstance(value, str):
+                    out[name] = value
+    except Exception:
+        return {}
+    return out
+
+
+def _windows_registry_env_values() -> List[Tuple[str, str, str]]:
+    """列出两 hive 里除 Path 之外的全部环境变量：(hive 名, 变量名, 原文值)。
+
+    Path 被排除是因为它由 _windows_registry_path_entries 单独按条目处理 ——
+    当作"一个值"去看会得到一长串，命中与否毫无意义。
+    """
+    if CURRENT_OS != "Windows":
+        return []
+    import winreg  # type: ignore
+
+    specs = (
+        ("HKCU", winreg.HKEY_CURRENT_USER, "Environment", 0),
+        ("HKLM", winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+         winreg.KEY_WOW64_64KEY),
+    )
+    result: List[Tuple[str, str, str]] = []
+    for hive, root, subkey, flags in specs:
+        for name, value in _enum_registry_values(root, subkey, flags).items():
+            if name.lower() == "path":
+                continue
+            result.append((hive, name, value))
+    return result
+
+
+def _windows_registry_path_entries() -> List[Tuple[str, str]]:
+    """两 hive 的 Path 条目：(hive 名, 条目原文)。未展开的 %VAR% 原样返回。"""
+    if CURRENT_OS != "Windows":
+        return []
+    import winreg  # type: ignore
+
+    specs = (
+        ("HKCU", winreg.HKEY_CURRENT_USER, "Environment", 0),
+        ("HKLM", winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+         winreg.KEY_WOW64_64KEY),
+    )
+    entries: List[Tuple[str, str]] = []
+    for hive, root, subkey, flags in specs:
+        values = _enum_registry_values(root, subkey, flags)
+        raw = values.get("Path") or values.get("PATH") or ""
+        for part in str(raw).split(";"):
+            if part.strip():
+                entries.append((hive, part.strip()))
+    return entries
+
+
+def _python_homes_from_py_launcher() -> List[str]:
+    """跑 `py -0p` 拿 Python 安装根目录；拿不到返回空表。
+
+    本机真实输出长这样（2026-10-08 实测，测试里就喂这两行）：
+         -V:3.14 *        C:\\...\\Python314\\python.exe
+         -V:Astral/CPython3.12.12 C:\\...\\cpython-3.12.12-windows-x86_64-none\\python.exe
+    第二行那种"不在 PATH、也没有 PYTHON_HOME"的解释器，只有这条源看得见。
+    """
+    if CURRENT_OS != "Windows":
+        return []
+    try:
+        proc = subprocess.run(["py", "-0p"], capture_output=True, text=True,
+                              timeout=5, check=False, stdin=STDIN_DEVNULL,
+                              creationflags=CREATE_NO_WINDOW)
+    except Exception:
+        return []
+    homes: List[str] = []
+    for line in (proc.stdout or "").splitlines():
+        m = _re.search(r"([A-Za-z]:\\[^\s]+\.exe)\s*$", line.strip())
+        if m:
+            homes.append(str(Path(os.path.expandvars(m.group(1))).parent))
+    return homes
+
+
+def _python_homes_from_registry() -> List[str]:
+    """退回读注册表 `Software\\Python\\<公司>\\<版本>\\InstallPath` 的默认值。
+
+    公司键不限于 PythonCore —— Astral（uv 装的那份）也在这里。
+    """
+    if CURRENT_OS != "Windows":
+        return []
+    import winreg  # type: ignore
+
+    homes: List[str] = []
+    for root, flags in ((winreg.HKEY_CURRENT_USER, 0),
+                        (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY)):
+        base = r"Software\Python"
+        try:
+            with winreg.OpenKey(root, base, 0, winreg.KEY_READ | flags) as k:
+                companies = []
+                i = 0
+                while True:
+                    try:
+                        companies.append(winreg.EnumKey(k, i))
+                    except OSError:
+                        break
+                    i += 1
+        except Exception:
+            continue
+        for company in companies:
+            sub = f"{base}\\{company}"
+            try:
+                with winreg.OpenKey(root, sub, 0, winreg.KEY_READ | flags) as ck:
+                    versions = []
+                    j = 0
+                    while True:
+                        try:
+                            versions.append(winreg.EnumKey(ck, j))
+                        except OSError:
+                            break
+                        j += 1
+            except Exception:
+                continue
+            for ver in versions:
+                try:
+                    with winreg.OpenKey(root, f"{sub}\\{ver}\\InstallPath", 0,
+                                        winreg.KEY_READ | flags) as ik:
+                        value, _t = winreg.QueryValueEx(ik, "")
+                    if isinstance(value, str) and value:
+                        homes.append(value)
+                except Exception:
+                    continue
+    return homes
+
+
+def discover_version_candidates(comp: Component) -> List[DiscoveredVersion]:
+    """列出该组件的全部「可用安装」候选（尚未探测版本号）。
+
+    返回: List[DiscoveredVersion]  工作区在前（版本号已填），外部候选在后（version 为空）
+
+    只对 EXTERNAL_TAKEOVER_KEYS 里的 7 个组件有意义（§8 第 16 条测试守着这一点）：
+    别的组件没有"装多个版本、切着用"的诉求，给它们列外部候选只会给界面添乱，
+    而且每多一个组件就多一条"改用户系统 PATH"的路径。
+    """
+    if not supports_external_takeover(comp):
+        return []
+
+    cands: List[DiscoveredVersion] = []
+    seen: List[str] = []
+
+    def _add(home: str, source: str, version: str = "") -> None:
+        raw = os.path.expandvars(str(home)).strip()
+        if not raw:
+            return
+        if any(EnvManager._same_path(raw, s) for s in seen):
+            return
+        seen.append(raw)
+        cands.append(DiscoveredVersion(home=Path(raw), source=source, version=version))
+
+    for ver, path in installed_versions(comp):
+        _add(str(path), "workspace", ver)
+
+    if CURRENT_OS != "Windows":
+        # 非 Windows 暂不做外部发现：接管路径（§5.4）本身就是 Windows 专有
+        # （HKLM/HKCU + UAC），而设计文档里的实测数据也全部来自 Windows。
+        # 宁可不列，也不给一个点了没用的按钮。
+        return cands
+
+    for _hive, _name, value in _windows_registry_env_values():
+        if comp.exec_path_in_home(value):
+            _add(value, f"env:{_name}")
+
+    for hive, entry in _windows_registry_path_entries():
+        if not comp.exec_path_in_home(entry):
+            continue
+        p = Path(os.path.expandvars(entry))
+        home = p.parent if p.name.lower() in _BIN_DIR_NAMES else p
+        _add(str(home), f"path:{hive}")
+
+    if comp.key == "python":
+        for home in (_python_homes_from_py_launcher() or []) + _python_homes_from_registry():
+            _add(home, "registry:py")
+
+    return cands
+
+
+def probe_discovered_versions(comp: Component, cands: List[DiscoveredVersion],
+                              log=None) -> List[DiscoveredVersion]:
+    """对每个外部候选真跑一次版本命令，只留下探测成功的。
+
+    入参 log: Optional[Callable[[str], None]]  记账用（拿不到就静默）
+
+    §5.1 第 6 步的理由：折叠区里摆一行"E:\\soft\\jdk\\jdk17  17.0.12"，用户就会
+    照着它做决定；这个版本号必须是**真跑出来的**，不能靠目录名猜。探测不出来的
+    候选一律丢弃 —— 显示一个认错了的目录，比少显示一个更糟。
+    """
+    out: List[DiscoveredVersion] = []
+    for cand in cands:
+        if cand.source == "workspace":
+            out.append(cand)
+            continue
+        exe = comp.exec_path_in_home(str(cand.home))
+        if not exe:
+            if log:
+                log(f"{cand.home} 下找不到 {comp.exec_name}，不作为候选")
+            continue
+        text = _probe_version(str(exe), list(comp.version_args or ["--version"]))
+        if not text:
+            if log:
+                log(f"{cand.home} 的版本命令没有回结果，不作为候选")
+            continue
+        out.append(DiscoveredVersion(home=cand.home, source=cand.source,
+                                     version=_extract_version_text(text)))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# §5.2 复验（模块级）＋ §5.4 的「最小文本编辑」与校验（纯函数，可离线测）
+#
+# 这一组是整个功能最高风险面的核心：**把系统 PATH 写坏的后果是整机命令找不到**。
+# 规则在这里写死，提权助手只是执行者：
+#   · 一律读写**未展开原文**（%JAVA_HOME% 这类占位符原样保留）。绝不能拿
+#     os.environ["PATH"] 或 expandvars 之后的值参与写入 —— 那会把占位符固化成
+#     死路径，这是"把系统 PATH 改坏"的头号方式（设计 §5.4 R-保真）。
+#   · 只做「整条删除 / 整条插入」，分隔符固定 ;，不重排、不去重、不改大小写、
+#     不合并重复项（R-最小编辑）。
+#   · 写完立刻自检：原有条目（除被删的）必须逐字仍在，含 system32 / \Windows 的
+#     条目少一条就回滚（R-关键条目校验）。
+# ---------------------------------------------------------------------------
+
+_MACHINE_ENV_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+_MACHINE_KEY_SUBSTRINGS = ("system32", "\\windows")
+_REG_TYPE_NAMES = {1: "REG_SZ", 2: "REG_EXPAND_SZ", 3: "REG_BINARY", 4: "REG_DWORD"}
+
+
+def _exec_name_variants(comp: Component) -> List[str]:
+    """某个组件命令在磁盘上的几种可能落盘名（Windows 按 PATHEXT 展开）。"""
+    name = comp.exec_name or ""
+    if not name:
+        return []
+    if CURRENT_OS != "Windows" or os.path.splitext(name)[1]:
+        return [name]
+    return [name + suffix for suffix in (".exe", ".cmd", ".bat", "")]
+
+
+def path_effective_check(comp: Component,
+                         expected_bin: Optional[str]) -> Tuple[str, Optional[str]]:
+    """复验：按系统合成的 PATH 顺序，命令行第一个命中的目录是不是 expected_bin。
+
+    返回: ("ok", None) | ("shadowed", 抢走命令的目录) | ("unknown", None)
+    unknown 含"拿不到合成环境"和"PATH 里根本没有这个命令"两种，**都不许当成通过**：
+    前者是没测，后者说明命令压根不在 PATH 上。
+
+    为什么必须有这一步（2026-09-30 真机实测）：用户 PATH 整体排在系统 PATH 之后，
+    且系统 PATH 里的 %JAVA_HOME%\\bin 是按**系统**表展开定死的 —— 我们把变量与
+    自己的 PATH 条目都写对了，命令行仍可能命中用户自装的那个版本。只报"已切到 X"
+    就是假话。
+    """
+    if not expected_bin:
+        return "unknown", None
+    composed = EnvManager.composed_env()
+    path_value = composed.get("PATH")
+    if not path_value:
+        return "unknown", None
+    names = _exec_name_variants(comp)
+    if not names:
+        return "unknown", None
+    for entry in path_value.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            hit = any(os.path.exists(os.path.join(entry, n)) for n in names)
+        except (OSError, ValueError):
+            continue
+        if hit:
+            if EnvManager._same_path(entry, expected_bin):
+                return "ok", None
+            return "shadowed", entry
+    return "unknown", None
+
+
+_MACHINE_VAR_RE = _re.compile(r"%([^%]+)%")
+
+
+def expand_machine_value(raw: Optional[str], depth: int = 4) -> str:
+    """把 %VAR% 按**系统（HKLM）自己**的变量值展开；不套用当前进程的环境块。
+
+    为什么不能直接用 os.path.expandvars：那用的是本进程环境（含用户变量与进程启动时
+    的快照），而系统 PATH 里那条 `%JAVA_HOME%\\bin` 是 Windows 按**系统**表展开的。
+    两者不一致时，"这条到底算不算系统级条目"就会判错 —— 而这个判定决定要不要提权，
+    判错的代价是多余地弹一次 UAC，或者该提权时没提、用户继续被压住。
+    本机就是嵌套的：HKLM Path 有 `%JAVA_HOME%\\bin`，而 HKLM JAVA_HOME = `%jdk21%`，
+    所以要递归展开（depth 兜住环状引用）。
+    """
+    if not raw:
+        return ""
+    if depth <= 0:
+        return str(raw)
+
+    def _sub(match) -> str:
+        name = match.group(1)
+        value, _type_name = read_machine_env_raw(name)
+        if not value:
+            return match.group(0)          # 展开不了就原样留着，不猜
+        return expand_machine_value(value, depth - 1)
+
+    return _MACHINE_VAR_RE.sub(_sub, str(raw))
+
+
+def machine_path_entries() -> List[str]:
+    """系统级（HKLM）Path 的条目，已按系统变量展开；读不到返回空表。"""
+    raw, _type_name = read_machine_env_raw("Path")
+    if not raw:
+        return []
+    return [expand_machine_value(p).strip() for p in str(raw).split(";")]
+
+
+def shadow_location(shadow: Optional[str]) -> str:
+    """抢走命令的那个目录写在哪一段：'machine' | 'user' | 'outside'。
+
+    这个判定决定"还能不能自己救"（R3.19），三态各有各的正确处置，不许混：
+      · machine —— 写在**系统级** Path 里。Windows 合成进程 PATH 的规则是
+        「系统段整体在前 + 用户段整体在后」，所以往用户级怎么写都压不住它，
+        只有提权改系统 Path 才可能生效。
+      · user —— 就在用户段里、只是排在我们那条前面；把它让位即可，**零提权**。
+      · outside —— 两段都找不到（PATH 由别的机制注入，或注册表刚被改过尚未反映）。
+        这种情况**不提权**：拿不准病灶在哪就动系统变量是无据升级，先如实报告。
+    """
+    if not shadow:
+        return "outside"
+    for entry in machine_path_entries():
+        if entry and EnvManager._same_path(entry, shadow):
+            return "machine"
+    try:
+        user_entries = EnvManager.read_user_path_entries()
+    except Exception:  # noqa: BLE001
+        user_entries = []
+    for entry in user_entries or []:
+        if entry and EnvManager._same_path(entry, shadow):
+            return "user"
+    return "outside"
+
+
+def edit_path_raw(raw: str, remove: List[str], add: str = "") -> str:
+    """在未展开原文上做「整条删除 +（可选）整条插入到最前」。
+
+    入参 raw:    str        注册表里的 Path 原文（可能含 %VAR%）
+    入参 remove: List[str]  要删掉的条目（按展开后比较，Windows 忽略大小写）
+    入参 add:    str        要插到最前面的条目；空串 = 只删不插
+    返回: str               新原文，除被删/新增的那几条外**逐字不变**
+    """
+    parts = list(str(raw or "").split(";"))
+    kept = [p for p in parts
+            if not any(EnvManager._same_path(p, r) for r in (remove or []))]
+    if add:
+        kept = [add] + kept
+    return ";".join(kept)
+
+
+def validate_path_raw(before: str, after: str, remove: List[str],
+                      add: str = "") -> List[str]:
+    """改完的自检：返回问题列表，空列表 = 通过。
+
+    刻意**不**用"再跑一遍 edit_path_raw 对比"来判定（那是自证），而是独立逐条核对：
+    原有条目（除被删的）在 after 里逐字找得到、新增条目确实在最前、条目总数对得上，
+    最后单独确认含 system32 / \\Windows 的关键条目没丢。
+    """
+    problems: List[str] = []
+    # 关键条目先查，且**不受后面"条目数不对就提前返回"的影响**：条目数不对是最常见的
+    # 损坏形态，若此时直接返回，报出来的就只有一句"数目不对"，看不出是不是把
+    # system32 弄丢了 —— 而后者才是必须让用户一眼看见的要命信息。两个都要报。
+    low_before, low_after = str(before or "").lower(), str(after or "").lower()
+    for needle in _MACHINE_KEY_SUBSTRINGS:
+        if needle in low_before and needle not in low_after:
+            problems.append(f"关键条目丢失：原来是含 {needle!r} 的那一条不见了")
+
+    before_parts = list(str(before or "").split(";"))
+    after_parts = list(str(after or "").split(";"))
+    removed = [p for p in before_parts
+               if any(EnvManager._same_path(p, r) for r in (remove or []))]
+    expected_count = len(before_parts) - len(removed) + (1 if add else 0)
+    if len(after_parts) != expected_count:
+        problems.append(f"条目数不对：改前 {len(before_parts)} 条、删 {len(removed)} 条、"
+                        f"增 {1 if add else 0} 条，应为 {expected_count} 条，"
+                        f"实际 {len(after_parts)} 条")
+        return problems          # 条目数都不对，后面的逐条核对没有意义
+
+    rest = list(after_parts)
+    if add:
+        if not rest or not EnvManager._same_path(rest[0], add):
+            problems.append("新增条目没在最前面：实际第一条是 "
+                            f"{rest[0] if rest else '(空)'!r}")
+        else:
+            rest.pop(0)
+    for part in before_parts:
+        if any(EnvManager._same_path(part, r) for r in removed):
+            continue
+        try:
+            index = rest.index(part)
+        except ValueError:
+            problems.append(f"原条目丢失或被改动：{part!r}")
+        else:
+            rest.pop(index)
+    return problems
+
+
+def read_machine_env_raw(name: str) -> Tuple[Optional[str], str]:
+    """读 HKLM 系统环境变量某个值的**未展开原文**与类型名。
+
+    返回: (原文, 类型名)；该值不存在时 (None, "")。类型名必须拿回来，写回时要保持
+          原来的 REG_EXPAND_SZ —— 写成 REG_SZ 会让 %VAR% 变成字面量，等于改坏了
+          别人的变量。
+    """
+    if CURRENT_OS != "Windows":
+        return None, ""
+    import winreg  # type: ignore
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _MACHINE_ENV_KEY, 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            value, reg_type = winreg.QueryValueEx(key, name)
+    except FileNotFoundError:
+        return None, ""
+    return str(value), _REG_TYPE_NAMES.get(int(reg_type), str(reg_type))
+
+
+def snapshot_machine_keys(names: List[str]) -> Dict[str, dict]:
+    """对若干 HKLM 变量做原文快照，供还原使用。
+
+    返回: {名: {"hive": "HKLM", "raw": 原文, "type": 类型名, "existed": bool}}
+
+    existed=False 表示"改之前这个值根本不存在"，还原时必须**删除**该键，而不是写空串
+    —— 空串会被别的程序当成"值为空"而不是"未设置"（设计 §4.2）。
+    """
+    snap: Dict[str, dict] = {}
+    for name in names:
+        if not name:
+            continue
+        raw, type_name = read_machine_env_raw(name)
+        snap[name] = {"hive": "HKLM", "raw": raw, "type": type_name,
+                      "existed": raw is not None}
+    return snap
+
+
+def read_user_env_raw(name: str) -> Tuple[Optional[str], str, str]:
+    """读 HKCU 用户环境变量某个值的原文、类型名与 hive 名。
+
+    返回: (原文, 类型名, "HKCU")；不存在时 (None, "", "HKCU")
+    """
+    if CURRENT_OS != "Windows":
+        return None, "", "HKCU"
+    import winreg  # type: ignore
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_READ) as key:
+            value, reg_type = winreg.QueryValueEx(key, name)
+    except FileNotFoundError:
+        return None, "", "HKCU"
+    return str(value), _REG_TYPE_NAMES.get(int(reg_type), str(reg_type)), "HKCU"
+
+
+def snapshot_user_keys(names: List[str]) -> Dict[str, dict]:
+    """对若干 HKCU 用户变量做原文快照（结构与 snapshot_machine_keys 一致）。"""
+    snap: Dict[str, dict] = {}
+    for name in names:
+        if not name:
+            continue
+        raw, type_name, hive = read_user_env_raw(name)
+        snap[name] = {"hive": hive, "raw": raw, "type": type_name,
+                      "existed": raw is not None}
+    return snap
+
+
+# ---------------------------------------------------------------------------
+# §5.3 用户级接管 / §5.4 提权接管 HKLM —— 让命令行真的用上用户选的那个版本
+#
+# 为什么非要动 HKLM 不可（2026-09-30 真机实测）：进程 PATH 的合成规则是
+# 「系统段整体在前 + 用户段整体在后」，所以只写用户级**永远压不住**系统级同名条目。
+# 本机 Maven 就是活例：HKLM Path 第 7 条是 E:\soft\maven\apache-maven-3.9.2\bin，
+# HKCU Path 第 7 条是我们写的 .env-tools\maven\maven-3.10.0\bin；用户级写得再对，
+# mvn -v 仍然是 3.9.2。只报「已切换」就是假话（用户已因此质疑过一次）。
+#
+# 因此流程是：先做**不需要提权**的用户级接管 → 复验；只有复验结论是 shadowed
+# （被更靠前的目录压住）才征求提权改 HKLM。复验结论是 unknown（拿不到合成环境 /
+# PATH 里根本没有这个命令）时**不升级** —— 拿不到结论不等于失败，为它弹 UAC 改系统
+# 变量是无据升级，如实报「未能复验，请重开终端确认」即可（§5.3 第 4 步）。
+# ---------------------------------------------------------------------------
+
+ELEVATE_FLAG = "--bt-elevate"
+ELEVATE_TIMEOUT_SEC = 90.0
+
+
+def _external_bin_dir(comp: Component, home: Path) -> str:
+    """外部版本该出现在 PATH 里的那个目录（写变量、复验、还原三处共用一套算法）。"""
+    return str(home / comp.path_subdir) if comp.path_subdir else str(home)
+
+
+def _remove_quietly(*paths: Path) -> None:
+    """删临时文件；删不掉（被占用 / 已不存在）不是错误，不打断主流程。"""
+    for p in paths:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+# --- HKCU 侧的原文保真写 -----------------------------------------------------
+
+def write_user_env_raw(name: str, value: str, type_name: str = "") -> None:
+    """把原文按**指定类型**写回 HKCU\\Environment，并广播环境变更。
+
+    为什么不能直接用 EnvManager.write_user_env：那个函数按"值里有没有 %"猜类型
+    （REG_EXPAND_SZ / REG_SZ）。还原时我们要的是"原来是什么类型就写回什么类型"，
+    猜错等于把别人的 `%USERPROFILE%` 变成字面量（设计 §5.4 R-保真，同一条规则
+    对用户级同样成立）。
+    """
+    import winreg  # type: ignore
+
+    type_id = winreg.REG_EXPAND_SZ if (type_name == "REG_EXPAND_SZ"
+                                       or (not type_name and "%" in value)) \
+        else winreg.REG_SZ
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, name, 0, type_id, value)
+    try:
+        EnvManager._broadcast_env_change()
+    except Exception:
+        pass
+
+
+def delete_user_env_raw(name: str) -> None:
+    """删除 HKCU 里的某个值；本来不存在则幂等返回。
+
+    还原一条 `existed=False` 的快照必须走这里（删键），不能写空串 ——
+    空串会让 detect() 之类的读侧误判成"已配置"（设计 §4.2）。
+    """
+    import winreg  # type: ignore
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_SET_VALUE) as key:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+    try:
+        EnvManager._broadcast_env_change()
+    except Exception:
+        pass
+
+
+def prepend_user_path_entry(entry: str) -> bool:
+    """把 entry 挪到 HKCU Path 的**最前面**（其余条目逐字不动）。
+
+    返回: bool  是否真的写入（已是最前一条且无重复时返回 False，幂等）
+
+    走 _read_windows_user_path 拿到的条目是**未展开原文**，正好满足 R-保真；
+    用「整条删除 + 整条插入到最前」而不是"直接 append"：用户级 PATH 内部也有顺序，
+    追加到末尾时同组件更早的那条仍会先命中（本机 Maven 切换踩过）。
+    """
+    raw, type_name, _hive = read_user_env_raw("Path")
+    old = raw or ""
+    new = edit_path_raw(old, [entry], entry)
+    if new == old:
+        return False
+    write_user_env_raw("Path", new, type_name or "REG_EXPAND_SZ")
+    return True
+
+
+def drop_user_path_entry(entry: str) -> bool:
+    """从 HKCU Path 里整条摘掉 entry（原文保真）；返回是否真的改动。"""
+    raw, type_name, _hive = read_user_env_raw("Path")
+    old = raw or ""
+    new = edit_path_raw(old, [entry])
+    if new == old:
+        return False
+    write_user_env_raw("Path", new, type_name or "REG_EXPAND_SZ")
+    return True
+
+
+# --- HKLM 侧的原文保真写（提权助手用）----------------------------------------
+
+def write_machine_env_raw(name: str, value: str, type_name: str) -> None:
+    """写 HKLM 系统环境变量，保持调用方指定的类型（R-保真）。"""
+    import winreg  # type: ignore
+
+    type_id = winreg.REG_EXPAND_SZ if type_name == "REG_EXPAND_SZ" else winreg.REG_SZ
+    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, _MACHINE_ENV_KEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+        winreg.SetValueEx(key, name, 0, type_id, value)
+
+
+def delete_machine_env_raw(name: str) -> None:
+    """删除 HKLM 系统环境变量某个值（不存在则幂等）。"""
+    import winreg  # type: ignore
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _MACHINE_ENV_KEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+
+
+class MachineRegistryBackend:
+    """提权助手读写 HKLM 的接缝。
+
+    真实实现就是上面两个函数；测试把它换成内存字典，就能离线覆盖最危险的三条规则
+    ——R-保真、R-关键条目校验、失败回滚（§8 第 7、8、10 条），完全不需要弹 UAC。
+    """
+
+    def read(self, name: str) -> Tuple[Optional[str], str]:
+        return read_machine_env_raw(name)
+
+    def write(self, name: str, value: str, type_name: str) -> None:
+        write_machine_env_raw(name, value, type_name)
+
+    def delete(self, name: str) -> None:
+        delete_machine_env_raw(name)
+
+
+def _machine_restore(before: Dict[str, dict], backend) -> List[str]:
+    """按快照把 HKLM 键写回原文；返回"没还原成功"的明细（空 = 干净）。
+
+    每条独立 try：一步失败不能拖累其余步 —— 留下"半回滚"至少比异常炸穿、
+    后面几条完全没机会执行要好；明细交给调用方显示。
+    """
+    problems: List[str] = []
+    for name, item in (before or {}).items():
+        try:
+            if item.get("existed") and isinstance(item.get("raw"), str):
+                backend.write(name, item["raw"], str(item.get("type") or "REG_SZ"))
+            else:
+                backend.delete(name)
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"{name} 没能还原：{exc}")
+    return problems
+
+
+def helper_verify_hit(path_value: str, exec_names: List[str],
+                      verify_dir: str) -> Tuple[str, Optional[str]]:
+    """复验：按 PATH 顺序第一个含该命令的目录，是不是我们期望的那个。
+
+    返回: ("ok", None) | ("shadowed", 抢走命令的目录) | ("unknown", None)
+    """
+    names = [n for n in (exec_names or []) if n]
+    if not names:
+        return "unknown", None
+    for entry in str(path_value or "").split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if any(os.path.exists(os.path.join(entry, n)) for n in names):
+                if EnvManager._same_path(entry, verify_dir):
+                    return "ok", None
+                return "shadowed", entry
+        except (OSError, ValueError):
+            continue
+    return "unknown", None
+
+
+# --- 助手侧核心：一次"接管"写 --------------------------------------------------
+
+def elevate_helper_apply(request: Dict[str, object], backend) -> Dict[str, object]:
+    """执行一次接管写。落盘顺序与硬规则（§5.4）：
+
+      R-保真 → R-最小编辑 → （落盘前先自检一次，不合格就一个字都不写）
+      → R-先备份 → 写 env_var / 写 Path（后者失败回滚前者，R-原子性）
+      → 重读原文逐条核对（R-关键条目校验，不合格立即回滚）→ 自己复验一次（R-复验）
+
+    入参 backend  读写 HKLM 的接缝（真实实现 MachineRegistryBackend）
+    返回 dict {ok, stage, error, before, after, verdict}
+      stage ∈ read|write|verify|rollback|done
+    """
+    env_var = str(request.get("env_var") or "")
+    home = str(request.get("home") or "")
+    remove_entries = [str(x) for x in (request.get("remove_entries") or [])]
+    add_entry = str(request.get("add_entry") or "")
+    verify_dir = str(request.get("verify_dir") or add_entry)
+    exec_names = [str(x) for x in (request.get("exec_names") or [])]
+    names = [n for n in (env_var, "Path") if n]
+
+    result: Dict[str, object] = {"ok": False, "stage": "read", "error": "",
+                                 "before": {}, "after": {}, "verdict": "unknown"}
+
+    # ① 读原文（未展开，含类型）
+    before: Dict[str, dict] = {}
+    try:
+        for name in names:
+            raw, type_name = backend.read(name)
+            before[name] = {"raw": raw, "type": type_name, "existed": raw is not None}
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"读系统变量失败，未做任何改动：{exc}"
+        return result
+    result["before"] = before
+
+    # ② 算出新原文并在**落盘前**自检：与其写完再回滚，不如发现不对劲就不写
+    path_before = before.get("Path", {}).get("raw") or ""
+    new_path = edit_path_raw(str(path_before), remove_entries, add_entry)
+    problems = validate_path_raw(str(path_before), new_path, remove_entries, add_entry)
+    if problems:
+        result["stage"] = "verify"
+        result["error"] = "改前自检未通过，未写入任何内容：" + "；".join(problems)
+        return result
+
+    # ③ R-先备份：写入前把原文快照落一份独立文件
+    backup_file = str(request.get("backup_file") or "")
+    if backup_file:
+        try:
+            ensure_dir(Path(backup_file).parent)
+            Path(backup_file).write_text(
+                json.dumps(before, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            result["error"] = f"备份文件写不出去，已放弃（系统变量未被改动）：{exc}"
+            return result
+
+    # ④ 落盘（原子性：第二步失败要把第一步回滚掉）
+    try:
+        result["stage"] = "write"
+        if env_var and home:
+            var_before = before.get(env_var) or {}
+            # 原来是什么类型就写什么类型；原来没有这个变量 → REG_SZ（值是绝对路径）
+            if var_before.get("existed"):
+                var_type = str(var_before.get("type") or "REG_SZ")
+            else:
+                var_type = "REG_SZ"
+            backend.write(env_var, home, var_type)
+        path_before_info = before.get("Path") or {}
+        # 系统 Path 恒存在且恒为 REG_EXPAND_SZ；取不到类型时按 REG_EXPAND_SZ 写，
+        # 因为写 REG_SZ 会把原值里的 %SystemRoot% 之类固化成死路径（R-保真）。
+        path_type = str(path_before_info.get("type") or "REG_EXPAND_SZ")
+        backend.write("Path", new_path, path_type)
+    except Exception as exc:  # noqa: BLE001
+        rollback = _machine_restore(before, backend)
+        result["stage"] = "rollback"
+        result["error"] = f"写入系统变量失败：{exc}"
+        if rollback:
+            result["error"] += "；回滚未完全成功，请手动检查：" + "；".join(rollback)
+        return result
+
+    # ⑤ R-关键条目校验：重读原文逐条核对（不信自己刚落盘的返回值）
+    problems: List[str] = []
+    after: Dict[str, dict] = {}
+    try:
+        for name in names:
+            raw, type_name = backend.read(name)
+            after[name] = {"raw": raw, "type": type_name, "existed": raw is not None}
+        problems += validate_path_raw(str(path_before),
+                                      str(after.get("Path", {}).get("raw") or ""),
+                                      remove_entries, add_entry)
+        if env_var and home:
+            got = str(after.get(env_var, {}).get("raw") or "")
+            if got != home:
+                problems.append(f"{env_var} 写回去的值不是 {home}（实际 {got or '未设置'}）")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"写完复核时读不回来：{exc}")
+    result["after"] = after
+
+    if problems:
+        rollback = _machine_restore(before, backend)
+        result["stage"] = "rollback"
+        result["error"] = ("写入后自检未通过，已" + ("回滚" if not rollback else "尝试回滚")
+                           + "：" + "；".join(problems))
+        if rollback:
+            result["error"] += "；回滚未完全成功，请手动检查：" + "；".join(rollback)
+        return result
+
+    # ⑥ R-复验：助手自己跑一次合成环境判断命中谁（主程序还会独立复验一次）
+    try:
+        composed = EnvManager.composed_env()
+        result["verdict"] = helper_verify_hit(composed.get("PATH") or "",
+                                              exec_names, verify_dir)[0]
+    except Exception:  # noqa: BLE001
+        result["verdict"] = "unknown"
+
+    result["ok"] = True
+    result["stage"] = "done"
+    return result
+
+
+def elevate_helper_restore(request: Dict[str, object], backend) -> Dict[str, object]:
+    """助手侧「还原」：把 HKLM 的键按快照写回原文（existed=false ⇒ 删除）。"""
+    spec = request.get("restore") or {}
+    result: Dict[str, object] = {"ok": False, "stage": "read", "error": "",
+                                 "before": {}, "after": {}}
+    if not isinstance(spec, dict) or not spec:
+        result["error"] = "还原请求里没有可用的快照，未做任何改动"
+        return result
+
+    try:
+        for name in spec:
+            raw, type_name = backend.read(name)
+            result["before"][name] = {"raw": raw, "type": type_name,
+                                      "existed": raw is not None}
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"读系统变量失败，未做任何改动：{exc}"
+        return result
+
+    problems: List[str] = []
+    try:
+        result["stage"] = "write"
+        for name, item in spec.items():
+            if not isinstance(item, dict):
+                problems.append(f"{name} 的快照形状不合法，已跳过")
+                continue
+            raw = item.get("raw")
+            if item.get("existed") and isinstance(raw, str):
+                backend.write(name, raw, str(item.get("type") or "REG_SZ"))
+            else:
+                backend.delete(name)
+    except Exception as exc:  # noqa: BLE001
+        result["stage"] = "rollback"
+        result["error"] = f"还原时写入失败：{exc}"
+        if problems:
+            result["error"] += "；" + "；".join(problems)
+        return result
+
+    # 还原后的校验：原来含 system32 / \Windows 的关键条目必须还在
+    try:
+        for name in spec:
+            raw, type_name = backend.read(name)
+            result["after"][name] = {"raw": raw, "type": type_name,
+                                     "existed": raw is not None}
+        want = str((spec.get("Path") or {}).get("raw") or "")
+        got = str((result["after"].get("Path") or {}).get("raw") or "")
+        if want and got != want:
+            problems.append("Path 没能逐字还原")
+        low_want, low_got = want.lower(), got.lower()
+        for needle in _MACHINE_KEY_SUBSTRINGS:
+            if needle in low_want and needle not in low_got:
+                problems.append(f"关键条目丢失：含 {needle!r} 的那一条不见了")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"还原后复核失败：{exc}")
+
+    if problems:
+        result["stage"] = "verify"
+        result["error"] = "还原后自检未通过：" + "；".join(problems)
+        return result
+
+    result["ok"] = True
+    result["stage"] = "done"
+    return result
+
+
+def elevate_helper_main(request_path: str) -> int:
+    """提权助手入口：`<自身> --bt-elevate <请求文件>`。一次性进程，用完即退。
+
+    绝不抛异常 —— 它是被 ShellExecuteW 拉起的、没有控制台可看，唯一能把
+    "为什么没成"带给主程序的通道就是结果文件。所以顶层全兜住。
+    """
+    req_file = Path(request_path)
+    result: Dict[str, object] = {"ok": False, "stage": "read", "error": ""}
+    result_file: Optional[Path] = None
+    try:
+        request = json.loads(req_file.read_text(encoding="utf-8"))
+        if not isinstance(request, dict):
+            raise ValueError("请求文件不是 JSON 对象")
+        rf = request.get("result_file")
+        result_file = Path(str(rf)) if rf else None
+        mode = str(request.get("mode") or "apply")
+        backend = MachineRegistryBackend()
+        if mode == "restore":
+            result = elevate_helper_restore(request, backend)
+        else:
+            result = elevate_helper_apply(request, backend)
+    except Exception as exc:  # noqa: BLE001
+        result = {"ok": False, "stage": "read",
+                  "error": f"助手内部错误：{exc}"}
+    finally:
+        if result_file is not None:
+            try:
+                result_file.write_text(
+                    json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+        _remove_quietly(req_file)
+    return 0 if result.get("ok") else 1
+
+
+# --- 主程序侧：提权助手调用点（可替换的进程边界）--------------------------------
+
+def _elevate_file_pair() -> Tuple[Path, Path]:
+    """生成一对临时文件名（请求 / 结果），放系统临时目录、带 pid 与随机后缀。"""
+    import tempfile
+
+    stem = f"bt-elevate-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    base = Path(tempfile.gettempdir()) / stem
+    return base.with_name(stem + ".req.json"), base.with_name(stem + ".res.json")
+
+
+def _run_elevated_helper(request: Dict[str, object],
+                         timeout: float = ELEVATE_TIMEOUT_SEC) -> Dict[str, object]:
+    """用 ShellExecuteW("runas") 拉起一次性助手，有界等待它回报。
+
+    入参 request: dict  见 §5.4 请求协议；本函数会自动补 result_file
+    入参 timeout: float 有界等待秒数（默认 90）
+    返回: dict  {ok, stage, error, ...}
+        stage="ok"        助手回报成功
+        stage="denied"    助手回报失败（含它自己的回滚结果）
+        stage="cancelled" 用户在 UAC 上点了"否"（ShellExecuteW 返回 1223）
+        stage="launch"    连助手都没起来（返回值 ≤32），或写不出请求文件
+        stage="timeout"   等到点也没见到结果文件
+
+    ⚠ **timeout 不等于失败**：助手可能已经写了注册表却没来得及回报。调用方必须
+    自己重读两 hive 原文判定实际状态，绝不允许凭超时直接下结论（§5.4 明写）。
+
+    这是**可替换的进程边界**（与既有 _read_windows_user_env 同构），不是功能开关：
+    测试把本模块的 _run_elevated_helper 换成假助手，即可离线覆盖全部分支（§8）。
+    """
+    if CURRENT_OS != "Windows":
+        return {"ok": False, "stage": "launch", "error": "提权接管仅支持 Windows"}
+
+    import ctypes
+
+    req_path, res_path = _elevate_file_pair()
+    payload = dict(request)
+    payload["result_file"] = str(res_path)
+    try:
+        req_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "stage": "launch", "error": f"请求文件写不出去：{exc}"}
+
+    # 两条路都要能跑：打包后 sys.executable 就是 byte-tools.exe（--bt-elevate 直接生效）；
+    # 源码运行时 sys.executable 是 python，要把 main.py 自己作为脚本参数传进去。
+    if getattr(sys, "frozen", False):
+        params = subprocess.list2cmdline([ELEVATE_FLAG, str(req_path)])
+    else:
+        params = subprocess.list2cmdline(
+            [str(Path(__file__).resolve()), ELEVATE_FLAG, str(req_path)])
+    try:
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", str(sys.executable), params, str(Path.cwd()), 1)
+    except Exception as exc:  # noqa: BLE001
+        _remove_quietly(req_path, res_path)
+        return {"ok": False, "stage": "launch", "error": f"无法请求管理员权限：{exc}"}
+
+    code = int(ret or 0)
+    if code == 1223:                       # ERROR_CANCELLED
+        _remove_quietly(req_path, res_path)
+        return {"ok": False, "stage": "cancelled",
+                "error": "用户取消了管理员权限请求，未做任何改动"}
+    if code <= 32:                          # ShellExecuteW 的失败返回值上限
+        _remove_quietly(req_path, res_path)
+        return {"ok": False, "stage": "launch",
+                "error": f"没能启动提权助手（ShellExecuteW 返回 {code}）"}
+
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    while time.monotonic() < deadline:
+        if res_path.exists():
+            try:
+                data = json.loads(res_path.read_text(encoding="utf-8"))
+            except Exception:               # noqa: BLE001
+                data = None                 # 助手正写到一半，下一轮再读
+            if isinstance(data, dict):
+                _remove_quietly(req_path, res_path)
+                data.setdefault("stage", "ok" if data.get("ok") else "denied")
+                return data
+        time.sleep(0.25)
+
+    # 超时：**不删文件** —— 助手可能还在跑，删了它就没法回报。调用方先重读注册表
+    # 判定实际状态，再决定是补写快照还是补回滚；这对文件交给系统临时目录回收。
+    return {"ok": False, "stage": "timeout",
+            "error": f"等待提权助手超过 {int(timeout)} 秒仍未收到结果"}
+
+
+# --- §5.3 用户级接管 ----------------------------------------------------------
+
+def apply_external_version_user(comp: Component, dv: "DiscoveredVersion",
+                                log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """§5.3 用户级接管：不弹 UAC 的那一步，能成就不提权。
+
+    返回: dict {ok, verdict, shadow, steps, snapshot, added}
+      ok       bool   用户级这一步是否已让命令行命中目标目录
+      verdict  str    "ok" | "shadowed" | "unknown" | "failed"
+      shadow   str    被哪个目录压住（仅 verdict="shadowed" 时有值）
+      steps    List[str]  中文步骤说明，界面逐行打日志
+      snapshot dict  接管前的 HKCU 原文快照（还原的唯一依据）
+      added    List[str]  我们插进 HKCU Path 的条目（还原时要摘掉）
+    """
+    def _log(level: str, text: str) -> None:
+        if log:
+            log(text)
+
+    home = Path(dv.home)
+    bin_dir = _external_bin_dir(comp, home)
+    names = [n for n in (comp.env_var or "", "Path") if n]
+    snapshot = snapshot_user_keys(names)
+    steps: List[str] = []
+    added: List[str] = []
+    result: Dict[str, object] = {"ok": False, "verdict": "failed", "shadow": None,
+                                 "steps": steps, "snapshot": snapshot, "added": added}
+
+    try:
+        if comp.env_var:
+            write_user_env_raw(comp.env_var, str(home))
+            steps.append(f"已把 {comp.env_var} 设为 {home}（用户级）")
+    except Exception as exc:  # noqa: BLE001
+        steps.append(f"写用户环境变量失败：{exc}")
+        _log("error", steps[-1])
+        return result
+
+    verdict, shadow = path_effective_check(comp, bin_dir)
+    if verdict == "shadowed":
+        # 用户级 PATH 内部也有先后：把目标目录挪到用户段最前，再复验一次。
+        try:
+            if prepend_user_path_entry(bin_dir):
+                added.append(bin_dir)
+                steps.append(f"已把 {bin_dir} 提到用户 PATH 最前")
+                verdict, shadow = path_effective_check(comp, bin_dir)
+        except Exception as exc:  # noqa: BLE001
+            steps.append(f"调整用户 PATH 顺序失败：{exc}")
+            _log("error", steps[-1])
+
+    if verdict == "ok":
+        steps.append("复验通过：新开的终端会用到这个版本（用户级）")
+        _log("ok", steps[-1])
+    elif verdict == "shadowed":
+        steps.append(f"用户级已改，命令行仍被更靠前的目录压住：{shadow}")
+        _log("warn", steps[-1])
+    else:
+        steps.append("未能复验（拿不到系统合成的环境变量或 PATH 里找不到该命令），"
+                     "请重开终端确认")
+        _log("warn", steps[-1])
+
+    result["ok"] = verdict == "ok"
+    result["verdict"] = verdict
+    result["shadow"] = shadow
+    return result
+
+
+# --- §5.4 提权接管 HKLM -------------------------------------------------------
+
+def build_machine_request(comp: Component, dv: "DiscoveredVersion",
+                          backup_file: str = "",
+                          restore: Optional[Dict[str, dict]] = None,
+                          mode: str = "apply") -> Dict[str, object]:
+    """组装一次提权请求（也用于确认框里逐条列出"要改什么"）。
+
+    默认只做**整条插入**（把目标 bin 目录插到系统 Path 最前），不删任何原有条目 ——
+    这是 R-最小编辑下改动面最小的做法：插到最前就足以让命令行命中目标，
+    顺带避开"删了用户自己的目录导致他别的工具坏掉"这类不可逆伤害。
+    """
+    home = Path(dv.home)
+    bin_dir = _external_bin_dir(comp, home)
+    return {
+        "mode": mode,
+        "env_var": comp.env_var or "",
+        "home": str(home),
+        # 默认只做整条插入、不删任何原有条目（R-最小编辑下改动面最小）；
+        # 插到最前就足以让命令行命中目标，顺带避开"删了用户自己的目录、
+        # 把他别的工具也搞坏"这类不可逆伤害。
+        "remove_entries": [],
+        "add_entry": bin_dir,
+        "verify_dir": bin_dir,
+        "exec_names": _exec_name_variants(comp),
+        "backup_file": backup_file,
+        "restore": restore or {},
+    }
+
+
+def apply_external_version_machine(comp: Component, dv: "DiscoveredVersion",
+                                   user_snapshot: Optional[Dict[str, dict]] = None,
+                                   user_added: Optional[List[str]] = None,
+                                   log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """§5.4 提权接管：改 HKLM，让命令行真的命中这个外部版本。
+
+    入参 user_snapshot / user_added: §5.3 那一步的 HKCU 快照与新增条目（并入接管登记，
+          还原时一并写回，避免只还原一半）。
+    返回: dict {ok, verdict, steps, error, cancelled}
+
+    主程序侧的兜底逻辑（§5.4 明文要求）：
+      · 用户取消 UAC（1223）→ 零改动、零快照，如实报"已取消"。
+      · 助手回报失败 → 自己重读两 hive 原文判定实际状态，绝不信助手的一面之词。
+      · 超时 → **不等于失败**：重读注册表，若目标已生效则按成功补写快照，
+        否则按失败处理（必要时再发一次还原请求）。
+      · 写完复验不通过 → 自动还原 + 明确说明原因，**不报成功**。
+    """
+    def _log(level: str, text: str) -> None:
+        if log:
+            log(text)
+
+    steps: List[str] = []
+    result: Dict[str, object] = {"ok": False, "verdict": "failed", "error": "",
+                                 "cancelled": False, "steps": steps,
+                                 "entry": None}
+
+    home = Path(dv.home)
+    bin_dir = _external_bin_dir(comp, home)
+    names = [n for n in (comp.env_var or "", "Path") if n]
+    machine_before = snapshot_machine_keys(names)
+
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    backup_rel = f"takeover-backups/{comp.key}-{stamp}.json"
+    backup_abs = str(CONFIG_DIR / backup_rel)
+
+    request = build_machine_request(comp, dv, backup_file=backup_abs)
+    steps.append(f"需要管理员权限：把 {bin_dir} 插入系统 PATH 最前"
+                 + (f"、把 {comp.env_var} 设为 {home}" if comp.env_var else ""))
+    _log("info", "正在请求管理员权限……")
+    outcome = _run_elevated_helper(request)
+    stage = str(outcome.get("stage") or "")
+
+    if stage == "cancelled":
+        result["cancelled"] = True
+        result["verdict"] = "cancelled"
+        result["error"] = str(outcome.get("error") or "已取消")
+        steps.append("已取消管理员权限请求，未做任何改动")
+        _log("warn", steps[-1])
+        return result
+
+    # 无论助手怎么说，都用**自己读到的注册表真值**复核一遍
+    current_path, _pt = read_machine_env_raw("Path")
+    current_var, _vt = read_machine_env_raw(comp.env_var) if comp.env_var else (None, "")
+    applied = (bin_dir in str(current_path or "").split(";")
+               or any(EnvManager._same_path(p, bin_dir)
+                      for p in str(current_path or "").split(";") if p.strip()))
+    if comp.env_var:
+        applied = applied and str(current_var or "") == str(home)
+
+    if not outcome.get("ok") and not applied:
+        result["verdict"] = "failed"
+        result["error"] = str(outcome.get("error") or f"提权助手未成功（{stage}）")
+        steps.append(f"切换失败：{result['error']}")
+        _log("error", steps[-1])
+        if stage == "timeout":
+            steps.append("提示：助手可能仍在运行，已重读系统变量确认过——目前没有生效")
+            _log("warn", steps[-1])
+        return result
+
+    # 到这里写盘已生效（助手回报成功，或超时但注册表确实变了）
+    verdict, shadow = path_effective_check(comp, bin_dir)
+    if verdict != "ok":
+        reason = (f"命令行仍会先命中 {shadow}" if verdict == "shadowed"
+                  else "拿不到系统合成的环境变量，无法确认是否生效")
+        steps.append(f"系统变量已改，但复验未通过（{reason}），正在还原…")
+        _log("warn", steps[-1])
+        revert = revert_machine_only(comp, machine_before, log=log)
+        if revert.get("ok"):
+            steps.append("已按改动前的原文还原，系统 PATH 未被改动")
+        else:
+            steps.append("还原未完全成功，请手动检查系统环境变量："
+                         + str(revert.get("error") or ""))
+        result["verdict"] = "failed"
+        result["error"] = f"复验未通过（{reason}）"
+        _log("error", steps[-1])
+        return result
+
+    entry = {
+        "home": str(home),
+        "version": dv.version,
+        "level": "machine",
+        "snapshot": {"HKCU": dict(user_snapshot or {}), "HKLM": machine_before},
+        "added": {"HKCU": list(user_added or []), "HKLM": [bin_dir]},
+        "backup_file": backup_rel,
+    }
+    save_takeover_entry(comp.key, entry)
+    result["ok"] = True
+    result["verdict"] = "ok"
+    result["entry"] = entry
+    steps.append("复验通过：新开的终端会用到这个版本（系统级）")
+    _log("ok", steps[-1])
+    return result
+
+
+def revert_machine_only(comp: Component, machine_before: Dict[str, dict],
+                        log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """只把 HKLM 写回指定快照（自动还原用；不碰 takeover 登记表）。"""
+    def _log(level: str, text: str) -> None:
+        if log:
+            log(text)
+
+    outcome = _run_elevated_helper({"mode": "restore", "restore": machine_before})
+    if outcome.get("ok"):
+        return {"ok": True, "error": ""}
+    # 助手失败/超时也要自己复核：也许它其实已经改回去了
+    problems: List[str] = []
+    for name, item in (machine_before or {}).items():
+        raw, _t = read_machine_env_raw(name)
+        if item.get("existed"):
+            if raw != item.get("raw"):
+                problems.append(f"{name} 与改动前不一致")
+        elif raw is not None:
+            problems.append(f"{name} 应当不存在，实际还在")
+    if not problems:
+        return {"ok": True, "error": ""}
+    detail = str(outcome.get("error") or "")
+    _log("error", "还原系统变量未完成：" + "；".join(problems)
+         + (f"（{detail}）" if detail else ""))
+    return {"ok": False, "error": "；".join(problems) + (f"（{detail}）" if detail else "")}
+
+
+# --- R3.19 让**工作区版本**在系统级也生效 ---------------------------------------
+
+def build_workspace_machine_request(comp: Component, version: str,
+                                    backup_file: str = "",
+                                    restore: Optional[Dict[str, dict]] = None,
+                                    mode: str = "apply") -> Dict[str, object]:
+    """组装"让**工作区版本**在系统级也生效"的提权请求（R3.19）。
+
+    与 build_machine_request（外部接管）唯一的**结构**区别是 home 的来源：这里是本工具
+    工作区里的 <CONFIG_DIR>/<key>/<key>-<version>，不是用户在别处装的那一份。
+    改动内容与硬规则完全一致：只在系统 Path 最前**插入**自己那条，原有条目一条不删
+    —— 用户自己装的 3.9.2 仍留在系统变量里，只是排到了后面，随时可按原文还原。
+    """
+    home = comp.install_dir(version)
+    bin_dir = _external_bin_dir(comp, home)
+    return {
+        "mode": mode,
+        "env_var": comp.env_var or "",
+        "home": str(home),
+        "remove_entries": [],
+        "add_entry": bin_dir,
+        "verify_dir": bin_dir,
+        "exec_names": _exec_name_variants(comp),
+        "backup_file": backup_file,
+        "restore": restore or {},
+    }
+
+
+def apply_workspace_machine(comp: Component, version: str,
+                            confirm_machine: Optional[Callable[[dict], bool]] = None,
+                            log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """工作区版本被**系统级**条目压住时，提权把它的 bin 目录插到系统 Path 最前。
+
+    返回: dict {ok, verdict, level, error, cancelled, steps}
+
+    与 apply_external_version_machine 共用同一套助手协议与五条硬规则，差别只在登记：
+    这个版本本来就是工作区版本，active[key] 仍然有效（两条键不互斥），所以不写
+    takeover，改记 machine_fix，供「↩ 还原到我之前的设置」按原文写回。
+    """
+    def _log(level: str, text: str) -> None:
+        if log:
+            log(text)
+
+    steps: List[str] = []
+    result: Dict[str, object] = {"ok": False, "verdict": "failed", "error": "",
+                                 "cancelled": False, "level": "", "steps": steps}
+
+    home = comp.install_dir(version)
+    bin_dir = _external_bin_dir(comp, home)
+    names = [n for n in (comp.env_var or "", "Path") if n]
+    machine_before = snapshot_machine_keys(names)
+
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    backup_rel = f"takeover-backups/{comp.key}-{stamp}.json"
+    request = build_workspace_machine_request(
+        comp, version, backup_file=str(CONFIG_DIR / backup_rel))
+
+    # 提权前的确认框：改的是整机所有程序看到的环境，必须用户点了确定才动
+    if confirm_machine is None or not confirm_machine(request):
+        steps.append("已取消：未修改任何系统变量")
+        _log("warn", steps[-1])
+        result["verdict"] = "cancelled"
+        result["error"] = "用户未同意修改系统变量"
+        return result
+
+    steps.append(f"需要管理员权限：把 {bin_dir} 插入系统 PATH 最前"
+                 + (f"、把 {comp.env_var} 设为 {home}" if comp.env_var else ""))
+    _log("info", "正在请求管理员权限……")
+    outcome = _run_elevated_helper(request)
+    stage = str(outcome.get("stage") or "")
+
+    if stage == "cancelled":
+        result["cancelled"] = True
+        result["verdict"] = "cancelled"
+        result["error"] = str(outcome.get("error") or "已取消")
+        steps.append("已取消管理员权限请求，未做任何改动")
+        _log("warn", steps[-1])
+        return result
+
+    # 无论助手怎么说，都用**自己读到的注册表真值**复核一遍（与外部接管同一条纪律）
+    current_path, _pt = read_machine_env_raw("Path")
+    current_var, _vt = read_machine_env_raw(comp.env_var) if comp.env_var else (None, "")
+    applied = any(EnvManager._same_path(p, bin_dir)
+                  for p in str(current_path or "").split(";") if p.strip())
+    if comp.env_var:
+        applied = applied and str(current_var or "") == str(home)
+
+    if not outcome.get("ok") and not applied:
+        result["error"] = str(outcome.get("error") or f"提权助手未成功（{stage}）")
+        steps.append(f"未能改到系统变量：{result['error']}")
+        _log("error", steps[-1])
+        if stage == "timeout":
+            steps.append("提示：助手可能仍在运行，已重读系统变量确认过——目前没有生效")
+            _log("warn", steps[-1])
+        return result
+
+    verdict, shadow = path_effective_check(comp, bin_dir)
+    if verdict != "ok":
+        reason = (f"命令行仍会先命中 {shadow}" if verdict == "shadowed"
+                  else "拿不到系统合成的环境变量，无法确认是否生效")
+        steps.append(f"系统变量已改，但复验未通过（{reason}），正在还原…")
+        _log("warn", steps[-1])
+        revert = revert_machine_only(comp, machine_before, log=log)
+        steps.append("已按改动前的原文还原，系统 PATH 未被改动" if revert.get("ok")
+                     else "还原未完全成功，请手动检查系统环境变量："
+                          + str(revert.get("error") or ""))
+        _log("info" if revert.get("ok") else "error", steps[-1])
+        result["error"] = f"复验未通过（{reason}）"
+        return result
+
+    entry = {
+        "home": str(home),
+        "version": version,
+        "level": "machine",
+        "snapshot": {"HKLM": machine_before},
+        "added": {"HKLM": [bin_dir]},
+        "backup_file": backup_rel,
+    }
+    save_machine_fix_entry(comp.key, entry)
+    result["ok"] = True
+    result["verdict"] = "ok"
+    result["level"] = "machine"
+    steps.append(f"复验通过：新开的终端会用到 {bin_dir}（已插到系统 PATH 最前）")
+    _log("ok", steps[-1])
+    return result
+
+
+def revert_machine_fix(comp: Component,
+                       log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """把「为工作区版本而改的系统变量」按原文写回，并清掉登记（R3.19）。
+
+    没登记过时是零成本的 no-op。
+    """
+    entry = load_machine_fix_map().get(comp.key)
+    if not entry:
+        return {"ok": True, "error": "", "steps": [], "cancelled": False}
+    before = (entry.get("snapshot") or {}).get("HKLM") or {}
+    steps = [f"按改动前的原文把系统变量写回（{entry.get('version')} 那次提权改动）……"]
+    res = revert_machine_only(comp, before, log=log)
+    if not res.get("ok"):
+        steps.append("还原未完成：" + str(res.get("error") or ""))
+        return {"ok": False, "error": str(res.get("error") or ""),
+                "steps": steps, "cancelled": False}
+    drop_machine_fix_entry(comp.key)
+    steps.append("系统变量已按原文写回")
+    return {"ok": True, "error": "", "steps": steps, "cancelled": False}
+
+
+def release_machine_state(comp: Component,
+                         log: Optional[Callable[[str], None]] = None,
+                         reason: str = "切换版本") -> Dict[str, object]:
+    """把两笔"动过系统环境"的账都还掉，顺序固定、任一失败即中止：
+
+      1. 接管过的外部版本（§4.3 两条键互斥的另一半）；
+      2. 为工作区版本提权改过的系统变量（R3.19）。
+
+    **两个入口共用**，这是它必须是"公共前置步骤"而不是某条路径私有逻辑的原因：
+      · 切回/切到工作区版本之前（`_apply_active`）；
+      · **接管另一个外部版本之前**（`switch_to_external_version`）。
+    不还原的话，系统 Path 最前还插着上一次改的目录，接下来无论做什么，复验都会命中那条旧目录 ——
+    界面说成功、命令行却是旧版本，正是用户质疑过的那类假话。而且两笔账会互相覆盖快照：
+    machine_fix 记的是"插入我们的 3.10.0 之前"的原文，若此时又叠一次接管，
+    按 machine_fix 还原会把接管插的那条一起抹掉，注册表回不到任何一次改动前的状态。
+    先还原再动，稳态里系统 Path 永远没有本工具留下的条目；新版本若仍被压住，会重新征求一次提权。
+    没欠账时是零成本的 no-op。
+    """
+    steps: List[str] = []
+
+    if load_takeover_map().get(comp.key):
+        if log:
+            log(f"检测到已接管过这个组件，先把系统变量还原到之前的设置再{reason}……")
+        back = revert_external_version(comp, log=log)
+        steps += list(back.get("steps") or [])
+        if not back.get("ok"):
+            return {"ok": False, "error": str(back.get("error") or ""), "steps": steps}
+
+    if load_machine_fix_map().get(comp.key):
+        if log:
+            log(f"检测到为系统变量做过的提权改动，先按原文还原再{reason}……")
+        fix = revert_machine_fix(comp, log=log)
+        steps += list(fix.get("steps") or [])
+        if not fix.get("ok"):
+            return {"ok": False, "error": str(fix.get("error") or ""), "steps": steps}
+
+    return {"ok": True, "error": "", "steps": steps}
+
+
+# --- 还原 ---------------------------------------------------------------------
+
+def revert_external_version(comp: Component,
+                            log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """把接管过的外部版本**原样退回**（§5.4 末段）。
+
+    读 takeover[key].snapshot，按 level 决定是否再弹一次 UAC；逐 hive 写回原文
+    （existed=false ⇒ 删除该键），移除我们插过的 PATH 条目，广播，删登记表。
+    用户追加的需求「装完别的版本还能切回本地那个」就是靠这条落地的。
+    """
+    def _log(level: str, text: str) -> None:
+        if log:
+            log(text)
+
+    steps: List[str] = []
+    result: Dict[str, object] = {"ok": False, "error": "", "cancelled": False,
+                                 "steps": steps}
+    entry = load_takeover_map().get(comp.key)
+    if not entry:
+        result["error"] = "没有登记在案的接管，无需还原"
+        steps.append(result["error"])
+        _log("warn", steps[-1])
+        return result
+
+    snapshot = entry.get("snapshot") or {}
+    user_snap = snapshot.get("HKCU") or {}
+    machine_snap = snapshot.get("HKLM") or {}
+    added = entry.get("added") or {}
+    level = str(entry.get("level") or "user")
+
+    # ① HKLM 先还原：它需要提权，最可能出岔子，放在最前面处理
+    if level == "machine" and machine_snap:
+        outcome = _run_elevated_helper({"mode": "restore", "restore": machine_snap})
+        if str(outcome.get("stage") or "") == "cancelled":
+            result["cancelled"] = True
+            result["error"] = "已取消管理员权限请求，环境变量未做改动"
+            steps.append(result["error"])
+            _log("warn", steps[-1])
+            return result
+        if not outcome.get("ok"):
+            check = revert_machine_only(comp, machine_snap, log=log)
+            if not check.get("ok"):
+                result["error"] = ("还原系统变量失败：" + str(check.get("error") or "")
+                                   + "；接管登记仍保留，可稍后重试")
+                steps.append(result["error"])
+                _log("error", steps[-1])
+                return result
+        steps.append("系统环境变量已按接管前的原文还原")
+        _log("ok", steps[-1])
+
+    # ② HKCU 还原：不需要提权
+    try:
+        for name, item in user_snap.items():
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("raw")
+            if item.get("existed") and isinstance(raw, str):
+                write_user_env_raw(name, raw, str(item.get("type") or ""))
+            else:
+                delete_user_env_raw(name)
+        for extra in (added.get("HKCU") or []):
+            drop_user_path_entry(str(extra))
+        steps.append("用户环境变量已按接管前的原文还原")
+        _log("ok", steps[-1])
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = (f"还原用户环境变量失败：{exc}"
+                           "；接管登记仍保留，可稍后重试")
+        steps.append(result["error"])
+        _log("error", steps[-1])
+        return result
+
+    try:
+        EnvManager._broadcast_env_change()
+    except Exception:
+        pass
+    drop_takeover_entry(comp.key)
+    result["ok"] = True
+    steps.append("已还原到我之前的设置")
+    _log("ok", steps[-1])
+    return result
+
+
+# --- 编排：一次完整的「切到外部版本」------------------------------------------
+
+def switch_to_external_version(comp: Component, dv: "DiscoveredVersion",
+                               confirm_machine: Optional[Callable[[Dict[str, object]], bool]] = None,
+                               log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """切到外部版本：用户级先行，被压住且用户同意才提权改 HKLM（§5.3 → §5.4）。
+
+    入参 confirm_machine: 提权前的确认回调，入参是请求 dict（要改什么一目了然），
+          返回 False 表示用户不同意。为 None 时**不提权**（只做用户级）——
+          这样任何调用方都不会在没问过用户的情况下动系统变量。
+    返回: dict {ok, verdict, level, error, steps}
+    """
+    def _log(level: str, text: str) -> None:
+        if log:
+            log(text)
+
+    # 接管另一个外部版本之前，先把两笔账都还掉（已接管的、以及为工作区版本提权改过的）：
+    # 不还的话系统 PATH 里会叠出第二条本工具的条目，两边快照互相覆盖，还原回不到原样。
+    back = release_machine_state(comp, log=log, reason="接管这个版本")
+    if not back.get("ok"):
+        return {"ok": False, "verdict": "failed", "level": "",
+                "error": "先还原上一次的系统变量改动失败：" + str(back.get("error") or ""),
+                "steps": list(back.get("steps") or [])}
+
+    user = apply_external_version_user(comp, dv, log=log)
+    steps = list(user.get("steps") or [])
+    verdict = str(user.get("verdict") or "failed")
+
+    if user.get("ok"):
+        entry = {
+            "home": str(dv.home),
+            "version": dv.version,
+            "level": "user",
+            "snapshot": {"HKCU": user.get("snapshot") or {}, "HKLM": {}},
+            "added": {"HKCU": list(user.get("added") or []), "HKLM": []},
+            "backup_file": "",
+        }
+        save_takeover_entry(comp.key, entry)
+        return {"ok": True, "verdict": "ok", "level": "user", "error": "", "steps": steps}
+
+    if verdict != "shadowed":
+        # unknown / failed：不升级。拿不到复验结论不等于失败，为它弹 UAC 是无据升级。
+        return {"ok": False, "verdict": verdict, "level": "user",
+                "error": "用户级已改，但未能确认命令行是否真的切过去，请重开终端验证；"
+                         "如需强制生效可在确认后用管理员权限改系统变量",
+                "steps": steps}
+
+    if confirm_machine is None:
+        return {"ok": False, "verdict": "shadowed", "level": "user",
+                "error": f"命令行仍被 {user.get('shadow')} 压住，需要管理员权限才能改系统变量",
+                "steps": steps}
+
+    plan = build_machine_request(comp, dv)
+    if not confirm_machine(plan):
+        steps.append("已取消：未修改任何系统变量")
+        _log("warn", steps[-1])
+        return {"ok": False, "verdict": "cancelled", "level": "user",
+                "error": "用户未同意修改系统变量", "steps": steps}
+
+    machine = apply_external_version_machine(
+        comp, dv, user_snapshot=user.get("snapshot") or {},
+        user_added=list(user.get("added") or []), log=log)
+    steps += list(machine.get("steps") or [])
+    return {"ok": bool(machine.get("ok")),
+            "verdict": str(machine.get("verdict") or "failed"),
+            "level": "machine" if machine.get("ok") else "user",
+            "error": str(machine.get("error") or ""),
+            "steps": steps}
+
+
+def release_external_before_workspace_switch(comp: Component,
+                                             log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """切回工作区版本**之前**必须做的事：把接管过的外部版本还原掉。
+
+    这是 §4.3「两条键互斥」的另一半：active 与 takeover 不允许并存，而 apply_active_version
+    只会写自己的工作区条目、并不知道系统变量已被接管改过 —— 不先还原就会出现
+    「登记表说工作区 21、系统 PATH 最前还插着外部 17」这种两边都不认的孤儿态，
+    用户切完发现命令行还是旧版本，正是他最开始质疑的那类问题。
+    没接管过时是零成本的 no-op。
+    """
+    if not load_takeover_map().get(comp.key):
+        return {"ok": True, "error": "", "steps": []}
+    if log:
+        log(f"已接管过外部版本，先还原到之前的设置再切回工作区版本……")
+    return revert_external_version(comp, log=log)
+
+
 def load_active_map() -> Dict[str, str]:
     """读取"每个组件当前生效哪个版本"的登记表；文件缺失或损坏一律当空表。
 
@@ -8888,6 +10763,320 @@ class ComponentCard(QFrame):
         self.progress.setValue(0)
         root.addWidget(self.progress)
 
+        # ---- 「系统里检测到的版本」折叠区＋还原按钮（设计 §6）----
+        # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余 19 张卡片保持原样，
+        # R3.9 那句"非目标组件文案与按钮零变化"才守得住。
+        self._external_candidates: List["DiscoveredVersion"] = []
+        self._external_scanned = False
+        self._external_expanded = False
+        self._external_worker: Optional["ExternalDiscoveryWorker"] = None
+        self._external_rows: List[QWidget] = []
+        self._restore_btn: Optional[QPushButton] = None
+        self._external_frame: Optional[QFrame] = None
+        self._external_toggle: Optional[QPushButton] = None
+        self._external_body: Optional[QWidget] = None
+        if supports_external_takeover(self.component):
+            self._build_external_section(root)
+
+    # ------------------------------------------------------------------
+    # 「系统里检测到的版本」折叠区（§6）
+    # ------------------------------------------------------------------
+    def _build_external_section(self, root: QVBoxLayout) -> None:
+        """卡片底部的折叠区 + 常驻的「还原到我之前的设置」。
+
+        默认收起且整块隐藏：格子内部只有 271px，展开就是好几行；绝大多数机器上
+        这里本来就是空的，不该白占地方。首次展开时才去扫（要真跑版本命令）。
+        """
+        self._external_frame = QFrame()
+        self._external_frame.setObjectName("externalBox")
+        box = QVBoxLayout(self._external_frame)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+
+        self._external_toggle = QPushButton("▸ 系统里检测到的版本")
+        self._external_toggle.setObjectName("externalToggle")
+        self._external_toggle.setCursor(QCursor(Qt.PointingHandCursor))
+        self._external_toggle.setFixedHeight(24)
+        # 同卡片里所有 QLabel/QPushButton 的道理：不压掉最小宽，长路径会把格子撑开
+        self._external_toggle.setMinimumWidth(1)
+        self._external_toggle.setSizePolicy(QSizePolicy.Expanding,
+                                            QSizePolicy.Fixed)
+        self._external_toggle.setToolTip(
+            "扫描本机已安装的这个组件的其它版本（环境变量、PATH、注册表里的登记）。\n"
+            "扫描只读，不会改动任何设置；点开后才开始扫描。")
+        self._external_toggle.clicked.connect(self._toggle_external_section)
+        box.addWidget(self._external_toggle)
+
+        self._external_body = QWidget()
+        self._external_body_layout = QVBoxLayout(self._external_body)
+        self._external_body_layout.setContentsMargins(2, 0, 2, 0)
+        self._external_body_layout.setSpacing(3)
+        self._external_body.setVisible(False)
+        box.addWidget(self._external_body)
+
+        self._restore_btn = QPushButton("↩ 还原到我之前的设置")
+        self._restore_btn.setObjectName("restoreBtn")
+        self._restore_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._restore_btn.setFixedHeight(26)
+        self._restore_btn.setMinimumWidth(1)
+        self._restore_btn.setVisible(False)
+        self._restore_btn.clicked.connect(self.on_restore_external_clicked)
+        box.addWidget(self._restore_btn)
+
+        self._external_frame.setVisible(False)
+        root.addWidget(self._external_frame)
+
+    def _toggle_external_section(self) -> None:
+        self._external_expanded = not self._external_expanded
+        self._external_body.setVisible(self._external_expanded)
+        self._external_toggle.setText(
+            ("▾ " if self._external_expanded else "▸ ") + self._external_toggle_text())
+        if self._external_expanded and not self._external_scanned:
+            self._start_external_discovery()
+
+    def _external_toggle_text(self) -> str:
+        n = len(self._external_candidates)
+        return f"系统里检测到的版本（{n}）" if self._external_scanned \
+            else "系统里检测到的版本"
+
+    def _start_external_discovery(self) -> None:
+        self._external_toggle.setText("▾ 正在扫描…")
+        self._external_toggle.setEnabled(False)
+        self._external_worker = ExternalDiscoveryWorker(self.component, self)
+        self._external_worker.done.connect(self._on_external_discovered)
+        self._external_worker.start()
+
+    def _on_external_discovered(self, cands) -> None:
+        self._external_worker = None
+        self._external_scanned = True
+        self._external_candidates = [c for c in cands if c.source != "workspace"]
+        self._external_toggle.setEnabled(True)
+        self._external_toggle.setText(
+            ("▾ " if self._external_expanded else "▸ ") + self._external_toggle_text())
+        self._refresh_external_section()
+
+    def _refresh_external_section(self) -> None:
+        """按当前状态重画折叠区与还原按钮。"""
+        if self._external_frame is None:
+            return
+        takeover = (load_takeover_map().get(self.component.key)
+                    if supports_external_takeover(self.component) else None)
+        # R3.19：为工作区版本提权改过系统变量时，还原按钮同样要常驻 —— 用户点「切换」
+        # 被系统级条目压住、同意了那次提权，之后就必须有个一键回到原样的出口。
+        machine_fix = (load_machine_fix_map().get(self.component.key)
+                       if supports_external_takeover(self.component) else None)
+
+        # 还原按钮：只在"确实动过"时常驻（§6）。重启后仍然出现 —— 依据是
+        # config.json 里的登记，不是本次运行的内存状态。
+        if self._restore_btn is not None:
+            self._restore_btn.setVisible(bool(takeover or machine_fix))
+            if takeover:
+                snap = takeover.get("snapshot") or {}
+                hives = []
+                if snap.get("HKCU"):
+                    hives.append("HKCU\\Environment")
+                if snap.get("HKLM"):
+                    hives.append("HKLM\\SYSTEM\\...\\Environment")
+                keys = sorted({k for h in snap.values() if isinstance(h, dict)
+                               for k in h})
+                self._restore_btn.setToolTip(
+                    f"当前生效的是系统里那个 {takeover.get('version')}"
+                    f"（{takeover.get('home')}）。\n"
+                    f"点这里按接管前的原文写回：{'、'.join(hives) or '（无）'}"
+                    f"，键：{'、'.join(keys) or '（无）'}。\n"
+                    "需要管理员权限时会再弹一次授权。")
+            elif machine_fix:
+                snap = machine_fix.get("snapshot") or {}
+                keys = sorted(k for k in (snap.get("HKLM") or {}))
+                self._restore_btn.setToolTip(
+                    f"为了让工作区里的 {machine_fix.get('version')} 生效，"
+                    "本工具在系统 PATH 最前插了一条。\n"
+                    f"点这里按改动前的原文写回：HKLM\\SYSTEM\\...\\Environment，"
+                    f"键：{'、'.join(keys) or '（无）'}。\n"
+                    "还原后命令行会回到改动前的那一份（也就是你自己装的那个），"
+                    "本工具装的版本仍在，可用下拉框再切回来。\n"
+                    "需要管理员权限时会再弹一次授权。")
+
+        # 折叠区整块：有外部候选 or 有接管/提权登记的残留时才出现
+        show = bool(self._external_candidates) or bool(takeover or machine_fix)
+        self._external_frame.setVisible(show)
+        if not show:
+            return
+
+        # 清空上一轮：takeAt 之后布局就不管它了，但 widget 的 parent 与几何都还在，
+        # 延迟删除执行前它会一直渲染在原地（项目记忆里踩过的"幽灵"）→ 先 hide、
+        # 再摘 parent、最后 deleteLater。
+        while self._external_body_layout.count():
+            item = self._external_body_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        self._external_rows = []
+
+        if not self._external_candidates:
+            hint = QLabel("没有扫描到外部安装的版本")
+            hint.setObjectName("externalHint")
+            hint.setMinimumWidth(1)
+            self._external_body_layout.addWidget(hint)
+            self._external_rows.append(hint)
+            return
+
+        for dv in self._external_candidates:
+            row = self._make_external_row(dv, takeover)
+            self._external_body_layout.addWidget(row)
+            self._external_rows.append(row)
+
+    def _make_external_row(self, dv: "DiscoveredVersion",
+                           takeover: Optional[dict]) -> QWidget:
+        """一行外部版本：版本号 / 完整路径 / 「当前在用」标记 + 「切过去」。
+
+        路径**换行显示**而不是省略号：格子只有 271px，而用户就是靠这段路径
+        认出"这是我装在 D 盘那个"。裁掉一半等于把这一行的全部信息量丢掉一半，
+        所以宁可让卡片高一点（折叠区本来就是用户主动展开的）。
+        """
+        row = QFrame()
+        row.setObjectName("externalRow")
+        outer = QVBoxLayout(row)
+        outer.setContentsMargins(0, 2, 0, 2)
+        outer.setSpacing(0)
+
+        in_use = bool(takeover) and EnvManager._same_path(
+            str(dv.home), str(takeover.get("home") or ""))
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        title = QLabel(f"{dv.version}" + ("　← 当前在用" if in_use else ""))
+        title.setObjectName("externalVersion")
+        title.setMinimumWidth(1)
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        head.addWidget(title)
+
+        btn = QPushButton("已生效" if in_use else "切过去")
+        btn.setObjectName("secondaryBtn")
+        btn.setCursor(QCursor(Qt.PointingHandCursor))
+        btn.setFixedHeight(24)
+        btn.setEnabled(not in_use)
+        btn.setToolTip("已生效" if in_use else
+                       f"把这个版本设为生效版本（会改写 "
+                       f"{self.component.env_var or 'PATH'}，必要时需要管理员权限）")
+        btn.clicked.connect(lambda _=False, d=dv: self.on_switch_external(d))
+        head.addWidget(btn)
+        outer.addLayout(head)
+
+        # 路径单独一行、占满整行宽：271px 的格子里它本来就放不下，
+        # 挤在按钮旁边只会两败俱伤（实测按钮会压在路径文字上）。
+        path_label = QLabel(str(dv.home))
+        path_label.setObjectName("externalPath")
+        path_label.setMinimumWidth(1)
+        path_label.setWordWrap(True)
+        path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        path_label.setToolTip(f"{dv.version}\n{dv.home}\n发现来源：{dv.source}")
+        outer.addWidget(path_label)
+        return row
+
+    def on_switch_external(self, dv: "DiscoveredVersion") -> None:
+        """把生效版本切到这个外部安装（§5.3 → 需要时 §5.4 提权）。"""
+        def _sink(text: str) -> None:
+            low = str(text)
+            level = ("error" if ("失败" in low or "未通过" in low or "未完成" in low)
+                     else "warn" if ("取消" in low or "未能" in low or "仍" in low)
+                     else "info")
+            self._log(level, low)
+
+        self._log("info", f"准备切换到系统里那个 {dv.version}（{dv.home}）…")
+        res = switch_to_external_version(
+            self.component, dv,
+            confirm_machine=self._confirm_machine_takeover, log=_sink)
+        for step in res.get("steps") or []:
+            _sink(step)
+        if res.get("ok"):
+            self._log("ok", f"已切换到系统里的 {dv.version}；"
+                            "新开的终端/IDE 才会读到新值")
+            self._log_verification_hint(time.time())
+        elif res.get("verdict") == "cancelled":
+            self._log("warn", "已取消，未做任何改动")
+        else:
+            self._log("error", str(res.get("error") or "切换未成功"))
+        self._refresh_external_section()
+        self._detect_status()
+        self._sync_action_buttons()
+
+    def _confirm_machine_takeover(self, plan: dict) -> bool:
+        """提权前的确认框：逐条列出要改什么、改成什么、原来是什么（§5.4 明文要求）。
+
+        这里必须是"用户点了确定才动系统变量"—— 它改的是整机所有程序看到的环境。
+        """
+        env_var = str(plan.get("env_var") or "")
+        add_entry = str(plan.get("add_entry") or "")
+        before_path, before_type = read_machine_env_raw("Path")
+        before_var, _vt = read_machine_env_raw(env_var) if env_var else (None, "")
+        lines = [
+            f"要让命令行真正用上这个版本，需要修改「系统变量」（需要管理员权限）：",
+            "",
+            f"· 系统 PATH 最前面插入：",
+            f"    {add_entry}",
+        ]
+        if env_var:
+            lines += ["", f"· 系统变量 {env_var}：",
+                      f"    现在：{before_var or '（未设置）'}",
+                      f"    改为：{plan.get('home')}"]
+        lines += [
+            "",
+            f"· 其余原有条目（含 {before_type or 'REG_EXPAND_SZ'} 里的 %VAR% 占位符）"
+            f"逐字保留，不删不改；",
+            "· 改动前的原文会先存一份快照，卡片上随时可以「还原到我之前的设置」。",
+            "",
+            "继续吗？（会弹出 Windows 的权限确认窗口）",
+        ]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("需要管理员权限")
+        box.setText("\n".join(lines))
+        yes = box.addButton("继续（修改系统变量）", QMessageBox.AcceptRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def on_restore_external_clicked(self) -> None:
+        """「还原到我之前的设置」：按快照把动过的变量写回原文。
+
+        R3.19 之后这里要能收两笔账，顺序固定：先还「为工作区版本提权改的系统变量」，
+        再还「接管的外部版本」。两者在稳态里不会并存（切工作区版本前已先还原），
+        真碰到并存时全还掉才是"回到我之前的样子"。
+        """
+        def _sink(text: str) -> None:
+            level = ("error" if ("失败" in str(text) or "未完成" in str(text))
+                     else "info")
+            self._log(level, str(text))
+
+        did = False
+        if has_machine_fix(self.component):
+            fix = revert_machine_fix(self.component, log=_sink)
+            for step in fix.get("steps") or []:
+                _sink(step)
+            if fix.get("ok"):
+                did = True
+            else:
+                self._log("error", "系统变量还原未完成："
+                          + str(fix.get("error") or ""))
+
+        if has_external_takeover(self.component):
+            res = revert_external_version(self.component, log=_sink)
+            for step in res.get("steps") or []:
+                _sink(step)
+            if res.get("ok"):
+                did = True
+            elif res.get("cancelled"):
+                self._log("warn", "已取消还原，设置未改动")
+            else:
+                self._log("error", str(res.get("error") or "还原未完成"))
+
+        if did:
+            self._log("ok", "已还原到我之前的设置，新开的终端才会读到")
+        self._refresh_external_section()
+        self._detect_status()
+
     # ------------------------------------------------------------------
     # 状态文案：主文本给短串，全量详情进 tooltip
     # ------------------------------------------------------------------
@@ -9527,6 +11716,58 @@ class ComponentCard(QFrame):
                 "（下拉框里有绿勾的就是已装）")
 
     # ------------------------------------------------------------------
+    def _show_external_capsule(self, takeover: dict, ordered, residue) -> bool:
+        """接管外部版本时的状态胶囊（设计 §6 第三档）。返回 True = 已接管显示。
+
+        为什么必须单独一档：接管生效期间 active 登记按 §4.3 已被删除，走原来那条
+        "本工具装了哪个版本生效"的分支只会报成"均未生效"，与实际情况正好相反。
+        """
+        home = Path(str(takeover.get("home") or ""))
+        ver = str(takeover.get("version") or "?")
+        names = "、".join(v for v, _p in ordered)
+        green = ("color:#2e7d32;font-weight:600;padding:2px 8px;"
+                 "background:#e8f5e9;border-radius:10px;")
+        orange = ("color:#ef6c00;font-weight:600;padding:2px 8px;"
+                  "background:#fff3e0;border-radius:10px;")
+
+        if not home.is_dir():
+            # §7：快照指向的目录被用户删了 —— 如实说，**不自动改环境**，
+            # 只提示可以点还原或另选一个。
+            capsule = (f"● 之前接管的外部版本已不存在（{home}）· 请点「还原到我之前的设置」"
+                       "或改选别的版本")
+            short = "● 接管的外部版本已不存在"
+            warned = True
+        else:
+            tail = (f" · 工作区 {len(ordered)} 个版本（{names}）" if ordered
+                    else " · 工作区没有装版本")
+            level = "系统" if str(takeover.get("level")) == "machine" else "用户"
+            capsule = f"● 生效 {ver}（{level} {home}）{tail}"
+            short = f"● 生效 {ver}（{level}级）"
+            warned = False
+        if residue:
+            capsule += f" · 另有 {len(residue)} 个残留空目录待清理"
+            short += f" · {len(residue)} 个残留待清理"
+            warned = True
+
+        self._mv_capsule = capsule
+        self._mv_capsule_short = short
+        self._mv_orange = warned
+        self._set_status(capsule, short)
+        self.status_label.setStyleSheet(orange if warned else green)
+        # active 置空：切换按钮据此恒为可用（用户要能切回工作区版本，
+        # _apply_active 会先走 release_external_before_workspace_switch 还原）。
+        self._mv_active = None
+        self._mv_warned = warned
+        self._mv_installed_set = ({v for v, _p in ordered}
+                                  | {v for v, _p in residue})
+        self._mv_buttons_ready = True
+        self._sync_action_buttons()
+        self._status_shows_configured = False
+        self._status_version = ""
+        self._version_worker = None
+        self._refresh_installed_marks()
+        return True
+
     def _detect_status(self) -> None:
         """检测组件状态，并在每条出口后刷新一遍运行态。
 
@@ -9561,6 +11802,14 @@ class ComponentCard(QFrame):
             # 会直接落到下面的通用探测分支，放里面就永远摘不掉那一行。
             if self.version_combo.count() != len(self._combo_version_list()):
                 self._reload_combo_items(preferred=self.version_combo.currentText())
+            # 接管了外部版本的一档（§6）：这个时候 active 登记已被删除，不能按
+            # "本工具装了哪个版本生效"去显示，否则会报成"均未生效"。
+            if supports_external_takeover(self.component):
+                self._refresh_external_section()
+                takeover = load_takeover_map().get(self.component.key)
+                if takeover:
+                    if self._show_external_capsule(takeover, ordered, residue):
+                        return
             # 只有"本工具目录下确实装着版本"时才走多版本胶囊。一个都没有时不许就此断言
             # "未安装"——用户很可能自己装了 JDK/Maven（JAVA_HOME 或 PATH 里就有），
             # 那要交给下面的通用探测识别成"已配置（系统安装）"。
@@ -10023,6 +12272,24 @@ class ComponentCard(QFrame):
             self._log("info", f"已取消卸载 {self.component.display_name} {cv.version}")
             return
         try:
+            # R3.19：若之前为了让**这个版本**生效而提权改过系统变量，先按原文还原再删目录。
+            # 不还原的话，系统 PATH 最前会留下一条指向即将消失的目录的死条目 ——
+            # 那比"没生效"更糟：全机所有程序的 PATH 里都多一条失效路径。
+            fix_entry = load_machine_fix_map().get(self.component.key)
+            if fix_entry and EnvManager._same_path(
+                    str(fix_entry.get("home") or ""),
+                    str(self.component.install_dir(cv.version))):
+                back = revert_machine_fix(
+                    self.component,
+                    log=lambda m: self._log("error" if ("失败" in m or "未完成" in m)
+                                            else "info", m))
+                for step in back.get("steps") or []:
+                    self._log("info", step)
+                if not back.get("ok"):
+                    self._log("error", "系统变量还原未完成，已中止卸载以免留下失效条目："
+                              + str(back.get("error") or ""))
+                    return
+                self._refresh_external_section()
             self._log("info", f"开始卸载 {self.component.display_name} {cv.version}")
             # 调用 Component.uninstall 执行实际卸载，返回中文摘要
             summary = self.component.uninstall(cv.version)
@@ -10153,6 +12420,18 @@ class ComponentCard(QFrame):
         生效版本变了也可能连带影响状态探测读到的目录，图标得跟磁盘重新对齐。
         """
         t_switch = time.time()
+        # §4.3 两条键互斥 + R3.19：接管过外部版本、或为系统变量做过提权改动时，
+        # 都要先原样还原再切工作区版本，否则系统 PATH 最前还插着旧那条，
+        # 切完命令行仍是旧版本。
+        release = release_machine_state(
+            self.component, log=lambda m: self._log("info", m),
+            reason="切回工作区版本")
+        for step in release.get("steps") or []:
+            self._log("error" if ("失败" in step or "未完成" in step) else "info", step)
+        if not release.get("ok"):
+            self._log("error", "接管/系统变量还原未完成，已中止本次切换以免留下半截状态："
+                      + str(release.get("error") or ""))
+            return False
         try:
             steps = apply_active_version(self.component, version)
         except SwitchError as exc:
@@ -10168,11 +12447,7 @@ class ComponentCard(QFrame):
             self._log("ok", f"复验通过：新开的终端会用到 {self._expected_bin_dir(version)}")
             self._log_verification_hint(t_switch)
         elif verdict == "shadowed":
-            self._log("warn", (f"环境变量已切到 {version}，但复验发现新终端里 "
-                               f"{self.component.exec_name} 仍会先命中 {shadow} —— "
-                               "它排在 PATH 更前面（多半是系统级变量或你自己装的版本）。"
-                               "本工具不改系统级环境变量：要让所选版本真正生效，"
-                               "需要在「系统变量」的 PATH 里删掉/后移那条，再重开终端。"))
+            self._handle_shadowed_after_switch(version, shadow, t_switch)
         else:
             self._log("warn", "未能复验新终端会用到哪个目录（拿不到系统合成后的环境），"
                               "请重开一个终端手动确认一次。")
@@ -10180,6 +12455,66 @@ class ComponentCard(QFrame):
         self._refresh_installed_marks()
         self._detect_status()
         return True
+
+    def _handle_shadowed_after_switch(self, version: str, shadow: Optional[str],
+                                      since_epoch: float) -> None:
+        """切换后仍被更靠前的目录压住时，**能自己解决的就自己解决**（R3.19）。
+
+        判据是"抢命令的那条写在哪一段"（shadow_location），不是猜：
+          · 写在用户段 → 把我们那条让到用户段最前即可，**零提权**；
+          · 写在系统段 → 用户级永远压不住，问一次是否用管理员权限插到系统段最前；
+          · 两段都找不到 → 只如实报告，不提权（改系统变量也未必对症）。
+        前两步只在白名单组件上做：那是"要不要动用户机器 PATH"的显式白名单，
+        非白名单组件维持"只报告"的老行为（R3.17 的同一道闸）。
+        """
+        exec_name = self.component.exec_name or ""
+        expected = str(self._expected_bin_dir(version))
+        head = (f"环境变量已切到 {version}，但复验发现新终端里 {exec_name} 仍会先命中 "
+                f"{shadow} —— 它排在 PATH 更前面（多半是系统级变量或你自己装的版本）。")
+        where = shadow_location(str(shadow or "")) if shadow else "outside"
+        whitelisted = supports_external_takeover(self.component)
+
+        # ① 用户段内部还有救：把我们那条让到用户段最前，再复验一次（零提权）
+        if whitelisted and where == "user":
+            try:
+                if prepend_user_path_entry(expected):
+                    self._log("info", f"已把本工具那条提到用户 PATH 最前：{expected}")
+            except Exception as exc:  # noqa: BLE001
+                self._log("warn", f"调整用户 PATH 顺序失败：{exc}")
+            verdict2, shadow2 = self._path_effective_check(version)
+            if verdict2 == "ok":
+                self._log("ok", f"复验通过：新开的终端会用到 {expected}")
+                self._log_verification_hint(since_epoch)
+                return
+            if shadow2:
+                shadow = shadow2
+                where = shadow_location(str(shadow))
+
+        # ② 系统段压着：只有改系统 Path 才有用，问一次（确认框 + UAC）
+        if whitelisted and where == "machine":
+            self._log("warn", head + "它在**系统变量**里，用户级写入压不住；"
+                                    "本工具可以帮你把这个版本插到系统 PATH 最前"
+                                    "（原有条目一条不删，随时可还原）。")
+            res = apply_workspace_machine(
+                self.component, version,
+                confirm_machine=self._confirm_machine_takeover,
+                log=lambda m: self._log("info", m))
+            for step in res.get("steps") or []:
+                self._log("error" if ("失败" in step or "未通过" in step) else "info", step)
+            if res.get("ok"):
+                self._log("ok", "已在系统级生效；新开的终端/IDE 才会读到新值")
+                self._log_verification_hint(since_epoch)
+                self._refresh_external_section()
+            elif res.get("verdict") == "cancelled":
+                self._log("warn", "已取消，系统变量未改动；命令行仍会用上面那个版本")
+            else:
+                self._log("error", str(res.get("error") or "改系统变量未成功"))
+            return
+
+        # ③ 两段都不是 / 不在白名单：如实报告，并说清为什么本工具不接手
+        self._log("warn", head + "它不在本工具的工作目录里，也不在本工具能改的"
+                                "「用户变量」里；需要你自己在「系统变量」的 PATH 里"
+                                "删掉/后移那条，再重开终端。")
 
     # ------------------------------------------------------------------
     def on_configure_clicked(self) -> None:
@@ -11423,6 +13758,34 @@ class MainWindow(QMainWindow):
             #statusLabel { font-size: 12px; }
             #fieldLabel { color:#546e7a; font-size:13px; }
 
+            /* ---- 「系统里检测到的版本」折叠区（设计 §6）----
+               格子内部只有 271px，所以这里是"一行一件事"的紧凑排版：
+               标题是一条扁按钮，展开后每行是「版本·路径 + 切过去」。 */
+            #externalToggle {
+                text-align: left;
+                padding: 0 6px;
+                border: 1px dashed #cfd8dc;
+                border-radius: 7px;
+                background: #f7f9fc;
+                color: #455a64;
+                font-size: 12px;
+            }
+            #externalToggle:hover { border-color: #90caf9; color: #1565c0; }
+            #externalRow { background: transparent; }
+            #externalVersion { color:#263238; font-size:12px; font-weight:600; }
+            #externalPath { color:#78909c; font-size:11px; }
+            #externalLabel { color:#37474f; font-size:12px; }
+            #externalHint { color:#90a4ae; font-size:12px; }
+            #restoreBtn {
+                border: 1px solid #ffb74d;
+                border-radius: 7px;
+                background: #fff8e1;
+                color: #e65100;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            #restoreBtn:hover { background: #ffecb3; border-color: #ffa726; }
+
             /* ----------------- 下拉框 ----------------- */
             QComboBox {
                 padding: 0 34px 0 12px;
@@ -11908,6 +14271,15 @@ class MainWindow(QMainWindow):
 # 入口
 # ---------------------------------------------------------------------------
 def main() -> int:
+    # 提权助手分支必须排在 QApplication 之前：它是被 runas 拉起的一次性无界面进程
+    # （打包后没有任何参数解析器，源码运行时形如 `python main.py --bt-elevate <请求文件>`），
+    # 建 QApplication / 探测运行中服务既没必要，也可能因会话隔离弹不出界面而白等。
+    argv = sys.argv[1:]
+    if argv and argv[0] == ELEVATE_FLAG:
+        if len(argv) < 2:
+            return 2
+        return elevate_helper_main(argv[1])
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

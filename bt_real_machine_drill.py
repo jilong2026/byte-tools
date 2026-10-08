@@ -5,6 +5,10 @@
     .venv/Scripts/python.exe bt_real_machine_drill.py --yes      # 真演练：切到另一个已装版本，再切回来
     .venv/Scripts/python.exe bt_real_machine_drill.py --launch <key>            # 组件启动演练：只打印将做什么
     .venv/Scripts/python.exe bt_real_machine_drill.py --launch <key> --yes      # 真启动→查控制台→真停止
+    .venv/Scripts/python.exe bt_real_machine_drill.py --external <key>          # 外部接管演练：只扫描 + 打印原文基线
+    .venv/Scripts/python.exe bt_real_machine_drill.py --external <key> --yes    # 真接管（弹 UAC）→ 复验 → 必然还原 → 逐字节比对
+    .venv/Scripts/python.exe bt_real_machine_drill.py --shadow-fix <key>        # 工作区版本被系统段压住：只复验 + 打印原文基线
+    .venv/Scripts/python.exe bt_real_machine_drill.py --shadow-fix <key> --yes  # 真提权生效（弹 UAC）→ 复验 → 必然还原 → 逐字节比对
 
 为什么要有这个脚本：单元测试能证明逻辑自洽，证明不了 Windows 真的照办。
 2026-09-30 那次就是教训——注册表写对了、`composed_env()` 复验也通过了，
@@ -14,7 +18,10 @@
 安全边界：
   · 只碰本工具工作区里已装的版本，切换用产品自己的 apply_active_version（含原子回滚）。
   · 结束时一定切回演练前的生效版本；中途异常也会尽力还原并如实报告。
-  · 不写系统级（HKLM）变量，不碰工作区之外的任何安装。
+  · **默认（main_drill）不写系统级（HKLM）变量，不碰工作区之外的任何安装。**
+  · 唯一会动 HKLM 的是 `--external` 与 `--shadow-fix` 两条（要改系统 PATH 才能生效）：
+    它们同样只走产品自己的路径、动手前打印两 hive 原文、结束时必然 revert，
+    并以"还原后与基线逐字节一致 + 无 takeover / machine_fix 残留"作为判据（设计 §10.3）。
 """
 
 from __future__ import annotations
@@ -34,6 +41,16 @@ if "--launch" in sys.argv:
     LAUNCH_KEY = sys.argv[_i] if _i < len(sys.argv) else ""
 else:
     LAUNCH_KEY = None
+if "--external" in sys.argv:
+    _i = sys.argv.index("--external") + 1
+    EXTERNAL_KEY = sys.argv[_i] if _i < len(sys.argv) else ""
+else:
+    EXTERNAL_KEY = None
+if "--shadow-fix" in sys.argv:
+    _i = sys.argv.index("--shadow-fix") + 1
+    SHADOW_FIX_KEY = sys.argv[_i] if _i < len(sys.argv) else ""
+else:
+    SHADOW_FIX_KEY = None
 sys.argv = [sys.argv[0]]           # 别让 main.py 的 argparse/入口看到本脚本的参数
 import main                        # noqa: E402
 
@@ -431,7 +448,229 @@ def launch_drill(comp_key: str, apply: bool) -> int:
     return 0
 
 
+# ------------------------------------------------- 外部版本接管 / 还原演练
+
+
+def _raw_snapshot(names) -> dict:
+    """两 hive 的**未展开原文 + 类型**快照，逐字节比较的唯一依据。"""
+    snap = {}
+    for name in names:
+        m_raw, m_type = main.read_machine_env_raw(name)
+        u_raw, u_type, _hive = main.read_user_env_raw(name)
+        snap[("HKLM", name)] = (m_raw, m_type)
+        snap[("HKCU", name)] = (u_raw, u_type)
+    return snap
+
+
+def _raw_diff(before: dict, after: dict) -> list:
+    return [f"{hive}\\{name}: {before.get((hive, name))!r} -> {after.get((hive, name))!r}"
+            for (hive, name) in sorted(set(before) | set(after))
+            if before.get((hive, name)) != after.get((hive, name))]
+
+
+def _fresh_shell_version(comp) -> str:
+    """在一个**全新进程**里问该组件的版本（继承的是本脚本进程的环境，不是外壳那份）。
+
+    比 explorer 探针弱一档（那个才等价于"用户新开终端"），但它能捕获"系统 PATH 有没有
+    真的把目标目录排到最前"这件事 —— 外部接管这条链路的成败就看这个。
+    判据分三层时以 explorer 探针为准，见 R3.16；这里给出的是第 3 层的快速版。
+    """
+    exe = comp.exec_name
+    argv = [exe] + list(comp.version_args or ["--version"])
+    try:
+        p = subprocess.run(argv, capture_output=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return ((p.stdout or b"") + (p.stderr or b"")).decode("utf-8", "replace").strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"(调用失败：{type(exc).__name__})"
+
+
+def external_drill(key: str, apply: bool) -> int:
+    """真机演练「接管用户自己装的版本 → 逐字节还原」（设计 §10.3）。
+
+    与 main_drill 的区别：这一条**故意要动 HKLM**，所以安全边界另外写清：
+      · 只对白名单组件、只在显式 `--yes` 时动手；
+      · 动手前把两 hive 的原文快照打到屏幕上（可直接人工对照）；
+      · 无论成败，最后一定调 revert_external_version 还原，并把还原后的原文与基线
+        **逐字节**比对作为验收判据；不一致就把两边的原文都打出来供人工修复；
+      · 全程复用产品自己的路径（switch_to_external_version / revert_external_version），
+        不是另写一套 —— 演练要验的是产品，不是脚本。
+    """
+    comps = {c.key: c for c in main.build_components()}
+    if key not in comps:
+        print(f"没有这个组件：{key!r}；可用：{sorted(main.EXTERNAL_TAKEOVER_KEYS)}")
+        return 2
+    comp = comps[key]
+    if not main.supports_external_takeover(comp):
+        print(f"{key} 不在外部接管白名单里：{sorted(main.EXTERNAL_TAKEOVER_KEYS)}")
+        return 2
+
+    names = [n for n in (comp.env_var or "", "Path") if n]
+    base = _raw_snapshot(names)
+    print("=" * 78)
+    print(f"真机演练 · 外部版本接管 · 组件 {key}")
+    print("改动前原文（未展开）：")
+    for (hive, name), (raw, rtype) in base.items():
+        print(f"  [{hive}] {name} ({rtype or '不存在'}) = {raw!r}")
+    print("=" * 78)
+
+    print("\n[1/4] 发现（只读扫描）…")
+    cands = main.discover_version_candidates(comp)
+    kept = main.probe_discovered_versions(comp, cands,
+                                          log=lambda m: print("      ·", m))
+    external = [dv for dv in kept if dv.source != "workspace"]
+    if not external:
+        print("  → 没有扫描到外部安装的版本，本机没法做这条演练。")
+        return 1
+    for dv in external:
+        print(f"  · {dv.version:<16} {dv.home}   （来源 {dv.source}）")
+
+    target = external[0]
+    print(f"\n[2/4] 目标版本：{target.version}  {target.home}")
+
+    if not apply:
+        print("\n（只体检模式：加 --yes 才会真的接管。未改动任何东西。）")
+        print("加 --yes 后会：① 先走用户级接管 ② 被压住时提权在系统 PATH 最前插入目标目录")
+        print("              ③ 复验 ④ 无论成败都还原，并与上面的原文逐字节比对")
+        return 0
+
+    print("\n[3/4] 接管（会弹 Windows 权限确认窗口）…")
+    result = main.switch_to_external_version(
+        comp, target,
+        confirm_machine=lambda plan: (print("      提权计划：", plan), True)[1],
+        log=lambda m: print("      ·", m))
+    print(f"  接管结果 ok={result.get('ok')} verdict={result.get('verdict')} "
+          f"level={result.get('level')} error={result.get('error') or '（无）'}")
+    if result.get("ok"):
+        mid = _raw_snapshot(names)
+        print("  接管后原文：")
+        for (hive, name), (raw, _t) in mid.items():
+            print(f"    [{hive}] {name} = {raw!r}")
+        print("  [判据 2] 全新进程里问版本 →", repr(_fresh_shell_version(comp)[:120]))
+        print("           （应与上面那个版本号一致；不一致请按 R3.16 用 explorer 探针复核）")
+    else:
+        print("  接管没成功 —— 仍要继续还原与比对，确认没留下半套状态。")
+
+    print("\n[4/4] 还原…")
+    back_res = main.revert_external_version(comp, log=lambda m: print("      ·", m))
+    print(f"  还原 ok={back_res.get('ok')} cancelled={back_res.get('cancelled')} "
+          f"error={back_res.get('error') or '（无）'}")
+    after = _raw_snapshot(names)
+    diffs = _raw_diff(base, after)
+    print("\n还原后与基线逐字节比对 →", "PASS" if not diffs else "FAIL")
+    for d in diffs:
+        print("  !!", d)
+    if diffs:
+        print("\n人工恢复所需的原文（改动前）：")
+        for (hive, name), (raw, rtype) in base.items():
+            print(f"  [{hive}] {name} ({rtype}) = {raw!r}")
+
+    left = main.load_takeover_map().get(key)
+    print("接管登记残留 →", "无" if not left else f"仍在：{left}")
+    ok = (not diffs) and not left
+    print("\n" + "=" * 78)
+    print("演练结论：", "PASS（接管链路走通且还原逐字节一致）" if ok
+          else "FAIL（看上面的 !! 行；按打印出的原文人工恢复）")
+    return 0 if ok else 1
+
+
+def shadow_fix_drill(key: str, apply: bool) -> int:
+    """真机演练「工作区版本被系统级条目压住 → 提权让它在系统级生效 → 逐字节还原」（R3.19）。
+
+    与 external_drill 的区别：那条验的是"接管用户装在别处的那一份"，这条验的是
+    **本工具自己装的版本被系统里的老版本压住**时能不能自己解决 —— 本机 Maven 就是活例
+    （HKLM Path 里 E:\\soft\\maven\\apache-maven-3.9.2\\bin 排在用户段前面）。
+
+    安全边界与 external_drill 完全一致：只在显式 `--yes` 时动手、动手前打印原文、
+    无论成败都还原，并以"还原后与基线逐字节一致 + 无 machine_fix 残留"作为判据。
+    """
+    comps = {c.key: c for c in main.build_components()}
+    if key not in comps:
+        print(f"没有这个组件：{key!r}；可用：{sorted(main.EXTERNAL_TAKEOVER_KEYS)}")
+        return 2
+    comp = comps[key]
+    if not main.supports_external_takeover(comp):
+        print(f"{key} 不在白名单里：{sorted(main.EXTERNAL_TAKEOVER_KEYS)}")
+        return 2
+
+    version = main.load_active_map().get(key)
+    if not version:
+        print(f"{key} 还没有登记生效版本 —— 请先在界面上把它切到一个工作区版本。")
+        return 2
+    home = comp.install_dir(version)
+    bin_dir = main._external_bin_dir(comp, home)
+    expected = str(home / comp.path_subdir) if comp.path_subdir else str(home)
+
+    names = [n for n in (comp.env_var or "", "Path") if n]
+    base = _raw_snapshot(names)
+    print("=" * 78)
+    print(f"真机演练 · 工作区版本被系统段压住时的提权生效 · 组件 {key}")
+    print(f"生效版本（工作区）：{version}  →  {expected}")
+    print("改动前原文（未展开）：")
+    for (hive, name), (raw, rtype) in base.items():
+        print(f"  [{hive}] {name} ({rtype or '不存在'}) = {raw!r}")
+    print("=" * 78)
+
+    verdict, shadow = main.path_effective_check(comp, expected)
+    print(f"\n[1/4] 现状复验：verdict={verdict} 抢命令的目录={shadow!r}")
+    if verdict == "ok":
+        print("  → 已经是这个版本在生效，本机不需要这条演练（或先切到别的版本再试）。")
+        return 1
+    where = main.shadow_location(shadow) if shadow else "outside"
+    print(f"  抢命令的那条写在：{where}"
+          "（machine=系统段，用户级压不住；user=用户段，让位即可；outside=都不是）")
+    if where != "machine":
+        print("  → 不是「系统段压住」的情形，这条演练不适用（产品会走别的分支）。")
+        return 1
+
+    if not apply:
+        print("\n（只体检模式：加 --yes 才会真的提权。未改动任何东西。）")
+        print(f"加 --yes 后会：① 提权把 {expected} 插到系统 PATH 最前（原有条目一条不删）")
+        print("              ② 复验 ③ 无论成败都按原文还原 ④ 与上面的原文逐字节比对")
+        return 0
+
+    print("\n[2/4] 提权生效（会弹 Windows 权限确认窗口）…")
+    res = main.apply_workspace_machine(
+        comp, version,
+        confirm_machine=lambda plan: (print("      提权计划：", plan), True)[1],
+        log=lambda m: print("      ·", m))
+    print(f"  结果 ok={res.get('ok')} verdict={res.get('verdict')} "
+          f"error={res.get('error') or '（无）'}")
+    if res.get("ok"):
+        print("  [判据 2] 全新进程里问版本 →", repr(_fresh_shell_version(comp)[:120]))
+        print(f"           （应显示 {version}；不一致请按 R3.16 用 explorer 探针复核）")
+    else:
+        print("  没成功 —— 仍要继续还原与比对，确认没留下半套状态。")
+
+    print("\n[3/4] 还原…")
+    back = main.revert_machine_fix(comp, log=lambda m: print("      ·", m))
+    print(f"  还原 ok={back.get('ok')} error={back.get('error') or '（无）'}")
+
+    print("\n[4/4] 比对…")
+    after = _raw_snapshot(names)
+    diffs = _raw_diff(base, after)
+    print("还原后与基线逐字节比对 →", "PASS" if not diffs else "FAIL")
+    for d in diffs:
+        print("  !!", d)
+    if diffs:
+        print("\n人工恢复所需的原文（改动前）：")
+        for (hive, name), (raw, rtype) in base.items():
+            print(f"  [{hive}] {name} ({rtype}) = {raw!r}")
+
+    left = main.load_machine_fix_map().get(key)
+    print("提权登记残留 →", "无" if not left else f"仍在：{left}")
+    ok = (not diffs) and not left
+    print("\n" + "=" * 78)
+    print("演练结论：", "PASS（提权生效链路走通且还原逐字节一致）" if ok
+          else "FAIL（看上面的 !! 行；按打印出的原文人工恢复）")
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
     if LAUNCH_KEY is not None:
         raise SystemExit(launch_drill(LAUNCH_KEY, APPLY_FLAG))
+    if EXTERNAL_KEY is not None:
+        raise SystemExit(external_drill(EXTERNAL_KEY, APPLY_FLAG))
+    if SHADOW_FIX_KEY is not None:
+        raise SystemExit(shadow_fix_drill(SHADOW_FIX_KEY, APPLY_FLAG))
     raise SystemExit(main_drill(APPLY_FLAG))

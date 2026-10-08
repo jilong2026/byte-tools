@@ -19,6 +19,7 @@ A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 com
 - 🔍 **Smart detection.** Checks whether `JAVA_HOME` and friends already exist and are valid; missing/invalid entries are flagged for reconfiguration.
 - 🔀 **Multiple versions + active-version switching.** Seven components (JDK / Python / Node.js / Go / Maven / Gradle / Bun) can keep several versions on disk at the same time, each in its own `~/.env-tools/<component>/<component>-<version>/` directory, and one of them is explicitly marked as the **active version**. Clicking **"Switch"** ("切换") makes the selected version active: `XXX_HOME` is repointed and this component's `PATH` entries are collapsed into the single entry of the active version. Any failure mid-switch is rolled back to the pre-switch state, so you never end up with `XXX_HOME` pointing at one version and `PATH` at another. In the version drop-down, a **green check mark** means that version is already installed on disk.
 - 🧹 **Safe uninstall and stale-entry cleanup.** Uninstall always targets a directory that really exists on disk. For the seven multi-version components it removes **only the version selected in the drop-down** — its directory and its own `PATH` entries — and leaves the sibling versions untouched; `XXX_HOME` is deleted only when it points at the version being removed. Only when no installed version of that component is left does the cleanup fall back to sweeping the whole component directory (which also clears dead entries left by manual deletions). The "Clean stale PATH entries" button in the title bar removes entries that point into this tool's folder but no longer exist.
+- 🧭 **Take over a version you installed yourself — with one-click revert.** A JDK / Maven / Node that already lives outside this tool's folders is scanned and can be made the active version (the scan is read-only and every candidate must pass a real version probe). Only when a user-level write cannot win does a confirmation dialog appear and the target directory get inserted at the front of the **system `PATH`**. The original text is snapshotted first, and **"↩ Revert to my previous settings"** stays on the card to write it back verbatim. Five hard rules — original-text snapshot, minimal edit, critical-entry validation, re-verification, always revertable — must all hold or nothing is executed; any failure rolls back automatically and is never reported as success. **When a version installed by this tool is shadowed by an older machine-level one (a user-level write can never outrank the machine segment) it likewise asks once and inserts it at the front of the system `PATH`**, instead of telling you to hand-edit system variables.
 - 🛠️ **Environment-variable management.**
     - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
     - macOS / Linux: appends idempotent `export` blocks (with begin/end markers) to `.zshrc` / `.bash_profile` / `.bashrc` / `.profile`.
@@ -153,6 +154,7 @@ The UI groups them into **four tabs** along the top, each titled with its compon
 │  │ ● active 17 (17, 11)      │ │ ● not configured          │  │
 │  │ [✓17 ▾] [Install] [Switch]│ │ [ 3.12 ▾ ] [Install]      │  │
 │  │ ████████████░░░░░  85%    │ │                           │  │
+│  │ ▸ versions on this system │ │                           │  │
 │  └───────────────────────────┘ └───────────────────────────┘  │
 │  ┌─ Node.js ─────────────────┐ ┌─ Maven ───────────────────┐  │
 │  │ ● configured · system     │ │ ● not configured          │  │
@@ -173,6 +175,8 @@ The UI groups them into **four tabs** along the top, each titled with its compon
 > marks a version that is already installed on disk — see [Multiple versions and the active version](#multiple-versions-and-the-active-version).
 > Cards are arranged in a **grid** (`▦`) that can be collapsed to a single column (`☰`), and the log is an
 > **overlay** — expanding it floats over the cards instead of squeezing them.
+> The `▸ versions on this system` row is a **collapsed** section (real label: 「系统里检测到的版本」) that lists
+> versions you installed outside this tool — see [Using the copy you installed](#using-the-copy-you-installed-takeover-and-one-click-revert).
 
 ---
 
@@ -300,6 +304,63 @@ The **active version** is the one the operating system actually uses.
 - The tool does **not** rewrite `pom.xml` / `build.gradle` in your projects and does not touch IDE SDK settings —
   multi-version setups are handled purely at the "active version" level. If an IDE needs a specific JDK, point its
   SDK setting at that version's directory yourself.
+
+### Using the copy *you* installed: takeover and one-click revert
+
+The section above only covers versions this tool downloaded into `~/.env-tools/`. A JDK / Maven / Node you already
+had on the machine (say `E:\soft\jdk\jdk17`) can be recognised and made active in the same way:
+
+1. **Scan.** Expand **"Versions found on this system"** at the bottom of the card. It inspects environment
+   variables, `PATH` entries, and — for Python — `py -0p` plus the registry. **The scan is read-only** and only
+   starts once you expand it. Every row has to pass a real version-command probe to be listed: a directory whose
+   version cannot be read is dropped rather than shown with a guessed one.
+2. **Switch to it.** Only the *user-level* variables are changed first (no elevation prompt). Then the tool
+   re-verifies which directory a brand-new terminal would actually hit first:
+   - already the target version → done;
+   - shadowed by an earlier directory (on Windows the process `PATH` is "the whole machine segment first, the
+     whole user segment after it", so user-level writes **cannot** override a machine-level entry of the same
+     name) → a confirmation dialog lists exactly what will be changed, from what, to what; only after you agree
+     does it request administrator rights and **insert** the target directory at the front of the *system* `PATH`;
+   - the verdict cannot be established → it does **not** escalate. It says so plainly instead.
+3. **Revert.** Once a takeover is active, **"↩ Revert to my previous settings"** stays on the card and writes the
+   *original* text back verbatim (including `%JAVA_HOME%`-style placeholders and the original value type). The
+   button is still there after a restart.
+4. **Safety envelope.** Touching system variables always means: snapshot the original text first (plus a separate
+   backup file), edit only by whole-entry insert/remove — no reordering, no de-duplication, no case changes,
+   re-read and check every entry afterwards (lose a critical entry such as `system32` / `Windows` and it rolls
+   back immediately), then re-verify, and always keep the revert path. If any of these fails it rolls back and
+   says so — it never reports success for something that did not take effect. Declining the UAC prompt, or the
+   helper timing out, is reported as "nothing was changed".
+
+External versions appear **only** in that collapsible section: they never enter the version drop-down (whose item
+text is the key used to resolve the selected version) and never take part in uninstall — this tool does not delete
+anything you installed yourself. The capability is enabled for JDK / Python / Node.js / Go / Maven / Gradle / Bun.
+
+### When "Switch" does not take effect: the tool fixes it itself
+
+There is a second case, and it is not about taking over a copy *you* installed — it is about **a version this tool
+installed being shadowed by an older one already on your system**. Measured on this machine: the system variable
+`PATH` contains your own `E:\soft\maven\apache-maven-3.9.2\bin`, while the 3.10.0 this tool installed lives in the
+user variable. On Windows the process `PATH` is composed as "the whole machine segment first, the whole user segment
+after it", so **a user-level write can never outrank that machine-level entry**.
+
+Previously this case only printed "this tool does not change system-level environment variables — go edit that entry
+yourself". Now it looks at **which segment the winning entry actually lives in** and fixes it whenever it can:
+
+- **In the user variables** (merely ordered before ours): our entry is moved to the front of the user segment and
+  re-verified — **no elevation prompt at all**;
+- **In the system variables**: a confirmation dialog lists exactly what will change; only after you agree does it ask
+  for administrator rights and **insert** this version's directory at the front of the *system* `PATH`, **deleting
+  none of the existing entries** (the copy you installed stays in the system variables, just further back). It then
+  re-verifies — success is only reported when the check passes;
+- **In neither segment**: **no elevation prompt**; it explains plainly why the tool leaves it alone (the cause is not
+  in either `PATH` segment, so changing system variables may not help anyway).
+
+In both fixable cases the original text is snapshotted first, and **"↩ Revert to my previous settings"** stays on the
+card for one-click restoration. In addition, **before switching to the next version or uninstalling this one the tool
+restores the system variables first** — so the system `PATH` never keeps a leftover entry pointing at an old, or
+already-deleted, directory. Declining the confirmation dialog or the UAC prompt is always reported as "nothing was
+changed".
 
 ### Applying variables
 
