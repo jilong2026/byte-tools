@@ -10596,11 +10596,12 @@ class MainWindow(QMainWindow):
         self._tab_cards: List[List[ComponentCard]] = []
         # `_tab_layouts[i]` 的语义从"直接装卡片"改成"装行的外层竖向布局"：
         # 行本身是一个 QWidget，行里的 QHBoxLayout 才装格子。
-        # 用行容器而不是 QGridLayout，是因为 _reparent / _restore_browse /
-        # _build_unified 三处全靠 QBoxLayout 的 indexOf / insertWidget / 末尾 stretch。
+        # 用行容器而不是 QGridLayout，是因为 _restore_browse /
+        # _build_unified / _relayout_results 全靠 QBoxLayout 的 indexOf / insertWidget
+        # / 末尾 stretch —— 结果面板的"行"要能插进指定位置，QGridLayout 做不到。
         self._tab_layouts: list = []
         # `_tab_rows[key]`：Tab 用 0..N-1 的序号，统一结果面板用 RESULTS_KEY。
-        # Tab 里存的是"行控件"，结果面板存的是"每行一张卡"的卡片序列。
+        # 两者存的都是"行控件"（结果面板里一行就是某个分类下的一截卡片）。
         self._tab_rows: dict = {}
         self._tab_wraps: List[QWidget] = []
         # Tab 标题的"干净"形态（分类名 + 组件数）。运行标记 `●` 是叠在它上面的，
@@ -10642,14 +10643,18 @@ class MainWindow(QMainWindow):
         self.results_area.setWidgetResizable(True)
         self.results_content = QWidget()
         self.results_content.setObjectName("resultsContent")
-        self.results_layout = QVBoxLayout(self.results_content)
+        # 结果面板用与 Tab 同一个 CardColumnLayout：命中卡片也住进 cardRow 行控件，
+        # 格子宽度就跟浏览时一模一样（不再是"一张卡占满 954px"的宽条）。
+        self.results_layout = CardColumnLayout(self.results_content)
         self.results_layout.setContentsMargins(18, 18, 18, 18)
         self.results_layout.setSpacing(6)
         self.results_area.setWidget(self.results_content)
-        # 结果面板保持"小标题 + 卡片"的单列列表：搜索命中通常是两三个组件，
-        # 排成网格反而要在窄结果里补空位。这里按"每行一张"登记进 _tab_rows，
-        # 好让"命中数 < 列数时有没有空洞"有统一的判据。
+        # 结果面板的结构是「分类小标题（整行）+ 该分类的若干 cardRow 行」。登记进
+        # _tab_rows 的是**真实的行控件**，与四个 Tab 同构，"命中数 < 列数时有没有
+        # 空洞"因此有统一判据。`_result_sections` 记着「标题 → 该分类命中卡片」，
+        # 重排时靠它在各自标题下面重建行（标题本身不重建，否则会丢）。
         self._tab_rows[RESULTS_KEY] = []
+        self._result_sections: list = []
 
         # 浏览模式用 Tab，搜索模式用统一结果面板，二者互斥地放进一个栈
         self.top_stack = QStackedWidget()
@@ -10758,10 +10763,38 @@ class MainWindow(QMainWindow):
         self._tab_rows[idx] = self._fill_rows(layout, root, own, self._card_columns())
 
     def _relayout_results(self) -> None:
-        """统一结果面板：单列列表，只把"每行一张卡"的行登记刷新一遍。"""
-        cards = [c for c in self.cards
-                 if not c.isHidden() and self.results_content.isAncestorOf(c)]
-        self._tab_rows[RESULTS_KEY] = [[c] for c in cards]
+        """统一结果面板：保留分类小标题，在各自标题下面重建卡片行。
+
+        行与浏览 Tab 是同一套 cardRow（`_make_rows` 造的），所以格子等宽。列数取
+        min(命中数, 浏览列数)：命中 1 个就 1 列（一张卡占满整行，不是缩在左上角
+        配一大片空白），命中 5 个就 3 列、第二行排 2 张 —— 不会为凑满一行补空位。
+        """
+        sections = getattr(self, "_result_sections", None) or []
+        cards = [c for _, group in sections for c in group]
+        if not cards:
+            self._tab_rows[RESULTS_KEY] = []
+            self.results_layout.row_widgets = []
+            return
+        columns = max(1, min(len(cards), self._card_columns()))
+        # 分块必须在搬家**之前**算完：setParent 会把卡片显式隐藏，先搬再算就排空
+        chunks_per_group = [chunk_visible(group, columns) for _, group in sections]
+        # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走
+        for card in cards:
+            if self.results_content.isAncestorOf(card):
+                card.setParent(self.results_content)
+        # 只摘行、留标题：结果面板是"标题 + 行"交错的结构，全清会把标题一起删掉
+        self._drop_rows(self.results_layout, only_rows=True)
+        rows: list = []
+        for (header, _group), chunks in zip(sections, chunks_per_group):
+            pos = self.results_layout.indexOf(header)
+            if pos < 0:
+                continue
+            for k, row in enumerate(self._make_rows(self.results_content, chunks,
+                                                    pad_to=columns)):
+                self.results_layout.insertWidget(pos + 1 + k, row)
+                rows.append(row)
+        self.results_layout.row_widgets = rows
+        self._tab_rows[RESULTS_KEY] = rows
 
     def _fill_rows(self, layout, root, cards, columns) -> list:
         """销毁旧行、按 columns 重建行，返回新建的行控件列表。
@@ -10776,9 +10809,30 @@ class MainWindow(QMainWindow):
         for card in cards:
             if root.isAncestorOf(card):
                 card.setParent(root)
-        while layout.count():
-            item = layout.takeAt(0)
+        self._drop_rows(layout)
+        layout.row_widgets = []
+        rows = self._make_rows(root, chunks)
+        for row in rows:
+            layout.addWidget(row)
+            layout.row_widgets.append(row)
+        layout.addStretch(1)
+        return rows
+
+    def _drop_rows(self, layout, only_rows: bool = False) -> None:
+        """摘掉 layout 里的条目并销毁（`_fill_rows` 与结果面板重排共用）。
+
+        入参 only_rows: bool  True → 只摘 objectName 为 "cardRow" 的行控件，
+             分类小标题与末尾 stretch 原样留下。结果面板是「标题 + 行 + 标题 + 行」
+             的交错结构，整清一次会把分类标题一起 deleteLater。
+        """
+        i = 0
+        while i < layout.count():
+            item = layout.itemAt(i)
             w = item.widget()
+            if only_rows and (w is None or w.objectName() != "cardRow"):
+                i += 1
+                continue
+            layout.takeAt(i)
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
@@ -10786,7 +10840,18 @@ class MainWindow(QMainWindow):
                 sp = item.spacerItem()
                 if sp is not None:
                     del sp
-        layout.row_widgets = []
+
+    def _make_rows(self, root, chunks, pad_to: int = 0) -> list:
+        """按 chunks（每个元素是一行的卡片序列）造出 cardRow 行控件。
+
+        入参 pad_to: int  >0 时，不足该列数的行末尾补一个等比占位控件，让卡片
+             仍然只占"一个格子"的宽度。搜索结果靠它保证「命中 5 个 → 3 列」时
+             第二行那 2 张卡跟第一行 3 张卡一样宽 —— 否则 addWidget(card, 1) 会把
+             半行的卡片拉伸到占满整行，宽度又跟浏览格子对不上了（真机实测踩中）。
+
+        只负责"造行"，**不碰外层布局** —— 行插在哪儿由调用方决定：Tab 是
+        顺序追加，结果面板要插在各自的分类小标题后面。
+        """
         rows: list = []
         for row_cards in chunks:
             row = QWidget(root)
@@ -10799,14 +10864,22 @@ class MainWindow(QMainWindow):
                 # setParent 会把控件**显式隐藏**（实测 isHidden 变 True），搬一次家
                 # 就把卡片弄没了，所以进格子后必须再放出来一次。
                 card.show()
+            if pad_to and len(row_cards) < pad_to:
+                # 占位控件必须**可见**才会参与布局（隐藏的控件会被布局忽略），
+                # 但它没有任何内容与背景，画出来是透明的；对鼠标也透明，不挡点击。
+                # 一格补一个（而不是一个占位控顶 n 格）：间距数才能与满行一致，
+                # 格子宽度才会跟浏览时分毫不差（313 vs 309 的偏差就是这么来的）。
+                for _ in range(pad_to - len(row_cards)):
+                    filler = QWidget(row)
+                    filler.setObjectName("cardRowFiller")
+                    filler.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    row_lay.addWidget(filler, 1)
+                    filler.show()
             # 行控件是新建的，加到布局里不会自动显示（实测 isVisible 仍为 False），
             # 必须显式 show 一次，否则重排之后整页卡片会"消失"；
             # show() 会顺着子控件往下走，把行里的卡片一起带出来。
             row.show()
-            layout.addWidget(row)
-            layout.row_widgets.append(row)
             rows.append(row)
-        layout.addStretch(1)
         return rows
 
     def resizeEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
@@ -10818,6 +10891,10 @@ class MainWindow(QMainWindow):
             self._last_columns = columns
             for idx in range(len(self._tab_cards)):
                 self.relayout_cards(idx)
+            # 搜索中窗口变宽/变窄，结果面板的格子也要跟着变，否则它的卡片宽度
+            # 会跟浏览 Tab 对不上（正是"搜索结果卡更宽"那条反馈的根源）。
+            if self.top_stack.currentIndex() == 1:
+                self.relayout_cards(RESULTS_KEY)
         self._position_log_overlay()
 
     def showEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
@@ -11118,30 +11195,47 @@ class MainWindow(QMainWindow):
                 return                      # 一次只跳一个，避免连翻多页
 
     def _build_unified(self, q: str) -> None:
-        """把命中的组件按分类归并进统一结果列表（带分类小标题）。"""
+        """把命中的组件按分类归并进统一结果列表（带分类小标题）。
+
+        结构与浏览 Tab 同一套网格：**分类小标题（整行）+ 该分类的若干 cardRow 行**，
+        所以搜索结果的卡片宽度与浏览时一致。列数取 min(命中数, 浏览列数)，由
+        `_relayout_results` 统一算 —— 命中 1 个就是 1 列，命中 5 个就是 3 列。
+        """
         self._clear_results_layout()
-        cur_cat = None
+        # 先按分类归好组：列数要按**总命中数**算，而它得等这一轮扫完才知道
+        groups: list = []
+        order: dict = {}
         hits = 0
-        # self.cards 已是分类顺序，便于在切换分类时插入分类小标题
         for card in self.cards:
             comp = card.component
-            if component_matches(comp, q):
-                cat = comp.category
-                if cat != cur_cat:
-                    header = QLabel(cat)
-                    header.setObjectName("resultCatHeader")
-                    self.results_layout.addWidget(header)
-                    cur_cat = cat
-                self._reparent(card, self.results_layout, self.results_layout.count())
-                card.setVisible(True)
-                hits += 1
-            else:
+            if not component_matches(comp, q):
                 card.setVisible(False)
+                continue
+            cat = comp.category
+            if cat not in order:
+                order[cat] = len(groups)
+                groups.append([cat, []])
+            groups[order[cat]][1].append(card)
+            card.setVisible(True)
+            hits += 1
+        # self.cards 已是分类顺序，遍历一遍即可，标题与卡片的相对顺序天然正确
+        sections: list = []
+        for cat, cards in groups:
+            header = QLabel(cat)
+            header.setObjectName("resultCatHeader")
+            self.results_layout.addWidget(header)
+            for card in cards:
+                # 先挂到结果面板宿主上（不进外层布局），具体排进哪个格子由
+                # _relayout_results 决定；setParent 会显式隐藏，随后要放出来
+                card.setParent(self.results_content)
+                card.setVisible(True)
+            sections.append((header, cards))
         self.results_layout.addStretch(1)
+        self._result_sections = sections
         self.top_stack.setCurrentIndex(1)
 
-        # 结果面板是单列列表，重排只是把"每行一张"登记刷新；四个 Tab 也要跟着
-        # 重排一次，把被搬走的命中卡片从旧行里摘掉（不然归属判断还认旧行）。
+        # 四个 Tab 也要跟着重排一次，把被搬走的命中卡片从旧行里摘掉
+        # （不然归属判断还认旧行）；结果面板的行在 relayout_cards 里造。
         for idx in range(len(self._tab_cards)):
             self.relayout_cards(idx)
         self.relayout_cards(RESULTS_KEY)
@@ -11152,46 +11246,54 @@ class MainWindow(QMainWindow):
         self.search_hint.style().unpolish(self.search_hint)
         self.search_hint.style().polish(self.search_hint)
 
-    def _reparent(self, card, target_layout, index) -> None:
-        """把卡片从任何已知容器摘下，再插入目标 layout 的指定位置。
+    def _send_card_home(self, card) -> None:
+        """把卡片从它当前所在的"行"里摘下、挂回所属 Tab 的容器（不销毁）。
 
-        卡片现在住在"行"里（Tab）或直接住在结果面板里，所以摘除要连行的布局
-        一起找 —— 只查外层布局是找不到的。
+        换父级并不会让旧布局自动放手，所以必须显式 removeWidget：否则销毁行控件
+        时 Qt 会把行内的卡片一起带走，下一轮搜索就少卡。
         """
-        containers = [self.results_layout]
-        for rows in self._tab_rows.values():
-            for row in rows:
-                if isinstance(row, QWidget):
-                    lay = row.layout()
-                    if lay is not None:
-                        containers.append(lay)
-        for lay in containers:
-            if lay.indexOf(card) != -1:
-                lay.removeWidget(card)
-        target_layout.insertWidget(index, card)
+        parent = card.parent()
+        lay = parent.layout() if parent is not None else None
+        if lay is not None and lay.indexOf(card) != -1:
+            lay.removeWidget(card)
+        home = self._home_wrap_of(card)
+        if home is not None:
+            card.setParent(home)      # 卡片稍后由 _restore_browse 重排归位
 
     def _clear_results_layout(self) -> None:
-        """清空统一结果面板里的所有条目（分类小标题等临时控件）。
+        """清空统一结果面板里的所有条目（分类小标题、卡片行）。
 
         卡片不在这里销毁：它们只是被摘出布局并回到自己 Tab 的容器，
         随后由 _restore_browse 统一重排。
         """
+        self._result_sections = []
+        self.results_layout.row_widgets = []
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             w = item.widget()
             if w is not None:
-                if any(w is card for card in self.cards):
-                    home = self._home_wrap_of(w)
-                    if home is not None:
-                        w.setParent(home)     # 卡片稍后由 _restore_browse 重排归位
-                else:
-                    # deleteLater 是**异步**的：takeAt 之后布局不再管它，但 widget 的
-                    # parent 还挂在 results_content 上、几何也没变，在 deferred delete
-                    # 真正执行前会以"幽灵"形态残留在原地 —— 用户连续改搜索词时，上一轮
-                    # 的分类标题会和这一轮的内容叠在一起（真机 2026-10-08 实测踩中）。
-                    # 先 hide 立即从屏幕上消失，删除交给事件循环。
+                if w.objectName() == "cardRow":
+                    # 行里住着卡片：先把它们送回各自 Tab 的容器，再销毁空行 ——
+                    # 直接 deleteLater 会把行内的卡片一起带走。
+                    lay = w.layout()
+                    if lay is not None:
+                        while lay.count():
+                            child = lay.takeAt(0).widget()
+                            if child is not None:
+                                self._send_card_home(child)
                     w.hide()
-                    w.deleteLater()           # 分类小标题等临时标签
+                    w.deleteLater()
+                    continue
+                if any(w is card for card in self.cards):
+                    self._send_card_home(w)
+                    continue
+                # deleteLater 是**异步**的：takeAt 之后布局不再管它，但 widget 的
+                # parent 还挂在 results_content 上、几何也没变，在 deferred delete
+                # 真正执行前会以"幽灵"形态残留在原地 —— 用户连续改搜索词时，上一轮
+                # 的分类标题会和这一轮的内容叠在一起（真机 2026-10-08 实测踩中）。
+                # 先 hide 立即从屏幕上消失，删除交给事件循环。
+                w.hide()
+                w.deleteLater()           # 分类小标题等临时标签
                 continue
             sp = item.spacerItem()
             if sp is not None:

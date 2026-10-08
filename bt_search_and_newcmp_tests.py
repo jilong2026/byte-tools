@@ -218,9 +218,29 @@ class MainWindowSearchBox(unittest.TestCase):
         self.assertEqual(len([c for c in self.win.cards if not c.isHidden()]), TOTAL)
 
     def _result_widgets(self):
+        """结果面板里的控件：分类小标题直接挂在布局上，卡片住在 cardRow 行里。
+
+        搜索结果改用网格之后，卡片不再直接挂在 results_layout 上（它的父级是行
+        控件），所以遇到 objectName 为 cardRow 的行要钻进去把它装着的卡片一起
+        收回来 —— "分类标题要在"与"命中的卡片要在且 key 正确"两条断言都靠它。
+        """
         lay = self.win.results_layout
-        return [lay.itemAt(i).widget() for i in range(lay.count())
-                if lay.itemAt(i).widget() is not None]
+        out = []
+        for i in range(lay.count()):
+            w = lay.itemAt(i).widget()
+            if w is None:
+                continue
+            out.append(w)
+            if w.objectName() != "cardRow":
+                continue
+            row_lay = w.layout()
+            if row_lay is None:
+                continue
+            for j in range(row_lay.count()):
+                card = row_lay.itemAt(j).widget()
+                if card is not None:
+                    out.append(card)
+        return out
 
     def test_search_switches_to_unified_results_panel(self):
         # sql 命中 mysql + postgresql，二者都在「开发软件」分类
