@@ -1025,7 +1025,7 @@ ComponentCard.on_configure_clicked()   # main.py:5066
         不写 active 表
 ```
 
-> 「仅配置环境变量」对多版本组件即"把选中版本设为生效版本"。选中版本已经是生效版本时按钮禁用
+> 「切换」对多版本组件即"把选中版本设为生效版本"。选中版本已经是生效版本时按钮禁用
 > （`_detect_status` 里 `btn_configure.setEnabled(selected != active)`），tooltip 提示先在下拉框换版本。
 
 ### 6.4 版本抓取流程

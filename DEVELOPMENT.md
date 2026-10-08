@@ -599,7 +599,7 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 或反过来误以为会丢而不敢删。护栏：`test_data_bearing_components_all_have_a_data_note`、
 `test_uninstall_confirm_text_shows_the_data_note`。
 
-**一条仍然有效的豁免**：「下载并安装」的"选中版本已装则置灰"对全部 26 个组件生效，
+**一条仍然有效的豁免**：「安装」的"选中版本已装则置灰"对全部 26 个组件生效，
 ### R3.10 下拉框清单必须包含"已装但清单里没有"的版本
 
 在线版本清单只保留近期版本（实测：bun 清单里已无 1.4.1，磁盘上却装着 `bun-1.4.1`）。
@@ -612,7 +612,7 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 "已装置灰安装按钮"兜住；非多版本组件不合成（R3.9）。
 护栏用例：`InstalledVersionNotInCatalog`（7 条）。
 
-### R3.11 选中版本已装则置灰「下载并安装」
+### R3.11 选中版本已装则置灰「安装」
 
 面向**全部 26 个组件**：`_installed_here(version)` 判"目录存在 **且** 里面找得见该组件可执行文件"
 （半截安装不算，否则按钮灰掉、卸载又无事可做，用户会被困死），已装时禁用安装按钮，
