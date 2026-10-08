@@ -22,6 +22,12 @@
 #                    脚本只在 Gitee Release 正文写 GitHub 直链；同时给 sync-to-gitee
 #                    加 timeout-minutes，并把脚本的静默长超时改成「每次请求都打耗时/字节/
 #                    状态码 + 4xx 立即判死」（v1.0.3 曾因此静默挂死 70 分钟以上）
+# 变更记录（2026-10-08）：pip 源改回官方 PyPI（境外 runner 就近），清华源降级为兜底；
+#                    「安装依赖」步骤加 timeout-minutes: 8 + 主源失败自动换备用源重试一次；
+#                     pip 统一带 --retries 3 --timeout 60 扛链路抖动。
+#                    原因：v1.1.0 发布时 macOS job 首次卡在「安装依赖」20+ 分钟不动
+#                    （此前 4 次发布该 job 均只用 1.5~2.0 分钟），卡的是 pip 拉 PySide6
+#                    大 wheel —— 境外 runner 去清华源要跨太平洋，方向是反的。
 
 name: release
 
@@ -51,9 +57,14 @@ env:
   PYTHON_VERSION: '3.12'
   # PyInstaller 最低版本：spec 中使用了 5.0+ 引入的 hooksconfig 参数
   PYINSTALLER_MIN_VERSION: '6.0'
-  # 国内 pip 镜像（清华源），加速 PySide6 等大体积 wheel 下载
-  # GitHub runner 在境外，但走清华源仍可加速国内 CN 区域的拉取
-  PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+  # pip 主源：官方 PyPI。runner 在境外（Azure），到 pypi.org 是就近 CDN；
+  # 而清华源要跨太平洋，拉的又是 PySide6 这种 100MB+ 的大 wheel，
+  # 链路一抖就会长时间挂住 —— 【2026-10-08 教训】v1.1.0 发布时 macOS job
+  # 首次卡在「安装依赖」20+ 分钟（此前 4 次发布都只用 1.5~2.0 分钟）。
+  # 若以后换成国内 self-hosted runner，把主源/备用源对调即可。
+  PIP_INDEX_URL: https://pypi.org/simple
+  # pip 备用源：主源安装失败时自动改用这个重试一次（见「安装依赖」步骤）
+  PIP_FALLBACK_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
   # Gitee 仓库 owner（用户名或组织名），按你的 Gitee 实际账号修改
   # Gitee 与 GitHub 账号名通常不同，此处必须改成 Gitee 上的真实 owner
   GITEE_OWNER: jack_liujilong
@@ -143,19 +154,36 @@ jobs:
             libxcb-xkb1 \
             libxkbcommon-x11-0
 
-      # 4. 升级 pip 并通过环境变量配置国内镜像源
+      # 4. 升级 pip（沿用 env 里的主源）
       #    使用 bash shell 保证跨平台行为一致（Windows runner 默认 shell 也切到 bash）
-      - name: 升级 pip 并配置国内镜像源
+      #    加 timeout：这一步也是网络请求，防止它单独卡住拖满整个 job 的 45 分钟
+      - name: 升级 pip
+        timeout-minutes: 5
         run: |
-          python -m pip install --upgrade pip
-          echo "已切换 pip 镜像到: ${{ env.PIP_INDEX_URL }}"
+          python -m pip install --upgrade pip --retries 3 --timeout 60
+          echo "pip 主源: ${{ env.PIP_INDEX_URL }}"
+          echo "pip 备用源: ${{ env.PIP_FALLBACK_INDEX_URL }}"
         shell: bash
 
       # 5. 安装项目运行时依赖与 PyInstaller
+      #    【2026-10-08 加固】针对"pip 跨境拉大 wheel 静默挂死"三件事一起做：
+      #      ① timeout-minutes: 8 —— 正常情况下这一步约 1 分钟，8 分钟足够"两次尝试"，
+      #         卡住就在 8 分钟变红，而不是把 job 的 45 分钟耗光（用户只能干等）；
+      #      ② 主源失败自动换备用源重试一次（pip 自己先靠 --retries/--timeout 扛抖动）；
+      #      ③ 两条 pip 用 && 串联，保证第一条失败时函数返回非零、兜底分支才会触发。
       - name: 安装依赖（PySide6 / requests / PyInstaller）
+        timeout-minutes: 8
         run: |
-          pip install -r requirements.txt
-          pip install "pyinstaller>=${{ env.PYINSTALLER_MIN_VERSION }}"
+          set -e
+          install_deps() {
+            pip install -r requirements.txt --retries 3 --timeout 60 &&
+            pip install "pyinstaller>=${{ env.PYINSTALLER_MIN_VERSION }}" --retries 3 --timeout 60
+          }
+          if ! install_deps; then
+            echo "::warning::主源 ${{ env.PIP_INDEX_URL }} 安装失败，改用备用源重试一次"
+            export PIP_INDEX_URL="${{ env.PIP_FALLBACK_INDEX_URL }}"
+            install_deps
+          fi
         shell: bash
 
       # 6. 执行 PyInstaller 打包（spec 文件已声明跨平台逻辑，无需额外参数）
