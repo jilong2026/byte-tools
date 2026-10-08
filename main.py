@@ -8756,6 +8756,12 @@ class ComponentCard(QFrame):
 
         self.status_label = QLabel("检测中…")
         self.status_label.setObjectName("statusLabel")
+        # 同标题的道理：QLabel 的 minimumSizeHint 是整串文本的宽度，状态一长
+        # （"✓ 已配置 · 系统安装 · 版本检测中…"）就会把格子撑开，哪怕主文本已经
+        # 精简过 —— 不同机器字体/缩放不同，撑到什么程度不一样。显式压掉最小宽，
+        # 让布局允许压缩它；超宽的部分裁掉，全量原文本来就在 tooltip 里。
+        self.status_label.setMinimumWidth(1)
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # 角标与胶囊都靠左挤在一起会互相裁字，胶囊单独一行（格子内部只有 271px）
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
@@ -8766,6 +8772,9 @@ class ComponentCard(QFrame):
             # 原先挂在按钮行尾巴上，按钮行在 271px 里已经排满，故提到状态行。
             self.launch_label = QLabel("")
             self.launch_label.setObjectName("launchLabel")
+            # 同上：僵尸登记的原文很长，别让它把格子撑开
+            self.launch_label.setMinimumWidth(1)
+            self.launch_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             status_row.addWidget(self.launch_label)
         status_row.addStretch(1)
         root.addLayout(status_row)
