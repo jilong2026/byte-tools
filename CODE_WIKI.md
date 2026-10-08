@@ -196,6 +196,7 @@ byte-tools/
 ├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
 ├── bt_boot_script_tests.py        # 离线回归测试：两个一键脚本的编码/换行/消息表/Python 自动安装闭环（见 8.2）
 ├── bt_launch_tests.py             # 离线回归测试：组件一键启动契约（规则 R5；LaunchSpec 表/端口簇/僵尸登记/NoExec 不变量/启停流/卡片与主窗接线）
+├── bt_grid_layout_tests.py        # 离线回归测试：卡片网格布局与日志浮层（列数计算/只排可见卡片/顺序不乱/浮层不重排/未读计数与自动收起/视图模式持久化）
 └── assets/                  # 静态资源（PyInstaller 打包时通过 datas 一并打入）
     ├── byte-tools-pt.png    # 主界面截图
     ├── byte-tools.png       # 应用窗口图标
@@ -585,7 +586,7 @@ apply_active_version(comp, version)
      才会读到新值（Windows 若装了 Oracle javapath，个别命令仍可能被它抢先）"
 ```
 
-调用方只有两处：`ComponentCard._apply_active()`（用户点「配置环境变量」，成功后才 `save_active_version`）
+调用方只有两处：`ComponentCard._apply_active()`（用户点「切换」，成功后才 `save_active_version`）
 与 `Component.uninstall()` 第 ④ 步（删掉生效版本后自动重排 / 按生效版本重建）。
 
 幂等机制：UNIX 系统下用 `marker_begin` / `marker_end` 包裹写入块，再次写入时只替换两标记之间的内容，不会重复堆积。
@@ -652,15 +653,26 @@ apply_active_version(comp, version)
 
 单组件卡片，承载一个 `Component` 的完整 UI 与交互。
 
-UI 组成（自上而下）：
-1. **顶部行**：组件名 `QLabel` + 状态胶囊 `QLabel`
-2. **中部行**：版本下拉框 `SearchableComboBox`（多版本组件里磁盘已装的条目带 `_installed_icon()` 画的绿色对勾）+ "下载并安装" + "配置环境变量" + "卸载" + "取消"按钮；**可启动组件（`component.launch is not None`，本期只有 Jenkins）**额外一排"启动" / "停止" / "打开控制台"按钮 + 一枚 `launch_label` 运行状态胶囊（"● 运行中 · 端口 8080" / "⚠ 上次运行的残留登记…"），不在登记表的组件这一排根本不创建
-3. **底部**：进度条 `QProgressBar`
+UI 组成（自上而下，四行 + 进度条；这么切是为了塞进 300px 的网格格子，见 `MainWindow` 的网格一节）：
+1. **顶部行**：组件名 `QLabel` + 状态角标
+2. **状态行**：状态胶囊 `status_label` + 运行状态胶囊 `launch_label`
+3. **版本行**：版本下拉框 `SearchableComboBox`（多版本组件里磁盘已装的条目带 `_installed_icon()` 画的绿色对勾）
+4. **按钮行**：「安装」「切换」「卸载」「取消」；**可启动组件（`component.launch is not None`）**再追加「启动」与「控制台」/「访问页」，不在登记表的组件这两颗根本不创建
+5. **进度条**：`QProgressBar`
+
+按钮文案是**瘦身过的**：`下载并安装→安装`、`配置环境变量/切换为生效版本→切换`、`打开控制台/打开访问页→控制台/访问页`。
+改文案的同时把 `combo` 220→150、按钮高 34→30、QSS padding 18/16→8、卡片 margins 与 spacing 一并收紧，
+否则按钮在 271px 的格子内必然换行，卡片高度会从 153 涨回 ~230，一屏反而更少。
+**`启动`/`停止` 一个字都不能动**：`_running_per_ui()` 读这颗按钮的文字判断是否在运行。
+`btn_console` 补了 `setObjectName("secondaryBtn")`——原先三条按钮 QSS 全都匹配不到它，它拿系统默认样式、
+`sizeHint` 恒 80（同长度的「安装」只占 42），观感上比旁边宽一圈。
+
+卡片实测高 153–155px（可启停组件 155，因为按钮行多两颗），同一行内由布局保证等高。
 
 状态胶囊（`_detect_status` 设置，全程不执行外部命令；**多版本组件走另一套文案**）：
 
 - 非多版本组件三态：
-  - 🟢 `✓ 已配置（CATALINA_HOME / PATH）· <version>` — 系统已能找到，禁用"配置环境变量"按钮、启用"卸载"；版本号先显示 `版本检测中…`，由 `VersionProbeWorker` 异步回填，`version_probe=False` 的组件不显示版本
+  - 🟢 `✓ 已配置（CATALINA_HOME / PATH）· <version>` — 系统已能找到，禁用「切换」按钮、启用"卸载"；版本号先显示 `版本检测中…`，由 `VersionProbeWorker` 异步回填，`version_probe=False` 的组件不显示版本
   - 🟠 `● 已下载，未配置` — 本地已解压但环境变量未设
   - 🔴 `○ 未安装` — 完全没有
 - 多版本组件（`component.multi_version`，7 个）：**不**套用上面的 `✓ 已配置（…）`，而是"装了哪几个 + 哪个生效"（`_detect_status` 开头分支，正文存进 `self._mv_capsule`，`_render_status_label()` 只在末尾追加异步探测到的版本号）：
@@ -671,14 +683,22 @@ UI 组成（自上而下）：
   - 同一分支还负责按钮门控：`btn_configure` 仅在"选中的版本 != 生效版本"时启用（tooltip 说明怎么换）；`btn_uninstall` 仅在"选中的版本确实已装"时启用（未装时 tooltip 提示先在下拉框里选带绿勾的）；一个版本都没装时 `btn_configure` 启用、`btn_uninstall` 禁用
   - 只对**生效版本**的目录起 `VersionProbeWorker` 回填版本号，并在重探测前清掉上一轮的 `_status_version` 与 `_version_worker`（否则切完版本胶囊还挂着旧版本号，迟到的旧回包也会污染新胶囊）
 
+> **状态文案是"主文本写结论 + 全量原文进 tooltip"**：格子内部只有 271–309px，而完整状态文本需要
+> 448–520px，PySide6 的 `QLabel` **没有** `setElideMode`（超宽是直接 clip，不是省略号），所以长文案只能这么切。
+> 唯一写入口是 `_set_status(full, short)` / `_set_launch(full, short)`：**两者每次都要一起设置**，
+> 只 `setText` 会把上一轮的详情留在悬停提示里，变成一句已经没有依据的旧话。
+> `_mv_capsule` 继续存全量原文（tooltip 源 + 缓存），短串单独存 `_mv_capsule_short`，
+> 免得异步版本回填把长文案弹回界面。
+
 关键方法：
+- `_set_status(full, short)` / `_set_launch(full, short)` — 状态行与运行状态胶囊的唯一写入口（短串进主文本、全量进 tooltip）
 - `_schedule_version_probe(exe_path)` / `_start_version_probe(exe_path)` — `QTimer.singleShot(0, …)` 延后到事件循环空闲，再起 `VersionProbeWorker` 后台跑 `_probe_version`；`version_probe=False` 或 `version_args` 为空直接跳过
 - `_on_version_probed(text)` — 回填版本并重绘胶囊；状态已不是"已配置"时丢弃结果，避免晚到的回包把卸载后的标签刷回绿色
 - `set_versions(versions)` — 接收抓取线程返回的新版本列表，替换 `component.versions` 并刷新下拉框；保留上次选中版本（按 version 字段匹配）
 - `on_install_clicked()` — 取出当前选中版本，决定下载文件后缀（安装器模式按 `archive_map` 取扩展名；普通模式按 `archive_for_current()` 决定 `.zip` / `.tar.gz` / `.war` / `""`单二进制），构造 `urls = cv.urls_for_current()` 启动 `DownloadWorker(urls, dest)`；下载→解压→自动配置环境变量→刷新状态一条龙流程
 - `_on_download_ok(path, cv)` — 下载成功回调：安装器模式走 `_run_installer`；普通模式走 `extract_archive` + `shutil.move`；**单二进制 / `.war` 重命名逻辑**（kubectl-1.28.4.exe → kubectl.exe / kubectl-1.28.4 → kubectl / jenkins-2.426.war → jenkins.war）；最后自动调用 `_configure_env`。**只覆盖同版本目录**（`install_dir(cv.version)`），同组件其它版本的目录不动，所以装第二个版本就是多版本并存
 - `_run_installer(installer_path, target_dir)` — 静默执行 Miniconda 等：Windows 拼 `/D=<path>`（不能带引号）；mac/Linux 用 `bash installer.sh -b -f -p <path>`
-- `on_configure_clicked()` — "配置环境变量"按钮。**多版本组件**：把下拉框选中的版本交给 `_apply_active()` 设为生效版本（选中版本没装、或该组件在磁盘上一个符合命名的目录都没有时，只写一条 warn 日志并返回）；**非多版本组件**：沿用原有行为——从 `installed_versions()` 取语义版本最高的那个目录调 `_configure_env`（改造前这里是"按目录名字典序取最后一个"，会把 `jdk-8` 当成最新，2026-09-29 起统一走 `_sort_semver_desc`）
+- `on_configure_clicked()` — 「切换」按钮（旧文案「配置环境变量 / 切换为生效版本」）。**多版本组件**：把下拉框选中的版本交给 `_apply_active()` 设为生效版本（选中版本没装、或该组件在磁盘上一个符合命名的目录都没有时，只写一条 warn 日志并返回）；**非多版本组件**：沿用原有行为——从 `installed_versions()` 取语义版本最高的那个目录调 `_configure_env`（改造前这里是"按目录名字典序取最后一个"，会把 `jdk-8` 当成最新，2026-09-29 起统一走 `_sort_semver_desc`）
 - `active_version()` — 当前生效版本：`load_active_map().get(key)` 优先，取不到再 `infer_active_from_env(comp)` 从持久层 `XXX_HOME` 反推；非多版本组件恒为 None
 - `_apply_active(version)` — 调 `apply_active_version()`，失败只把 `SwitchError` 文本打进日志并返回 False（不改登记表），成功则逐步写日志、`save_active_version(key, version)`、`_refresh_installed_marks()` + `_detect_status()`
 - `_refresh_installed_marks()` — 给磁盘上已装的版本挂绿勾：`self.component.versions` 逐项 `setItemData(i, icon, Qt.DecorationRole)`，图标由 `_installed_icon()` 用 `QPainter` 现画（绿色 `#2e7d32`、16px、2 倍分辨率绘制）。**只动 `DecorationRole`，绝不改条目文本**；非多版本组件直接 return，连 `DecorationRole` 都不写（保持"从未挂过"的原始数据）。安装、卸载、切换生效、重灌条目（`_reload_combo_items` 的两条出口）之后都要重挂
@@ -707,16 +727,53 @@ UI 组成（自上而下）：
 UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
-3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 26 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了
-4. **主体 QSplitter（垂直）**：   - 上部 `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向）按 `COMPONENT_CATEGORIES` 分四个 Tab，**标题带组件数量**：`开发环境（10）` / `开发软件（4）` / `一键启停（10）` / `其它软件（2）`（数字由 `len(comps)` 现算，不写死）；每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`
+3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 26 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了。
+搜索条右侧还挂着「▦ 网格 / ☰ 列表」与「📋 日志」两颗按钮——**它们也不放标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽
+4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分四个 Tab，Tab 外层
+   `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向），**标题带组件数量**：
+   `开发环境（10）` / `开发软件（4）` / `一键启停（10）` / `其它软件（2）`（数字由 `len(comps)` 现算，不写死）；
+   每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
+   （见下方「卡片网格」一节），不再是一行一张占满宽
    - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 26 项
-   - 下部日志区 `QTextEdit`（深色主题、等宽字体）
-5. **底部状态栏**：显示当前系统信息、工作目录与 `组件总数：N 个`（N=26，方便用户一眼掌握支持范围）
+5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
+6. **底部状态栏**：显示当前系统信息、工作目录与 `组件总数：N 个`（N=26，方便用户一眼掌握支持范围）
 
 > **不变量**：`MainWindow.cards` 仍是**全量平铺**列表（26 张卡片，跨 Tab 收集），
 > 刷新版本、读写配置、关窗前等探测线程都遍历它；分组只影响卡片的父布局，不影响这个列表。
 > 分类数据由 `COMPONENT_CATEGORY_OF` 单点登记 → `build_components()` 末尾写入 `Component.category`
 > → `group_components()` 按 `COMPONENT_CATEGORIES` 顺序出组；未登记的 key 会 KeyError，不会静默漏卡片。
+
+#### 卡片网格（2026-10-08）
+
+组件卡片从「一行一张占满宽」改成**按宽度重排的网格**，目的是让一屏看得见更多组件。
+
+- **列数只由可用宽度算**：`grid_columns_for(available_px, MIN_CARD_WIDTH_PX)`，`MIN_CARD_WIDTH_PX = 300`
+  （一张卡片信息不砍的下限），间距 `CARD_ROW_SPACING = 14`。窗口 1000 宽时视口净宽 954，实测出
+  **3 列 × 3 行 = 9 个/屏**；窗口拉宽自动变更多列，拉窄回落到 1 列。非法入参（视口尚未生效时宽度为 0）
+  一律兜底 1 列，不抛异常——除零或负列数会让整片卡片消失
+- **实现是行容器法，不是 `QGridLayout`**：Tab 外层仍是 `QVBoxLayout`，里面装"行"，每行一个 `QHBoxLayout` 装 1..N 张卡
+  （`_tab_layouts[i]` 的语义因此从"直接装卡片"改成"装行的外层竖向布局"，`_tab_rows[key]` 存行控件）。
+  原因是 `_reparent` / `_restore_browse` / `_build_unified` 三处全靠 `QBoxLayout` 的 `indexOf` / `insertWidget` /
+  末尾 stretch 工作，`QGridLayout` 没有这套语义
+- **relayout 只排可见卡片**（`chunk_visible`）：`QBoxLayout` 会给隐藏控件留位，
+  留着隐藏卡片等于"搜索命中 1 个时网格出现空洞"。判可见用 `isHidden()` 而不是 `isVisible()`——
+  后者还要看父级，而卡片所在 Tab 页没被翻到时父级就是不可见的
+- **`resizeEvent` 只在列数真的变化时才重建行**：resize 是每变一个像素一次的事件，每次都重建行控件会把拖动窗口卡死
+- **视图切换**：搜索条上一颗 `▦ 网格 / ☰ 列表`，持久化到 `config.json` 的 `view_mode`，默认 `grid`；
+  列表模式 = 强制 1 列，卡片内部一模一样。**按钮在搜索条上，不在标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，
+  实测需要 ~992px，而窗口才 1000 宽，再加必然把已有按钮压到裁字
+
+#### 日志浮层（2026-10-08）
+
+日志原先和卡片区按 **3:2** 分在同一个 `QSplitter` 里，展开/收起都会挤压网格。现在卡片区独占中部，
+日志改成浮在它上面的浮层：
+
+- **为什么不改回挤压式**：浮层不在 `body` 的布局里，`show/hide` 不触发重排 ⇒ 列数与行数只由窗口宽度决定，
+  开关日志不会让格子忽大忽小，也省掉"挤压式折叠"带来的二次 relayout。代价是展开时遮住最下面一行格子
+- **只有 `warn` / `error` 才自动弹开**：下载/安装这类常规进度在卡片上已有进度条，每来一条都弹会把用户
+  正在操作的那张卡盖住。未读条数挂在按钮文字里（`📋 日志 (N)`，不新增控件），
+  **只在"弹开前是收起的"时才累加**；手动点开即清零且**不自动收起**（`_log_user_open`）；
+  自动弹开的那个静默 `LOG_AUTO_HIDE_MS = 8000` 后自愈收起
 
 无边框窗口拖动：
 - `mousePressEvent` 在标题栏区域按下左键时记录 `_drag_pos`
@@ -727,7 +784,11 @@ UI 组成：
 - `_on_cleanup_path_clicked()` — "清理残留 PATH"入口：先用 `find_dead_tool_path_entries()` 只读预览并弹确认框，确认后 `cleanup_dead_tool_path_entries()` 删除死条目、写日志并逐卡片 `_detect_status()` 刷新
 - `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（26 个并发），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
-- `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`
+- `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`；**只有 `warn`/`error` 会顺带自动弹开日志浮层并累加未读条数**
+- `_card_columns()` — 当前该排几列（列表模式恒 1 列，网格模式按 `QScrollArea` **视口**净宽算，不是窗口宽度）
+- `relayout_cards(container_key)` / `_fill_rows(...)` — 把一个容器里的卡片按当前列数重排成"行"；`container_key` 为 Tab 序号或 `RESULTS_KEY`（统一搜索结果面板，固定单列）
+- `_set_log_open(open_)` / `_on_log_button_clicked()` / `_close_log_by_user()` — 浮层的开/关；**浮层的 show/hide 不触发 relayout**，这是"展开日志不重排网格"这条承诺的实现基础
+- `_on_view_mode_clicked()` — 网格 ⇄ 列表，写完即 `_save_settings()` 落盘
 - `_load_settings()` / `_save_settings()` — 启动时从 `CONFIG_FILE` 加载上次选中版本；`closeEvent` 时保存。保存是**合并写**：先读原文件、只替换 `selections` 段，`active`（生效版本登记表，见 4.6）原样保留，整体覆盖会把切换功能写的数据抹掉
 - `_apply_qss()` — 应用整张 QSS 样式表（含标题栏、卡片、下拉框、按钮、进度条、滚动条、日志区、状态栏）
 - **一键启动接线**（见规则 R5）：
@@ -770,6 +831,7 @@ def main() -> int:
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
 | `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（133 个用例，见 R5.6）。全量回归 9 套件之一 |
+| `bt_grid_layout_tests.py` | 卡片网格与日志浮层：`grid_columns_for` 表驱动（含非法入参兜底 1 列）、`chunk_visible` 保序且不含隐藏卡片（= 空洞回归护栏）、`relayout_cards` 行数 == `ceil(N/C)` 且拼接顺序 == `self.cards`、视图模式默认 `grid` 与 `config.json` 缺键取 `grid`、**浮层展开/收起前后行数与每行卡片数完全不变**（浮层方案的核心承诺）、`warn`/`error` 自动弹开与未读条数、搜索命中数 < 列数时只有一行且无空位 |
 
 #### `bt_multiversion_tests.py` 覆盖面
 
@@ -845,13 +907,13 @@ Component
 | `MainWindow.btn_cleanup_path.clicked` | `MainWindow._on_cleanup_path_clicked` | 用户点"清理残留 PATH" |
 | `MainWindow.btn_github.clicked` | `QDesktopServices.openUrl(GITHUB_URL)` | 用户点 GitHub |
 | `MainWindow.btn_donate.clicked` | `MainWindow._on_donate_clicked` | 用户点打赏 |
-| `ComponentCard.btn_install.clicked` | `ComponentCard.on_install_clicked` | 用户点"下载并安装" |
-| `ComponentCard.btn_configure.clicked` | `ComponentCard.on_configure_clicked` | 用户点"配置环境变量" |
+| `ComponentCard.btn_install.clicked` | `ComponentCard.on_install_clicked` | 用户点"安装" |
+| `ComponentCard.btn_configure.clicked` | `ComponentCard.on_configure_clicked` | 用户点"切换" |
 | `ComponentCard.btn_cancel.clicked` | `ComponentCard.on_cancel_clicked` | 用户点"取消" |
 | `ComponentCard.version_combo.currentIndexChanged` | `ComponentCard._on_index_changed` | 下拉框选中变化 |
 | `ComponentCard.btn_start.clicked` | `ComponentCard.on_start_clicked` | 用户点"启动"（可启动组件才有，见 R5） |
 | `ComponentCard.btn_stop.clicked` | `ComponentCard.on_stop_clicked` | 用户点"停止" |
-| `ComponentCard.btn_console.clicked` | `ComponentCard.on_console_clicked` | 用户点"打开控制台" |
+| `ComponentCard.btn_console.clicked` | `ComponentCard.on_console_clicked` | 用户点"控制台"/"访问页" |
 | `LaunchWorker.started_ok` | `ComponentCard._on_launch_ok` | 启动成功且端口已在听（回填 console_url） |
 | `LaunchWorker.stopped` | `ComponentCard._on_launch_stopped` | 已停止并释放端口 |
 | `LaunchWorker.need_force` | `ComponentCard._on_need_force` | 停不下来，弹一次"要强制结束吗"（force_stop/stop 都接这条线） |
@@ -898,7 +960,7 @@ main()
   └─ MainWindow()
        ├─ setWindowIcon(assets/byte-tools.png)
        ├─ build_components()           # 构造 26 个组件的默认清单（全部用 url_list_map 走 R1 多源）
-       ├─ _build_ui()                 # 构造标题栏 + 卡片 + 日志区 + 状态栏(组件总数=26)
+       ├─ _build_ui()                 # 构造标题栏 + 搜索条(含视图切换/日志开关) + 卡片网格 + 日志浮层 + 状态栏(组件总数=26)
        ├─ _apply_qss()                # 应用样式表
        ├─ _load_settings()             # 从 config.json 恢复上次选中版本
        └─ _start_fetch_versions()      # 为 26 张卡片各起一个 VersionFetchWorker 并发抓取

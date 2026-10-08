@@ -421,13 +421,36 @@ COMPONENT_CATEGORY_OF = {
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
 
+Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是一行一张占满宽：
+
+- **列数只由可用宽度算**：`grid_columns_for(available_px, MIN_CARD_WIDTH_PX)`，`MIN_CARD_WIDTH_PX = 300`
+  （一张卡片信息不砍的下限）。窗口 1000 宽时视口净宽 954，实测 **3 列 × 3 行 = 9 个/屏**；
+  窗口拉宽自动变更多列，拉窄回落到 1 列。视口宽度在布局生效前会是 0，非法入参一律兜底 1 列
+  ——除零或负列数会让整片卡片消失
+- **实现是行容器法，不是 `QGridLayout`**：Tab 外层仍是一个 `QVBoxLayout`，里面装"行"，
+  每行一个 `QHBoxLayout` 装 1..N 张卡（`_tab_layouts[i]` 的语义因此从"直接装卡片"改成"装行的外层竖向布局"）。
+  **不要换成 `QGridLayout`**：`_reparent` / `_restore_browse` / `_build_unified` 三处全靠 `QBoxLayout`
+  的 `indexOf` / `insertWidget` / 末尾 stretch 工作，`QGridLayout` 没有这套语义
+- **relayout 只排可见卡片**（`chunk_visible`）：`QBoxLayout` 会给隐藏控件留位，
+  留着隐藏卡片等于"搜索命中 1 个时网格出现空洞"
+- **视图切换**是搜索条上一颗 `▦ 网格 / ☰ 列表`，持久化到 `config.json` 的 `view_mode`，默认 `grid`；
+  列表模式 = 强制 1 列，卡片内部一模一样。**按钮在搜索条上，不在标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，
+  实测需要 ~992px，窗口才 1000 宽，再加必然把已有按钮压到裁字
+
+底部日志区已**移出 `QSplitter` 的 3:2 分配**，改成浮层（同 parent + `raise_()`，几何随 resize 跟随），
+展开时**遮住**最下面一行格子而不是把网格压扁。选浮层的理由：它不在 `body` 的布局里，`show/hide` 不触发
+重排 ⇒ 列数与行数只由窗口宽度决定，开关日志不会让格子忽大忽小，也省掉"挤压式折叠"的二次 relayout。
+触发规则：**只有 `warn` / `error` 才自动弹开**并挂未读条数（写在 `📋 日志 (N)` 按钮文字里，不新增控件）；
+下载/安装这类常规进度不弹（进度条已在卡片上，每来一条都弹会把用户正在操作的那张卡盖住）。
+未读数只在"弹开前是收起的"时才累加；手动打开即清零且**不自动收起**；自动弹开的那个静默 8 秒后自愈收起。
+
 ### R2.4 新增 / 调整组件分类 checklist
 
 - [ ] `COMPONENT_CATEGORY_OF` 里登记了该 key，且值取自 `COMPONENT_CATEGORIES`
 - [ ] 按 R2.1 的判定顺序核对归类理由，有争议的在 PR 说明里写清
 - [ ] `bt_component_category_tests.py` 通过（其中 `EXPECTED_MEMBERSHIP` 是分类基线，改归类要同步改它）
 - [ ] 未新增 `if category == ...` 之类的界面特判——分组渲染只走 `group_components()`
-- [ ] README / README_EN 的三 Tab 表格与 `CODE_WIKI.md` 的 `category` 字段说明同步
+- [ ] README / README_EN 的四 Tab 表格与 `CODE_WIKI.md` 的 `category` 字段说明同步
 
 ### R2.5 组件搜索框
 
@@ -439,6 +462,8 @@ Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标�
   空查询（或全空白）返回 `True` 表示不过滤。**不要**把分类名纳入匹配——分类已由 Tab 表达，
   搜"开发"会命中全部卡片，等于没搜
 - 过滤**只改 `card.setVisible()` 与卡片在布局里的归属**，绝不从 `MainWindow.cards` 里摘项（原因见 R2.3 的全量平铺不变量）
+- 网格布局下这条更关键：Tab 里的 relayout **只排可见卡片**，所以命中数少于列数时不会留下空洞；
+  统一结果面板则固定**单列**——搜索命中通常是两三个组件，排成网格反而要在窄结果里补空位
 - **全组件搜索的呈现方式**：搜索时收起四个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
   把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
   清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
