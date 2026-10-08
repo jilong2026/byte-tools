@@ -544,7 +544,7 @@ class Component:
                         summary_parts.append(
                             f"生效版本 {active} 已卸载，但 {self.env_var} 指向组件目录之外"
                             f"（{home_now}，是你自己的选择），不自动改写；"
-                            f"如需由本工具接管，可选中剩余版本后点「仅配置环境变量」重设")
+                            f"如需由本工具接管，可选中剩余版本后点「切换」重设")
                     else:
                         target = remaining[0][0]
                 # 登记表里那个版本本来就不在磁盘上、这次又没删到它 → 不猜，交给用户重点按钮
@@ -560,9 +560,9 @@ class Component:
                         # 它本来就在生效，说"自动切到"是假话。失败分支同理分叉。
                         summary_parts.append(
                             (f"自动切到 {target} 失败，生效登记已清空，请重新点一次"
-                             f"「仅配置环境变量」：{exc}") if target != active else
+                             f"「切换」：{exc}") if target != active else
                             (f"按生效版本 {target} 重建环境变量与 PATH 失败，生效登记已清空，"
-                             f"请重新点一次「仅配置环境变量」：{exc}"))
+                             f"请重新点一次「切换」：{exc}"))
                     else:
                         summary_parts.append(
                             f"生效版本已自动切到 {target}" if target != active
@@ -575,7 +575,7 @@ class Component:
                         except Exception as exc:
                             summary_parts.append(
                                 f"生效登记表写入失败：{exc}（环境变量已切到 {target}，"
-                                "重开界面可能显示旧生效版本，再点一次「仅配置环境变量」可修正）")
+                                "重开界面可能显示旧生效版本，再点一次「切换」可修正）")
 
         return "；".join(summary_parts) if summary_parts else "无需卸载"
 
@@ -4393,7 +4393,7 @@ def build_components() -> List[Component]:
             # 用户运行 Jenkins 需先装 JDK，这里通过 hint 提示
             unsupported_platform_hint=(
                 "Jenkins 通过 jenkins.war 单文件分发，运行需要先安装 JDK（本工具已支持 JDK 自动装配）。"
-                "下载完成后点卡片上的「启动」按钮即可一键拉起、并从「打开控制台」进入 Jenkins 页面"
+                "下载完成后点卡片上的「启动」按钮即可一键拉起、并从「控制台」进入 Jenkins 页面"
                 "（能力已实现且有离线回归守护；Windows 真机验证待用户在场执行，见 DEVELOPMENT.md 规则 R5）。"
             ),
             versions=[_jenkins_cv(v) for v in ("2.568.3", "2.555.3", "2.541.3")],
@@ -7268,7 +7268,7 @@ def launch_gate(comp: Component, spec: LaunchSpec,
         shown = "、".join(v.version for v in comp.versions[:3])
         return False, (f"磁盘上还没有 {comp.display_name} 的任何已安装版本，"
                        f"没法启动（可选版本：{shown}）。"
-                       f"请先在本工具里点「下载并安装」装一个版本，再回来点启动。")
+                       f"请先在本工具里点「安装」装一个版本，再回来点启动。")
     return True, ""
 
 
@@ -8593,7 +8593,11 @@ class ComponentCard(QFrame):
         self._status_shows_configured = False
         # 多版本胶囊的基础文案：异步版本号回填时要在它后面续（" · <版本>"），
         # 不能落到非多版本那条 "✓ 已配置（…）" 旧文案。
+        # **存的是全量原文**（tooltip 源 + 缓存）：短串单独存在 _mv_capsule_short，
+        # 两者由 _detect_status_impl 的同一个分支产出。把缓存改成短串会让 tooltip
+        # 丢掉版本列表；只改显示不改缓存，异步回填时全量原文又会弹回主文本。
         self._mv_capsule: str = ""
+        self._mv_capsule_short: str = ""
         # 多版本胶囊是否用橙色告警态（未对齐 / 被 PATH 更靠前的条目遮蔽）
         self._mv_orange: bool = False
         # 多版本按钮状态：切换/卸载两个按钮要按"当前选中的版本"重算，
@@ -8626,16 +8630,19 @@ class ComponentCard(QFrame):
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
+        # 四行结构：顶部（标题+角标）/ 状态行 / 版本行 / 按钮行 / 进度条。
+        # 原先版本下拉与按钮混在同一行（mid），塞进 271px 宽的格子必然换行，
+        # 卡片高度从 121 涨到 230；拆开 + 缩短文案与 padding 后按钮一行放得下。
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(6)
 
-        # 顶部：名称 & 状态
+        # 顶部：名称 & 角标
         top = QHBoxLayout()
         top.setSpacing(10)
         title = QLabel(self.component.display_name)
         title.setObjectName("cardTitle")
-        title.setFont(QFont("", 14, QFont.Bold))
+        title.setFont(QFont("", 13, QFont.Bold))
         top.addWidget(title)
 
         # 多版本能力角标：一个版本都没装时，这张卡片跟其它组件长得一样，
@@ -8651,77 +8658,92 @@ class ComponentCard(QFrame):
             )
             badge.setToolTip(
                 "这个组件可以同时安装多个版本。在下拉框里选中某个版本后点"
-                "「配置环境变量」，就把它设为生效版本（改写 XXX_HOME 与 PATH）；"
+                "「切换」，就把它设为生效版本（改写 XXX_HOME 与 PATH）；"
                 "带绿色对勾的版本表示磁盘上已安装。"
             )
             top.addWidget(badge)
-
-        self.status_label = QLabel("检测中…")
-        self.status_label.setObjectName("statusLabel")
-        top.addWidget(self.status_label)
         top.addStretch(1)
         root.addLayout(top)
 
-        # 中部：版本选择 + 按钮
-        mid = QHBoxLayout()
-        mid.setSpacing(10)
+        self.status_label = QLabel("检测中…")
+        self.status_label.setObjectName("statusLabel")
+        # 角标与胶囊都靠左挤在一起会互相裁字，胶囊单独一行（格子内部只有 271px）
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_row.addWidget(self.status_label)
+        if self.component.launch is not None:
+            # 运行状态自己一个小 label：status_label 已有 5 处写点，挤进去会把
+            # 多版本胶囊 / 系统安装 那套判定搅浑（R3.9 要求非目标组件零影响）。
+            # 原先挂在按钮行尾巴上，按钮行在 271px 里已经排满，故提到状态行。
+            self.launch_label = QLabel("")
+            self.launch_label.setObjectName("launchLabel")
+            status_row.addWidget(self.launch_label)
+        status_row.addStretch(1)
+        root.addLayout(status_row)
+
+        # 版本行：版本标签 + 下拉框
+        ver = QHBoxLayout()
+        ver.setSpacing(8)
         version_label = QLabel("版本")
         version_label.setObjectName("fieldLabel")
         version_label.setFixedWidth(36)
-        mid.addWidget(version_label)
+        ver.addWidget(version_label)
 
         self.version_combo = SearchableComboBox()
         self.version_combo.setObjectName("versionCombo")
         self.version_combo.setCursor(QCursor(Qt.PointingHandCursor))
         self._reload_combo_items()
-        # 固定宽度，避免抢占按钮空间
-        self.version_combo.setFixedWidth(220)
-        self.version_combo.setFixedHeight(34)
+        # 固定宽度，避免抢占按钮空间。150 是"版本串还能看全"与"按钮行放得下"的折中：
+        # 原来的 220 会把按钮行顶出格子。
+        self.version_combo.setFixedWidth(150)
+        self.version_combo.setFixedHeight(30)
         self.version_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         # 换选中就要重算切换/卸载按钮：不连这条，切一次生效版本后按钮会一直灰着
         # （2026-09-30 真机反馈）。只做按钮同步，不重跑探测、不起版本探测子进程。
         self.version_combo.currentIndexChanged.connect(
             lambda *_: self._sync_action_buttons())
-        mid.addWidget(self.version_combo)
+        ver.addWidget(self.version_combo)
+        ver.addStretch(1)
+        root.addLayout(ver)
 
-        mid.addSpacing(8)
+        # 按钮行：一行放完，不换行
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
 
-        self.btn_install = QPushButton("下载并安装")
+        self.btn_install = QPushButton("安装")
         self.btn_install.setObjectName("primaryBtn")
         self.btn_install.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_install.setFixedHeight(34)
+        self.btn_install.setFixedHeight(30)
         self.btn_install.clicked.connect(self.on_install_clicked)
-        mid.addWidget(self.btn_install)
+        actions.addWidget(self.btn_install)
 
-        self.btn_configure = QPushButton("配置环境变量")
+        # 「配置环境变量 / 切换为生效版本」→「切换」：格子只有 271px，
+        # 两种旧叫法都太长；多版本语义由 tooltip 承载（下面 _sync_action_buttons 里）。
+        self.btn_configure = QPushButton("切换")
         self.btn_configure.setObjectName("secondaryBtn")
         self.btn_configure.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_configure.setFixedHeight(34)
-        # 多版本组件上这个按钮的真实语义是"把下拉框选中的版本设为生效版本"，
-        # 叫「配置环境变量」会让人以为只是写写变量、不敢点，故按能力位改文案。
-        if self.component.multi_version:
-            self.btn_configure.setText("切换为生效版本")
+        self.btn_configure.setFixedHeight(30)
         self.btn_configure.clicked.connect(self.on_configure_clicked)
-        mid.addWidget(self.btn_configure)
+        actions.addWidget(self.btn_configure)
 
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setObjectName("dangerBtn")
         self.btn_cancel.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_cancel.setFixedHeight(34)
+        self.btn_cancel.setFixedHeight(30)
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.setVisible(False)  # 默认隐藏；开始下载时才显示
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
-        mid.addWidget(self.btn_cancel)
+        actions.addWidget(self.btn_cancel)
 
         self.btn_uninstall = QPushButton("卸载")
         self.btn_uninstall.setObjectName("dangerBtn")
         self.btn_uninstall.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_uninstall.setFixedHeight(34)
+        self.btn_uninstall.setFixedHeight(30)
         # 默认禁用，待 _detect_status 检测到已安装或有本地下载时才启用
         self.btn_uninstall.setEnabled(False)
         self.btn_uninstall.setToolTip("删除已安装的版本、清理 XXX_HOME 与 PATH")
         self.btn_uninstall.clicked.connect(self.on_uninstall_clicked)
-        mid.addWidget(self.btn_uninstall)
+        actions.addWidget(self.btn_uninstall)
 
         # 启动相关按钮：只有登记了启动描述符的组件才有（LAUNCH_KEYS，本期只有 Jenkins）
         self.launch_worker: Optional[LaunchWorker] = None
@@ -8735,37 +8757,57 @@ class ComponentCard(QFrame):
             # 运行状态时那一格才亮起来，看起来就像"多出来的按钮没出现"。
             # 合成一个之后：按钮永远在那儿，状态直接写在按钮文字上，
             # 不用找、不用猜。
+            #
+            # 文案**不许瘦身**：_running_per_ui() 读它判断是否在运行。
             self.btn_start = QPushButton("启动")
             self.btn_start.setObjectName("primaryBtn")
             self.btn_start.setCursor(QCursor(Qt.PointingHandCursor))
-            self.btn_start.setFixedHeight(34)
+            self.btn_start.setFixedHeight(30)
             self.btn_start.clicked.connect(self.on_start_stop_clicked)
-            mid.addWidget(self.btn_start)
+            actions.addWidget(self.btn_start)
             # 刻意**不保留** `self.btn_stop`：合并按钮后没有第二个 widget，
             # 留一个同名别名会让读代码的人以为界面上有两个按钮。
             # 旧代码里 `btn_stop.isEnabled()` 那个"是否在运行"的判据，
             # 改为读按钮文字——见 _running_per_ui()。
-            self.btn_console = QPushButton("打开控制台")
-            self.btn_console.setFixedHeight(34)
+            self.btn_console = QPushButton("控制台")
+            # 原先没有 objectName → 三条 QSS 全部匹配不到它，拿系统默认样式，
+            # 实测比旁边几颗按钮宽一圈（sizeHint 恒 80，同长度的「安装」只占 42）。
+            self.btn_console.setObjectName("secondaryBtn")
+            self.btn_console.setFixedHeight(30)
             self.btn_console.clicked.connect(self.on_console_clicked)
             self.btn_console.setEnabled(False)
-            mid.addWidget(self.btn_console)
+            actions.addWidget(self.btn_console)
 
-            # 运行状态自己一个小 label：status_label 已有 5 处写点，挤进去会把
-            # 多版本胶囊 / 系统安装 那套判定搅浑（R3.9 要求非目标组件零影响）。
-            self.launch_label = QLabel("")
-            self.launch_label.setObjectName("launchLabel")
-            mid.addWidget(self.launch_label)
-
-        mid.addStretch(1)  # 右侧留空，避免下拉框被拉伸
-        root.addLayout(mid)
+        actions.addStretch(1)  # 右侧留空，避免按钮被拉伸
+        root.addLayout(actions)
 
         # 底部：进度条
+        # 高度保持 14：setTextVisible(True) 的百分比在 8px 下必然被裁切，
+        # 且圆角 6px 会大于半高 4px。
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(True)
         self.progress.setValue(0)
         root.addWidget(self.progress)
+
+    # ------------------------------------------------------------------
+    # 状态文案：主文本给短串，全量详情进 tooltip
+    # ------------------------------------------------------------------
+    def _set_status(self, full: str, short: str) -> None:
+        """状态行的唯一写入口：主文本用短串，全量原文进 tooltip。
+
+        格子内部只有 271px，而 PySide6 的 QLabel 没有 setElideMode（超宽是直接
+        clip，不是省略号），所以长文案只能"主文本写结论、tooltip 写全文"。
+        两者**每次都要一起设置**：状态切换时只 setText 会把上一轮的详情留在
+        悬停提示里，变成一句已经没有依据的旧话。
+        """
+        self.status_label.setText(short)
+        self.status_label.setToolTip(full)
+
+    def _set_launch(self, full: str, short: str) -> None:
+        """运行状态 label 的唯一写入口，同 _set_status()。"""
+        self.launch_label.setText(short)
+        self.launch_label.setToolTip(full)
 
     # ------------------------------------------------------------------
     def _log(self, level: str, msg: str) -> None:
@@ -8821,15 +8863,15 @@ class ComponentCard(QFrame):
         running = st.state == "running"
         self.btn_start.setEnabled(self.launch_worker is None)
         # **每个可启停组件都有一个能打开的地址**（2026-10-08 用户要求）：
-        #   自带 Web 界面 → 按钮文字「打开控制台」，指向它自己的页面；
-        #   协议端口型（kafka/rocketmq/rabbitmq）→ 文字「打开访问页」，
+        #   自带 Web 界面 → 按钮文字「控制台」，指向它自己的页面；
+        #   协议端口型（kafka/rocketmq/rabbitmq）→ 文字「访问页」，
         #   指向工具自带的「启动成功」页（卡片销毁前若还留着上次的 URL 就用它，
         #   否则由 _has_console() 从登记表里读）。
         has_console = self._has_console()
         spec = getattr(self.component, "launch", None)
-        self.btn_console.setText("打开控制台"
+        self.btn_console.setText("控制台"
                                  if (spec is not None and spec.console_path)
-                                 else "打开访问页")
+                                 else "访问页")
         self.btn_console.setVisible(has_console)
         self.btn_console.setEnabled(running)
         # 按钮文字就是状态本身：运行中显示「停止」，否则显示「启动」。
@@ -8854,7 +8896,8 @@ class ComponentCard(QFrame):
             # 服务是好的，只是没有页面可点。把这句话摆在这儿，用户就不会去找
             # 那个不存在的控制台入口、也不会以为服务坏了。
             tail = "" if self._has_console() else " · 无网页控制台"
-            self.launch_label.setText(f"● 运行中 · 端口 {st.record.port}{tail}")
+            self._set_launch(f"● 运行中 · 端口 {st.record.port}{tail}",
+                             f"● 运行中 {st.record.port}")
             # 运行中禁止卸载：边跑边删目录会把正在写的日志和数据留在半删状态
             self.btn_uninstall.setEnabled(False)
             self.btn_uninstall.setToolTip("请先停止运行中的 %s 再卸载" % self.component.display_name)
@@ -8864,11 +8907,12 @@ class ComponentCard(QFrame):
                 # 僵尸登记要看得见：否则"上次崩了、登记还留着"和"干净地停过"长得一模一样。
                 # 文案只承诺 start() 真会做的事：它不看旧 PID，直接起一个新进程并覆盖这条登记
                 # —— 万一是"卡住但还活着"的旧进程，那个进程归 adopt/手工处理，别说成"接管"。
-                self.launch_label.setText(
+                self._set_launch(
                     f"⚠ 上次运行的残留登记（端口 {st.record.port} 没在听），"
-                    f"再点启动会重新起一个并覆盖这条登记")
+                    f"再点启动会重新起一个并覆盖这条登记",
+                    f"⚠ 残留登记 · 端口 {st.record.port}")
             else:
-                self.launch_label.setText("")
+                self._set_launch("", "")
             # 只解冻自己被锁过的那次：卸载按钮的可用性本来由 _detect_status /
             # _sync_action_buttons 按"选中版本装没装"判定，无条件点亮会给出
             # 一张未安装也能点卸载的卡片。
@@ -9259,10 +9303,14 @@ class ComponentCard(QFrame):
             # 只在其后追加；绿=有生效版本（_status_shows_configured），橙=均未生效/未对齐。
             # _mv_capsule 为空串表示这次走的是"本工具没装过、探测到系统安装"的通用分支，
             # 那时必须落到下面的 ✓ 已配置 文案，不能渲染一个空胶囊。
+            # 短串与全量原文同步续上版本号：主文本只放得下结论，版本列表在 tooltip 里。
             text = self._mv_capsule
+            # 外部只塞了胶囊全文（没算过短串）时退回全量，主文本不许是空的
+            short = self._mv_capsule_short or self._mv_capsule
             if self._status_version:
                 text += f" · {self._status_version}"
-            self.status_label.setText(text)
+                short += f" · {self._status_version}"
+            self._set_status(text, short)
             self.status_label.setStyleSheet(
                 "color:#ef6c00;font-weight:600;padding:2px 8px;"
                 "background:#fff3e0;border-radius:10px;"
@@ -9272,15 +9320,28 @@ class ComponentCard(QFrame):
             return
 
         text = f"✓ 已配置（{self._status_where}）"
+        short = f"✓ 已配置 · {self._short_where()}"
         if self._status_version:
             text += f" · {self._status_version}"
+            short += f" · {self._status_version}"
         elif self.component.version_probe:
             text += " · 版本检测中…"
-        self.status_label.setText(text)
+            short += " · 检测中…"
+        self._set_status(text, short)
         self.status_label.setStyleSheet(
             "color:#2e7d32;font-weight:600;padding:2px 8px;"
             "background:#e8f5e9;border-radius:10px;"
         )
+
+    def _short_where(self) -> str:
+        """主文本里那截"来源"要短（格子只有 271px），完整出处留给 tooltip。
+
+        多版本组件走到通用分支 = 本工具一个版本都没装、探测到的是用户自己装的，
+        主文本只说「系统安装」；"不由本工具管理"这个结论在 tooltip 的全量原文里。
+        """
+        if self.component.multi_version:
+            return "系统安装"
+        return self._status_where or "系统"
 
     def _schedule_version_probe(self, exe_path: str) -> None:
         """把「执行组件命令取版本号」推迟到事件循环空闲时，且放到后台线程。
@@ -9418,23 +9479,30 @@ class ComponentCard(QFrame):
                 verdict, shadow = self._path_effective_check(active)
                 warned = mismatch or verdict == "shadowed"
                 names = "、".join(v for v, _p in ordered)
+                short = ""
                 if mismatch:
                     capsule = (f"● 已装 {len(ordered)} 个版本 · 未对齐：PATH 用的是 {path_ver}，"
                                f"{self.component.env_var or '环境变量'} 指 {home_ver}（{names}）")
+                    short = "● 未对齐（PATH≠HOME）"
                 elif verdict == "shadowed":
                     capsule = (f"● 已装 {len(ordered)} 个版本 · 生效 {active}（{names}）"
                                f" · 但 PATH 先命中 {shadow}")
+                    short = (f"● 已装 {len(ordered)} 个 · 生效 {active}"
+                             f" · 被 PATH 抢先")
                 else:
                     tail = f" · 生效 {active}" if active else " · 均未生效"
                     capsule = f"● 已装 {len(ordered)} 个版本{tail}（{names}）"
+                    short = f"● 已装 {len(ordered)} 个{tail}"
                 if residue:
                     # 磁盘上还有内容被删空的目录：必须报出来，否则它既不算已装、
                     # 又没人知道要清理，就成了永久死角（胶囊是用户唯一的入口线索）。
                     warned = True
                     capsule += f" · 另有 {len(residue)} 个残留空目录待清理"
+                    short += f" · {len(residue)} 个残留待清理"
                 self._mv_capsule = capsule
+                self._mv_capsule_short = short
                 self._mv_orange = warned
-                self.status_label.setText(capsule)
+                self._set_status(capsule, short)
                 self.status_label.setStyleSheet(
                     "color:#ef6c00;font-weight:600;padding:2px 8px;"
                     "background:#fff3e0;border-radius:10px;" if warned or not active else
@@ -9478,8 +9546,9 @@ class ComponentCard(QFrame):
                 capsule = (f"● {len(residue)} 个残留空目录待清理（{vers}）"
                            f" · 内容已删除、不算已装")
                 self._mv_capsule = capsule
+                self._mv_capsule_short = f"● {len(residue)} 个残留待清理"
                 self._mv_orange = True
-                self.status_label.setText(capsule)
+                self._set_status(capsule, self._mv_capsule_short)
                 self.status_label.setStyleSheet(
                     "color:#ef6c00;font-weight:600;padding:2px 8px;"
                     "background:#fff3e0;border-radius:10px;")
@@ -9510,6 +9579,7 @@ class ComponentCard(QFrame):
             # 走通用分支 = 本工具没装过这个组件，多版本胶囊不适用；清空它，
             # 否则 _render_status_label 会渲染上一轮留下的旧胶囊。
             self._mv_capsule = ""
+            self._mv_capsule_short = ""
             self._render_status_label()
             # 已可用 —— 禁用「仅配置环境变量」按钮
             self.btn_configure.setEnabled(False)
@@ -9524,7 +9594,7 @@ class ComponentCard(QFrame):
                 self.btn_uninstall.setEnabled(False)
                 self.btn_uninstall.setToolTip(
                     "系统里这个是你自己装的，本工具不代为卸载。想交给本工具管理并在多个"
-                    "版本间切换，先在下拉框选一个版本点「下载并安装」。")
+                    "版本间切换，先在下拉框选一个版本点「安装」。")
             else:
                 self.btn_uninstall.setEnabled(True)
                 self.btn_uninstall.setToolTip(
@@ -9539,7 +9609,8 @@ class ComponentCard(QFrame):
             p for p in install_root.iterdir()
             if p.is_dir() and not p.name.startswith(".") and p.name != "downloads"
         ):
-            self.status_label.setText("● 已下载，未配置")
+            # 主文本已经够短，不需要 tooltip 复述；显式清空，免得留下上一轮胶囊的详情
+            self._set_status("", "● 已下载，未配置")
             self.status_label.setStyleSheet(
                 "color:#ef6c00;font-weight:600;padding:2px 8px;"
                 "background:#fff3e0;border-radius:10px;"
@@ -9551,7 +9622,7 @@ class ComponentCard(QFrame):
             self.btn_uninstall.setToolTip("删除已下载但尚未配置的安装目录")
             return
 
-        self.status_label.setText("○ 未安装")
+        self._set_status("", "○ 未安装")
         self.status_label.setStyleSheet(
             "color:#c62828;font-weight:600;padding:2px 8px;"
             "background:#ffebee;border-radius:10px;"
@@ -10026,7 +10097,7 @@ class ComponentCard(QFrame):
         """
         install_root = CONFIG_DIR / self.component.key
         if not install_root.exists():
-            self._log("warn", "尚未下载，请先执行“下载并安装”。")
+            self._log("warn", "尚未下载，请先执行“安装”。")
             return
         ordered = installed_versions(self.component)
         if self.component.multi_version:
@@ -10913,7 +10984,7 @@ class MainWindow(QMainWindow):
                 background: #1976d2;
                 color: white;
                 border: none;
-                padding: 6px 18px;
+                padding: 6px 8px;
                 border-radius: 8px;
                 font-weight: 600;
                 font-size: 13px;
@@ -10926,7 +10997,7 @@ class MainWindow(QMainWindow):
                 background: #ffffff;
                 color: #1976d2;
                 border: 1px solid #1976d2;
-                padding: 6px 16px;
+                padding: 6px 8px;
                 border-radius: 8px;
                 font-weight: 600;
                 font-size: 13px;
@@ -10943,7 +11014,7 @@ class MainWindow(QMainWindow):
                 background: #ffffff;
                 color: #c62828;
                 border: 1px solid #c62828;
-                padding: 6px 16px;
+                padding: 6px 8px;
                 border-radius: 8px;
                 font-size: 13px;
             }

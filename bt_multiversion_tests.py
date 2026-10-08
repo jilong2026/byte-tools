@@ -1169,9 +1169,12 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
     def test_two_installed_one_active(self):
         card = self._card(active=self.JDK_ACTIVE)
         text = card.status_label.text()
-        self.assertIn("已装 2 个版本", text)
+        # 主文本只放结论（格子只有 271px，QLabel 超宽是 clip 不是省略号）：
+        # 「已装 2 个版本」精简成「已装 2 个」，完整的版本列表搬去 tooltip。
+        self.assertIn("已装 2 个", text)
         self.assertIn(f"生效 {self.JDK_ACTIVE}", text)
-        self.assertIn(self.JDK_OTHER, text)
+        # 护栏：另一个已装版本不许因为精简而消失——它只是从主文本挪到了 tooltip
+        self.assertIn(self.JDK_OTHER, card.status_label.toolTip())
 
     def test_installed_but_none_active_says_so(self):
         card = self._card(active=None)
@@ -1224,14 +1227,14 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
         # 又要基础胶囊文案逐字保留，且绝不落到旧的「✓ 已配置」文案。
         card = self._card(active=self.JDK_ACTIVE)
         base = card.status_label.text()
-        self.assertIn("已装 2 个版本", base)
+        self.assertIn("已装 2 个", base)
         self.assertIn(f"生效 {self.JDK_ACTIVE}", base)
         self.assertNotIn("21.0.4", base)               # 回填前没有版本号
         # 模拟探测线程 done 信号回来（worker 传默认 None，跳过"是否被新一轮取代"那道闸）
         card._on_version_probed("21.0.4")
         text = card.status_label.text()
         self.assertIn("21.0.4", text)                  # 版本号进胶囊
-        self.assertIn("已装 2 个版本", text)            # 正文逐字不变
+        self.assertIn("已装 2 个", text)                # 正文逐字不变
         self.assertIn(f"生效 {self.JDK_ACTIVE}", text)
         self.assertNotIn("已配置", text)               # 不许掉回旧的 ✓ 已配置文案
         self.assertNotIn("版本检测中", text)           # 回填后不再是"检测中"占位
@@ -1253,7 +1256,7 @@ class StatusCapsuleForMultiVersion(EnvSandbox):
         # 这两处断言同时红——正是 reviewer 注入 ordered[0] 后现有用例抓不到的原因。
         card = self._card3(active=self.JDK_OTHER)      # 生效 17
         text = card.status_label.text()
-        self.assertIn("已装 3 个版本", text)
+        self.assertIn("已装 3 个", text)
         self.assertIn(f"生效 {self.JDK_OTHER}", text)
         self.assertNotIn(f"生效 {self.JDK_ACTIVE}", text)   # 生效的不是最高版本 21
         card.version_combo.setCurrentIndex(card.version_combo.findText(self.JDK_ACTIVE))
@@ -1630,7 +1633,7 @@ class StaleProbeWorkerGuard(EnvSandbox):
         card._detect_status()
         card._on_version_probed("21.0.4")
         self.assertIn("21.0.4", card.status_label.text())
-        self.assertIn("已装 2 个版本", card.status_label.text())
+        self.assertIn("已装 2 个", card.status_label.text())
 
 
 class UninstallButtonGate(EnvSandbox):
@@ -1818,7 +1821,7 @@ class UninstallRepointHomeGuardF12(EnvSandbox):
         summary = self.comp.uninstall("21.0.4")
         self.assertEqual(self.win_env.get("JAVA_HOME"), foreign,
                          "用户指到组件根外的 JAVA_HOME 不得被卸载的自动重排覆成我们的目录")
-        self.assertIn("仅配置环境变量", summary, "不出手可以，但要在摘要里提示用户怎么重设")
+        self.assertIn("切换", summary, "不出手可以，但要在摘要里提示用户怎么重设")
         self.assertNotIn("已自动切到", summary)
         self.assertEqual(main.load_active_map().get("jdk"), "21.0.4",
                          "不重排就不写 active：留旧登记交给用户点按钮收尾")
@@ -2045,9 +2048,11 @@ class RealMachineRegressions(EnvSandbox):
         card._detect_status()
         text = card.status_label.text()
         print("不一致胶囊:", text)
+        tip = card.status_label.toolTip()
         self.assertIn("未对齐", text)
-        self.assertIn("21", text)
-        self.assertIn("17", text)
+        # 具体是哪两个版本对不上属于细节：主文本写结论，细节搬去 tooltip
+        self.assertIn("21", tip)
+        self.assertIn("17", tip)
         self.assertNotIn("● 已装 2 个版本 · 生效 17（21、17）", text,
                          "不能再只报 HOME 里那个版本当作生效版本")
         self.assertIn("#ef6c00", card.status_label.styleSheet(), "不一致必须是橙色告警态")
@@ -2069,7 +2074,8 @@ class RealMachineRegressions(EnvSandbox):
         text = card.status_label.text()
         print("外部安装胶囊:", text)
         self.assertIn("已配置", text)
-        self.assertIn("JAVA_HOME", text)
+        # 来源是"JAVA_HOME 还是 PATH"属于细节：主文本只说「系统安装」
+        self.assertIn("JAVA_HOME", card.status_label.toolTip())
         self.assertIn("系统", text, "要说清这是系统里的安装，不是本工具装的")
         self.assertNotIn("未安装", text)
         # 本工具没装过 = 没有可卸的东西，按钮不许给出做不到的承诺
@@ -2108,6 +2114,7 @@ class RealMachineRegressions(EnvSandbox):
         断言"只有 jdk 那类是『切换为生效版本』，tomcat 还是『配置环境变量』"。
         两种叫法指的是同一个动作（都把选中版本写进 XXX_HOME），留着两种文案
         只会让用户以为 tomcat 是"不能切版本"的那种。
+        2026-10-08 卡片瘦身：两种叫法统一再缩短成「切换」，多版本语义交给 tooltip。
         """
         self.as_windows()
         for key in ("jdk", "tomcat", "mysql", "nginx", "nacos"):
@@ -2115,7 +2122,7 @@ class RealMachineRegressions(EnvSandbox):
                 comp = self.make_component(key, "1.0.0")if key not in ("jdk",) \
                     else self.make_component(key)
                 card = main.ComponentCard(comp, lambda lvl, msg: None)
-                self.assertEqual(card.btn_configure.text(), "切换为生效版本",
+                self.assertEqual(card.btn_configure.text(), "切换",
                                  f"{key} 的按钮文案该统一")
 
 
@@ -2178,8 +2185,8 @@ class SwitchVerification(EnvSandbox):
                         f"必须有一条复验告警，实际日志：{joined}")
         self.assertIn(self.FOREIGN, joined, "告警要点名是谁把命令抢走的")
         self.card._detect_status()
-        text = self.card.status_label.text()
-        self.assertIn("先命中", text, "胶囊要常驻显示这个不一致，不能只闪一行日志")
+        self.assertIn("先命中", self.card.status_label.toolTip(),
+                      "胶囊要常驻显示这个不一致，不能只闪一行日志（细节在 tooltip）")
         self.assertIn("#ef6c00", self.card.status_label.styleSheet())
 
     def test_unverifiable_is_admitted_not_assumed_ok(self):

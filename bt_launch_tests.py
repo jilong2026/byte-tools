@@ -682,7 +682,7 @@ class LaunchPlan(unittest.TestCase):
             self.assertIsNone(main.resolve_launch_version(comp))
             ok, why = main.launch_gate(comp, self.spec, self.jdk_home)
             self.assertFalse(ok, "一个版本都没装却放过了门控")
-            self.assertIn("下载并安装", why, "门控原因要给出可点的下一步")
+            self.assertIn("安装", why, "门控原因要给出可点的下一步")
 
     def test_java_home_prefers_our_own_installed_jdk(self):
         """EnvManager.get 只是 os.environ.get（main.py:3660），
@@ -1944,10 +1944,11 @@ class CardLaunchUi(unittest.TestCase):
         main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": False
         self.card._refresh_launch_state()
         self.assertIn("残留", self.card.launch_label.text())
-        self.assertIn("8080", self.card.launch_label.text())
+        # 端口与"会重新起一个"是细节：主文本写结论，全文搬去 tooltip
+        self.assertIn("8080", self.card.launch_label.toolTip())
         # 文案不许承诺 start() 不做的事：它不看旧 PID，是直接起新进程覆盖登记。
         # 上次评审点过这句"会自动接管"过界，钉在这里防止改回去。
-        self.assertIn("重新起一个", self.card.launch_label.text())
+        self.assertIn("重新起一个", self.card.launch_label.toolTip())
         # 僵尸态按钮仍应是「启动」且可点：点它的意图是"清掉残留重新起一个"。
         # 合并按钮后如果这里显示「停止」，用户点下去会走stop 路径 —— 而端口本来
         # 就没在听，点了等于什么都不发生，看起来就是按钮坏了。
@@ -1957,7 +1958,7 @@ class CardLaunchUi(unittest.TestCase):
                          "僵尸态不算在运行：点按钮的意图是重新起一个")
         self.assertTrue(self.card.btn_start.isEnabled(),
                         "僵尸态按钮必须可点，否则用户点它像坏了")
-        self.assertNotIn("接管", self.card.launch_label.text())
+        self.assertNotIn("接管", self.card.launch_label.toolTip())
         self.assertTrue(self.card.btn_start.isEnabled())
         self.assertFalse(self.card.btn_console.isEnabled())
 
