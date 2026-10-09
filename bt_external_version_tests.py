@@ -732,6 +732,8 @@ class TakeoverFlowTests(ExternalSandbox):
         self.assertEqual(entry["level"], "machine")
         self.assertEqual(entry["home"], str(self.home))
         self.assertIn("HKLM", entry["snapshot"])
+        self.assertTrue(self.broadcasts,
+                        "外部接管改完系统变量同样必须通知外壳（与 machine_fix 一条道理）")
 
     def test_user_declining_the_confirmation_changes_nothing(self):
         shadow_home = self.make_home("jdk8", "java.exe")
@@ -1351,6 +1353,22 @@ class WorkspaceMachineFixTests(ExternalSandbox):
         self.assertEqual(res["verdict"], "cancelled")
         self.assertEqual(self.hklm, before)
         self.assertEqual(main.load_machine_fix_map(), {})
+        self.assertEqual(self.broadcasts, [], "什么都没改就不必通知外壳")
+
+    def test_machine_fix_notifies_the_shell_so_new_terminals_see_it(self):
+        """改完 HKLM 必须发 WM_SETTINGCHANGE，否则"复验通过"是空话。
+
+        2026-10-08 真机：提权把 maven-3.10.0\\bin 插到 HKLM Path[0]，注册表与
+        composed_env 都显示 3.10.0，但 explorer 的缓存块仍是旧的（3.9.2 在前），
+        用户从开始栏重开 cmd 一百次仍是 3.9.2 —— 因为压根没人通知过外壳。
+        """
+        comp = self._maven()
+        self.install_fake_helper("ok")
+        res = main.apply_workspace_machine(comp, "3.10.0",
+                                           confirm_machine=lambda plan: True)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(self.broadcasts,
+                        "系统变量改完必须请求一次外壳刷新，否则新终端仍是旧环境")
 
     def test_machine_fix_coexists_with_active_instead_of_replacing_it(self):
         """与 takeover 的关键区别：生效版本仍是工作区那个，active 不许被清掉。"""

@@ -21,7 +21,7 @@ A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 com
 - 🧹 **Safe uninstall and stale-entry cleanup.** Uninstall always targets a directory that really exists on disk. For the seven multi-version components it removes **only the version selected in the drop-down** — its directory and its own `PATH` entries — and leaves the sibling versions untouched; `XXX_HOME` is deleted only when it points at the version being removed. Only when no installed version of that component is left does the cleanup fall back to sweeping the whole component directory (which also clears dead entries left by manual deletions). The "Clean stale PATH entries" button in the title bar removes entries that point into this tool's folder but no longer exist.
 - 🧭 **Take over a version you installed yourself — with one-click revert.** A JDK / Maven / Node that already lives outside this tool's folders is scanned and can be made the active version (the scan is read-only and every candidate must pass a real version probe). Only when a user-level write cannot win does a confirmation dialog appear and the target directory get inserted at the front of the **system `PATH`**. The original text is snapshotted first, and **"↩ Revert to my previous settings"** stays on the card to write it back verbatim. Five hard rules — original-text snapshot, minimal edit, critical-entry validation, re-verification, always revertable — must all hold or nothing is executed; any failure rolls back automatically and is never reported as success. **When a version installed by this tool is shadowed by an older machine-level one (a user-level write can never outrank the machine segment) it likewise asks once and inserts it at the front of the system `PATH`**, instead of telling you to hand-edit system variables.
 - 🛠️ **Environment-variable management.**
-    - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` asynchronously (no `setx`, which truncates PATH at 1024 chars).
+    - Windows: writes to `HKCU\Environment` via `winreg` and broadcasts `WM_SETTINGCHANGE` (sent synchronously, addressed to the shell by name; other top-level windows are broadcast to in the background). No `setx`, which truncates PATH at 1024 chars.
     - macOS / Linux: appends idempotent `export` blocks (with begin/end markers) to `.zshrc` / `.bash_profile` / `.bashrc` / `.profile`.
 - 📊 **Live feedback.** Progress bar with real-time byte counts, cancel support, and a collapsible **log overlay** with colour-coded output (info / ok / warn / error; warn / error auto-open it and attach an unread count to the "Log" button).
 - 🎨 **Modern UI.** Frameless custom title bar with a window icon (visible in the taskbar / Alt+Tab), rounded cards with drop shadows **arranged in an adaptive grid** (`▦` / `☰` toggles between grid and single-column list), gradient progress bars, hover/press animations, a component search box above the tabs, a **collapsible log overlay** that floats over the cards, and a bottom status bar showing "Total components: 26".
@@ -352,19 +352,25 @@ yourself". Now it looks at **which segment the winning entry actually lives in**
 - **In the system variables**: a confirmation dialog lists exactly what will change; only after you agree does it ask
   for administrator rights and **insert** this version's directory at the front of the *system* `PATH`, **deleting
   none of the existing entries** (the copy you installed stays in the system variables, just further back). It then
-  re-verifies — success is only reported when the check passes;
+  re-verifies — success is only reported when the check passes. The elevated write is done by a helper *process*, so
+  the main program additionally announces the change to the shell afterwards; without that second step you would see
+  "the registry is already correct, the tool's own verification terminal shows the new version, yet a console *you*
+  just opened still runs the old one".
 - **In neither segment**: **no elevation prompt**; it explains plainly why the tool leaves it alone (the cause is not
   in either `PATH` segment, so changing system variables may not help anyway).
 
 In both fixable cases the original text is snapshotted first, and **"↩ Revert to my previous settings"** stays on the
-card for one-click restoration. In addition, **before switching to the next version or uninstalling this one the tool
+card for one-click restoration (reverting is a machine-level change too, so it also announces the change — otherwise
+a console opened *after* the revert would still hit the version that was just removed from the front of the system
+`PATH`). In addition, **before switching to the next version or uninstalling this one the tool
 restores the system variables first** — so the system `PATH` never keeps a leftover entry pointing at an old, or
 already-deleted, directory. Declining the confirmation dialog or the UAC prompt is always reported as "nothing was
 changed".
 
 ### Applying variables
 
-- **Windows:** any new console window will see the fresh user variables. After every write the tool notifies
+- **Windows:** any new console window will see the fresh user variables. After every write — user variables *and*
+  machine-level ones made through elevation — the tool notifies
   the shell (`Shell_TrayWnd`) by name so it rebuilds its own environment block immediately — terminals opened
   from the Start menu, taskbar or desktop therefore pick up the new value within about a second.
 - **If something still shows the old version, a long-lived host process is the cause.** Windows *copies* the

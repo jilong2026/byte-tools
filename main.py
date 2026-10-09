@@ -9458,6 +9458,22 @@ def build_machine_request(comp: Component, dv: "DiscoveredVersion",
     }
 
 
+def _announce_env_change() -> None:
+    """改完**系统级**（HKLM）环境变量后通知外壳。
+
+    为什么用户级不用管、系统级必须单独喊一声：用户级的写入口
+    （`write_user_env_raw`）自己就带广播；系统级是提权助手子进程写的，主进程这边
+    一声不出，explorer 记的那份环境块就还是旧的，而 Windows 是**把环境块复制给
+    每个新进程**的——于是他"切换之后新开的 cmd"依旧命中旧版本（本机 Maven 3.9.2
+    vs 3.10.0 踩过：注册表已经对，软件内「开验证终端」也对，用户自己的 cmd 还是旧的）。
+    通知失败不影响已写好的注册表，所以这里只静默尝试。
+    """
+    try:
+        EnvManager._broadcast_env_change()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def apply_external_version_machine(comp: Component, dv: "DiscoveredVersion",
                                    user_snapshot: Optional[Dict[str, dict]] = None,
                                    user_added: Optional[List[str]] = None,
@@ -9557,6 +9573,7 @@ def apply_external_version_machine(comp: Component, dv: "DiscoveredVersion",
     result["ok"] = True
     result["verdict"] = "ok"
     result["entry"] = entry
+    _announce_env_change()
     steps.append("复验通过：新开的终端会用到这个版本（系统级）")
     _log("ok", steps[-1])
     return result
@@ -9571,6 +9588,9 @@ def revert_machine_only(comp: Component, machine_before: Dict[str, dict],
 
     outcome = _run_elevated_helper({"mode": "restore", "restore": machine_before})
     if outcome.get("ok"):
+        # 还原同样是系统级改动：不喊一声的话，"还原之后新开的终端"还会命中
+        # 被还原掉的那个版本（和切换方向犯的是同一个错）。
+        _announce_env_change()
         return {"ok": True, "error": ""}
     # 助手失败/超时也要自己复核：也许它其实已经改回去了
     problems: List[str] = []
@@ -9711,6 +9731,7 @@ def apply_workspace_machine(comp: Component, version: str,
     result["ok"] = True
     result["verdict"] = "ok"
     result["level"] = "machine"
+    _announce_env_change()
     steps.append(f"复验通过：新开的终端会用到 {bin_dir}（已插到系统 PATH 最前）")
     _log("ok", steps[-1])
     return result
@@ -9825,6 +9846,7 @@ def revert_external_version(comp: Component,
                 return result
         steps.append("系统环境变量已按接管前的原文还原")
         _log("ok", steps[-1])
+        _announce_env_change()
 
     # ② HKCU 还原：不需要提权
     try:
