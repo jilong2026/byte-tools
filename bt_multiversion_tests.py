@@ -2721,12 +2721,19 @@ class InstallButtonBlockedWhenInstalled(EnvSandbox):
                         "空目录/半截安装不该灰掉安装按钮")
 
     def test_every_component_respects_the_rule(self):
-        """26 个组件逐个走一遍：装了就该灰，且换选未装版本能亮回来。"""
+        """能装的组件逐个走一遍：装了就该灰，且换选未装版本能亮回来。
+
+        「开发工具」那批（download_only）**不在遍历范围内**，理由不是"漏了"：
+        它们磁盘上永远不落 `install_dir(version)`，"已装"这个前提对它们不存在，
+        而它们那颗按钮的语义是「下载」（能不能点是另一条契约，见 bt_download_only_tests）。
+        """
         self.as_windows()
         self.enable_detect()
         main.ComponentCard.probe_calls = []
         checked = 0
         for comp in main.build_components():
+            if comp.download_only:
+                continue
             version = comp.versions[0].version
             card = main.ComponentCard(comp, lambda lvl, msg: None)
             home = comp.install_dir(version)
@@ -2741,7 +2748,9 @@ class InstallButtonBlockedWhenInstalled(EnvSandbox):
                 self.assertFalse(card.btn_install.isEnabled(),
                                  f"{comp.key} 已装 {version} 时安装按钮必须置灰")
             checked += 1
-        self.assertEqual(checked, len(main.build_components()))
+        installable = [c for c in main.build_components() if not c.download_only]
+        self.assertEqual(checked, len(installable),
+                         "遍历漏了组件：新增可安装组件时这条要一起覆盖到")
 
     def test_download_in_progress_is_never_re_enabled(self):
         """下载途中换选中，不许把按钮点亮。"""

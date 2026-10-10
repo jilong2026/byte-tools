@@ -264,6 +264,47 @@ def save_update_check(last_check_ts=None, notified=None) -> None:
     _update_config(_mut)
 
 
+# 「开发工具」那批只下载组件的落点偏好（R13）。单独一个键而不是塞进 selections：
+# selections 记的是"装哪个版本"，与"下到哪儿"是两件事。
+DOWNLOAD_DIR_KEY = "download_dir"
+
+
+def default_download_dir() -> Path:
+    """没记住过目录时的默认落点：用户自己的「下载」文件夹。"""
+    return Path.home() / "Downloads"
+
+
+def load_download_dir() -> Path:
+    """上一次下载用的目录。
+
+    没记录 / 记录的不是目录 / 那个目录后来被删了 —— 一律安静回落到 ~/Downloads。
+    这只是一个"默认落在哪"的偏好，为它弹错误框不值得。
+    """
+    data: dict = {}
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:                    # noqa: BLE001  坏配置不该挡住下载
+            data = {}
+    raw = data.get(DOWNLOAD_DIR_KEY) if isinstance(data, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return default_download_dir()
+    candidate = Path(raw)
+    return candidate if candidate.is_dir() else default_download_dir()
+
+
+def save_download_dir(path) -> None:
+    """记住这次选的目录。
+
+    必须走 `_update_config` 的读-改-写：整体覆盖会连带清掉 active / selections /
+    takeover 三张别的写入方的表（R3.2 的教训）。
+    """
+    def _mut(cfg: dict) -> None:
+        cfg[DOWNLOAD_DIR_KEY] = str(Path(path))
+
+    _update_config(_mut)
+
+
 def update_check_due(now: float, state, interval_sec: float = UPDATE_CHECK_INTERVAL_SEC) -> bool:
     """自动检查的频控：距上次不足 24 小时就不查（不骚扰、也不给网络添活）。
 
@@ -5046,6 +5087,28 @@ def uninstall_confirm_text(comp: Component) -> str:
 # ---------------------------------------------------------------------------
 # 下载线程
 # ---------------------------------------------------------------------------
+# 归档类型 → 文件头魔数。只下载型组件下载完不解压，"内容对不对"只能靠文件头判；
+# 表里没有的类型（war / 裸二进制）不校验，宁可不判也不要误判成失败。
+_MAGIC_BY_EXT: Dict[str, bytes] = {"zip": b"PK", "exe": b"MZ", "msi": b"\xd0\xcf"}
+
+
+def _unique_download_path(target: Path) -> Path:
+    """目标文件已存在时补 ` (2)`、` (3)`… 直到不冲突。
+
+    只下载型组件下到用户自己的目录，同名覆盖会把用户上一次下的东西吃掉 ——
+    而"我刚才下的那个 1.2GB 的包不见了"是没有日志可查的那种损失。
+    """
+    if not target.exists():
+        return target
+    for n in range(2, 1000):
+        candidate = target.with_name(
+            f"{target.stem} ({n}){target.suffix}"
+            if target.suffix else f"{target.name} ({n})")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"{target} 同名文件过多，无法确定保存文件名")
+
+
 class DownloadWorker(QThread):
     """
     多源故障转移下载线程（详见 DEVELOPMENT.md R1.4）。
@@ -5063,17 +5126,24 @@ class DownloadWorker(QThread):
     _CHUNK_SIZE = 64 * 1024
 
     def __init__(self, urls: List[str], dest: Path,
-                 parent: Optional[QObject] = None) -> None:
+                 parent: Optional[QObject] = None,
+                 expect_magic: bytes = b"") -> None:
         """
         构造下载任务。
 
         入参 urls: List[str]     按 R1 优先级排序的 URL 列表（镜像在前，官网末位）
         入参 dest: Path         目标文件路径（先写 .part 临时文件，成功后 replace）
         入参 parent: QObject    Qt 父对象
+        入参 expect_magic: bytes 期望的文件头魔数（如 b"PK" / b"MZ"）；**默认空 = 不校验**，
+                     保持 26 个老组件的行为逐字不变。只下载型组件必须传：实测
+                     mirrors.huaweicloud.com 的 jetbrains 目录会回 200 + 12KB HTML，
+                     那种体量轻松越过 DOWNLOAD_MIN_VALID_BYTES 这道字节数下限，
+                     用户会拿到一个后缀写着 .exe、内容却是网页的文件。
         """
         super().__init__(parent)
         self.urls = list(urls)
         self.dest = dest
+        self.expect_magic = bytes(expect_magic or b"")
         self._cancel = False
         # 记录每个源的失败原因，最终汇总输出
         self._failures: List[str] = []
@@ -5146,6 +5216,17 @@ class DownloadWorker(QThread):
                     f"（声明 {total}），判定该源无效，换下一个源。")
                 tmp.unlink(missing_ok=True)
                 return False
+            # 魔数校验：字节数够不代表内容对（200 + 12KB HTML 的假源就够）。
+            # 放在 replace 之前、失败同样删干净 —— 半截文件留在用户目录里比没有更糟。
+            if self.expect_magic:
+                with open(tmp, "rb") as probe:
+                    head = probe.read(len(self.expect_magic))
+                if head != self.expect_magic:
+                    self.log.emit("warn",
+                        f"第 {url} 的内容开头是 {head!r}，不是预期的 {self.expect_magic!r}"
+                        "（多半是镜像站拿一个网页应付了这个文件），换下一个源。")
+                    tmp.unlink(missing_ok=True)
+                    return False
             tmp.replace(self.dest)
         self.log.emit("ok",
             f"下载完成：{self.dest} ({human_size(self.dest.stat().st_size)})，"
@@ -11195,17 +11276,29 @@ class ComponentCard(QFrame):
         self.btn_install.setObjectName("primaryBtn")
         self.btn_install.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_install.setFixedHeight(30)
-        self.btn_install.clicked.connect(self.on_install_clicked)
+        # 只下载型组件：同一颗主按钮、同一个属性名，但文案是「下载」、槽位是
+        # on_download_clicked。不改属性名是因为 _sync_action_buttons、布局与一批用例
+        # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
+        if self.component.download_only:
+            self.btn_install.setText("下载")
+            self.btn_install.setToolTip(
+                "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量")
+            self.btn_install.clicked.connect(self.on_download_clicked)
+        else:
+            self.btn_install.clicked.connect(self.on_install_clicked)
         actions.addWidget(self.btn_install)
 
         # 「配置环境变量 / 切换为生效版本」→「切换」：格子只有 271px，
         # 两种旧叫法都太长；多版本语义由 tooltip 承载（下面 _sync_action_buttons 里）。
-        self.btn_configure = QPushButton("切换")
-        self.btn_configure.setObjectName("secondaryBtn")
-        self.btn_configure.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_configure.setFixedHeight(30)
-        self.btn_configure.clicked.connect(self.on_configure_clicked)
-        actions.addWidget(self.btn_configure)
+        # 只下载型组件**不创建**这个节点（不是创建后隐藏，同「可多版本」角标的纪律）：
+        # 它没有"生效版本"可切，留着按钮等于给用户一个点了会写注册表的入口。
+        if not self.component.download_only:
+            self.btn_configure = QPushButton("切换")
+            self.btn_configure.setObjectName("secondaryBtn")
+            self.btn_configure.setCursor(QCursor(Qt.PointingHandCursor))
+            self.btn_configure.setFixedHeight(30)
+            self.btn_configure.clicked.connect(self.on_configure_clicked)
+            actions.addWidget(self.btn_configure)
 
         self.btn_cancel = QPushButton("取消")
         self.btn_cancel.setObjectName("dangerBtn")
@@ -11216,15 +11309,18 @@ class ComponentCard(QFrame):
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
         actions.addWidget(self.btn_cancel)
 
-        self.btn_uninstall = QPushButton("卸载")
-        self.btn_uninstall.setObjectName("dangerBtn")
-        self.btn_uninstall.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_uninstall.setFixedHeight(30)
-        # 默认禁用，待 _detect_status 检测到已安装或有本地下载时才启用
-        self.btn_uninstall.setEnabled(False)
-        self.btn_uninstall.setToolTip("删除已安装的版本、清理 XXX_HOME 与 PATH")
-        self.btn_uninstall.clicked.connect(self.on_uninstall_clicked)
-        actions.addWidget(self.btn_uninstall)
+        # 只下载型组件**不创建**卸载节点（不是创建后置 None/隐藏）：
+        # 属性压根不存在，任何误用它的代码都会当场 AttributeError 而不是静默跳过。
+        if not self.component.download_only:
+            self.btn_uninstall = QPushButton("卸载")
+            self.btn_uninstall.setObjectName("dangerBtn")
+            self.btn_uninstall.setCursor(QCursor(Qt.PointingHandCursor))
+            self.btn_uninstall.setFixedHeight(30)
+            # 默认禁用，待 _detect_status 检测到已安装或有本地下载时才启用
+            self.btn_uninstall.setEnabled(False)
+            self.btn_uninstall.setToolTip("删除已安装的版本、清理 XXX_HOME 与 PATH")
+            self.btn_uninstall.clicked.connect(self.on_uninstall_clicked)
+            actions.addWidget(self.btn_uninstall)
 
         # 启动相关按钮：只有登记了启动描述符的组件才有（LAUNCH_KEYS，本期只有 Jenkins）
         self.launch_worker: Optional[LaunchWorker] = None
@@ -12254,6 +12350,10 @@ class ComponentCard(QFrame):
         ③ 下载结束或失败之后。只挂 ① 会出真机 bug —— 切一次生效版本后按钮置灰，
         用户换选另一个版本没人重算，按钮一直灰着点不动（2026-09-30 反馈）。
         """
+        # 只下载型组件没有「切换 / 卸载」节点，下面每一行都会踩空；
+        # 而且它按"选中版本装没装"算启用条件，那要去扫盘 —— 一开始就该短路掉。
+        if self.component.download_only:
+            return
         # 下载途中按钮归下载流程管：否则换个选中就能并发触发第二次下载
         if not (self.worker and self.worker.isRunning()):
             selected = self._current_version().version
@@ -12364,6 +12464,16 @@ class ComponentCard(QFrame):
         本方法在窗口构建卡片时就会被调用，因此绝不同步执行组件命令：detect 只判定
         存在（probe_version=False），版本号交给 VersionProbeWorker 异步回填。
         """
+        # 只下载型组件（「开发工具」）磁盘上根本不会有它，任何"已配置 / 未安装"的结论
+        # 都是假的，而且算这些结论要扫盘。胶囊只说清它能干什么，中性灰 —— 不用绿色
+        # （绿色在本界面里等于"已配置"）也不用橙色（等于"出问题了"）。
+        if self.component.download_only:
+            note = "仅提供官方安装包下载 · 不解压、不配置环境变量"
+            self._set_status(note, "仅提供官方安装包下载")
+            self.status_label.setStyleSheet(
+                "color:#5b6b7a;font-weight:600;padding:2px 8px;"
+                "background:#eef2f6;border-radius:10px;")
+            return
         # 「下载并安装」的启用状态只取决于选中的版本装没装好，与后面走哪条探测分支无关，
         # 所以在分支之前先同步一次；多版本那两个按钮要等本方法算出 active 之后再同步。
         self._sync_action_buttons()
@@ -12574,6 +12684,10 @@ class ComponentCard(QFrame):
         R3.9 那句"非多版本组件清单逐字不变"约束的是**不能凭空造版本**，
         不是"不许把真装了的版本显示出来"—— 后者正是本条要修的。
         """
+        # 只下载型组件：磁盘上不会有它，合成本来就没有对象；直接返回官方清单，
+        # 顺带保证"下拉框里出现的每一版都能下载"这条判据不被合成项污染。
+        if self.component.download_only:
+            return list(self.component.versions)
         result = list(self.component.versions)
         known = {cv.version for cv in result}
         # 已装的 + 只剩空壳的都合成进来：空壳必须还能被选中并卸载，
@@ -12606,6 +12720,10 @@ class ComponentCard(QFrame):
         jenkins / nacos / activemq / powershell 全都没有，正是这个 return 造成的。
         `multi_version` 只管"能不能多版本并存"（R3 语义），不该管"要不要显示已装"。
         """
+        # 只下载型组件永远没"已装"这回事：勾的判据是磁盘目录，它一个字节都不往
+        # ~/.env-tools 下写。这里短路，免得以后有人给它加了落盘就把勾带出来。
+        if self.component.download_only:
+            return
         versions = self._combo_version_list()
         # F4 护栏：下面的循环按 enumerate(versions) 的行号往 combo 写数据，前提是
         # 行数与下拉框清单 1:1。哪天有调用点在改清单的同时没重灌 combo（搜索过滤、
@@ -12635,11 +12753,14 @@ class ComponentCard(QFrame):
             # 点"配置环境变量"或"卸载"会对着不存在的目录动手。
             # 找不到任何已装版本时才退回第一项（首装场景就该选清单首位）。
             idx = 0
-            installed = {v for v, _p in installed_versions(self.component)}
-            for i, cv in enumerate(self._combo_version_list()):
-                if cv.version in installed:
-                    idx = i
-                    break
+            # 只下载型组件磁盘上永远不会有它，这次扫描纯属白跑 —— 而且"建卡时不碰磁盘"
+            # 是这类组件的契约之一，留着它以后就没法证明"它真的不落盘"。
+            if not self.component.download_only:
+                installed = {v for v, _p in installed_versions(self.component)}
+                for i, cv in enumerate(self._combo_version_list()):
+                    if cv.version in installed:
+                        idx = i
+                        break
             self.version_combo.setCurrentIndex(idx)
             self.version_combo.blockSignals(False)
             self.version_combo._committed_text = self.version_combo.currentText()
@@ -12747,6 +12868,80 @@ class ComponentCard(QFrame):
         self.worker.finished_ok.connect(lambda p: self._on_download_ok(Path(p), cv))
         self.worker.finished_fail.connect(self._on_download_fail)
         self.worker.start()
+
+    # ------------------------------------------------------------------
+    def on_download_clicked(self) -> None:
+        """「开发工具」那颗「下载」：把官方安装包下到用户挑的目录，到此为止。
+
+        为什么不复用 on_install_clicked：那条链的收尾是
+        `install_downloaded` → `_configure_after_extract` → `apply_active_version`
+        → `_configure_env`，**每一步都在写注册表 / shell rc**（且 `_configure_env`
+        连 env_var 为空都会往 PATH 里塞一条）。共用一个槽位，等于给以后
+        "顺手在这里加一行配置"留门 —— 分开写才是把"这类组件不碰环境"钉死。
+        """
+        cv = self._current_version()
+        urls = cv.urls_for_current()
+        if not urls:
+            self._log("error", self.component.unsupported_platform_hint
+                      or f"当前系统 {CURRENT_OS} 无可用下载地址。")
+            return
+
+        start = load_download_dir()
+        chosen = QFileDialog.getExistingDirectory(self, "选择安装包保存位置", str(start))
+        if not chosen:
+            return          # 用户点了取消：什么都不该发生
+        dest_dir = Path(chosen)
+        suffix = self._download_suffix(cv)
+        dest = _unique_download_path(dest_dir / f"{self.component.key}-{cv.version}{suffix}")
+        save_download_dir(dest_dir)
+
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.btn_install.setEnabled(False)
+        self.btn_cancel.setVisible(True)
+        self.btn_cancel.setEnabled(True)
+
+        self.worker = DownloadWorker(urls, dest, None, _MAGIC_BY_EXT.get(
+            cv.archive_for_current(), b""))
+        self.worker.progress.connect(self._on_progress)
+        self.worker.log.connect(self._log)
+        self.worker.finished_ok.connect(lambda p: self._on_download_only_ok(Path(p)))
+        self.worker.finished_fail.connect(self._on_download_only_fail)
+        self.worker.start()
+
+    def _download_suffix(self, cv: ComponentVersion) -> str:
+        """落盘文件后缀：取归档类型表（_DEVTOOLS 里逐条写死的 exe / zip）。
+
+        不从 URL 推 —— GitHub 产物的首选地址是加速器拼出来的
+        `https://gh-proxy.com/https://github.com/...`，尾巴上确实带 .zip，
+        但加速器换一条就变；归档类型表才是我们说清楚了的"这个文件是什么"。
+        """
+        ext = cv.archive_for_current()
+        return f".{ext}" if ext and ext not in ("bin",) else ""
+
+    def _on_download_only_ok(self, path: Path) -> None:
+        self.progress.setValue(100)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(False)
+        self._log("ok", f"已下载到 {path}（{human_size(path.stat().st_size)}）。"
+                        f"本工具**不解压、不安装、不配置环境变量** —— "
+                        f"双击这个文件自己装，安装目录由你在安装向导里选。")
+        answer = QMessageBox.question(
+            self, "下载完成",
+            f"{path.name}\n已保存到：\n{path.parent}\n\n要打开所在文件夹吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if answer == QMessageBox.Yes and not _open_in_file_manager(path.parent):
+            self._log("warn", f"打不开文件夹，请自己到 {path.parent} 找它")
+        self.btn_install.setEnabled(True)
+
+    def _on_download_only_fail(self, message: str) -> None:
+        # 取消走的是同一个 finished_fail（沿用 DownloadWorker 的既有约定），
+        # 那种情况不该报"失败"，只记一句就好。
+        level = "warn" if "取消" in message else "error"
+        self._log(level, f"下载未完成：{message}")
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(False)
+        self.btn_install.setEnabled(True)
 
     # ------------------------------------------------------------------
     def _on_progress(self, downloaded: int, total: int) -> None:
