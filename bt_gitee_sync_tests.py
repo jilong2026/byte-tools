@@ -446,6 +446,30 @@ class AutoFetchContract(unittest.TestCase):
         self.assertIn('if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof', self._bat())
         self.assertIn('[ "${AUTO_FETCH_ASSETS:-1}" != "0" ]', self._sh())
 
+    def test_bat_clears_stale_assets_before_fetching(self):
+        """产物跨 tag **同名**（v1.1.2 起都叫 ByteTools.exe），所以"文件已存在"根本说明不了
+        它属于哪个版本 —— 旧行为是把上个 tag 留下的包原样传到新 tag 的 Gitee Release 上，
+        而 [3/3] 只核附件名，照样打印 OK（2026-10-10 用户就是这么撞上"传上去全是旧的"）。
+        现在每次真要去下载之前，先把暂存目录整个清空。
+        """
+        bat = self._bat().replace("\r\n", "\n")
+        self.assertIn("\n:clear_stale\n", bat, "缺清空子过程")
+        clear_at = bat.index("call :clear_stale")
+        self.assertLess(clear_at, bat.index("call :fetch_asset"),
+                        "清空必须排在任何一次下载之前")
+        self.assertLess(
+            bat.index('if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof'), clear_at,
+            "清空必须排在离线开关之后：AUTO_FETCH_ASSETS=0 时一个字节都不许删")
+
+    def test_bat_refuses_to_clear_a_dir_not_named_release_assets(self):
+        """ASSETS_DIR 是命令行第 3 个参数。手滑传成 `assets`（仓库里的图标目录）或仓库根目录时，
+        无条件 rmdir 会直接删掉版本库文件 —— 所以清空只允许作用于末级名为 release-assets 的目录。
+        """
+        body = self._bat().split(":clear_stale", 1)[1]
+        self.assertIn('"release-assets"', body, "clear_stale 里没有按目录末级名设闸")
+        self.assertIn("notice:", body, "闸门拦下时要打印为什么没清，别静默跳过")
+        self.assertIn("rmdir /s /q", body, "clear_stale 里没有真的清空动作")
+
     def test_bat_is_still_ascii_and_crlf(self):
         raw = (REPO_ROOT / "同步Gitee产物.bat").read_bytes()
         self.assertEqual(sorted({b for b in raw if b > 0x7F}), [],
@@ -480,18 +504,22 @@ class BatEndToEnd(unittest.TestCase):
             (Path(self.tmp.name) / name).write_bytes(b"Z" * 2048)
         (Path(self.tmp.name) / "byte-tools.png").write_bytes(b"icon")
 
-    def test_bat_uploads_all_four_and_verifies(self):
+    def _run_bat(self, assets_dir, auto_fetch="0"):
+        """跑真 .bat：API 指向本地 mock，AUTO_FETCH_ASSETS 默认关掉以保持离线。"""
         env = dict(os.environ)
         env["GITEE_API_BASE"] = f"http://127.0.0.1:{self.port}/api/existing_links/repos/owner/slug"
         env["NO_PAUSE"] = "1"
-        env["AUTO_FETCH_ASSETS"] = "0"   # 同上：回归用例不许碰网络
+        env["AUTO_FETCH_ASSETS"] = auto_fetch   # 回归用例不许碰网络
         proc = subprocess.run(
             ["cmd.exe", "/c",
-             f'{REPO_ROOT / "同步Gitee产物.bat"} vTEST FAKE_TOKEN_NOT_REAL '
-             f'{self.tmp.name} nopause'],
+             f'{REPO_ROOT / "同步Gitee产物.bat"} {TAG} FAKE_TOKEN_NOT_REAL '
+             f'{assets_dir} nopause'],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(REPO_ROOT), env=env, timeout=300)
-        out = (proc.stdout or "") + (proc.stderr or "")
+        return proc, (proc.stdout or "") + (proc.stderr or "")
+
+    def test_bat_uploads_all_four_and_verifies(self):
+        proc, out = self._run_bat(self.tmp.name)
         self.assertEqual(proc.returncode, 0, out)
         self.assertIn("preflight ok: found 4 artifact file(s)", out)
         self.assertIn("release exists, reuse ID: 777", out)
@@ -502,6 +530,25 @@ class BatEndToEnd(unittest.TestCase):
         # 上传必须带上可观测的 http/耗时/字节，别再回到「静默挂半小时」
         self.assertGreaterEqual(out.count("curl: http=200"), 4, out)
         self.assertNotIn("FAKE_TOKEN_NOT_REAL", out, "输出里回显了令牌")
+
+    def test_offline_mode_does_not_wipe_the_staging_dir(self):
+        """清空一步的闸门：下载开关关着（= 维护者手放的产物 / 回归用例）时一个字节都不许删。
+
+        这里刻意把暂存目录的末级名取成 release-assets —— 也就是"名字符合清空条件"，
+        唯一拦住它的必须只能是 AUTO_FETCH_ASSETS=0。
+        """
+        stage = Path(self.tmp.name) / "release-assets"
+        stage.mkdir()
+        for name in ARTIFACTS:
+            (stage / name).write_bytes(b"Z" * 2048)
+        marker = stage / "hand-placed.txt"
+        marker.write_text("keep me")
+        proc, out = self._run_bat(str(stage))
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertTrue(marker.exists(),
+                        "AUTO_FETCH_ASSETS=0 时脚本删掉了暂存目录里的文件")
+        self.assertIn("preflight ok: found 4 artifact file(s)", out)
+        self.assertEqual(sorted(STATE["assets"]), sorted(ARTIFACTS))
 
 
 if __name__ == "__main__":

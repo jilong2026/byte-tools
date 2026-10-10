@@ -628,20 +628,35 @@ git push origin v1.0.1
    ```
 
 2. **等 Actions 全绿**。这一步之后：GitHub Release 有 3 平台 4 个产物且已正式发布；Gitee 有同名 Release，正文是 GitHub 直链表格，但**附件区还是空的**。
-3. **本机取产物并传上 Gitee**（令牌走交互输入，不落命令行历史）
+3. **本机传产物上 Gitee**（令牌走交互输入，不落命令行历史）
 
    ```bat
    cd /d E:\file\test\byte-tools
+   同步Gitee产物.bat v1.0.4
+   ```
+
+   就这一条。脚本会自己建 `release-assets/`、走 `gh-proxy.com` 把四个产物下进来、再逐个传上 Gitee，
+   跑完 `[3/3]` 核对四个附件是否都在。产物已经在本地了就不重复下载（除非你手动清过目录）。
+
+   ```bat
+   REM 自动下载失败时的手动兜底：下完再跑上面那条即可
    mkdir release-assets
    curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools.exe"
    curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools-windows-x64.zip"
    curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools-macos-arm64.zip"
    curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools-linux-x64"
    dir release-assets
-   同步Gitee产物.bat v1.0.4
    ```
 
-   双击 `同步Gitee产物.bat` 也一样：它只会问 tag 和令牌，产物目录默认就是 `release-assets`。脚本幂等，重跑会跳过已存在的附件；跑完 `[3/3]` 会核对四个附件是否都在。
+   双击 `同步Gitee产物.bat` 也一样：它只会问 tag 和令牌，产物目录默认就是 `release-assets`。
+
+> ⚠️ **为什么每次跑都会先清空 `release-assets/`**：四个产物**跨 tag 同名**（v1.1.2 起都叫 `ByteTools.exe`），
+> "文件已存在"根本说明不了它属于哪个版本。早先的写法是"存在且非 0 字节就跳过下载"，于是上个 tag 留下的包
+> 会被原样传进新 tag 的 Gitee Release，而末尾那道核对只看附件名，照样报 OK（2026-10-10 用户就是这么撞上
+> "传上去的全是旧的"）。现在 `:clear_stale` 会在下载前把暂存目录整个删掉重下 —— 代价是**中途失败后重跑要
+> 重新下约 218 MB**。清空只作用于末级名为 `release-assets` 的目录：第 3 个参数传成别的（比如仓库里真实存在的
+> 图标目录 `assets`）时它会打印 `notice:` 并跳过，绝不 rmdir 版本库文件。设 `AUTO_FETCH_ASSETS=0`（回归用例与
+> 手放产物的场景）时同样不清空、不下载。
 
 > 想省掉第 3 步：把 `release.yml` 里 `sync-to-gitee` 的 `runs-on` 换成部署在国内的 `self-hosted` runner，并把该 step 的 `UPLOAD_ARTIFACTS` 填上四个产物名，CI 就能全自动把产物传上 Gitee。
 

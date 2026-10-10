@@ -279,11 +279,34 @@ REM untouched - except a 0-byte leftover from an interrupted run, which can only
 REM ever be garbage. AUTO_FETCH_ASSETS=0 is the test seam that keeps the
 REM regression suite offline; same name as the .sh one on purpose.
 if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof
+call :clear_stale
 if not exist "%ASSETS_DIR%\" mkdir "%ASSETS_DIR%" >nul 2>nul
 if not exist "%ASSETS_DIR%\" goto :eof
 for %%N in (ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64) do call :fetch_asset %%N
 goto :eof
 
+REM ==========================================================================
+:clear_stale
+REM Artifacts carry the SAME file name across tags (ByteTools.exe since v1.1.2),
+REM so "the file is already here" says nothing about which release it belongs to.
+REM Before this step existed, a leftover from the previous tag was uploaded into
+REM this tag's Gitee release and still passed the name-only check in [3/3].
+REM Only reached when auto-fetch is on, so hand-placed files and the offline
+REM regression suite are never touched.
+REM Guard: ASSETS_DIR comes from argument 3. A mistyped value (the tracked icon
+REM dir "assets", or the repo root) must never be removed, so clearing is
+REM allowed only when the last path element is exactly release-assets.
+for %%I in ("%ASSETS_DIR%") do set "TAIL_NAME=%%~nxI"
+if /i not "!TAIL_NAME!"=="release-assets" (
+  echo   notice: not clearing "%ASSETS_DIR%" - only a staging dir named
+  echo           release-assets is auto-cleared. Delete it by hand if the files
+  echo           inside it came from an older tag.
+  goto :eof
+)
+if not exist "%ASSETS_DIR%\" goto :eof
+echo   clearing stale staging dir "%ASSETS_DIR%" before re-fetching ...
+rmdir /s /q "%ASSETS_DIR%" >/dev/null 2>/dev/null
+goto :eof
 :fetch_asset
 REM %~1 = artifact name as published on the GitHub Release.
 set "DST=%ASSETS_DIR%\%~1"
