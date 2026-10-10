@@ -185,7 +185,7 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 ### R1.5 各组件镜像清单
 
 下表 26 个**可安装**组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
-2026-10-10 起另有 11 个「开发工具」是**只下载**的，它们的实测矩阵单独记在 R13.3（那批没有可用大陆镜像，属 R1 例外）。
+2026-10-10 起另有 17 个「开发工具」是**只下载**的，它们的实测矩阵单独记在 R13.3（那批没有可用大陆镜像，属 R1 例外）。
 "默认清单实测"一栏给的是默认版本行里**可用大陆源的数量 / 配置的候选数量**。
 
 #### 首批 8 个组件（2026-09 由单源补齐为多源）
@@ -378,13 +378,13 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 37 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 43 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（10 / 6 / 11 / 10） |
+| 分类 | 判定标准 | 组件（10 / 6 / 17 / 10） |
 |------|----------|--------------------|
 | **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
 | **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | mysql、mongodb、postgresql、pulsar、docker、kubectl |
-| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools、eclipse |
+| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools、eclipse、apipost、apifox、hbuilderx、android-studio、visual-studio、navicat |
 | **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | jenkins、nacos、activemq、rocketmq、nginx、kafka、tomcat、elasticsearch、rabbitmq、seata |
 
 边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
@@ -419,7 +419,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 （上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（37 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（43 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -1557,23 +1557,44 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答。
 | `update.code.visualstudio.com/<ver>/win32-x64-user/stable` | 206 + `MZ`；1.141.0=251,828,312 / 1.140.0=244,372,816 / 1.139.1=232,909,888 字节 |
 | `github.com/t8y2/dbx/…/DBX_0.6.38_x64-setup.exe` | 206 + `MZ`，29,228,000 字节 |
 | Eclipse `technology/epp/downloads/release/<列车>/R/eclipse-java-…-win32-x86_64.zip` | 清华 / 阿里 / 华为 / 官方**四个源都回同一个字节数**（2026-09=377,592,420、2026-06=368,384,084、2026-03=368,790,631），`PK` ✓；官方 CDN 只有 25 KB/s、清华 2.7–3.9 MB/s |
+| `www.apipost.cn/dl.php?client=Win&arch=x64&version=8.2.7` | 302 → `dlcdn.apipost.cn/dl/8.2.7/Apipost_win_x64_8.2.7.exe?auth_key=<时效签名>` → 206 / 93,635,360 / `MZ`，7.43 MB/s；ia32 档 90,103,560。**登记分发器那条**，签名地址会过期。**不带 `version=` 时 dl.php 回 200 + 一小段 HTML** —— 正是"200 ≠ 真源"，靠 `expect_magic=b"MZ"` 挡在落盘前 |
+| `download1.dcloud.net.cn/hbuilderx/release.json` | 200 / 928 B，`version` + `files[].code/path`；`win_simple` → `.../download/HBuilderX.<ver>.zip`。**同一份 JSON 在一小时内从 5.24.2026081301（91,325,223 B）变成 5.26.2026091802（93,908,502 B）**，两个都实测 206 + `PK` ⇒ 官方在滚动发版，这正是"手写离线清单必然腐烂"的现场证据，也是给它注册 fetcher 的理由 |
+| `download.dcloud.io/hbuilderx/release.json` | 同一份 JSON；文件侧同一字节数、8.09 MB/s ⇒ 两个域名互为源 |
+| `cdn.apifox.com/download/latest.yml` | 200 / 469 B，`version: 2.5.19` / `size: 139586536` / **`releaseDate: 2024-04-07`**；exe 206 + `MZ`、字节数与清单一致、7.66 MB/s。**清单里写的是 `http://`，登记前升 https** |
+| `dl.google.com/dl/android/studio/install/2026.2.1.8/android-studio-rabbit1-windows.exe` | 206 / 1,511,692,296 / `MZ`，**6.15 MB/s**（1.51 GB 约 4 分钟） |
+| `edgedl.me.gvt1.com/android/studio/install/…`（winget 清单原址） | 同一文件同字节数，但实测只有 **72 KB/s** ⇒ 排末位 |
+| `api.github.com/repos/microsoft/winget-pkgs/contents/manifests/g/Google/AndroidStudio` | 200，版本目录列表；再进目录取 `*.installer.yaml` 的 `download_url`（`raw.githubusercontent.com` 本机可达），读出 `InstallerUrl`。**文件名带列车代号（rabbit1），按版本号拼必 404** |
+| `aka.ms/vs/17/release/vs_Community.exe` | 302 → `download.visualstudio.microsoft.com/download/pr/<GUID>/…/vs_Community.exe`，200 / **4,474,136** / `MZ`。**这是在线引导器不是离线包**，卡片必须写明 |
+| `download.navicat.com/download/navicat17_premium_cs_x64.exe` | 206 / 153,253,568 / `MZ`，804 KB/s；`en` 包 152,687,592。**根目录 403 但文件 206** —— 无 UA 时会误判成假源 |
+| `www.navicat.com` / `www.netsarang.com` / `cdn.netsarang.net` / `developer.android.com` / `androidstudio.googleblog.com` | 本机 **http=000 连不上**（不是 403）⇒ Xshell / Xftp 至今取不到任何证据；Android Studio 的版本号改从 winget 索引取 |
+| `data.services.jetbrains.com/products` | 200，82 个产品**里没有 Fleet**；`?code=FLEET` 回空对象 `{}` ⇒ 独立版已停，无可机读源 |
 
 ⇒ JetBrains / VS Code / 微信这批**只有官方直链**（Eclipse 例外，它有清华等三个真镜像），与 R1「镜像优先、官网末位」相反，是实测例外，
 （**Eclipse 是例外中的反例**：官方 CDN 本机实测 25 KB/s，而清华 / 阿里 / 华为三个镜像都回
 同一个 377,592,420 字节的 `PK` 包、清华 2.7–3.9 MB/s ⇒ 它按 R1 正常排多源，不进豁免表。）
 在 `bt_mirror_spec_tests.OFFICIAL_ONLY_EXCEPTION` 里登记；那条用例断的是"大陆源恰好 0 个"而不是跳过，
-以后有人挂镜像会红，逼他带实测来改表。
+以后有人挂镜像会红，逼他带实测来改表。**注意该表的口径是"有没有第三方镜像站"**：
+dcloud / apipost / apifox 本身就是大陆 CDN（7.4–8.6 MB/s），但不是镜像，`is_mainland()` 按镜像域名认，
+所以它们仍记 0 个大陆源。
 
 ### R13.4 点名要过但没进表的（别当成漏加）
 
 | 候选 | 为什么没进 |
 |---|---|
-| Navicat、Xshell、Xftp | 商业授权 / 仅限个人免费使用，官方直链指向试用包，等于我们替厂商发试用版 |
+| Xshell、Xftp | `netsarang.com` / `cdn.netsarang.net` 本机全部 **http=000**，连一份证据都取不到；按 R1 不许登记未实测的源 |
 | JetBrains Ultimate | 同上（主线已含在 `idea` / `pycharm` 里，授权由用户自己解决） |
-| Visual Studio | bootstrapper 要联网选 workload，体积与失败率都不划算 |
-| Xcode | macOS 专属，且本平台支持还没定 |
-| HBuilderX、Apipost、Apifox | 下载页全 JS 渲染，拿不到可实测的官方直链（探过的候选路径 403 / 404 / 跳首页） |
+| Xcode | macOS 独占，且只走 Mac App Store / Apple 开发者账号登录，Windows 侧无可下直链 |
+| Fleet | 官方产品目录 82 个产品里没有它，`?code=FLEET` 回 `{}` —— 独立版已停并回 IntelliJ IDEA |
 | Lithe | 官方仓库 `1lck/Lithe-IDEA` 经 API 已 404，新 `Lithe-IDEA/Lithe-IDEA` 建于 2026-10-09、0 个 release |
+
+**订正（2026-10-10 第二批）**：本节原先写着「HBuilderX、Apipost、Apifox 下载页全 JS 渲染，
+拿不到可实测的官方直链」与「Visual Studio bootstrapper 不划算」，**四条全是错的**：
+Apipost 有 `dl.php` 分发器、HBuilderX 有官方 `release.json`、Apifox 有 electron-updater 的
+`latest.yml`（只是通道 2024-04 起停更）、VS 有 `aka.ms` 稳定别名。四个都已进表。
+错因是**只搜了 `.exe` / `.zip` 字面量，0 命中就收工** —— 判"拿不到"之前必须先把页面里
+所有下载锚点整串打出来，再顺着前端模板变量名（`ReleaseCfg`、`zh_downloadURL`）找它绑定的接口；
+Electron 系应用一律先探 `<cdn>/download/latest.yml`。这条教训已写进
+`bt_download_only_tests.DEFERRED_KEYS` 上方的注释与本节，防止下一个人重蹈。
 
 补进来的前提是先按 R1 实测，然后"分类表一行 + `_DEVTOOLS` 一条 + 必要时注册 fetcher"，
 并删掉 `bt_download_only_tests.DEFERRED_KEYS` 里对应那项。

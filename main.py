@@ -3618,6 +3618,147 @@ def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple):
     return _fetch
 
 
+# --- 第二批（2026-10-10）：Apipost / HBuilderX / Apifox / Android Studio ------
+# 这四个当初被我判成"拿不到可机读的官方源"，全部是误判：我只搜了 `.exe`/`.zip`
+# 字面量就收工。真源分别是 dl.php 分发器、官网 Vue 背后的 release.json、
+# electron-updater 的 latest.yml、winget 清单索引里的 InstallerUrl。
+# 逐条实测（状态码 + 魔数 + 字节数 + 5MB 吞吐）见 DEVELOPMENT.md R13.3。
+
+_HBX_RELEASE_JSON = "https://download1.dcloud.net.cn/hbuilderx/release.json"
+# 同一份文件在两个域名上字节数完全相同（91,325,223 + `PK`），互为故障转移源。
+_HBX_HOSTS = (("download1.dcloud.net.cn", "download.dcloud.io"),)
+
+
+def fetch_hbuilderx_versions() -> List[ComponentVersion]:
+    """HBuilderX：官方 release.json 的 `win_simple.path` 就是便携 zip 直链。
+
+    版本取 `version`（5.24.2026081301）而不是 `displayVersion`（5.24）——
+    同一个 5.24 会连着发好几个构建，用短号会让下拉框里两个"5.24"指向不同文件。
+    """
+    try:
+        data = _get(_HBX_RELEASE_JSON, timeout=DEVTOOL_FETCH_TIMEOUT).json()
+    except Exception as exc:
+        raise RuntimeError(f"HBuilderX 版本列表抓取失败：release.json 不可用：{exc}") from exc
+    ver = str((data or {}).get("version") or "").strip()
+    win = ""
+    for item in ((data or {}).get("files") or []):
+        if str((item or {}).get("code") or "") == "win_simple":
+            win = str(item.get("path") or "").strip()
+    if not ver or not win.startswith("https://"):
+        raise RuntimeError("HBuilderX release.json 里没有可用的 Windows 产物")
+    urls = [win]
+    for src_host, alt_host in _HBX_HOSTS:
+        alt = win.replace(src_host, alt_host)
+        if alt != win and alt not in urls:
+            urls.append(alt)
+    cv = _cv(ver, {"Windows": urls}, {"Windows": "zip"})
+    # 接口给的 size 是 "87.09M" 这种展示串，不是字节数 —— 宁可不显示也不换算一个约等于的数。
+    cv.artifacts = [DownloadArtifact("zip", ARTIFACT_LABELS["zip"], urls)]
+    return [cv]
+
+
+_APIPOST_DOWNLOAD_PAGE = "https://www.apipost.cn/download.html"
+_APIPOST_DL_RE = _re.compile(
+    r"https://www\.apipost\.cn/dl\.php\?client=Win&arch=x64&version=([0-9][0-9.]*)")
+
+
+def fetch_apipost_versions() -> List[ComponentVersion]:
+    """Apipost：登记**分发器**那条 `dl.php?...&version=X`，不登记跟 302 之后的地址。
+
+    302 的终点是 `dlcdn.apipost.cn/dl/X/Apipost_win_x64_X.exe?auth_key=<时效签名>`，
+    签名会过期，硬编必失效；分发器那条实测 206 / 93,635,360 B / `MZ`。
+    版本号只能从下载页里读 —— 不带 `version=` 时 dl.php 回 200 + 一小段 HTML，
+    正是 R1 反复防的"200 不等于真源"，靠魔数校验挡在落盘之前。
+    """
+    try:
+        page = _get(_APIPOST_DOWNLOAD_PAGE, timeout=DEVTOOL_FETCH_TIMEOUT).text
+    except Exception as exc:
+        raise RuntimeError(f"Apipost 版本列表抓取失败：下载页不可用：{exc}") from exc
+    hit = _APIPOST_DL_RE.search(str(page or "").replace("&amp;", "&"))
+    if not hit:
+        raise RuntimeError("Apipost 下载页里找不到 dl.php 链接（页面改版了，按 R1 不猜 URL）")
+    ver = hit.group(1).rstrip(".")
+    url = f"https://www.apipost.cn/dl.php?client=Win&arch=x64&version={ver}"
+    cv = _cv(ver, {"Windows": [url]}, {"Windows": "exe"})
+    cv.artifacts = [DownloadArtifact("exe", ARTIFACT_LABELS["exe"], [url])]
+    return [cv]
+
+
+_APIFOX_LATEST_YML = "https://cdn.apifox.com/download/latest.yml"
+
+
+def fetch_apifox_versions() -> List[ComponentVersion]:
+    """Apifox：electron-updater 清单 latest.yml（实测 200 / 469 B）。
+
+    **这条通道已经停更**：清单里 `releaseDate: 2024-04-07`、`version: 2.5.19`，
+    而官网当前版只在 JS 里拼、拿不到直链。所以这里给的一定不是最新版 ——
+    卡片 `data_note` 必须写明，别让用户以为下拉框顶部那个就是最新。
+    """
+    try:
+        body = str(_get(_APIFOX_LATEST_YML, timeout=DEVTOOL_FETCH_TIMEOUT).text or "")
+    except Exception as exc:
+        raise RuntimeError(f"Apifox 版本列表抓取失败：latest.yml 不可用：{exc}") from exc
+    ver = _re.search(r"(?m)^version:\s*([0-9][0-9.]*)", body)
+    link = _re.search(r"url:\s*(\S+?\.exe)", body)
+    if not ver or not link:
+        raise RuntimeError("Apifox latest.yml 里读不出版本号或 exe 地址")
+    # 清单里写的是 http:// —— 登记前升成 https（R13.2：只认 HTTPS）。
+    url = link.group(1).replace("http://", "https://", 1)
+    try:
+        size = int(_re.search(r"size:\s*(\d+)", body).group(1))
+    except (AttributeError, ValueError):
+        size = 0
+    cv = _cv(ver.group(1).rstrip("."), {"Windows": [url]}, {"Windows": "exe"})
+    cv.artifacts = [DownloadArtifact("exe", ARTIFACT_LABELS["exe"], [url], size)]
+    return [cv]
+
+
+_WINGET_AS_DIR = ("https://api.github.com/repos/microsoft/winget-pkgs/contents/"
+                  "manifests/g/Google/AndroidStudio")
+
+
+def fetch_android_studio_versions() -> List[ComponentVersion]:
+    """Android Studio：版本号与文件名都从 winget 清单索引里读，不自己拼。
+
+    为什么绕这一圈：官方下载页 `developer.android.com` 本机实测 http=000（连不上），
+    而产物文件名带**列车代号**（`android-studio-rabbit1-windows.exe`），
+    按版本号拼必 404。winget 的清单就是照抄 Google 的，`InstallerUrl` 给的是
+    `edgedl.me.gvt1.com`；实测同一文件在 `dl.google.com/dl/…` 上也有，
+    且快 85 倍（6.15 MB/s 对 72 KB/s），所以把 dl.google.com 排在前面、清单原址兜底。
+    """
+    try:
+        listing = _github_api_json(_WINGET_AS_DIR, timeout=DEVTOOL_FETCH_TIMEOUT)
+        names = [str((e or {}).get("name") or "") for e in
+                 (listing if isinstance(listing, list) else [])
+                 if (e or {}).get("type") == "dir"]
+        ordered = _sort_semver_desc([n for n in names if _version_parts(n) is not None])
+        if not ordered:
+            raise RuntimeError("winget 索引里没找到 Android Studio 的版本目录")
+        files = _github_api_json(f"{_WINGET_AS_DIR}/{ordered[0]}",
+                                 timeout=DEVTOOL_FETCH_TIMEOUT)
+        yml = next((str(f.get("download_url") or "") for f in
+                    (files if isinstance(files, list) else [])
+                    if str((f or {}).get("name") or "").lower().endswith(".installer.yaml")),
+                   "")
+        if not yml:
+            raise RuntimeError(f"winget 的 {ordered[0]} 目录里没有 installer.yaml")
+        body = str(_get(yml, timeout=DEVTOOL_FETCH_TIMEOUT).text or "")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Android Studio 版本列表抓取失败：winget 清单不可用：{exc}") from exc
+    hit = _re.search(r"InstallerUrl:\s*(\S+)", body)
+    if not hit or not hit.group(1).startswith("https://"):
+        raise RuntimeError("winget 清单里读不出 Android Studio 的 InstallerUrl")
+    official = hit.group(1)
+    # edgedl.me.gvt1.com/android/... 与 dl.google.com/dl/android/... 是同一份文件，
+    # 只差路径前缀；实测两边字节数一致（1,511,692,296 + `MZ`）。
+    tail = _re.sub(r"^https?://[^/]+/", "", official)
+    urls = [f"https://dl.google.com/dl/{tail}", official]
+    cv = _cv(ordered[0], {"Windows": urls}, {"Windows": "exe"})
+    cv.artifacts = [DownloadArtifact("exe", ARTIFACT_LABELS["exe"], urls)]
+    return [cv]
+
+
 FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "jdk": fetch_jdk_versions,
     "maven": fetch_maven_versions,
@@ -3646,9 +3787,10 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "powershell": fetch_powershell_versions,
     "nginx": fetch_nginx_versions,
     "erlang": fetch_erlang_versions,
-    # 「开发工具」：只下载型组件。微信开发者工具**故意不在这里** ——
-    # 官方无可机读的版本号（下载端点只回文件，版本要登录后台才看得到），
-    # 硬编一个"最新版"出来比没有更糟，所以它的清单只能内置、刷新时按缺 fetcher 跳过。
+    # 「开发工具」：只下载型组件。**没注册 fetcher 的那几个是故意的** ——
+    # 微信开发者工具 / Eclipse / Visual Studio / Navicat 官方都没有可机读的版本号
+    # （下载端点只回文件，版本要登录后台或看人工页面才拿得到），
+    # 硬编一个"最新版"出来比没有更糟，所以它们的清单只能内置、刷新时按缺 fetcher 跳过。
     "idea": make_jetbrains_fetcher("idea", "IIU"),
     "pycharm": make_jetbrains_fetcher("pycharm", "PCP"),
     "clion": make_jetbrains_fetcher("clion", "CL"),
@@ -3661,6 +3803,10 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "windterm": make_github_asset_fetcher(
         "windterm", "kingToolbox/WindTerm",
         (("zip", "windows_portable_x86_64.zip"),)),   # 官方只发便携包，没有安装器
+    "hbuilderx": fetch_hbuilderx_versions,
+    "apipost": fetch_apipost_versions,
+    "apifox": fetch_apifox_versions,
+    "android-studio": fetch_android_studio_versions,
 }
 
 
@@ -3715,6 +3861,8 @@ COMPONENT_CATEGORY_OF = {
     "webstorm": "开发工具", "goland": "开发工具", "datagrip": "开发工具",
     "vscode": "开发工具", "dbx": "开发工具", "windterm": "开发工具",
     "wechat-devtools": "开发工具", "eclipse": "开发工具",
+    "apipost": "开发工具", "apifox": "开发工具", "hbuilderx": "开发工具",
+    "android-studio": "开发工具", "visual-studio": "开发工具", "navicat": "开发工具",
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
     "erlang": "开发环境",
@@ -3738,6 +3886,24 @@ COMPONENT_CATEGORY_OF = {
 # 选错一次是重下 1.5 GB，这个信息值得占一行。
 # 只登记 2026-10-10 逐个 range 探过（状态码 + 魔数 + 字节数）的产物；
 # 没写第四项的就是"官方只发这一种"或"另一种我没实测"，界面上就不出现菜单。
+#
+# 第二批六个 key 的实测台账（2026-10-10，同一套判据：状态码 + 魔数 + 字节数 + 5MB 吞吐）：
+#   www.apipost.cn/dl.php       → 302 → dlcdn.apipost.cn（带 auth_key 时效签名）→ 206 /
+#                                 93,635,360 B / `MZ`，7.43 MB/s
+#   download1.dcloud.net.cn     → release.json 200/928B；win_simple zip 实测 206 / `PK` / 8.56 MB/s
+#                                 （当天从 5.24.2026081301=91,325,223 滚到 5.26.2026091802=93,908,502，
+#                                  两个都验过 ⇒ 清单会腐烂，所以它注册了 fetcher）
+#   download.dcloud.io          → 同一份 JSON 与文件，8.09 MB/s ⇒ 互为源
+#   cdn.apifox.com/download/…exe→ 206 / 139,586,536 B / `MZ`，7.66 MB/s（清单 releaseDate 2024-04-07）
+#   dl.google.com（Android Studio）→ 206 / 1,511,692,296 B / `MZ`，6.15 MB/s
+#   edgedl.me.gvt1.com          → 同一文件同字节数，但只有 72 KB/s ⇒ 排末位
+#   aka.ms/vs/17/release/…      → 302 → download.visualstudio.microsoft.com，200 /
+#                                 4,474,136 B / `MZ`（在线引导器，不是离线包）
+#   download.navicat.com        → 206 / 153,253,568 B / `MZ`，804 KB/s
+# 反面记录（防后人"再试一次就有了"）：
+#   developer.android.com / androidstudio.googleblog.com / www.netsarang.com /
+#   cdn.netsarang.net / www.navicat.com  本机全部 http=000（连不上，不是 403）；
+#   data.services.jetbrains.com/products 的 82 个产品里没有 Fleet，?code=FLEET 回 {}。
 _DEVTOOLS: tuple = (
     ("idea", "IntelliJ IDEA", "exe",
      "商业软件：本工具只提供官方安装包直链，**不含授权**。"
@@ -3815,6 +3981,48 @@ _DEVTOOLS: tuple = (
          f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
      ], {"2026-09": 377592420, "2026-06": 368384084, "2026-03": 368790631}[train])
          for train in ("2026-09", "2026-06", "2026-03"))),
+    # --- 2026-10-10 第二批 ---------------------------------------------------
+    # 下面六行是"刷新版本失败时"的兜底清单，数值与 fetcher 同源、同样逐条实测过。
+    # Apipost：登记分发器，不登记 302 之后带 auth_key 的签名地址。
+    ("apipost", "Apipost 接口调试", "exe",
+     "国产 API 调试工具，免费版可用（另有团队版付费）。官方直链是 `dl.php` 分发器，"
+     "跟随后带时效签名，所以清单里存的是分发器地址。",
+     (("8.2.7", "https://www.apipost.cn/dl.php?client=Win&arch=x64&version=8.2.7",
+       93635360),)),
+    # Apifox：官方 electron-updater 通道 2024-04 起没再发过版，必须写明。
+    ("apifox", "Apifox", "exe",
+     "官方自动更新通道（latest.yml）最后一次发版是 2024-04-07 的 2.5.19，"
+     "**当前版本官方只在网页脚本里拼链接、拿不到可实测的直链**，所以这里给的一定不是最新版；"
+     "要最新版请去官网手动下载。",
+     (("2.5.19", "https://cdn.apifox.com/download/2.5.19/Apifox-2.5.19.exe",
+       139586536),)),
+    ("hbuilderx", "HBuilderX", "zip",
+     "DCloud 官方前端 IDE，免费。下载页是 Vue 模板，但背后有官方 JSON（release.json），"
+     "所以「刷新版本」对它是有效的。版本号形如 5.24.2026081301 —— 同一个 5.24 会连发多个构建，"
+     "故取全号（版本框偏窄时以「复制」为准）。",
+     (("5.26.2026091802",
+       ["https://download1.dcloud.net.cn/download/HBuilderX.5.26.2026091802.zip",
+        "https://download.dcloud.io/download/HBuilderX.5.26.2026091802.zip"],
+       93908502),)),
+    ("android-studio", "Android Studio", "exe",
+     "Google 官方 IDE，免费。文件名带列车代号（rabbit1），所以版本号与链接一律照抄 winget "
+     "清单，不按版本号拼。官方下载页本机连不上（http=000），清单里的版本号可能落后。",
+     (("2026.2.1.8",
+       ["https://dl.google.com/dl/android/studio/install/2026.2.1.8/"
+        "android-studio-rabbit1-windows.exe",
+        "https://edgedl.me.gvt1.com/android/studio/install/2026.2.1.8/"
+        "android-studio-rabbit1-windows.exe"],
+       1511692296),)),
+    ("visual-studio", "Visual Studio 2022 Community", "exe",
+     "**这是 4.4 MB 的在线安装器，不是完整离线包**：双击后它才去微软 CDN 拉组件，"
+     "所以断网下不了。Community 版对个人与开源免费；离线布局要用 `vs_community.exe "
+     "--layout <目录>` 自己建。",
+     (("2022", "https://aka.ms/vs/17/release/vs_Community.exe", 4474136),)),
+    ("navicat", "Navicat Premium 17", "exe",
+     "商业软件：本工具只提供官方安装包直链，**不含授权**（装完是试用期）。"
+     "简体中文 x64 版；官方另有 en 包，字节数不同（152,687,592）。",
+     (("17", "https://download.navicat.com/download/navicat17_premium_cs_x64.exe",
+       153253568),)),
 )
 
 

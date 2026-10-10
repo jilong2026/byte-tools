@@ -121,15 +121,21 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
     #     官方 API 退到末位兜底。现在南大 + 清华都可用，14.6 / 13.5 MB/s。
     SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2}
 
-    # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具。
+    # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具，
+    # 以及 2026-10-10 第二批的 apipost / apifox / hbuilderx / android-studio / visual-studio / navicat。
     # 依据 2026-10-10 实测（DEVELOPMENT.md R1.5）：华为云的 jetbrains 目录回 200 但只有 12KB HTML
     # （正是本文件反复防的"200 + 小 HTML 应付缺失文件"那种假源）、南大 404；
     # update.code.visualstudio.com 与 servicewechat.com 无人镜像。
+    # **注意本表的口径是"有没有第三方镜像站"，不是"服务器在不在大陆"**：
+    # dcloud / apipost / apifox 本来就是大陆 CDN（实测 7.4–8.6 MB/s），但它们不是镜像，
+    # `is_mainland()` 按镜像域名标记认，所以这里仍记 0 个大陆源。
     # **DBX / WindTerm 不在这个表里** —— 它们是 GitHub 产物，三个加速器都算大陆源，天然满足本条。
     # 这里断"大陆源恰好 0 个"而不是直接跳过：以后真找到可用镜像时，这条会红，
     # 逼着人带着实测数据来改表，而不是悄悄多挂一个没验过的源。
     OFFICIAL_ONLY_EXCEPTION = {"idea", "pycharm", "clion", "webstorm", "goland",
-                               "datagrip", "vscode", "wechat-devtools"}
+                               "datagrip", "vscode", "wechat-devtools",
+                               "apipost", "apifox", "hbuilderx", "android-studio",
+                               "visual-studio", "navicat"}
 
     def test_counts(self):
         for key, comp in COMPS.items():
@@ -188,10 +194,10 @@ class OfficialIsLast(unittest.TestCase):
     def test_no_component_escapes_this_table(self):
         """新组件不许靠"表里没写 = 不用查"悄悄逃过本条。
 
-        「开发工具」那批确实不在 OFFICIAL_HOST 里：八个只有官方直链（见
+        「开发工具」那批确实不在 OFFICIAL_HOST 里：十四个只有官方直链（见
         `WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION`），
-        两个是 GitHub 产物、末位天然是 github.com。但这两组都要**点名**，
-        加组件时得来这里登记一句，而不是让检查自动跳过它。
+        两个是 GitHub 产物、末位天然是 github.com，一个是 Eclipse（有真镜像，走常规检查）。
+        但这两组都要**点名**，加组件时得来这里登记一句，而不是让检查自动跳过它。
         """
         github_assets = {"dbx", "windterm"}
         accounted = (set(self.OFFICIAL_HOST)

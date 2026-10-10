@@ -54,11 +54,15 @@ _APP = QApplication.instance() or QApplication([])
 DOWNLOAD_ONLY_KEYS = set(EXPECTED_MEMBERSHIP["开发工具"])
 
 # 用户点名要、但这一版**没进表**的候选。登记一个没实测过的源违反 R1（200 也可能是
-# 拿 HTML 应付的假源），所以宁可少四个也不硬凑；这张表存在的意义是别让人以为"漏了"。
+# 拿 HTML 应付的假源），所以宁可少几个也不硬凑；这张表存在的意义是别让人以为"漏了"。
+# 2026-10-10 第二批：Apipost / Apifox / HBuilderX 已从本表移出并进了 Tab ——
+# 当初"拿不到直链"的判定是错的（我只搜了 `.exe`/`.zip` 字面量就收工），
+# 真源分别是 dl.php 分发器、cdn 上的 electron-updater latest.yml、release.json。
 DEFERRED_KEYS = {
-    "hbuilderx": "下载页与文档页全 JS 渲染，探到的候选路径 404",
-    "apipost": "download.html 里没有任何 .exe/.zip 字面量，拿不到直链",
-    "apifox": "同上；官网 /download 直接跳首页",
+    "xshell": "netsarang.com / cdn.netsarang.net 本机全域 http=000，取不到任何证据",
+    "xftp": "同上（同一家厂商、同一组域名）",
+    "fleet": "JetBrains 官方产品目录 82 个产品里没有 Fleet，?code=FLEET 回空对象 —— 独立版已停",
+    "xcode": "macOS 独占且只走 Mac App Store / Apple 开发者账号，Windows 侧无可下直链",
     "lithe": "官方仓库 1lck/Lithe-IDEA 经 API 已 404，新仓库 0 个 release",
 }
 
@@ -114,15 +118,15 @@ class TabStructure(unittest.TestCase):
         for key in DEFERRED_KEYS:
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
-    def test_visible_component_count_is_37(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（26 老 + 11 新）。
+    def test_visible_component_count_is_43(self):
+        """**全仓库唯一一处**写死界面可见组件数的地方（26 老 + 17 新）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 37)
-        self.assertEqual(len(self.components), 38, "37 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 43)
+        self.assertEqual(len(self.components), 44, "43 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -723,6 +727,183 @@ class VersionFetchers(unittest.TestCase):
                                 f"加速器只是前缀，不能改变挑中的产物：{urls}")
 
 
+class SecondBatchSources(unittest.TestCase):
+    """第二批六个 key 的取数路径（2026-10-10 从 DEFERRED_KEYS 翻案进来）。
+
+    当初判 Apipost / Apifox / HBuilderX "拿不到直链"是**我的误判**：只搜了
+    `.exe`/`.zip` 字面量就收工。真源分别是 dl.php 分发器、electron-updater 的
+    latest.yml、官网 Vue 背后那个 release.json。全部走注入的假 `_get`，用例不联网。
+    """
+
+    def _fake(self, by_marker):
+        """by_marker: 请求 URL 里的匹配串 → 响应体（dict 走 .json()，str 走 .text）。"""
+        calls = []
+
+        class _R:
+            def __init__(self, body):
+                self._body = body
+
+            def json(self_inner):
+                return self_inner._body
+
+            @property
+            def text(self_inner):
+                return self_inner._body
+
+        def fake(url, *a, **k):
+            calls.append((url, k.get("timeout")))
+            for marker, body in by_marker.items():
+                if marker in url:
+                    return _R(body)
+            raise AssertionError(f"用例没准备这个 URL 的响应：{url}")
+
+        return fake, calls
+
+    def _patch(self, by_marker):
+        fake, calls = self._fake(by_marker)
+        orig = main._get
+        self.addCleanup(setattr, main, "_get", orig)
+        main._get = fake
+        return calls
+
+    # --- HBuilderX：官方 release.json ---------------------------------------
+    HBX_JSON = {
+        "version": "5.24.2026081301", "displayVersion": "5.24",
+        "files": [
+            {"code": "win_simple", "size": "87.09M",
+             "path": "https://download1.dcloud.net.cn/download/"
+                     "HBuilderX.5.24.2026081301.zip"},
+            {"code": "mac_simple", "size": "268.99M",
+             "path": "https://download1.dcloud.net.cn/download/"
+                     "HBuilderX.5.24.2026081301.dmg"},
+        ],
+    }
+
+    def test_hbuilderx_takes_the_windows_zip_from_release_json(self):
+        self._patch({"release.json": self.HBX_JSON})
+        got = main.FETCHERS["hbuilderx"]()
+        self.assertEqual(got[0].version, "5.24.2026081301",
+                         "用 version 不用 displayVersion：5.24 这个号会连着发好几个构建")
+        urls = got[0].urls_for_current()
+        self.assertEqual(urls[0], self.HBX_JSON["files"][0]["path"],
+                         "路径照抄接口给的，不按文件名规律拼")
+        self.assertIn("download.dcloud.io", urls[-1],
+                      "备用域名排在末位（实测同一文件同字节数 91,325,223）")
+        self.assertEqual(got[0].archive_for_current(), "zip")
+        self.assertNotIn(".dmg", " ".join(urls), "mac 档不许混进 Windows 的源列表")
+
+    # --- Apipost：dl.php 分发器 ---------------------------------------------
+    APIPOST_HTML = (
+        '<a href="https://www.apipost.cn/dl.php?client=Win&amp;arch=x64&version=8.2.7">下载</a>'
+        '<a href="https://www.apipost.cn/dl.php?client=Mac&arch=arm64&version=8.2.7">mac</a>'
+    )
+
+    def test_apipost_version_and_url_come_from_the_page_itself(self):
+        self._patch({"download.html": self.APIPOST_HTML})
+        got = main.FETCHERS["apipost"]()
+        self.assertEqual(got[0].version, "8.2.7")
+        self.assertEqual(
+            got[0].urls_for_current(),
+            ["https://www.apipost.cn/dl.php?client=Win&arch=x64&version=8.2.7"],
+            "登记分发器那条：跟 302 之后的 dlcdn 地址带 auth_key 时效，硬编必失效")
+        self.assertNotIn("Mac", got[0].urls_for_current()[0])
+
+    def test_apipost_page_without_a_version_link_fails_instead_of_guessing(self):
+        """页面上找不到 dl.php 时宁可抛错保留内置清单，也不拼一个 version= 出来。"""
+        self._patch({"download.html": "<html>没有链接</html>"})
+        with self.assertRaises(RuntimeError):
+            main.FETCHERS["apipost"]()
+
+    # --- Apifox：electron-updater latest.yml --------------------------------
+    APIFOX_YML = ("version: 2.5.19\nfiles:\n"
+                  "  - url: http://cdn.apifox.com/download/2.5.19/Apifox-2.5.19.exe\n"
+                  "    size: 139586536\npath: nope\n")
+
+    def test_apifox_manifest_is_parsed_and_upgraded_to_https(self):
+        self._patch({"latest.yml": self.APIFOX_YML})
+        got = main.FETCHERS["apifox"]()
+        self.assertEqual(got[0].version, "2.5.19")
+        url = got[0].urls_for_current()[0]
+        self.assertTrue(url.startswith("https://"),
+                        "清单里写的是 http://，登记前必须升 https（R13.2 第 6 条）")
+        self.assertEqual(got[0].download_artifacts()[0].size, 139586536,
+                         "体积取清单声明的 size，菜单才敢显示它")
+
+    # --- Android Studio：winget 清单索引 ------------------------------------
+    WINGET_DIR = [
+        {"name": "2026.2.1.8", "type": "dir",
+         "download_url": "https://api.github.com/repos/microsoft/winget-pkgs/"
+                         "contents/manifests/g/Google/AndroidStudio/2026.2.1.8"},
+        {"name": "Beta", "type": "dir",
+         "download_url": "https://api.github.com/repos/microsoft/winget-pkgs/"
+                         "contents/manifests/g/Google/AndroidStudio/Beta"},
+    ]
+    WINGET_VER_DIR = [
+        {"name": "Google.AndroidStudio.installer.yaml", "type": "file",
+         "download_url": "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/"
+                         "manifests/g/Google/AndroidStudio/2026.2.1.8/"
+                         "Google.AndroidStudio.installer.yaml"},
+    ]
+    WINGET_YAML = ("- Architecture: x64\n"
+                   "  InstallerUrl: https://edgedl.me.gvt1.com/android/studio/install/"
+                   "2026.2.1.8/android-studio-rabbit1-windows.exe\n")
+
+    def test_android_studio_url_is_read_out_of_the_winget_manifest(self):
+        """文件名带列车代号（rabbit1），按版本号拼必 404 —— 只能照抄清单。"""
+        orig_api = main._github_api_json
+        self.addCleanup(setattr, main, "_github_api_json", orig_api)
+
+        def fake_api(url, *a, **k):
+            return self.WINGET_VER_DIR if url.endswith("/2026.2.1.8") else self.WINGET_DIR
+
+        main._github_api_json = fake_api
+        self._patch({"installer.yaml": self.WINGET_YAML})
+        got = main.FETCHERS["android-studio"]()
+        self.assertEqual(got[0].version, "2026.2.1.8",
+                         "要按语义版本挑最大，不能取目录列表的最后一项（那是 Beta）")
+        urls = got[0].urls_for_current()
+        self.assertEqual(
+            urls[0],
+            "https://dl.google.com/dl/android/studio/install/2026.2.1.8/"
+            "android-studio-rabbit1-windows.exe",
+            f"首选实测 6.15 MB/s 的那个 CDN：{urls}")
+        self.assertTrue(any("edgedl.me.gvt1.com" in u for u in urls[1:]),
+                        f"两个 Google CDN 都要给（edgedl 实测只有 72 KB/s，故排后面）：{urls}")
+        self.assertEqual(got[0].archive_for_current(), "exe")
+
+    def test_android_studio_falls_back_when_github_is_unreachable(self):
+        """GitHub 未认证限额/被墙时抛错，让上层保留内置清单而不是把下拉框灌空。"""
+        def boom(*a, **k):
+            raise OSError("connection refused")
+
+        orig = main._get
+        orig_api = main._github_api_json
+        self.addCleanup(setattr, main, "_get", orig)
+        self.addCleanup(setattr, main, "_github_api_json", orig_api)
+        main._get = boom
+        main._github_api_json = boom
+        with self.assertRaises(RuntimeError):
+            main.FETCHERS["android-studio"]()
+
+    # --- 离线两行：Visual Studio / Navicat ----------------------------------
+    def test_visual_studio_row_says_the_file_is_an_online_bootstrapper(self):
+        """4.4 MB 不是完整安装包，双击后才从 CDN 拉内容 —— 不写清就是骗用户。"""
+        comp = next(c for c in main.build_components() if c.key == "visual-studio")
+        self.assertIn("在线安装器", comp.data_note)
+        self.assertEqual(comp.versions[0].urls_for_current(),
+                         ["https://aka.ms/vs/17/release/vs_Community.exe"],
+                         "aka.ms 是微软给的稳定别名，背后的 GUID 路径每次发版都变")
+        self.assertEqual(comp.versions[0].download_artifacts()[0].size, 4474136)
+
+    def test_navicat_row_is_a_measured_official_url_with_license_note(self):
+        comp = next(c for c in main.build_components() if c.key == "navicat")
+        self.assertIn("不含授权", comp.data_note)
+        art = comp.versions[0].download_artifacts()[0]
+        self.assertEqual(art.urls,
+                         ["https://download.navicat.com/download/navicat17_premium_cs_x64.exe"])
+        self.assertEqual(art.size, 153253568)
+
+
 class LicenseLabeling(_EnvSandbox):
     """商业档必须把"不含授权"写在用户看得见的地方，而不是只写在注释里。
 
@@ -740,7 +921,8 @@ class LicenseLabeling(_EnvSandbox):
         return main.ComponentCard(comp, lambda lvl, msg: None)
 
     def test_commercial_products_are_labeled_no_license(self):
-        commercial = {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip"}
+        commercial = {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip",
+                      "navicat"}
         for key in sorted(commercial):
             card = self._card(key)
             visible = " ".join(filter(None, (card.btn_install.toolTip(),
@@ -883,7 +1065,14 @@ class ArtifactMenu(_EnvSandbox):
                    "github.com", "gh-proxy.com", "ghfast.top", "ghproxy.net",
                    "servicewechat.com", "download.eclipse.org",
                    "mirrors.tuna.tsinghua.edu.cn", "mirrors.aliyun.com",
-                   "mirrors.huaweicloud.com")
+                   "mirrors.huaweicloud.com",
+                   # 2026-10-10 第二批，逐个 range + 5MB 吞吐实测过（台账在 _DEVTOOLS 上方）：
+                   "www.apipost.cn",              # dl.php 分发器，302 后 206 / `MZ`
+                   "download1.dcloud.net.cn", "download.dcloud.io",   # 同字节数互为源
+                   "cdn.apifox.com",
+                   "dl.google.com", "edgedl.me.gvt1.com",             # 同一文件，6.15 MB/s 排前
+                   "aka.ms",                      # 微软给的稳定别名，跟到 download.visualstudio…
+                   "download.navicat.com")
         for comp in main.build_components():
             if not comp.download_only:
                 continue

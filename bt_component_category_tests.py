@@ -42,12 +42,17 @@ EXPECTED_MEMBERSHIP = {
     # 用户要求取消它，于是"容器与编排外围"归到同为大件服务的这一组。
     "开发软件": {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl"},
     # 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only）。
-    # 这 11 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
+    # 这 17 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
     # 磁盘上不落 ~/.env-tools/<key>/ 目录**，所以遍历全组件的老断言都要按能力位豁免。
-    # 少掉的 Apipost / Apifox / HBuilderX / Lithe 不是"忘了加"，而是**拿不到可实测的
-    # 官方直链**（前三家下载页全 JS 渲染、Lithe 官方仓库 404），按 R1 不许登记未实测的源。
+    # 2026-10-10 第二批补进 6 个：apipost / hbuilderx / apifox / android-studio /
+    # visual-studio / navicat。前三个当初被我判成"拿不到直链"是**误判**（只搜了
+    # `.exe`/`.zip` 字面量就收工，漏了 dl.php 分发器与 release.json），订正见 R13.4。
+    # 仍然没进表的是"取不到证"的那几个（Xshell / Xftp 全域 http=000、Fleet 官方目录
+    # 已无此产品、Xcode 只走 Mac App Store），清单在 bt_download_only_tests.DEFERRED_KEYS。
     "开发工具": {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip",
-               "vscode", "dbx", "windterm", "wechat-devtools", "eclipse"},
+               "vscode", "dbx", "windterm", "wechat-devtools", "eclipse",
+               "apipost", "apifox", "hbuilderx", "android-studio",
+               "visual-studio", "navicat"},
     # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS），
     # 固定排在最后。这里手写一份清单是为了让
     # "扩白名单 = 必须同时改这张表"变成一次可见的改动：
