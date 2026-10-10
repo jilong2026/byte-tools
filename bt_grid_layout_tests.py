@@ -55,7 +55,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import main  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton,  # noqa: E402
                                QWidget)
 
 # 分类基线复用对面那份，不另写一张表（理由见 bt_search_and_newcmp_tests.py 顶部）。
@@ -757,19 +757,21 @@ class StatusBarFacts(_UsesRealWindow, unittest.TestCase):
         return re.sub("<[^>]+>", "", self.win.status_bar.text())
 
     def test_component_count_is_what_the_user_can_actually_see(self):
-        """总数按**界面可见**的卡片算，与搜索提示同一个分母。
+        """总数按**界面可见**的卡片算，而且只写数字。
 
         erlang 是 hidden 组件（只作 rabbitmq 的前置依赖，不出现在任何 Tab），
         以前状态条写 `len(self.components)` = 27，而搜索框右边写的是 / 26 ——
-        同一屏两个数字互相矛盾，用户自然怀疑清单是不是漏了一个。
+        同一屏两个数字互相矛盾（2026-10-10 用户第一条质疑）。
+        后来补的那句"（另有 1 个仅作前置依赖，不在界面显示）"又被嫌啰嗦：
+        底部状态条是一眼扫过的地方，交代去向是文档的活，不是它的。
         """
         win = self.win
         visible = len(win.cards)
         self.assertEqual(visible, 26, "界面可见组件数变了，这条用例的基线要一起核")
-        self.assertIn(f"组件总数：{visible} 个", self._plain())
-        self.assertNotIn(f"组件总数：{len(win.components)} 个", self._plain())
-        # 隐藏组件不许悄悄消失：总数旁边要交代它去哪了
-        self.assertIn("前置依赖", self._plain())
+        self.assertIn(f"组件：{visible}", self._plain())
+        self.assertNotIn(f"组件：{len(win.components)}", self._plain())
+        self.assertNotIn("总数", self._plain(), "还是老长句：底部要的是数字，不是句子")
+        self.assertNotIn("前置依赖", self._plain())
 
     def test_working_directory_is_a_link_pointing_at_the_real_dir(self):
         import re
@@ -790,8 +792,17 @@ class StatusBarFacts(_UsesRealWindow, unittest.TestCase):
                          [Path(main.CONFIG_DIR).as_posix()])
 
     def test_version_shows_up_in_ui_and_is_not_behind_the_latest_tag(self):
-        self.assertIn(f"v{main.APP_VERSION}", self._plain(),
-                      "状态条要显示版本号，用户报问题时第一眼就能对上版本")
+        """版本号只有一个可见落点：标题栏那枚 chip（点它就是手动检查更新）。
+
+        以前底部状态条也写一份，用户说"重复、底部要干净" —— 底部去掉以后
+        版本仍必须在界面里看得见，否则报问题时连版本都对不上。
+        """
+        chip = self.win.findChild(QPushButton, "versionChip")
+        self.assertIn(f"v{main.APP_VERSION}", chip.text(),
+                      "chip 要显示版本号，用户报问题时第一眼就能对上版本")
+        self.assertNotIn(f"v{main.APP_VERSION}", self._plain(),
+                         "底部状态条不该再重复一遍版本")
+        self.assertNotIn("版本", self._plain())
         title = self.win.findChild(QLabel, "titleText")
         self.assertIn(main.APP_VERSION, title.toolTip() or title.text())
         import subprocess

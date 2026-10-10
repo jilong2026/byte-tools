@@ -3082,6 +3082,27 @@ class CleanTerminalWindow(EnvSandbox):
         self.assertEqual(clipped, [], "标题栏按钮在最窄窗口里被压扁裁字")
         self.assertLessEqual(right, win.width(), "按钮排到了窗口外面，最后一个点不到")
 
+    def test_version_chip_follows_the_title_not_the_button_row(self):
+        """版本号 chip 挪到左上角"软件名后面"（2026-10-10 用户要的位置）。
+
+        它在最窄窗口下也不能把右边那排按钮挤裁 —— 左边多占的每个像素都是
+        右边少的，所以这条和上面那条裁字用例是一对，缺一不可。
+        """
+        win = self.win
+        win.show()
+        win.resize(win.minimumWidth(), 700)
+        for _ in range(30):
+            self.app.processEvents()
+        chip = win.btn_version
+        title = win.findChild(main.QLabel, "titleText")
+        self.assertGreaterEqual(chip.geometry().x(),
+                                title.geometry().x() + title.geometry().width(),
+                                "chip 没紧跟在软件名后面")
+        self.assertLess(chip.geometry().x(), win.btn_github.geometry().x(),
+                        "chip 还在右边那排按钮里，没挪到左上角")
+        self.assertLess(chip.geometry().center().x(), win.title_bar.width() // 2,
+                        "chip 中心过了标题栏中线，等于还在右边")
+
 
 class ShellRefreshNotification(EnvSandbox):
     """广播必须真的让 explorer 重建环境块 —— 旧写法根本没做到。

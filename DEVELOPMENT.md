@@ -1394,11 +1394,15 @@ README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文�
 改名前界面上同时存在三个名字（`字节-开发环境与工具自动安装` / `编程开发环境自动装配小工具` /
 `byte-tools`），macOS「关于」面板的版本号还常年写着 `1.0.0`。
 
-**版本号只有一个真源：`main.APP_VERSION`。** 界面状态条、标题 tooltip、
-macOS bundle 的 `CFBundleShortVersionString` / `CFBundleVersion`（spec 用正则从
+**版本号只有一个真源：`main.APP_VERSION`。** 界面唯一可见落点是标题栏软件名后面那枚
+`#versionChip`（点它 = 手动检查更新，见 R12），另有标题 tooltip、macOS bundle 的
+`CFBundleShortVersionString` / `CFBundleVersion`（spec 用正则从
 `main.py` 读，不 import —— 那是个要拉 PySide6 的 GUI 模块）全部取自它；
 `release.yml` 在**任何构建之前**有一步闸门比对 `APP_VERSION` 与被推送的 tag，
 不一致就直接红。发版动作因此是两步：改常量 → 打同名 tag。
+底部状态条以前也写一份 `版本：v1.1.2`，2026-10-10 用户要求去掉（同一屏两处重复）；
+同一条要求还包括状态条的组件数只写 `组件：26`，不要"总数…个（另有 N 个仅作前置依赖…）"这种句子
+—— **隐藏组件的去向归文档（R5.3）交代，不归状态条**。
 用例 `StatusBarFacts.test_version_shows_up_in_ui_and_is_not_behind_the_latest_tag`
 会在本地拿 `git describe --tags --abbrev=0` 对一遍（没有 git 时 skip，不硬失败）。
 这条用例有两个坑，都踩过：

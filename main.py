@@ -13281,10 +13281,22 @@ class MainWindow(QMainWindow):
         title_label = QLabel(APP_NAME)
         title_label.setObjectName("titleText")
         title_label.setFont(QFont("", 12, QFont.Bold))
-        # 版本号放在标题的 tooltip 里（状态条上也有一份）：标题栏那 48px 已经挤了
-        # 五个按钮，再塞一串 v1.1.1 会在小窗口下把按钮裁掉（本项目栽过两次）。
+        # 版本号只活在标题栏这枚 chip 上（底部状态条那份 2026-10-10 去掉了，重复）。
+        # 为什么 chip 在左上角而不是右边那排按钮里：右边已经挤了六个按钮，之前加一个
+        # 就把「清理残留 PATH」裁掉过（最小宽 1000 那次教训）；挪到软件名后面，
+        # 左边只多占一个 chip 的宽度，右边反而松一格。
         title_label.setToolTip(f"{APP_NAME} v{APP_VERSION}")
         tb.addWidget(title_label)
+
+        # 版本号 chip：常驻显示当前版本，点一下 = 手动检查更新（规则 R12）。
+        self.btn_version = QPushButton(f"v{APP_VERSION}")
+        self.btn_version.setObjectName("versionChip")
+        self.btn_version.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_version.setToolTip(
+            f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
+            "（启动后一天最多自动查一次，查不到不打扰你）")
+        self.btn_version.clicked.connect(lambda: self._start_update_check(auto=False))
+        tb.addWidget(self.btn_version)
         tb.addStretch(1)
 
         # GitHub 图标
@@ -13296,18 +13308,6 @@ class MainWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL))
         )
         tb.addWidget(self.btn_github)
-
-        # 版本号 chip：常驻显示当前版本，点一下 = 手动检查更新（规则 R12）。
-        # 为什么不把版本号塞进标题文字：标题栏那 48px 已经挤了五个按钮，
-        # 之前加一个按钮就把「清理残留 PATH」裁掉过（最小宽 1000 那次教训）。
-        self.btn_version = QPushButton(f"v{APP_VERSION}")
-        self.btn_version.setObjectName("versionChip")
-        self.btn_version.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_version.setToolTip(
-            f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
-            "（启动后一天最多自动查一次，查不到不打扰你）")
-        self.btn_version.clicked.connect(lambda: self._start_update_check(auto=False))
-        tb.addWidget(self.btn_version)
 
         # 刷新版本列表按钮
         self.btn_refresh = QPushButton("⟳ 刷新版本")
@@ -13556,19 +13556,18 @@ class MainWindow(QMainWindow):
         overlay_lay.addWidget(self.log_view)
         self.log_overlay.hide()
 
-        # 底部状态条：系统 / **可点的工作目录** / 组件总数 / 版本号。
-        # 总数按 `self.cards`（界面可见）算，不是 `self.components`：erlang 是 hidden
+        # 底部状态条：系统 / **可点的工作目录** / 组件数。
+        # 数按 `self.cards`（界面可见）算，不是 `self.components`：erlang 是 hidden
         # 组件，只当 rabbitmq 的前置依赖，用户在四个 Tab 里都找不到它 —— 以前这里写 27、
         # 搜索框右边写 /26，同一屏两个数字互相矛盾（2026-10-10 用户第一条质疑）。
-        hidden = len(self.components) - len(self.cards)
+        # 同一轮用户又嫌句子长："26 就显示 26"，于是去向说明和版本号都从底部拿掉
+        # （版本号只剩标题栏 chip 一处，见上面；隐藏组件的去向归文档 R5.3 交代）。
         self.status_bar = QLabel(
             f"系统：{CURRENT_OS} ({MACHINE})   工作目录："
             f'<a href="dir://{html_escape(Path(CONFIG_DIR).as_posix())}" '
             f'style="color:#8fa3b8;text-decoration:underline">'
             f"{html_escape(str(CONFIG_DIR))}</a>   "
-            f"组件总数：{len(self.cards)} 个"
-            + (f"（另有 {hidden} 个仅作前置依赖，不在界面显示）" if hidden > 0 else "")
-            + f"   版本：v{APP_VERSION}"
+            f"组件：{len(self.cards)}"
         )
         self.status_bar.setObjectName("statusBar")
         self.status_bar.setTextFormat(Qt.RichText)
