@@ -11409,8 +11409,12 @@ class ComponentCard(QFrame):
         # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
         if self.component.download_only:
             self.btn_install.setText("下载")
-            self.btn_install.setToolTip(
-                "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量")
+            tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
+            if self.component.data_note:
+                # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
+                # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
+                tip += "\n" + self.component.data_note
+            self.btn_install.setToolTip(tip)
             self.btn_install.clicked.connect(self.on_download_clicked)
         else:
             self.btn_install.clicked.connect(self.on_install_clicked)
