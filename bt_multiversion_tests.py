@@ -3072,7 +3072,7 @@ class CleanTerminalWindow(EnvSandbox):
         for _ in range(30):
             self.app.processEvents()
         clipped, right = [], 0
-        for name in ("btn_github", "btn_refresh", "btn_cleanup_path",
+        for name in ("btn_github", "btn_version", "btn_refresh", "btn_cleanup_path",
                      "btn_clean_terminal", "btn_donate"):
             b = getattr(win, name)
             need = b.fontMetrics().horizontalAdvance(b.text())

@@ -134,6 +134,206 @@ def _open_in_file_manager(path: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# 检查更新（规则 R12）：只读、后台、自动路径失败完全静默，且**绝不自动替换自己**
+# ---------------------------------------------------------------------------
+# 为什么走 api.github.com 而不是 github.com：2026-10-10 本机实测，git/下载端点
+# github.com:443 会整天连不上，而 api.github.com 免鉴权 1.2 秒回 200（8.6KB JSON）。
+# 第二源是 GitHub 加速器（实测代理回来的也是真 JSON）。**Gitee 不能当更新源**：
+# 它的开放 API 对这个仓库回 404「Not Found Project」（仓库不是公开的）。
+_REPO_SLUG = GITHUB_URL.split("github.com/", 1)[-1].strip("/")
+# 必须带 /repos/ 段：`api.github.com/<owner>/<repo>/...` 会回 404（真踩过 —— 用例当时
+# 只断言"以 /releases/latest 结尾"，所以没拦住，是拿真接口跑了一遍才发现的）。
+UPDATE_API_URL = f"https://api.github.com/repos/{_REPO_SLUG}/releases/latest"
+UPDATE_SOURCES = [UPDATE_API_URL, "https://gh-proxy.com/" + UPDATE_API_URL]
+UPDATE_CHECK_INTERVAL_SEC = 24 * 3600      # 自动检查的频控：一天最多一次
+UPDATE_HTTP_TIMEOUT = 8.0                  # 后台线程也要有硬超时，不许挂在那儿
+
+
+def _version_parts(text: object):
+    """`v1.10.2` → (1, 10, 2)；读不出数字段返回 None（宁可不提示也不猜）。"""
+    s = str(text or "").strip().lstrip("vV")
+    if not s:
+        return None
+    parts = []
+    for chunk in s.split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if not digits:
+            return None
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def version_is_newer(current: str, latest: str) -> bool:
+    """按**数值分段**比较版本号。
+
+    字符串比会得出 `1.9 > 1.10`（`_version_key` 那条注释里钉过同一个坑），
+    后果是用户永远收不到升级提示 —— 而这恰恰是这条功能存在的唯一理由。
+    任何一边读不出来都返回 False：拿不到结论时不许打扰用户。
+    """
+    a, b = _version_parts(current), _version_parts(latest)
+    if a is None or b is None:
+        return False
+    width = max(len(a), len(b))
+    a = a + (0,) * (width - len(a))
+    b = b + (0,) * (width - len(b))
+    return b > a
+
+
+def parse_latest_release(payload: object):
+    """把 `releases/latest` 的响应读成 {tag, version, page_url, assets}。
+
+    draft / prerelease 一律不算：本项目的发布流程是"各平台先传草稿暂存，
+    Gitee 同步核对齐全后才自动取消草稿"，所以 latest 里出现 draft 就等于半成品，
+    提示用户去下它会把人坑在没传完的包上。
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("draft") or payload.get("prerelease"):
+        return None
+    tag = str(payload.get("tag_name") or "").strip()
+    if _version_parts(tag) is None:
+        return None
+    assets = []
+    for item in (payload.get("assets") or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        assets.append({"name": str(item.get("name") or ""),
+                       "size": size,
+                       "browser_download_url": str(item.get("browser_download_url") or "")})
+    return {"tag": tag,
+            "version": tag[1:] if tag[:1] in ("v", "V") else tag,
+            "page_url": str(payload.get("html_url") or ""),
+            "assets": assets}
+
+
+def pick_update_asset(assets, os_name: str):
+    """按**平台 + 后缀**挑要下的产物，不写死文件名。
+
+    产物在 v1.1.2 起从 `byte-tools.*` 改叫 `ByteTools.*`，而 v1.1.1 及更早的 Release
+    里还是旧名 —— 写死任何一个名字，都会在另一个时代选不到包。
+    """
+    items = [a for a in (assets or []) if isinstance(a, dict) and a.get("name")]
+
+    def lowered(a):
+        return str(a["name"]).lower()
+
+    if os_name == "Windows":
+        found = [a for a in items if lowered(a).endswith(".exe")]
+    elif os_name == "Darwin":
+        found = [a for a in items if "macos" in lowered(a) or "darwin" in lowered(a)]
+    elif os_name == "Linux":
+        found = [a for a in items if "linux" in lowered(a)]
+    else:
+        found = []
+    return found[0] if found else None
+
+
+def load_update_state() -> dict:
+    """读 `config.json` 里的更新检查状态；读不到就是一张空表（= 该查一次）。"""
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:                       # noqa: BLE001
+        return {}
+    state = (data or {}).get("update_check")
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def save_update_check(last_check_ts=None, notified=None) -> None:
+    """写更新检查状态。必须走 `_update_config` 的读-改-写，整体覆盖会清掉别的登记表。"""
+    def _mut(cfg: dict) -> None:
+        state = cfg.get("update_check")
+        state = dict(state) if isinstance(state, dict) else {}
+        if last_check_ts is not None:
+            state["last_check_ts"] = float(last_check_ts)
+        if notified is not None:
+            state["notified"] = str(notified)
+        cfg["update_check"] = state
+
+    _update_config(_mut)
+
+
+def update_check_due(now: float, state, interval_sec: float = UPDATE_CHECK_INTERVAL_SEC) -> bool:
+    """自动检查的频控：距上次不足 24 小时就不查（不骚扰、也不给网络添活）。
+
+    **没有 `last_check_ts` 这个键 = 从没查过 → 必须查**，不能按 0 处理：
+    按 0 算的话"从没查过"和"1970 年查过"同义，第一次启动反而永远不查。
+    """
+    raw = (state or {}).get("last_check_ts")
+    if raw is None:
+        return True
+    try:
+        last = float(raw)
+    except (TypeError, ValueError):
+        return True
+    return (float(now) - last) >= interval_sec
+
+
+def update_notify_due(state, version: str) -> bool:
+    """同一个新版本只提示一次；否则每次开软件都弹同一句话，用户会烦到关掉功能。"""
+    return str((state or {}).get("notified") or "") != str(version)
+
+
+def _fetch_release_json(url: str, timeout: float):
+    """默认取回实现：只带项目统一 UA，**不带任何用户信息**。"""
+    resp = requests.get(url, headers=HTTP_UA, timeout=timeout)
+    if resp.status_code != 200:
+        return int(resp.status_code), {}
+    try:
+        return 200, resp.json()
+    except ValueError:
+        return 200, None                    # 200 但不是 JSON → 交给 parse 判形状
+
+
+def check_for_update(fetch=None, current=None, timeout: float = UPDATE_HTTP_TIMEOUT) -> dict:
+    """查一次最新发布版。
+
+    入参 fetch: Callable[[str, float], tuple]  接缝（不是运行时开关）：测试注入假响应，
+          不会在 CI 与用户机器上真发请求。默认 `_fetch_release_json`。
+    入参 current: str  当前版本号，默认 `APP_VERSION`。
+    返回: dict {ok, silent, newer, latest, asset, error}
+          `silent=True` 只有一种含义：**两个源都没连上**，自动检查这条路上要完全静默。
+          "拿到了响应但读不出版本"不算静默 —— 那是接口变了，值得在手动路径上说一句。
+    """
+    out = {"ok": False, "silent": False, "newer": False, "latest": None,
+           "asset": None, "error": ""}
+    fetch = fetch or _fetch_release_json
+    cur = str(current if current is not None else APP_VERSION)
+    last_err = ""
+    for url in UPDATE_SOURCES:
+        try:
+            status, payload = fetch(url, timeout)
+        except Exception as exc:            # noqa: BLE001  网络异常是常态，不是 bug
+            last_err = f"{type(exc).__name__}: {exc}"
+            continue
+        if int(status or 0) != 200:
+            last_err = f"HTTP {status}"
+            continue
+        parsed = parse_latest_release(payload)
+        if parsed is None:
+            out["error"] = last_err or "更新源返回的内容读不出版本号"
+            return out
+        out["ok"] = True
+        out["latest"] = parsed
+        out["asset"] = pick_update_asset(parsed["assets"], CURRENT_OS)
+        out["newer"] = version_is_newer(cur, parsed["version"])
+        return out
+    out["silent"] = True
+    out["error"] = last_err or "连不上更新源"
+    return out
+
+
 # 当前操作系统标识与 CPU 架构：刻意不用 platform.system() / platform.machine()。
 # 那两个函数内部会走 platform.uname() -> win32_ver() -> 一次 WMI 查询，而 WINMGMT
 # 冷启动时这条查询能阻塞几十秒到一两分钟（本机实测），表现就是"双击启动脚本之后
@@ -12999,6 +13199,26 @@ class DonateDialog(QDialog):
 # ---------------------------------------------------------------------------
 # 主窗口（无边框自定义标题栏）
 # ---------------------------------------------------------------------------
+class UpdateCheckWorker(QThread):
+    """后台查一次更新。
+
+    必须在子线程里做：启动路径上任何同步网络请求都可能把界面锁死 ——
+    本项目为 `platform.win32_ver()` 卡 135 秒的事专门写过 R3.14，不该在
+    新功能里再犯一次同样的错。`run()` 里连异常都不许外抛（QThread 里抛异常
+    在这个项目上真崩过：0xC0000409 fail-fast，界面直接没了）。
+    """
+
+    done = Signal(dict)
+
+    def run(self) -> None:
+        try:
+            self.done.emit(check_for_update())
+        except Exception as exc:       # noqa: BLE001
+            self.done.emit({"ok": False, "silent": True, "newer": False,
+                            "latest": None, "asset": None,
+                            "error": f"{type(exc).__name__}: {exc}"})
+
+
 class MainWindow(QMainWindow):
     _COMPONENTS_CACHE: Dict[str, "Component"] = {}
 
@@ -13076,6 +13296,18 @@ class MainWindow(QMainWindow):
             lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL))
         )
         tb.addWidget(self.btn_github)
+
+        # 版本号 chip：常驻显示当前版本，点一下 = 手动检查更新（规则 R12）。
+        # 为什么不把版本号塞进标题文字：标题栏那 48px 已经挤了五个按钮，
+        # 之前加一个按钮就把「清理残留 PATH」裁掉过（最小宽 1000 那次教训）。
+        self.btn_version = QPushButton(f"v{APP_VERSION}")
+        self.btn_version.setObjectName("versionChip")
+        self.btn_version.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_version.setToolTip(
+            f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
+            "（启动后一天最多自动查一次，查不到不打扰你）")
+        self.btn_version.clicked.connect(lambda: self._start_update_check(auto=False))
+        tb.addWidget(self.btn_version)
 
         # 刷新版本列表按钮
         self.btn_refresh = QPushButton("⟳ 刷新版本")
@@ -13569,6 +13801,129 @@ class MainWindow(QMainWindow):
         height = min(300, max(160, int(host.height() * 0.45)))
         overlay.setGeometry(0, host.height() - height, host.width(), height)
 
+    def _start_update_check(self, auto: bool) -> None:
+        """查一次更新。auto=True 是启动后的静默检查，False 是用户点了版本号。"""
+        worker = getattr(self, "_update_worker", None)
+        if worker is not None and worker.isRunning():
+            if not auto:
+                self._append_log("info", "已经在检查更新了，稍等一下。")
+            return
+        if auto and not update_check_due(time.time(), load_update_state()):
+            return                     # 24 小时内查过：一个字都不说
+        if not auto:
+            self._append_log("info", f"检查更新中…（当前 v{APP_VERSION}）")
+        self._update_worker = UpdateCheckWorker(parent=self)
+        self._update_worker.done.connect(
+            lambda res, a=auto: self._apply_update_result(res, auto=a))
+        self._update_worker.finished.connect(self._update_worker.deleteLater)
+        self._update_worker.start()
+
+    def _apply_update_result(self, res, auto: bool) -> None:
+        """把检查结果落到界面与日志。
+
+        **自动检查失败时一个字都不写**（用户明确要求"连不上要完全静默"）：
+        这台机器对 github.com 偶发整天连不上是常态，弹一句"检查失败"对普通用户
+        等于凭空多出一个故障。手动点版本号时才必须回答，否则像按钮坏了。
+        """
+        if not isinstance(res, dict):
+            res = {}
+        if not res.get("ok"):
+            if auto and res.get("silent"):
+                return
+            self._append_log("info",
+                      f"没检查成更新：{res.get('error') or '未知原因'}"
+                      "（不影响软件本身使用，稍后可以再点一次版本号）")
+            return
+        latest = res.get("latest") or {}
+        version = str(latest.get("version") or "")
+        save_update_check(last_check_ts=time.time())
+        if not res.get("newer"):
+            if not auto:
+                self._append_log("ok", f"已经是最新版本 v{APP_VERSION}。")
+            return
+        chip = getattr(self, "btn_version", None)
+        if chip is not None:
+            # chip 只写新版本号（不写"当前→新"那种长串）：标题栏宽度紧，之前裁过按钮。
+            # 换色用**动态属性**而不是改 objectName：改了名字，之后按名字找它的代码与
+            # 用例就再也找不到了（真踩了一次：test_version_chip 跑在改色之后直接查不到）。
+            chip.setText(f"↑ v{version}")
+            chip.setProperty("hasUpdate", True)
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
+            chip.setToolTip(f"新版本 v{version} 已发布，点击查看详情并选择是否下载")
+        if update_notify_due(load_update_state(), version):
+            save_update_check(notified=version)
+            self._append_log("ok", f"发现新版本 v{version}（当前 v{APP_VERSION}）："
+                            f"{latest.get('page_url') or GITHUB_URL}")
+        if not auto:
+            self._offer_update_download(res)
+
+    def _offer_update_download(self, res) -> None:
+        """把新包下到**用户挑的目录**，绝不替换正在运行的自己（规则 R12）。
+
+        为什么不做"一键升级"：改名/覆盖运行中的 exe 在 Windows 上做得到，但杀软与
+        SmartScreen 对"程序自我替换"极易误报，onefile 又解包在 %TEMP% —— 一旦失手，
+        用户手里是一个既没更新完也打不开的软件。宁可让他自己把文件拖过去。
+        """
+        res = res if isinstance(res, dict) else {}
+        latest = res.get("latest") or {}
+        asset = res.get("asset")
+        page = str(latest.get("page_url") or GITHUB_URL)
+        version = str(latest.get("version") or "")
+        if not isinstance(asset, dict) or not asset.get("browser_download_url"):
+            QMessageBox.information(
+                self, "发现新版本",
+                f"v{version} 已发布，但这个 Release 里找不到本平台可用的安装包。\n"
+                f"可以到发布页看看：{page}")
+            return
+        name = str(asset["name"])
+        size = int(asset.get("size") or 0)
+        reply = QMessageBox.question(
+            self, "发现新版本",
+            f"新版本 v{version}（当前 v{APP_VERSION}）\n"
+            f"要下载的产物：{name}（约 {human_size(size)}）\n\n"
+            "下载不会改动、也不会替换正在使用的本程序；下完你自己放到任意目录即可。\n"
+            "现在下载吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "选择保存位置",
+                                                  str(Path.home() / "Downloads"))
+        if not folder:
+            self._append_log("info", "没选保存位置，已取消下载。")
+            return
+        dest = Path(folder) / name
+        urls = _gh_accelerated(str(asset["browser_download_url"]))
+        self._append_log("info", f"开始下载 v{version}：{dest}（{len(urls)} 个源依次尝试）")
+        self._update_dl = DownloadWorker(urls, dest, parent=self)
+        self._update_dl.log.connect(lambda lvl, msg: self._append_log(lvl, f"[更新] {msg}"))
+        self._update_dl.finished_ok.connect(
+            lambda p: self._on_update_downloaded(p, size, version))
+        self._update_dl.finished_fail.connect(
+            lambda e: self._append_log("error", f"[更新] 下载失败：{e}"))
+        self._update_dl.start()
+
+    def _on_update_downloaded(self, path: str, expected_size: int, version: str) -> None:
+        """下完了先核字节数，再问要不要打开所在文件夹。"""
+        got = 0
+        try:
+            got = Path(path).stat().st_size
+        except OSError as exc:
+            self._append_log("error", f"[更新] 下载说成功了，但读不到文件 {path}：{exc}")
+            return
+        if expected_size and got != expected_size:
+            self._append_log("error", f"[更新] 字节数对不上：声明 {expected_size}，实际 {got}"
+                               "（别用这个文件，去发布页重新下）")
+            return
+        self._append_log("ok", f"[更新] v{version} 已下载到 {path}（{human_size(got)}，字节数已核对）")
+        reply = QMessageBox.question(
+            self, "下载完成",
+            f"已下载到：\n{path}\n\n要打开所在文件夹吗？"
+            "（把新的 ByteTools 放到你习惯的位置，替换旧文件前先退出本程序）",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply == QMessageBox.Yes and not _open_in_file_manager(str(Path(path).parent)):
+            self._append_log("warn", f"[更新] 打不开目录 {Path(path).parent}，请自己到该路径取文件")
+
     def _on_status_link(self, link: str) -> None:
         """状态条里的 `dir://…` → 用系统文件管理器打开那个目录（2026-10-10 用户要求）。
 
@@ -13979,6 +14334,32 @@ class MainWindow(QMainWindow):
                 border-top-right-radius: 8px;
             }
             #titleText { color: white; padding-left: 4px; }
+            #versionChip {
+                background: rgba(255, 255, 255, 0.14);
+                color: #dfe7ee;
+                border: 1px solid rgba(255, 255, 255, 0.28);
+                padding: 4px 9px;
+                font-size: 12px;
+                border-radius: 10px;
+            }
+            #versionChip:hover {
+                background: rgba(255, 255, 255, 0.26);
+                color: white;
+            }
+            /* 发现新版本时才换色：一个安静的琥珀色小牌，不弹窗、不抢视线。
+               选择器挂在**动态属性**上（objectName 不许改，改了按名字找它的代码会失效） */
+            #versionChip[hasUpdate="true"] {
+                background: #f9a825;
+                color: #3e2723;
+                border: none;
+                padding: 4px 9px;
+                font-size: 12px;
+                font-weight: 700;
+                border-radius: 10px;
+            }
+            #versionChip[hasUpdate="true"]:hover {
+                background: #ffb74d;
+            }
             #iconBtn, #donateBtn, #ctrlBtn, #closeBtn {
                 background: transparent;
                 color: white;
@@ -14602,6 +14983,10 @@ def main() -> int:
     win = MainWindow()
     win._adopt_running()      # 认清本机在跑什么；不放 __init__——它会读写用户 running.json、探测真端口，构造窗口的测试会跟着遭殃
     win.show()
+    # 检查更新只挂在**程序入口**、不挂 __init__：理由与上面 `_adopt_running` 那条注释一样。
+    # 第一版犯过这个错 —— 测试直接构造 MainWindow，4 秒后定时器一响，真发了一次 HTTP
+    # 请求并把 `last_check_ts` 写进了用户真实的 config.json（延迟 4 秒是为了不给启动添负担）。
+    QTimer.singleShot(4000, lambda: win._start_update_check(auto=True))
     return app.exec()
 
 

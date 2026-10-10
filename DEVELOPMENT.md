@@ -1413,6 +1413,67 @@ macOS bundle 的 `CFBundleShortVersionString` / `CFBundleVersion`（spec 用正�
 
 新增文档里提到"这个软件"时用 **ByteTools**；提到上面四类时按原样写。
 
+## 规则 R12：检查更新只读、后台、自动路径失败完全静默，且绝不替换自己
+
+2026-10-10 加的功能，范围是用户拍定的 **A + B**：查版本 + 提示 + 应用内把新包下到
+**用户挑的目录**；**不做"一键升级替换自己"**（要做必须单独出 spec）。
+
+### R12.1 端点是实测出来的，不是想当然
+
+| 端点 | 2026-10-10 本机实测 | 用法 |
+|---|---|---|
+| `https://api.github.com/repos/jilong2026/byte-tools/releases/latest` | **200 / 1.2s / 8.6KB / 免鉴权** | 主源 |
+| `https://gh-proxy.com/<上面这个 URL>` | **200，代理回来的也是真 JSON** | 兜底源 |
+| `gitee.com/api/v5/repos/.../releases/latest` | **404 "Not Found Project"**（仓库不公开） | **不能当更新源** |
+| `github.com:443` | 本机偶发**整天**连不上 | 只出现在下载 URL 里，所以下载一律加速器优先 |
+
+`latest` 天然只给非 draft 的最新正式版，正好和"各平台先传草稿、Gitee 同步核对齐全后
+才自动取消草稿"的发布流程对上 —— 半成品不会被提示成"有新版本"。
+
+### R12.2 硬约束
+
+1. **自动检查只挂在程序入口，不挂 `MainWindow.__init__`**。第一版就犯过：测试直接构造
+   窗口，4 秒定时器一响就真发了一次 HTTP 请求，并把 `last_check_ts` 写进用户真实的
+   `config.json`。这与 `_adopt_running` 不进 `__init__` 是同一条理由（见那里的注释）。
+2. **必须在子线程里查**，`UpdateCheckWorker.run()` 连异常都要吞成结果 ——
+   QThread 里抛异常在这个项目上崩过 `0xC0000409`（界面直接没了）。超时 8 秒硬闸。
+   启动路径上任何同步网络请求都可能把界面锁死，这条是 R3.14（WMI 卡 135 秒）换来的。
+3. **自动检查失败完全静默**：一个字的日志都不写。本机对 github.com 偶发连不上是常态，
+   弹一句"检查失败"对普通用户等于凭空多一个故障。**手动点版本号 chip 时才必须回答**，
+   否则像按钮坏了 —— 两条路径的差别就这一条。
+4. **不携带任何用户信息**：URL 只有那两个端点，不拼查询参数、不记 IP。
+   这是"检查更新"和"遥测"的分界，用例 `test_requests_carry_no_user_data` 钉着。
+5. **产物按平台 + 后缀挑**，不许写死文件名：v1.1.1 及更早的产物叫 `byte-tools.*`，
+   v1.1.2 起叫 `ByteTools.*`（R11），写死任何一个都会在另一个时代选不到包。
+6. **`draft` / `prerelease` / 读不出版本号一律不算有新版本**；没有产物的 Release
+   仍然算"有新版可告知"（能打开发布页），只是不给应用内下载 —— 两者混成一个
+   "读不懂"，用户就再也收不到任何升级消息。
+7. **频控**：`config.json` 的 `update_check` 存 `last_check_ts` 与 `notified`；
+   自动检查 24 小时最多一次、**同一个新版本只提示一次**。写这个键必须走
+   `_update_config()` 的读-改-写（整体覆盖会清掉 active / takeover / selections）。
+8. **绝不改名或覆盖正在运行的自己**。下载只写到用户选的目录、下完核对字节数，
+   然后提示"自己放到习惯的位置，替换前先退出本程序"。
+9. 提示形态是标题栏那颗版本号 chip 变琥珀色（`#versionChip[hasUpdate="true"]`）。
+   **换色用动态属性，不许改 `objectName`** —— 改完按名字找它的代码与用例就失效了（踩过）。
+   chip 文字只写新版本号，标题栏宽度紧，最窄窗口下不许裁字
+   （`bt_multiversion_tests.CleanTerminalWindow.test_title_bar_buttons_are_not_clipped_at_minimum_width`
+   现在把 `btn_version` 一起数进去了）。
+
+### R12.3 版本号真源
+
+只有 `main.APP_VERSION` 一个（见 R11）：界面 chip、macOS bundle、CI 的 tag 闸门都读它。
+比较用 `version_is_newer()`，**按数值分段**比（`1.10.0 > 1.9.0`）；
+任何一边读不出来都返回 False —— 拿不到结论时不许打扰用户。
+
+### R12.4 用例
+
+`bt_update_check_tests.py`（18 条，全离线：`check_for_update(fetch=...)` 是可注入接缝，
+测试不联网）：响应解析与拒绝形状、无产物 Release、数值版本比较、两时代产物挑选、
+24 小时频控、同版本只提示一次、失败静默位、加速器兜底、隐私线、
+chip 初始文字、自动失败不写日志 / 手动失败要回答。
+
+---
+
 ## 接新组件的流程与经验
 
 **要写需求时看 `docs/HOW-TO-REQUEST-COMPONENT-LAUNCH.md`** —— 那是需求说明书模板 +
