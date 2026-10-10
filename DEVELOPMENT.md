@@ -462,8 +462,15 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
   空查询（或全空白）返回 `True` 表示不过滤。**不要**把分类名纳入匹配——分类已由 Tab 表达，
   搜"开发"会命中全部卡片，等于没搜
 - 过滤**只改 `card.setVisible()` 与卡片在布局里的归属**，绝不从 `MainWindow.cards` 里摘项（原因见 R2.3 的全量平铺不变量）
-- 网格布局下这条更关键：Tab 里的 relayout **只排可见卡片**，所以命中数少于列数时不会留下空洞；
-  统一结果面板则固定**单列**——搜索命中通常是两三个组件，排成网格反而要在窄结果里补空位
+- 网格布局下这条更关键：Tab 里的 relayout **只排可见卡片**，不足一行时在行尾补
+  `cardRowFiller` 透明占位格 —— **一格补一个**（不是一个占位控顶 n 格），
+  这样间距数与满行一致，格子宽度才不会漂（313 vs 309 就是这么来的）
+- **搜索结果面板与浏览用同一列数**（2026-10-10 用户改的口径：「搜索组件时如果只有一个组件
+  也要以网格显示，现在变成列表了」）。这里先后改过两次：最早是"结果面板固定单列"，
+  后来变成 `min(命中数, 浏览列数)`（命中 1 个就 1 列、一张卡占满整行）—— 那正是用户这次
+  报"变成列表了"的现象。现在恒取 `_card_columns()`，命中 1 个也是"3 个格子里占 1 个 + 2 个占位格"。
+  判据钉在 `SearchGridHasNoHoles.test_single_hit_keeps_the_same_cell_count_as_browsing`
+  （数的是**格子数**，不是卡片像素宽：少补一格，`addWidget(card, 1)` 就会把那张卡拉成整行宽）
 - **全组件搜索的呈现方式**：搜索时收起四个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
   把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
   清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
@@ -881,6 +888,96 @@ HKLM 的，主进程拿到回报后只做了复验和登记，**一声没出**�
 提权助手在测试里被换成假助手（`install_fake_helper`），**接缝位于助手层而非调用点**，
 因此通知必须由调用方发起才算被覆盖到 —— 把广播塞进 `_run_elevated_helper()` 会让全部用例绕过它。
 
+### R3.21 版本下拉框的展开状态必须由控件自己记账，`view().isVisible()` 不可信
+
+**真机反馈（2026-10-09 用户）**：「版本下拉如果没被鼠标选中，点第一次能弹出来列表，
+点击一次选中之后，再点一次就弹不出来了」，随后又补「偶尔还是有些弹不出来，点几次后又好了」。
+两层原因叠在一起，任何一层单独修都不够：
+
+1. **`self.view().isVisible()` 这个判据本身就是脏的**。Qt 的 popup 容器与它内部的 view
+   可见性不同步，两个平台给出**互相矛盾**的结论：offscreen 里选中之后卡在 `True`
+   （于是再点一次走 `hidePopup()` 分支 → 把已经收起的 popup 又收一次 = 用户看到"弹不出来"）；
+   真实 Windows 里明明展开着却报 `False`。
+2. **记账会失同步**。只在覆写的 `showPopup()` / `hidePopup()` 里记，但点到别处、窗口失焦、
+   容器自己 hide 时 Qt **不走**这两个入口 → 记账停在"开着" → 下次点击又变成"再收一次"。
+   这就是"多点几次才好"：第一次点收起（假动作），第二次才弹。
+
+四条不许回退的实现约束：
+
+- 判据是 `_popup_is_really_open()` = **记账说开着 且 容器确实可见**，两个条件缺一不可。
+  只信记账会失同步，只信可见性就退回第 1 条那个脏值。
+- 记账必须在 `super().showPopup()` **之后**、`super().hidePopup()` **之后**：放前面会把
+  "没弹成功"也记成展开，下一次点击就成了收起。
+- 事件过滤器装**三处**，少一处就漏一种点击位置：`lineEdit()`（文本区）、`self`
+  （右侧箭头那 28px 与内边距 —— 箭头 label 是鼠标穿透的，事件落到 combo 上）、
+  `view()`（用 `Show`/`Hide` 兜住 Qt 自己的收起路径）。只装 `lineEdit()` 时点箭头会走
+  QComboBox **原生 toggle**，和记账打架。
+- 在 `MouseButtonPress` 里**不许当场** `showPopup()`：主窗口很可能还没被激活（窗口系统的激活
+  发生在 press 之后），native popup 会被紧接着的"窗口被激活"立刻关掉 —— 同样是"点了没反应"。
+  要 `QTimer.singleShot(0, …)` 推到下一个事件循环，并且控件可能已析构，得静默兜住 `RuntimeError`。
+
+产品口径（用户明确要求，写进注释）：**框内任何位置的点击只负责"弹出"，不做开/关切换**；
+收起交给 Qt 原生行为（选中某项 / 点到外面 / Esc）。去掉切换之后这件事变成幂等的，
+没有任何状态可失同步。护栏用例：`VersionComboPopupReopens`（9 条，含"记账停在 True 但容器
+已收起时点击必须展开""连着几轮点开→选中→再点开每轮都必须弹开"）。
+
+### R3.22 `path_subdir` 必须由**归档实测**背书，并且每次装完自检
+
+**真机证据（两连击）**：
+
+- 2026-10-09 Python：Windows 装的是 embeddable 包（`python-3.x-embed-amd64.zip`），
+  `python.exe` 就在解压根目录、包里**压根没有 `Scripts`**，而组件声明写的是 `path_subdir="Scripts"`。
+  后果不是"显示不好看"，是**整条切换链白做**：PATH 指向一个没有解释器的目录 →
+  `python` 永远命中机器上自己装的那份 → R3.19 提权把这条没用的目录插到系统 PATH 最前，
+  复验照样命中机器上原有那个 → 自动回滚，用户连着看到两次"系统变量已改，但复验未通过"。
+- 2026-10-10 全量实测又抓一个同类的 **Node**：官方 `node-v20.15.0-win-x64.zip` 里
+  `node.exe` 同样在 `node-vX.Y.Z-win-x64/` 这一层，**没有 `bin` 子目录**，而声明写的是 `"bin"`。
+
+所以硬约束是三条：
+
+1. **新增或改动组件时，`path_subdir` 要跑 `bt_archive_layout_audit.py` 实测**，不许按惯例猜。
+   手法：zip 的中央目录在文件**尾部**，用 HTTP Range 只取几 KB～几 MB 就能列出全部条目
+   （JDK 一个包 190MB，不必下载）；tar.gz 是流式、无法随机读，就按预算（40MB）顺着读，
+   超预算只能判 `UNKNOWN` —— **拿残缺清单判失败等于凭空造一个假 bug**。
+   单二进制 / `.war` / `.exe` 安装器没有目录清单，明确标 `SKIP`。
+   判据与产品一致：`_exec_name_variants()` 里那些名字，**在 `_external_bin_dir()` 说的那个目录里**存在才算过。
+2. **每次安装解压完立刻自检**：`verify_bin_dir(comp, home)` 返回 `(是否在声明目录, 实际位置)`，
+   指错时日志当场点名"实际它在 …\python-3.15.0\python.exe"，并说明"这会让切换生效版本失效、
+   请把这段日志发给开发者"。这类错在界面上只表现为"切了但没生效"，用户无从自查，
+   所以必须让**下一次反馈自带根因**，而不是我们再去猜。
+3. **期望表钉进测试**：`bt_multiversion_tests.WindowsPathDirsMatchTheRealArchives` 里
+   `EXPECTED_WIN_SUBDIR`（2026-10-10 实测）+ `NOT_AUDITABLE`（归档类型审不了的 4 个：
+   kafka / pulsar / seata 是 tar.gz、docker 在 Windows 无免安装形态）。
+   `test_every_windows_component_is_accounted_for` 保证**新组件不会悄悄漏在表外**；
+   Unix 的 node / python 仍在 `bin/`，有专项用例挡住"Windows 的改动顺手带到别的平台"。
+4. **可执行文件的名字同样要实测**。同一轮审计在 Linux/macOS 上抓到：
+   apache-tomcat 的 `bin/` 里**没有**不带扩展名的 `catalina`，只有 `catalina.sh` 与 `catalina.bat`，
+   而 `_exec_name_variants()` 在非 Windows 只返回裸名 —— 于是 Linux/macOS 装完 tomcat 后
+   连入口都找不到（卡片状态与版本探测全落空）。现在 POSIX 的候选是 `[裸名, 裸名 + ".sh"]`，
+   **裸名仍排第一**（`python3` / `gradle` 这类有裸名的别被挤到后面）。
+   用例：`PosixExecNamesCoverTheShellScript`（3 条，含"Windows 那套 PATHEXT 展开不许被带偏"）。
+
+### R3.23 自动装的前置运行时，装完必须**当场能用**（HOME + PATH 都要写，失败不许说"不影响启动"）
+
+`needs=("jdk",)` 的 java 系组件（nacos / jenkins / kafka / rocketmq / seata / activemq）与
+`prereq=PrereqSpec` 的 rabbitmq（Erlang），在缺依赖时会**自动排队先装**。以前装完只做一件事：
+调 Windows 专用的 `set_windows_user_env(pre.env_var, …)` 写一个 HOME 变量 ——
+**不写 PATH**，Linux/macOS 上连 HOME 都不写，而失败时日志写的是"不影响启动"。
+对 java 系恰恰相反：`startup.cmd` / `seata-server.bat` / `catalina.bat` 都自己读 `%JAVA_HOME%`，
+写不上就是起不来，用户看到的就是"依赖明明装好了，启动还是失败"。
+
+改成 `_configure_prereq_env(pre, final)`，四条：
+
+1. **HOME 与 PATH 都写**，且按平台走各自的写入入口（Windows 写 HKCU，Unix 写 rc 文件）。
+2. **写完核对**：复用 R3.22 的 `verify_bin_dir`，声明目录里没有可执行文件就点名报出来。
+3. **失败如实上报并中止启动流程**（`_on_prereq_failed`），**不许**再打"不影响启动"。
+4. 启动侧那一份 env 注入**保留不动**：`build_launch_plan()` 会把 `JAVA_HOME`
+   （以及 Erlang 的 `ERLANG_HOME` + 把 erl 的 bin 前插进**这个子进程的** PATH）注进子进程环境。
+   两条路各有各的用处：注入保证"本工具点启动一定起得来"，写注册表保证"用户自己的终端里 java 也能用"。
+   少任何一条都是半截子（2026-10-06 的 rocketmq 与 rabbitmq 停止失败各查过一次）。
+
+护栏用例：`PrereqRuntimeIsReallyUsable`（Windows / Unix 各一条，断言 HOME 与 PATH 都写过）。
+
 ---
 
 ## 规则 R4：一键脚本自举契约
@@ -1265,7 +1362,26 @@ python bt_live_matrix.py --keys nginx,tomcat,activemq,rocketmq,kafka,elasticsear
 
 ---
 
-- R11: _待定_
+## 规则 R11：产品名是 ByteTools，但四处旧名 `byte-tools` 是承重墙，不许顺手改
+
+2026-10-10 把**产物名与文档里的产品名**从 `byte-tools` 改成 `ByteTools`：
+`byte-tools.spec` 的 `APP_NAME` → 产出 `ByteTools.exe` / `ByteTools.app` / `ByteTools`，
+`release.yml` 的四个 `artifact_name`、`同步Gitee产物.sh/.bat` 的期望清单、
+`bt_gitee_sync_tests.py` 的夹具、两个一键脚本的标题与 `assets/msg_zh.txt` 文案、
+README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文件的一次性对齐**：
+任何一处漏改，下一次发版就会出现"CI 造出 `ByteTools.exe`，Gitee 同步脚本却去找
+`byte-tools.exe`"这种半截状态（`RELEASE_ARTIFACTS` 与 `DEFAULT_ARTIFACTS` 必须逐字相同）。
+
+以下四处**保留 `byte-tools` 原样**，各自都有具体后果，不是"没改完"：
+
+| 保留项 | 位置 | 改了会怎样 |
+|---|---|---|
+| 仓库标识 | `jilong2026/byte-tools`、`GITEE_REPO=byte-tools`、README 里 `cd byte-tools` | 远端仓库没改名，改了 clone/下载链接全断 |
+| 下载 UA | `HTTP_UA = {"User-Agent": "byte-tools"}` 与各处"实测 + byte-tools UA"注释 | 大陆高校镜像是**按这个 UA 实测放行**的（默认 UA 回 403，见 R1）；改 UA 等于把 24 个组件 × 3 平台的源全部重测一遍 |
+| shell rc 标记 | `# >>> byte-tools:NAME >>>` / `# >>> byte-tools:PATH:<entry> >>>` | 老用户 `.zshrc` / `.bash_profile` 里已写入的块**再也匹配不上**，清理与幂等更新双双失效，留下永久残块 |
+| 文件与内部名 | `byte-tools.spec`、`assets/byte-tools.png/.ico/byte-tools-pt.png`、日志 `byte-tools.out`、`com.rgh.byte-tools` | 都是既有路径/标识：换名要连着搬用户数据、重生成图标引用，macOS 上换 bundle id 还会丢已授予的权限 |
+
+新增文档里提到"这个软件"时用 **ByteTools**；提到上面四类时按原样写。
 
 ## 接新组件的流程与经验
 

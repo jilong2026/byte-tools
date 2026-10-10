@@ -55,7 +55,8 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import main  # noqa: E402
-from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel,  # noqa: E402
+                               QWidget)
 
 # 分类基线复用对面那份，不另写一张表（理由见 bt_search_and_newcmp_tests.py 顶部）。
 from bt_component_category_tests import EXPECTED_MEMBERSHIP  # noqa: E402
@@ -621,9 +622,11 @@ class LogOverlayNeverRelayouts(_UsesRealWindow, unittest.TestCase):
 # F. 搜索
 # ======================================================================
 class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
-    """搜索命中数 < 列数时，结果里不许留空位。
+    """搜索结果面板始终是**网格**：行里没有"消失的卡片"，命中数不足一行时用透明占位格补齐。
 
-    现在红是预期的：网格还不存在。
+    2026-10-10 口径变更：以前定的是"命中 1 个就 1 列、一张卡占满整行"（不想看到
+    孤零零一张小卡缩在左上角），用户现在明确要求"只有一个组件也要以网格显示"。
+    所以"没有洞"的含义从"不补占位"变成"补了占位、卡片仍只占一格"。
     """
 
     def _container_holding(self, key_of_card):
@@ -635,7 +638,7 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
                     return key
         self.fail(f"{key_of_card} 不在任何容器里 —— 搜索结果没有重排")
 
-    def test_single_hit_occupies_one_row_with_no_gap(self):
+    def test_single_hit_row_holds_only_that_card(self):
         win = self.win
         win.search_box.setText("kafka")
         self.addCleanup(win.search_box.setText, "")
@@ -645,8 +648,41 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
         key = self._container_holding("kafka")
         rows = [row for row in _rows_of(win, key) if row]
         self.assertEqual(len(rows), 1, f"命中 1 个却排出了 {len(rows)} 行")
-        self.assertEqual(len(rows[0]), 1, "这一行里有空位（占位格或隐藏卡片）")
+        # 这里数的是**卡片**（_row_cards 只认 ComponentCard），透明占位格不算：
+        # 一行里有 1 张卡 + 若干占位格才是网格；1 张卡独占整行是列表。
+        self.assertEqual(len(rows[0]), 1, "这一行里混进了别的卡片")
         self.assertEqual(rows[0][0].component.key, "kafka")
+
+    def test_single_hit_keeps_the_same_cell_count_as_browsing(self):
+        """命中 1 个也必须按网格排：结果行的**格子数**要等于浏览行的格子数。
+
+        2026-10-10 用户改的口径：以前定的是"命中 1 个就 1 列、一张卡占满整行"
+        （不想看到孤零零一张小卡缩在左上角），现在明确要求"只有一个组件也要以网格显示"。
+        判据用格子数而不是卡片像素宽：少一个占位格，`addWidget(card, 1)` 就会把
+        这张卡拉成整行宽 —— 占位格正是"等宽"的直接原因，而像素宽在 offscreen 下
+        还受窗口是否真正 show 影响，不是干净的判据。
+        """
+        win = self.win
+        _relayout_all(win)
+        idx = next(i for i in range(win.tabs.count())
+                   if any(c.component.key == "kafka" for c in win._tab_cards[i]))
+        browse_row = next(r for r in win._tab_rows[idx]
+                          if any(c.component.key == "kafka"
+                                 for c in r.findChildren(main.ComponentCard)))
+        cells = browse_row.layout().count()
+        self.assertGreaterEqual(cells, 2, "浏览时 kafka 所在行只有一格，这条用例钉不住东西")
+
+        win.search_box.setText("kafka")
+        self.addCleanup(win.search_box.setText, "")
+        rows = win._tab_rows.get(main.RESULTS_KEY) or []
+        hit_row = next((r for r in rows
+                        if any(c.component.key == "kafka"
+                               for c in r.findChildren(main.ComponentCard))), None)
+        self.assertIsNotNone(hit_row, "搜索后 kafka 不在任何结果行里")
+        self.assertEqual(hit_row.layout().count(), cells,
+                         "命中 1 个时结果行的格子数与浏览时不等 —— 那张卡被拉成了整行宽")
+        self.assertEqual([c.component.key for c in hit_row.findChildren(main.ComponentCard)],
+                         ["kafka"], "结果行里混进了别的卡片")
 
     def test_clearing_search_puts_every_card_back_in_order(self):
         win = self.win
@@ -661,6 +697,53 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
                 self.assertEqual([c for row in rows for c in row],
                                  win._tab_cards[index],
                                  "清空搜索后卡片没按原顺序回到原 Tab")
+
+
+# ======================================================================
+# F2. 带背景的标签不许被竖直拉伸（真机 2026-10-10 用户截图）
+# ======================================================================
+class BadgeNeverStretchesVertically(unittest.TestCase):
+    """同一行的卡片会被拉成等高，内容少的那张多出来的高度不许灌进标题行。
+
+    用户看到的症状：「可多版本」角标在 JDK / Python 卡上是一个**高盒子**，
+    在 Maven / Node.js 卡上是一枚紧凑胶囊 —— 字一样大，框不一样高。
+    根因不是字号（真机逐张量过：26 张卡的角标全是 66×20、11px）：
+    网格会把同一行的卡片拉成等高，而 Maven 那张卡多了「系统里检测到的版本」
+    折叠区与「还原」两行，把整行撑高；卡片主布局**末尾没有 stretch**，
+    多出来的高度于是被各行分掉，标题行里的角标是带背景色的 QLabel，
+    一被拉高就变成一个大框。
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def _row_with(self, short_key: str, tall_key: str):
+        comps = {c.key: c for c in main.build_components()}
+        short = main.ComponentCard(comps[short_key], lambda msg, level=None: None)
+        tall = main.ComponentCard(comps[tall_key], lambda msg, level=None: None)
+        tall._external_frame.setVisible(True)      # 复刻"Maven 卡多了两行内容"
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(short, 1)
+        lay.addWidget(tall, 1)
+        row.resize(820, 420)
+        row.show()
+        for _ in range(8):
+            self.app.processEvents()
+        self.addCleanup(row.deleteLater)
+        return short, tall
+
+    def test_badge_height_is_its_size_hint_not_the_leftover_space(self):
+        short, tall = self._row_with("jdk", "maven")
+        self.assertGreater(tall.height(), short.minimumSizeHint().height(),
+                           "对照组失效：两张卡本来就不等高，这条用例钉不住东西")
+        self.assertGreater(short.height(), short.sizeHint().height(),
+                           "短卡片没被拉高，说明这一行根本没有多余空间")
+        badge = short.findChild(QLabel, "multiVersionBadge")
+        self.assertEqual(badge.height(), badge.sizeHint().height(),
+                         "角标被竖直拉伸了：它的高度必须等于自己的 sizeHint，"
+                         "否则同一行里内容少的卡片会显示成一个大盒子")
 
 
 # ======================================================================

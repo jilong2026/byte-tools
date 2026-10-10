@@ -850,6 +850,362 @@ class ActiveConfig(EnvSandbox):
         self.assertIsNone(main.infer_active_from_env(comp))
 
 
+class VersionComboPopupReopens(unittest.TestCase):
+    """选中过一项之后，版本下拉框必须还能再点开（2026-10-09 朋友机真机反馈）。
+
+    复现路径：点开 → 选一项（Qt 自己收起）→ 再点输入框 → **弹不出来了**；
+    换一个没被选过的组件又能弹开。
+
+    根因：旧实现用 `self.view().isVisible()` 判断"现在是不是展开着"。这个值并不可靠 ——
+    Qt 的 popup 容器与它内部的 view 可见性不同步，实测两个平台给出互相矛盾的结论：
+      · offscreen：选中之后**卡在 True**（于是再点一次走的是 hidePopup 分支 → 弹不出来）；
+      · 真实 windows：明明展开着却报 **False**。
+    所以展开状态必须由控件自己记账（`_popup_open`），不能去问 view。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _combo(self):
+        c = main.SearchableComboBox()
+        c.addItems(["3.12.0", "3.11.0", "3.10.0"])
+        return c
+
+    def _press(self, combo):
+        """模拟用户点击输入框（走 eventFilter 那条真实路径）。"""
+        from PySide6.QtCore import QEvent, QPoint, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        ev = QMouseEvent(QEvent.MouseButtonPress, QPoint(5, 5),
+                         Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(combo.lineEdit(), ev)
+        # 展开是 QTimer.singleShot(0) 延迟做的（避开"窗口还没激活就被关掉"的竞态），
+        # 所以这里必须让定时器跑起来，否则测的是"还没到点"而不是"没弹开"。
+        QApplication.processEvents()
+
+    def test_popup_state_is_tracked_by_the_widget(self):
+        combo = self._combo()
+        self.assertFalse(combo._popup_open, "初始必须是收起")
+        combo.showPopup()
+        self.assertTrue(combo._popup_open)
+        combo.hidePopup()
+        self.assertFalse(combo._popup_open)
+
+    def test_click_reopens_after_selecting_an_item(self):
+        """用户报的那一步：选中一项之后再点，必须重新展开。"""
+        combo = self._combo()
+        combo.showPopup()          # 第一次点开
+        combo.setCurrentIndex(1)   # 选中一项
+        combo.hidePopup()          # Qt 自己收起（会走到我们覆写的 hidePopup）
+        self.assertFalse(combo._popup_open, "选中后应是收起状态")
+
+        self._press(combo)         # ★ 再点一次
+        self.assertTrue(combo._popup_open,
+                       "选中过之后再点必须重新展开，而不是把已经收起的 popup 再收一次")
+
+    def test_click_opens_even_when_view_reports_a_stale_value(self):
+        """view().isVisible() 报脏值时不许被骗：收起状态下它报 True 也要展开。"""
+        combo = self._combo()
+        combo.hidePopup()
+        combo.view().setVisible(True)      # 制造脏值：view 说可见，其实已收起
+        self._press(combo)
+        self.assertTrue(combo._popup_open,
+                       "旧实现在这里会被脏值骗到，把“展开”做成“收起”")
+
+    def test_view_hide_event_syncs_the_bookkeeping(self):
+        """Qt 不走我们的 hidePopup 直接收起时，记账必须跟上（偶发失同步的兜底）。"""
+        from PySide6.QtCore import QEvent
+
+        combo = self._combo()
+        combo._popup_open = True
+        QApplication.sendEvent(combo.view(), QEvent(QEvent.Hide))
+        self.assertFalse(combo._popup_open, "popup 被 Hide 时记账要跟着变收起")
+
+    def test_click_opens_when_the_flag_is_stale_open_but_nothing_is_visible(self):
+        """偶发场景：记账停在"开着"，容器其实已经收起 —— 这时点击必须是展开。"""
+        combo = self._combo()
+        combo._popup_open = True          # 记账失同步
+        combo.view().setVisible(False)    # 事实：已经收起
+        self.assertFalse(combo._popup_is_really_open(), "两个条件要同时满足才算开着")
+        self._press(combo)
+        self.assertTrue(combo._popup_open, "这种失同步下点击必须展开，而不是再收一次")
+
+    def test_many_click_select_cycles_always_reopen(self):
+        """用户报的"多点几次才有"：连着几轮 点开→选中→再点开，每一轮都必须弹开。"""
+        combo = self._combo()
+        for i in range(3):
+            self._press(combo)
+            self.assertTrue(combo._popup_open, f"第 {i + 1} 轮点击没有展开")
+            combo.setCurrentIndex(i % combo.count())
+            combo.hidePopup()
+            self.assertFalse(combo._popup_open, f"第 {i + 1} 轮选中后应收起")
+
+    def test_click_anywhere_in_the_box_opens_the_list(self):
+        """用户要求：版本框内任何位置（含右侧箭头）的点击都弹列表，不只是点版本号。"""
+        from PySide6.QtCore import QEvent, QPoint, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        combo = self._combo()
+        # 点在箭头那一侧：事件落到 combo 自己身上，不是 lineEdit
+        QApplication.sendEvent(
+            combo, QMouseEvent(QEvent.MouseButtonPress, QPoint(combo.width() - 5, 5),
+                               Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        QApplication.processEvents()
+        self.assertTrue(combo._popup_open, "点箭头也必须弹出列表")
+
+    def test_clicking_again_does_not_close_it(self):
+        """框内点击只负责弹出，不再做开/关切换 —— 切换是偶发点不开的根源。"""
+        combo = self._combo()
+        self._press(combo)
+        self.assertTrue(combo._popup_open)
+        self._press(combo)
+        self.assertTrue(combo._popup_open, "再点一次不该把列表收起来")
+
+    def test_typing_also_opens_the_popup(self):
+        """输入关键字同样要能展开（旧实现这里也用了 view().isVisible()）。"""
+        combo = self._combo()
+        combo.lineEdit().setText("3.11")
+        combo._on_text_edited("3.11")
+        self.assertTrue(combo._popup_open)
+
+
+class PythonPathDirHoldsTheInterpreter(EnvSandbox):
+    r"""Windows 的 Python 是 embeddable 包：解释器在**安装根目录**，不在 Scripts。
+
+    2026-10-09 真机踩到：path_subdir 写成 "Scripts"，于是
+      · PATH 被指向 .../python-3.15.0/Scripts —— 这个目录里没有 python.exe
+        （embeddable 包连这个目录都没有）；
+      · `python` 因此永远命中机器上自己装的那份（本机 C:\Program Files\python）；
+      · 连带后果：R3.19 的提权把这条**没用的**目录插到系统 PATH 最前，复验照样
+        命中 C:\Program Files\python → 自动回滚，用户看到"切了但没生效"。
+    判据不是"path_subdir 等于什么字符串"，而是**我们放进 PATH 的那个目录必须真有解释器**。
+    """
+
+    def _python(self):
+        comp = next(c for c in main.build_components() if c.key == "python")
+        home = comp.install_dir("3.15.0")
+        home.mkdir(parents=True, exist_ok=True)
+        # 复刻 embeddable 包的真实布局：python.exe 在根目录，没有 Scripts
+        (home / "python.exe").write_bytes(b"\x00")
+        return comp, home
+
+    def test_windows_python_path_dir_contains_the_interpreter(self):
+        self.as_windows()
+        comp, home = self._python()
+        bin_dir = main._external_bin_dir(comp, home)
+        self.assertTrue((Path(bin_dir) / "python.exe").exists(),
+                        f"要放进 PATH 的目录必须真有 python.exe，实际指向 {bin_dir}")
+
+    def test_windows_python_path_dir_is_the_install_root(self):
+        self.as_windows()
+        comp, home = self._python()
+        self.assertEqual(main._external_bin_dir(comp, home), str(home))
+
+    def test_unix_python_still_uses_bin(self):
+        """Unix 官方包解释器在 bin/，别被 Windows 的改动带偏。"""
+        self.as_linux()
+        comp = next(c for c in main.build_components() if c.key == "python")
+        self.assertEqual(comp.path_subdir, "bin")
+
+    def test_conda_still_uses_scripts(self):
+        """Miniconda 的 conda.exe 确实在 Scripts，别跟着 python 一起改掉。"""
+        self.as_windows()
+        conda = next(c for c in main.build_components() if c.key == "conda")
+        self.assertEqual(conda.path_subdir, "Scripts")
+
+
+class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
+    r"""Windows 上**每个**组件"要放进 PATH 的那个目录"，必须和归档里的真实布局一致。
+
+    这张期望表不是按惯例推的，是 2026-10-10 用 `bt_archive_layout_audit.py` 读归档
+    中央目录实测出来的（zip 只取尾部几 KB～几 MB，不下载整包）。为什么必须有这张表：
+    Python 那次是 `path_subdir="Scripts"` 指到一个没有解释器的目录，Node 这次是
+    `"bin"` —— Windows 官方 node zip 的 `node.exe` 在解压根目录，压根没有 bin 子目录。
+    同一种错在界面上只表现为"切了但没生效"，而单元测试原本一个都发现不了
+    （测试不知道归档长什么样）。
+
+    表里没有的组件是**归档类型审不了**的：kafka / pulsar / seata 的 Windows 包是
+    tar.gz（流式，无法随机读清单），docker 在 Windows 没有免安装形态。
+    这几个由装完自检 `verify_bin_dir` 兜，并且必须在这里显式登记，
+    否则以后新增组件会静默绕过这道检查。
+    """
+
+    EXPECTED_WIN_SUBDIR = {
+        "jdk": "bin", "maven": "bin", "tomcat": "bin", "mysql": "bin",
+        "git": "cmd", "go": "bin", "gradle": "bin", "mongodb": "bin",
+        "postgresql": "bin", "rocketmq": "bin", "activemq": "bin",
+        "nacos": "bin", "elasticsearch": "bin", "erlang": "bin",
+        "rabbitmq": "sbin", "conda": "Scripts",
+        "nginx": "", "python": "", "node": "", "powershell": "", "bun": "",
+        "kubectl": "", "jenkins": "",
+    }
+    NOT_AUDITABLE = {"kafka", "pulsar", "seata", "docker"}
+
+    def _win_comps(self):
+        self.as_windows()
+        return {c.key: c for c in main.build_components()}
+
+    def test_every_windows_component_is_accounted_for(self):
+        """审过的 + 审不了的 = 全部组件，谁也不许悄悄漏在表外。"""
+        comps = self._win_comps()
+        missing = sorted(set(comps) - set(self.EXPECTED_WIN_SUBDIR) - self.NOT_AUDITABLE)
+        self.assertEqual(missing, [], f"这些组件既没实测也没登记：{missing}")
+
+    def test_path_subdir_matches_the_measured_archive_layout(self):
+        comps = self._win_comps()
+        for key, want in sorted(self.EXPECTED_WIN_SUBDIR.items()):
+            self.assertEqual(comps[key].path_subdir, want,
+                             f"{key} 的 path_subdir 与 2026-10-10 实测的归档布局不符")
+
+    def test_the_dir_we_put_into_path_really_holds_the_executable(self):
+        """判据落在行为上：按实测布局摆好文件后，PATH 那个目录里必须真有可执行文件。"""
+        comps = self._win_comps()
+        for key, want in sorted(self.EXPECTED_WIN_SUBDIR.items()):
+            comp = comps[key]
+            names = main._exec_name_variants(comp)
+            if not names:
+                continue                      # 没有 exec_name 的组件本来就不进 PATH
+            home = comp.install_dir("9.9.9")
+            bin_dir = home / want if want else home
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / names[0]).write_bytes(b"\x00")
+            ok, where = main.verify_bin_dir(comp, home)
+            self.assertTrue(ok,
+                            f"{key}: PATH 目录 {bin_dir} 里找不到 {names[0]}（实测在 {where}）")
+            self.assertEqual(main._external_bin_dir(comp, home), str(bin_dir), key)
+
+    def test_windows_node_path_dir_is_the_extract_root(self):
+        """node 专项：这是本轮实测新发现的那一个，别被"node 应该有 bin"的直觉带回去。"""
+        comps = self._win_comps()
+        home = comps["node"].install_dir("20.15.0")
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "node.exe").write_bytes(b"\x00")     # 官方 zip 的真实位置
+        self.assertEqual(main._external_bin_dir(comps["node"], home), str(home))
+
+    def test_unix_node_still_uses_bin(self):
+        """Unix 的 node 包解释器在 bin/，Windows 的改动不许顺手带过去。"""
+        self.as_linux()
+        node = next(c for c in main.build_components() if c.key == "node")
+        self.assertEqual(node.path_subdir, "bin")
+
+
+class PosixExecNamesCoverTheShellScript(EnvSandbox):
+    r"""POSIX 上"这个组件的可执行文件"要认 `.sh`，否则 tomcat 这类只有 shell 入口的组件永远探测不到。
+
+    2026-10-10 用 bt_archive_layout_audit.py 读 apache-tomcat-10.1.60.tar.gz 实测：
+    `bin/` 下 29 个文件里**没有**不带扩展名的 `catalina`，只有 `catalina.sh` 与 `catalina.bat`。
+    而 `_exec_name_variants()` 在非 Windows 只返回裸名 —— 于是 Linux/macOS 上装完 tomcat 之后：
+      · `exec_path_in_home()` 找不到入口 → 卡片状态与版本探测都落空；
+      · `verify_bin_dir()` 会说"要放进 PATH 的目录里没有 catalina"，可目录其实是对的。
+    判据不是"tomcat 该叫什么"，而是**PATH 里那个目录必须真有一个能跑的东西**。
+    """
+
+    def _tomcat_with(self, files):
+        comp = next(c for c in main.build_components() if c.key == "tomcat")
+        home = comp.install_dir("10.1.60")
+        bin_dir = home / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            (bin_dir / name).write_bytes(b"\x00")
+        return comp, home
+
+    def test_posix_variants_include_the_shell_script(self):
+        self.as_linux()
+        comp = next(c for c in main.build_components() if c.key == "tomcat")
+        names = main._exec_name_variants(comp)
+        self.assertIn("catalina.sh", names,
+                      f"POSIX 上 catalina 的落盘名是 catalina.sh，实际候选={names}")
+        self.assertEqual(names[0], "catalina", "裸名必须仍排第一：python3 这种有裸名的别搞反")
+
+    def test_posix_verify_bin_dir_passes_with_only_the_shell_script(self):
+        self.as_linux()
+        comp, home = self._tomcat_with(["catalina.sh", "startup.sh", "bootstrap.jar"])
+        ok, where = main.verify_bin_dir(comp, home)
+        self.assertTrue(ok, f"bin/ 里只有 catalina.sh 也算这个目录可用，实际判为 {where}")
+
+    def test_windows_variants_stay_untouched(self):
+        """Windows 那套 PATHEXT 展开不许被带偏（mvn.cmd / startup.cmd 都靠它）。"""
+        self.as_windows()
+        comp = next(c for c in main.build_components() if c.key == "tomcat")
+        self.assertIn("catalina.bat", main._exec_name_variants(comp))
+        self.assertNotIn("catalina.sh", main._exec_name_variants(comp))
+
+
+class InstalledBinDirIsVerified(EnvSandbox):
+    """装完必须核对"要放进 PATH 的那个目录里有没有可执行文件"（R3.22 的护栏）。
+
+    Python 那次就是这个目录指错了：说在 Scripts，其实 python.exe 在根目录，
+    而界面上只表现为"切了但没生效"，用户完全无从自查。所以核对函数必须能
+    ① 对的时候确认；② 错的时候**说出实际在哪**，好让人一眼改对。
+    """
+
+    def test_ok_when_the_executable_is_in_the_declared_dir(self):
+        comp = next(c for c in main.build_components() if c.key == "maven")
+        home = comp.install_dir("3.10.0")
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        (home / "bin" / "mvn.cmd").write_text("", encoding="utf-8")
+        ok, where = main.verify_bin_dir(comp, home)
+        self.assertTrue(ok)
+        self.assertIn("mvn.cmd", where)
+
+    def test_names_the_real_location_when_the_dir_is_wrong(self):
+        comp = next(c for c in main.build_components() if c.key == "python")
+        home = comp.install_dir("3.15.0")
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "python.exe").write_bytes(b"\x00")
+        orig = comp.path_subdir
+        comp.path_subdir = "Scripts"       # 人为制造 Python 当年那个错
+        self.addCleanup(setattr, comp, "path_subdir", orig)
+        ok, where = main.verify_bin_dir(comp, home)
+        self.assertFalse(ok, "PATH 目录里没有解释器时必须报出来")
+        self.assertIn("python.exe", where, "要说清实际在哪个目录")
+
+
+class PrereqRuntimeIsReallyUsable(EnvSandbox):
+    """前置运行时（JDK / Erlang）装完必须**真的能用**，不能只落位不配环境。
+
+    以前 `_on_prereq_downloaded` 只调 Windows 专用的 set_windows_user_env 写一个
+    JAVA_HOME，**不写 PATH**，Linux/macOS 上连 JAVA_HOME 都不写；失败时日志还写着
+    "不影响启动"。对 java 系组件这恰恰相反：JAVA_HOME 没配上，nacos 的 startup.cmd、
+    jenkins 的 `java -jar` 根本起不来 —— 用户看到的就是"依赖明明装好了，还是启动失败"。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _card(self, key="nacos"):
+        comp = next(c for c in main.build_components() if c.key == key)
+        return main.ComponentCard(comp, lambda lvl, msg: None)
+
+    def test_prereq_env_writes_home_and_path_on_windows(self):
+        self.as_windows()
+        jdk = next(c for c in main.build_components() if c.key == "jdk")
+        final = jdk.install_dir("21")
+        (final / "bin").mkdir(parents=True, exist_ok=True)
+        (final / "bin" / "java.exe").write_bytes(b"\x00")
+
+        card = self._card()
+        self.assertTrue(card._configure_prereq_env(jdk, final))
+        self.assertEqual(self.win_env.get("JAVA_HOME"), str(final))
+        self.assertIn(str(final / "bin"), self.win_path,
+                      "PATH 里也要有 java 所在的目录，否则命令行找不到 java")
+
+    def test_prereq_env_writes_home_and_path_on_unix(self):
+        self.as_linux()
+        jdk = next(c for c in main.build_components() if c.key == "jdk")
+        final = jdk.install_dir("21")
+        (final / "bin").mkdir(parents=True, exist_ok=True)
+        (final / "bin" / "java").write_bytes(b"\x00")
+
+        card = self._card()
+        self.assertTrue(card._configure_prereq_env(jdk, final))
+        rc = self.rc.read_text(encoding="utf-8")
+        self.assertIn("JAVA_HOME", rc, "Unix 上以前连 JAVA_HOME 都不写")
+        self.assertIn(str(final / "bin"), rc)
+
+
 class SaveSettingsKeepsActive(EnvSandbox):
     def test_window_save_preserves_active(self):
         # theme 同 ActiveConfig：_save_settings 也只许改 selections，其它顶层键原样保留。

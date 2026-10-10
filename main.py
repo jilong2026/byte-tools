@@ -4182,7 +4182,14 @@ def build_components() -> List[Component]:
             key="python",
             display_name="Python",
             env_var=None,
-            path_subdir="Scripts" if CURRENT_OS == "Windows" else "bin",
+            # **Windows 必须用安装根目录，不能写 "Scripts"**（2026-10-09 真机踩到）：
+            # Windows 下装的是 embeddable 包（python-3.x.x-embed-amd64.zip），
+            # python.exe 就在解压根目录，包里**压根没有 Scripts 目录**。写成 "Scripts"
+            # 会让 PATH 指向一个不含解释器的目录 —— 于是 `python` 永远命中机器上自己装
+            # 的那份（本机 C:\Program Files\python），切换、乃至提权插到系统 PATH 最前
+            # 都白做：复验只会一直报"仍会先命中 …"，然后自动回滚。
+            # Unix 的官方包解释器在 bin/，保持原样。
+            path_subdir="" if CURRENT_OS == "Windows" else "bin",
             exec_name="python3" if CURRENT_OS != "Windows" else "python",
             version_args=["--version"],
             versions=[_cv(v, _python_urls(v)) for v in ("3.12.4", "3.11.9", "3.10.11", "3.9.13")],
@@ -4195,7 +4202,13 @@ def build_components() -> List[Component]:
             key="node",
             display_name="Node.js",
             env_var="NODE_HOME",
-            path_subdir="bin",
+            # **Windows 用解压根目录**（2026-10-10 用 bt_archive_layout_audit.py 读官方
+            # node-v20.15.0-win-x64.zip 的中央目录实测）：`node.exe`、`npm`、`npx.cmd`
+            # 全在 `node-vX.Y.Z-win-x64/` 这一层，包里**没有 bin 子目录**。
+            # 写 "bin" 会让 PATH 指到一个不存在的目录 —— 与 Python 那次（"Scripts"）
+            # 是同一类错：界面上只表现为"切了但没生效"，命令行永远命中机器上原有的 node。
+            # Unix 官方 tar.gz 里解释器确实在 bin/，保持原样。
+            path_subdir="" if CURRENT_OS == "Windows" else "bin",
             exec_name="node",
             version_args=["--version"],
             versions=[_cv(v, _node_urls(v)) for v in ("20.15.0", "18.20.3", "16.20.2")],
@@ -5933,7 +5946,7 @@ def page_shell(title: str, body: str) -> str:
  .links li {{ margin: 4px 0; }}
  .note {{ margin-top: 16px; font-size: 13px; color: #57606a; }}
 </style></head><body><div class="card">{body}
-<p class="note">这一页由 byte-tools 自带的小服务生成，只监听 127.0.0.1。
+<p class="note">这一页由 ByteTools 自带的小服务生成，只监听 127.0.0.1。
 刷新可以看到最新的运行状态。</p></div></body></html>"""
 
 
@@ -8630,8 +8643,14 @@ def _exec_name_variants(comp: Component) -> List[str]:
     name = comp.exec_name or ""
     if not name:
         return []
-    if CURRENT_OS != "Windows" or os.path.splitext(name)[1]:
+    if os.path.splitext(name)[1]:
         return [name]
+    if CURRENT_OS != "Windows":
+        # POSIX 要带上 `.sh`：2026-10-10 读 apache-tomcat-10.1.60.tar.gz 实测，
+        # `bin/` 里**没有**不带扩展名的 `catalina`，只有 `catalina.sh` / `catalina.bat`。
+        # 只认裸名的话，Linux/macOS 上装完 tomcat 会连入口都找不到（状态与版本探测全落空）。
+        # 裸名仍排第一：python3 / gradle 这类有裸名的，别被 .sh 挤到后面。
+        return [name, name + ".sh"]
     return [name + suffix for suffix in (".exe", ".cmd", ".bat", "")]
 
 
@@ -9320,7 +9339,7 @@ def _run_elevated_helper(request: Dict[str, object],
     except OSError as exc:
         return {"ok": False, "stage": "launch", "error": f"请求文件写不出去：{exc}"}
 
-    # 两条路都要能跑：打包后 sys.executable 就是 byte-tools.exe（--bt-elevate 直接生效）；
+    # 两条路都要能跑：打包后 sys.executable 就是 ByteTools.exe（--bt-elevate 直接生效）；
     # 源码运行时 sys.executable 是 python，要把 main.py 自己作为脚本参数传进去。
     if getattr(sys, "frozen", False):
         params = subprocess.list2cmdline([ELEVATE_FLAG, str(req_path)])
@@ -9610,6 +9629,33 @@ def revert_machine_only(comp: Component, machine_before: Dict[str, dict],
 
 
 # --- R3.19 让**工作区版本**在系统级也生效 ---------------------------------------
+
+def verify_bin_dir(comp: Component, home: Path) -> Tuple[bool, str]:
+    """装完之后核对：**我们准备放进 PATH 的那个目录里，到底有没有可执行文件**。
+
+    为什么必须有这一步（Python 踩出来的坑，见 R3.22）：Windows 的 Python 是 embeddable 包，
+    python.exe 在**安装根目录**而不是 `Scripts`；`path_subdir` 一错，PATH 就指向一个没有
+    解释器的目录，于是「切换生效版本」永远是假话 —— 连 R3.19 提权插到系统 PATH 最前都救不回来
+    （复验必然命中机器上原有的那个，然后自动回滚）。而这种错在界面上只表现为"切了但没生效"，
+    用户根本无从自查。所以装完立刻核对一次，不对就在日志里点名说清实际在哪个目录。
+
+    返回: (是否就在我们说的那个目录, 实际找到的位置；找不到时为空串)
+    """
+    names = _exec_name_variants(comp)
+    if not names:
+        return True, ""
+    bin_dir = Path(_external_bin_dir(comp, home))
+    for n in names:
+        if (bin_dir / n).exists():
+            return True, str(bin_dir / n)
+    # 不在我们说的那个目录 → 换几个常见布局找一遍，好在日志里说出"实际在哪"
+    for sub in ("", "bin", "Scripts", "cmd", "sbin", "condabin"):
+        d = home / sub if sub else home
+        for n in names:
+            if (d / n).exists():
+                return False, str(d / n)
+    return False, ""
+
 
 def build_workspace_machine_request(comp: Component, version: str,
                                     backup_file: str = "",
@@ -10169,6 +10215,12 @@ class SearchableComboBox(QComboBox):
 
     交互设计：
     - 点击输入框任意位置 → 弹出下拉列表（默认显示全部）
+    - **点击版本框内任何位置（含右侧箭头、内边距）都只负责"弹出"，不再做开/关切换**
+      —— 2026-10-09 用户明确要求："只要是在那个版本框内发生的点击，都弹出版本列表"。
+      切换本身也是偶发点不开的根源：原生 QComboBox 在箭头区域有自己的 toggle，
+      与我们的记账容易失同步，表现就是"点了没反应、多点几次才好"。去掉切换后
+      弹出这件事变成幂等的：按了就一定弹，没有任何状态可失同步。
+      列表的收起交给 Qt 原生行为：选中某项、点到外面、按 Esc。
     - 输入关键字 → 实时过滤下拉列表中的项
     - 点击某项即选中（也可按回车 / 上下键选择）
     - 无效输入 → 失焦时回滚到上一次选中的值
@@ -10189,8 +10241,14 @@ class SearchableComboBox(QComboBox):
         self._arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._arrow_label.setFixedWidth(28)
 
-        # 在 lineEdit 上安装 event filter：点击文本区时也弹出下拉
+        # 过滤器装三处，缺一个就会漏掉一种点击位置：
+        #   · lineEdit：文本区（覆盖大部分框面）
+        #   · self：右侧箭头那 28px 与内边距（箭头 label 是鼠标穿透的，事件落到 combo 上）
+        #   · view：看 Show/Hide 兜住 Qt 自己的收起路径
+        # 只装在 lineEdit 上时，点箭头会走 QComboBox **原生的 toggle**，与这里的记账
+        # 互相打架 —— 那就是"点了没反应、多点几次才好"的来源。
         self.lineEdit().installEventFilter(self)
+        self.installEventFilter(self)
 
         # completer：让 QCompleter 也做 contains 匹配（无所谓，主要靠 view 过滤）
         completer = QCompleter(self)
@@ -10203,6 +10261,18 @@ class SearchableComboBox(QComboBox):
 
         # 记录当前有效选中项
         self._committed_text: str = ""
+
+        # 展开状态**由控件自己记账**（R3.21）：绝不能去问 self.view().isVisible()。
+        # 实测那个值不可靠——Qt 的 popup 容器与它内部的 view 可见性不同步，两个平台
+        # 给出互相矛盾的结论：offscreen 里选中之后**卡在 True**（于是再点一次走的是
+        # hidePopup 分支 → 用户看到"选中过之后再点就弹不出来"）；真实 windows 里
+        # 明明展开着却报 False。展开与否只有 showPopup/hidePopup 这两个入口说了算。
+        self._popup_open: bool = False
+
+        # 光在 showPopup/hidePopup 里记账还不够：点到别处、窗口失焦、容器自己 hide 时，
+        # Qt 不一定经过我们覆写的那两个入口，记账会失同步 —— 用户看到的就是"偶尔弹不出来、
+        # 多点了几次又好了"。所以在 view 上再装一个事件过滤器，用 Show/Hide 兜住。
+        self.view().installEventFilter(self)
 
         # 连接信号
         self.currentIndexChanged.connect(self._on_index_changed)
@@ -10224,14 +10294,51 @@ class SearchableComboBox(QComboBox):
         的 press/release 处理进入 QComboBox 内部的 toggle 逻辑 —— 那会导致
         我们刚弹出的 popup 被立即隐藏。
         """
-        if obj is self.lineEdit() and event.type() == QEvent.MouseButtonPress:
+        # ① view 自己的 Show/Hide：兜住 Qt 不经过我们覆写的那几条收起路径
+        if obj is self.view():
+            if event.type() == QEvent.Show:
+                self._popup_open = True
+            elif event.type() == QEvent.Hide:
+                self._popup_open = False
+            return False   # 不吞，照常交给 Qt
+
+        # 版本框内**任何位置**的按下（文本区 / 箭头 / 内边距）一律弹出，不做开/关切换。
+        if event.type() == QEvent.MouseButtonPress and \
+                (obj is self or obj is self.lineEdit()):
             self.lineEdit().setFocus()
-            if self.view().isVisible():
-                self.hidePopup()
-            else:
-                self.showPopup()
-            return True  # 吞掉事件，QLineEdit 不再处理
+            if not self._popup_is_really_open():
+                QTimer.singleShot(0, self._deferred_show_popup)
+            return True  # 吞掉事件：不让 Qt 走它自己那套 toggle
         return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------------------
+    def _deferred_show_popup(self) -> None:
+        """singleShot(0) 到点后的展开入口；控件可能已被销毁，故静默兜住。
+
+        为什么要绕这一个事件循环：在 MousePress 里当场 showPopup，主窗口很可能
+        **还没被激活**（窗口系统的激活发生在 press 之后），native popup 会被紧接着的
+        "窗口被激活"这一下立刻关掉 —— 现象就是偶尔点了没反应、多点几次才好。
+        放到下一个事件循环，激活已完成，弹出就稳定了。
+        """
+        try:
+            if not self._popup_is_really_open():
+                self.showPopup()
+        except RuntimeError:
+            pass   # 卡片/窗口已经析构，没必要再弹
+
+    # ------------------------------------------------------------------
+    def _popup_is_really_open(self) -> bool:
+        """记账说开着**且**容器确实可见，才算真的开着（偶发"点几次才弹出"的最后一道保险）。
+
+        两个条件缺一不可：
+          · 只信记账 → Qt 走别的路径收起时失同步，下一次点击变成"再收一次"，弹不出来；
+          · 只信可见性 → 又碰到 R3.21 那个 view().isVisible() 报脏值的老问题。
+        """
+        if not self._popup_open:
+            return False
+        view = self.view()
+        container = view.window() if view is not None else None
+        return bool(view.isVisible()) or (container is not None and container.isVisible())
 
     # ------------------------------------------------------------------
     def focusInEvent(self, e) -> None:
@@ -10249,18 +10356,22 @@ class SearchableComboBox(QComboBox):
             self._filter_items(text)
         self._arrow_label.setText("▴")
         super().showPopup()
+        # 记账放在 super() 之后：Qt 那一步真把 popup 建起来了，才算展开。
+        # 放在之前会把"没弹成功"也记成展开，下一次点击就变成收起 —— 正是要修的那个现象。
+        self._popup_open = True
 
     # ------------------------------------------------------------------
     def hidePopup(self) -> None:  # noqa: D401
         self._arrow_label.setText("▾")
         super().hidePopup()
+        self._popup_open = False
 
     # ------------------------------------------------------------------
     def _on_text_edited(self, text: str) -> None:
         """用户在输入框中键入时：实时过滤 + 展开下拉。"""
-        # 展开下拉（若尚未展开）
-        if not self.view().isVisible():
-            super().showPopup()
+        # 展开下拉（若尚未展开）；同样看 _popup_is_really_open()，不看 view().isVisible()
+        if not self._popup_is_really_open():
+            self.showPopup()
         # 过滤
         keyword = text.strip()
         if not keyword:
@@ -10638,6 +10749,10 @@ class ComponentCard(QFrame):
         if self.component.multi_version:
             badge = QLabel("可多版本")
             badge.setObjectName("multiVersionBadge")
+            # 竖直方向必须 Fixed：同一行里标题的 sizeHint 比它高一点（13pt 粗体），
+            # 默认 Preferred 会让角标被拉到与标题等高 —— 带背景的标签一被拉高，
+            # 就从紧凑胶囊变成一个大盒子（真机 2026-10-10 用户截图：JDK / Python 卡）。
+            badge.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             badge.setStyleSheet(
                 "color:#5c6f82;background:#eef2f6;border-radius:9px;"
                 "padding:2px 8px;font-size:11px;font-weight:600;"
@@ -10847,6 +10962,12 @@ class ComponentCard(QFrame):
 
         self._external_frame.setVisible(False)
         root.addWidget(self._external_frame)
+
+        # 末尾必须有一个 stretch：网格会把同一行的卡片拉成等高，内容少的卡片
+        # 就多出一段高度。没有这个占位的话，那段高度会被各行按策略分掉 ——
+        # 带背景色的标签首当其冲：真机 2026-10-10 用户截图里，JDK / Python 卡的
+        # 「可多版本」角标被拉成一个大盒子，而同一行内容更多的 Maven 卡是紧凑胶囊。
+        root.addStretch(1)
 
     def _toggle_external_section(self) -> None:
         self._external_expanded = not self._external_expanded
@@ -11176,13 +11297,20 @@ class ComponentCard(QFrame):
         #   协议端口型（kafka/rocketmq/rabbitmq）→ 文字「访问页」，
         #   指向工具自带的「启动成功」页（卡片销毁前若还留着上次的 URL 就用它，
         #   否则由 _has_console() 从登记表里读）。
-        has_console = self._has_console()
         spec = getattr(self.component, "launch", None)
-        self.btn_console.setText("控制台"
-                                 if (spec is not None and spec.console_path)
-                                 else "访问页")
-        self.btn_console.setVisible(has_console)
+        own_page = spec is not None and bool(spec.console_path)
+        self.btn_console.setText("控制台" if own_page else "访问页")
+        # 按钮**常驻**（2026-10-10 用户报「有些怎么没有控制台按钮」）：以前停止状态下
+        # `console_path` 为 None 的组件（kafka / rocketmq / rabbitmq）会被整个藏掉 ——
+        # 它们只有运行期间由本工具生成的那一页"启动成功 / 该怎么访问"，于是没在跑的时候
+        # 按钮消失，用户读成"这个组件少了一个功能"。现在只要可启停就留着，
+        # 点不动的原因写进 tooltip（禁用态不解释，就是让用户猜）。
+        self.btn_console.setVisible(spec is not None)
         self.btn_console.setEnabled(running)
+        self.btn_console.setToolTip(
+            "" if running else
+            f"启动 {self.component.display_name} 之后才能打开"
+            + ("它自己的页面" if own_page else "本工具为它生成的访问说明页"))
         # 按钮文字就是状态本身：运行中显示「停止」，否则显示「启动」。
         # 正在起/停的过渡态（"启动中…"/"停止中…"）不能被这一行盖掉——
         # 那是用户点下去之后的即时反馈，被立刻改回「启动」会让人以为没点上。
@@ -11363,12 +11491,48 @@ class ComponentCard(QFrame):
             self._on_prereq_failed(f"{pre.display_name} 装完了但在 {final} 里找不到可执行文件")
             return
         self._log("ok", f"{pre.display_name} {version} 已装好：{final}")
-        if pre.env_var:
-            try:
-                EnvManager.set_windows_user_env(pre.env_var, str(final))
-            except Exception as exc:
-                self._log("warn", f"写 {pre.env_var} 失败（不影响启动）：{exc}")
+        ok_env = self._configure_prereq_env(pre, final)
+        if not ok_env:
+            # java 系组件没有 JAVA_HOME 就是起不来，这里不许再写成"不影响启动"
+            self._on_prereq_failed(
+                f"{pre.display_name} 装好了，但写 {pre.env_var or 'PATH'} 失败，"
+                f"{self.component.display_name} 依然启动不了")
+            return
         self._install_next_prereq()
+
+    def _configure_prereq_env(self, pre: "Component", final: Path) -> bool:
+        """让刚装好的前置运行时**真的能用**：HOME 变量 + PATH 都要写，且跨平台。
+
+        以前这里只调 Windows 专用的 `set_windows_user_env` 写一个 HOME，**不写 PATH**，
+        Linux/macOS 上更是连 HOME 都不写；失败时日志还写着"不影响启动" —— 对 java 系
+        组件来说恰恰相反：JAVA_HOME 没配上，nacos 的 startup.cmd / jenkins 的 `java -jar`
+        根本起不来，用户看到的就是"依赖明明装好了，启动还是失败"。
+        所以改成与正常安装同一套写入（HOME + PATH + 装完核对），失败如实上报。
+        """
+        bin_dir = final / pre.path_subdir if pre.path_subdir else final
+        try:
+            if pre.env_var:
+                if CURRENT_OS == "Windows":
+                    EnvManager.set_windows_user_env(pre.env_var, str(final))
+                    EnvManager.append_windows_path(str(bin_dir))
+                else:
+                    rc = EnvManager.set_unix_env(pre.env_var, str(final))
+                    EnvManager.append_unix_path(str(bin_dir))
+                    self._log("info", f"已写入 {rc}")
+                self._log("ok", f"设置 {pre.env_var}={final}")
+            else:
+                if CURRENT_OS == "Windows":
+                    EnvManager.append_windows_path(str(bin_dir))
+                else:
+                    EnvManager.append_unix_path(str(bin_dir))
+            self._log("ok", f"追加 PATH：{bin_dir}")
+            ok_dir, _where = verify_bin_dir(pre, final)
+            if not ok_dir:
+                self._log("warn", f"{pre.display_name} 装完了，但 {bin_dir} 里没有它的可执行文件")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._log("error", f"写 {pre.env_var or 'PATH'} 失败：{exc}")
+            return False
 
     def _on_prereq_failed(self, reason: str) -> None:
         self._prereq_queue = []
@@ -12584,6 +12748,15 @@ class ComponentCard(QFrame):
         非多版本组件保持原有行为逐字不变。
         """
         comp = self.component
+        # 装完先核对"要放进 PATH 的目录里有没有可执行文件"（R3.22 的教训）：
+        # 指错目录只会表现为"切了但没生效"，用户无从自查，必须当场点名。
+        ok_dir, where = verify_bin_dir(comp, install_path)
+        if not ok_dir:
+            self._log("warn",
+                      f"装完核对：本工具准备放进 PATH 的目录里没有 {comp.exec_name}"
+                      + (f"，实际它在 {where}" if where else "（整个安装目录里都没找到）")
+                      + "。这会让「切换生效版本」失效 —— 命令行仍会命中机器上原有的那个。"
+                        "请把这段日志发给开发者，需要修正该组件的 path_subdir。")
         if not comp.multi_version:
             self._configure_env(install_path)
             return
@@ -13129,9 +13302,12 @@ class MainWindow(QMainWindow):
     def _relayout_results(self) -> None:
         """统一结果面板：保留分类小标题，在各自标题下面重建卡片行。
 
-        行与浏览 Tab 是同一套 cardRow（`_make_rows` 造的），所以格子等宽。列数取
-        min(命中数, 浏览列数)：命中 1 个就 1 列（一张卡占满整行，不是缩在左上角
-        配一大片空白），命中 5 个就 3 列、第二行排 2 张 —— 不会为凑满一行补空位。
+        行与浏览 Tab 是同一套 cardRow（`_make_rows` 造的），所以格子等宽。
+        **列数恒取浏览列数**（2026-10-10 用户改的口径：「搜索组件时如果只有一个组件
+        也要以网格显示，现在变成列表了」）：命中 1 个也是 3 个格子里占 1 个，
+        另外两格补透明占位控件 —— 少补一格，`addWidget(card, 1)` 就会把那张卡拉成
+        整行宽，看上去就从"网格"退化成"列表"。以前这里是 `min(命中数, 浏览列数)`，
+        命中 1 个就 1 列，正是用户报的那个现象。
         """
         sections = getattr(self, "_result_sections", None) or []
         cards = [c for _, group in sections for c in group]
@@ -13139,7 +13315,7 @@ class MainWindow(QMainWindow):
             self._tab_rows[RESULTS_KEY] = []
             self.results_layout.row_widgets = []
             return
-        columns = max(1, min(len(cards), self._card_columns()))
+        columns = max(1, self._card_columns())
         # 分块必须在搬家**之前**算完：setParent 会把卡片显式隐藏，先搬再算就排空
         chunks_per_group = [chunk_visible(group, columns) for _, group in sections]
         # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走

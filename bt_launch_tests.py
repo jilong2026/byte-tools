@@ -1660,6 +1660,27 @@ class CardLaunchUi(unittest.TestCase):
                          "未运行时按钮文字必须是「启动」")
         self.assertFalse(self.card.btn_console.isEnabled())
 
+    def test_protocol_only_component_keeps_the_access_button_when_stopped(self):
+        """没有自带网页的组件（kafka）：停止时按钮也要**在**，只是点不动，并说清为什么。
+
+        2026-10-10 用户报「一键启停里的组件，有些怎么没有控制台按钮」。原因是这类组件
+        `console_path` 为 None，只有运行期间由本工具生成的一页「启动成功 / 该怎么访问」，
+        于是停止时 `setVisible(_has_console())` 把按钮整个藏了 —— 用户看到的是
+        "这个组件好像少了一个功能"，而它其实只是没在跑。
+        改成常驻：文案「访问页」，未运行时禁用并在 tooltip 里写明要等启动。
+        """
+        kafka = next(c for c in main.build_components() if c.key == "kafka")
+        self.assertIsNone(kafka.launch.console_path, "前提：kafka 确实没有自带网页控制台")
+        main.save_running_map({})
+        card = main.ComponentCard(kafka, lambda msg, level: None)
+        card._refresh_launch_state()
+        self.assertFalse(card.btn_console.isHidden(),
+                         "停止时把「访问页」整个藏掉 = 用户以为这个组件没有这个功能")
+        self.assertEqual(card.btn_console.text(), "访问页")
+        self.assertFalse(card.btn_console.isEnabled(), "没在跑，点开也没有页面可看")
+        self.assertIn("启动", card.btn_console.toolTip(),
+                      "禁用态必须自己说清为什么点不动")
+
     def test_one_button_carries_both_actions(self):
         """启动/停止是**同一个**按钮，位置固定，状态写在文字上（2026-10-06 用户要求）。
 
