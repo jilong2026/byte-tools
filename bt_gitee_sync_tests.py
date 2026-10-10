@@ -85,6 +85,16 @@ class MockGitee(BaseHTTPRequestHandler):
     def do_GET(self):
         sc, tail = self.scenario(), self.tail()
         STATE["reqs"].append(("GET", tail))
+        if "/releases/download/" in self.path:
+            # GH_ACCEL 测试接缝指到这里：给一个 >1 MB 的"真产物"，
+            # 让「清空 → 重新下载」这条路径能离线跑完（curl_fetch 只收 ≥1 MB 的文件）。
+            body = b"R" * 1_100_000
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if sc == "server500":
             return self.send_json(500, '{"message":"boom"}')
         if sc == "client400":
@@ -470,6 +480,20 @@ class AutoFetchContract(unittest.TestCase):
         self.assertIn("notice:", body, "闸门拦下时要打印为什么没清，别静默跳过")
         self.assertIn("rmdir /s /q", body, "clear_stale 里没有真的清空动作")
 
+    def test_bat_never_redirects_to_dev_null(self):
+        """.bat 里出现 Unix 的 /dev/null 会让整条命令静默不执行，且 ERRORLEVEL 仍是 0。
+
+        2026-10-10 实测三种写法的 rmdir：`>/dev/null 2>/dev/null` 与 `>/dev/null 2>nul`
+        都是"文件还在、目录还在、errlevel=0"，只有不重定向或重定向到 `nul` 才真删。
+        批处理里的空设备只有一个名字：nul。这条守卫防的是我下一次又顺手写 Unix 那套。
+        """
+        raw = (REPO_ROOT / "同步Gitee产物.bat").read_text(encoding="ascii")
+        code = [ln for ln in raw.splitlines() if not ln.strip().upper().startswith("REM")]
+        hits = [ln.strip()[:70] for ln in code if "/dev/null" in ln]
+        self.assertEqual(hits, [],
+                         ".bat 的执行行里出现 /dev/null：cmd 会去创建 \\dev\\null，"
+                         f"失败后整条命令被丢弃且不报错 → {hits}")
+
     def test_bat_is_still_ascii_and_crlf(self):
         raw = (REPO_ROOT / "同步Gitee产物.bat").read_bytes()
         self.assertEqual(sorted({b for b in raw if b > 0x7F}), [],
@@ -504,12 +528,14 @@ class BatEndToEnd(unittest.TestCase):
             (Path(self.tmp.name) / name).write_bytes(b"Z" * 2048)
         (Path(self.tmp.name) / "byte-tools.png").write_bytes(b"icon")
 
-    def _run_bat(self, assets_dir, auto_fetch="0"):
+    def _run_bat(self, assets_dir, auto_fetch="0", extra_env=None):
         """跑真 .bat：API 指向本地 mock，AUTO_FETCH_ASSETS 默认关掉以保持离线。"""
         env = dict(os.environ)
         env["GITEE_API_BASE"] = f"http://127.0.0.1:{self.port}/api/existing_links/repos/owner/slug"
         env["NO_PAUSE"] = "1"
         env["AUTO_FETCH_ASSETS"] = auto_fetch   # 回归用例不许碰网络
+        for k, v in (extra_env or {}).items():
+            env[k] = v
         proc = subprocess.run(
             ["cmd.exe", "/c",
              f'{REPO_ROOT / "同步Gitee产物.bat"} {TAG} FAKE_TOKEN_NOT_REAL '
@@ -517,6 +543,22 @@ class BatEndToEnd(unittest.TestCase):
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(REPO_ROOT), env=env, timeout=300)
         return proc, (proc.stdout or "") + (proc.stderr or "")
+
+    def test_leftover_scratch_from_an_earlier_run_does_not_skip_uploads(self):
+        """`%TEMP%\\bt_gitee_sync` 是固定路径，上一次真实发版留下的 assets.txt 会让本次
+        把附件全判成"已存在，跳过"，然后在 [3/3] 报缺 —— 和暂存目录同一个病根：跨次残留。
+
+        2026-10-10 实测现场：用户跑完 v1.2.0 的真同步之后，本文件的用例当场全红，
+        那个文件里留着 `ByteTools-linux-x64 / ... / v1.2.0.zip / v1.2.0.tar.gz` 五行
+        （Gitee 那次真实返回的附件名），于是 mock 说"什么都没有"脚本也说"都已经有了"。
+        """
+        scratch = Path(os.environ.get("TEMP") or "/tmp") / "bt_gitee_sync"
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / "assets.txt").write_text("\n".join(ARTIFACTS) + "\n", encoding="ascii")
+        proc, out = self._run_bat(self.tmp.name)
+        self.assertIn("done: uploaded 4, skipped 0, ignored 1", out,
+                      f"残留的 assets.txt 让本次跳过了上传：{out}")
+        self.assertEqual(proc.returncode, 0, out)
 
     def test_bat_uploads_all_four_and_verifies(self):
         proc, out = self._run_bat(self.tmp.name)
@@ -549,6 +591,28 @@ class BatEndToEnd(unittest.TestCase):
                         "AUTO_FETCH_ASSETS=0 时脚本删掉了暂存目录里的文件")
         self.assertIn("preflight ok: found 4 artifact file(s)", out)
         self.assertEqual(sorted(STATE["assets"]), sorted(ARTIFACTS))
+
+    def test_stale_artifact_is_cleared_and_refetched(self):
+        """留一个上个版本的 ByteTools.exe，脚本必须删掉重下，而不是原样传上 Gitee。
+
+        2026-10-10 用户实测撞到的：`:clear_stale` 写成 `rmdir ... >/dev/null 2>/dev/null`，
+        cmd 把 `/dev/null` 当成"当前目录下的 \\dev\\null 文件"去创建，创建失败后**整条 rmdir
+        被丢弃不执行**，而 ERRORLEVEL 仍是 0 —— 于是"清空 stale staging dir"照打、
+        旧文件照传。当时这条只有文本契约（断言里有 rmdir 那三个字），所以全绿却全错；
+        这条行为用例把 GH_ACCEL 指到本地 mock，才第一次真的把"清空 + 重下"跑了一遍。
+        """
+        stage = Path(self.tmp.name) / "release-assets"
+        stage.mkdir()
+        stale = stage / "ByteTools.exe"
+        stale.write_bytes(b"OLD-VINTAGE" * 40)          # 440 B，远不到 1 MB 门槛
+        proc, out = self._run_bat(
+            str(stage), auto_fetch="1",
+            extra_env={"GH_ACCEL": f"http://127.0.0.1:{self.port}/gh/"})
+        self.assertIn("clearing stale staging dir", out)
+        self.assertEqual(stale.stat().st_size, 1_100_000,
+                         f"旧产物没被清掉重下 —— 传上 Gitee 的就是上个版本的包：{out}")
+        self.assertEqual(sorted(STATE["assets"]), sorted(ARTIFACTS))
+        self.assertEqual(proc.returncode, 0, out)
 
 
 if __name__ == "__main__":

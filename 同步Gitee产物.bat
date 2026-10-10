@@ -56,7 +56,10 @@ REM   gh-proxy.com  ~9 MB/s (220MB in 24s)  <- used here
 REM   ghfast.top    ~54 KB/s
 REM   ghproxy.net   ~28 KB/s (timed out mid-range)
 REM Edit this one line if the accelerator ever dies.
-set "GH_ACCEL=https://gh-proxy.com/"
+REM GH_ACCEL doubles as a test seam: the offline suite points it at a local mock
+REM so it can exercise "clear the staging dir, then re-download" without pulling
+REM 218 MB off the real network.
+if not defined GH_ACCEL set "GH_ACCEL=https://gh-proxy.com/"
 
 set "TOKEN_ENV=%GITEE_TOKEN%"
 set "TAG_NAME=%~1"
@@ -75,6 +78,12 @@ if /i "%NO_PAUSE%"=="1" set "NO_PAUSE=1"
 
 set "TMPDIR=%TEMP%\bt_gitee_sync"
 if not exist "%TMPDIR%" mkdir "%TMPDIR%" >nul 2>nul
+REM This path is FIXED, so it is shared across runs and across tags. A leftover
+REM assets.txt from an earlier release makes [2/3] answer "already exists, skip"
+REM for files this release does not actually have, and the run then dies at [3/3]
+REM (measured 2026-10-10: a real v1.2.0 sync left five names behind and every
+REM regression test after it went red). Scratch is per-run: wipe it on entry.
+del /q "%TMPDIR%\*" >nul 2>nul
 
 echo.
 echo ================================================================
@@ -280,6 +289,7 @@ REM ever be garbage. AUTO_FETCH_ASSETS=0 is the test seam that keeps the
 REM regression suite offline; same name as the .sh one on purpose.
 if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof
 call :clear_stale
+if errorlevel 1 goto :fail
 if not exist "%ASSETS_DIR%\" mkdir "%ASSETS_DIR%" >nul 2>nul
 if not exist "%ASSETS_DIR%\" goto :eof
 for %%N in (ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64) do call :fetch_asset %%N
@@ -305,8 +315,18 @@ if /i not "!TAIL_NAME!"=="release-assets" (
 )
 if not exist "%ASSETS_DIR%\" goto :eof
 echo   clearing stale staging dir "%ASSETS_DIR%" before re-fetching ...
-rmdir /s /q "%ASSETS_DIR%" >/dev/null 2>/dev/null
-goto :eof
+REM No redirect on this line on purpose: "/dev/null" is not a cmd device, and when
+REM the redirect target cannot be created cmd drops the WHOLE command without
+REM running it - while still reporting ERRORLEVEL 0. Measured 2026-10-10: with that
+REM typo the stale file survived, the banner still printed, and last release's exe
+REM went up to Gitee. Success is silent anyway; a real failure is worth seeing.
+rmdir /s /q "%ASSETS_DIR%"
+if not exist "%ASSETS_DIR%\" goto :eof
+echo   error: could not empty "%ASSETS_DIR%" - refusing to upload files whose
+echo          release is unknown. Something still holds them open (Explorer
+echo          preview, antivirus, a previous run); close it and rerun, or delete
+echo          the folder by hand.
+exit /b 1
 :fetch_asset
 REM %~1 = artifact name as published on the GitHub Release.
 set "DST=%ASSETS_DIR%\%~1"
