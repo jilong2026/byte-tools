@@ -28,7 +28,7 @@
 
 > 让"新机器 → 一套完整开发环境"这件事变成点几下鼠标就搞定。
 
-支持 **36 个可见组件**（26 个可一键装配 + 10 个只下载的「开发工具」），按分类组织如下（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 R1 规则）：
+支持 **37 个可见组件**（26 个可一键装配 + 11 个只下载的「开发工具」），按分类组织如下（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 R1 规则）：
 
 | 分类 | 组件 | 内部 key | 环境变量 | 默认版本来源 |
 |------|------|---------|---------|-------------|
@@ -733,14 +733,14 @@ UI 组成（自上而下，四行 + 进度条；这么切是为了塞进 300px �
 UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
-3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 36 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了。
+3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 37 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了。
 搜索条右侧还挂着「▦ 网格 / ☰ 列表」与「📋 日志」两颗按钮——**它们也不放标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽
 4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分四个 Tab，Tab 外层
    `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向），**标题带组件数量**：
-   `开发环境（10）` / `开发软件（6）` / `开发工具（10）` / `一键启停（10）`（数字由 `len(comps)` 现算，不写死）；
+   `开发环境（10）` / `开发软件（6）` / `开发工具（11）` / `一键启停（10）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 36 项
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 37 项
 5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
 6. **底部状态栏**：显示当前系统信息、可点开的工作目录与 `组件：N`（N=26，界面可见数；只写数字不写句子，版本号在标题栏 chip 上不重复）
 
@@ -948,7 +948,7 @@ Component
 | `_sort_semver_desc(vs)` | ~1626 | 语义化版本倒序排序 |
 | `_fetch_github_releases_versions(repo, prefix)` | ~2322 | R1 公共辅助：抓取 GitHub Releases 版本列表（Nacos/Seata/RabbitMQ 等复用） |
 | `_fetch_apache_versions(key)` | ~2213 | R1 公共辅助：抓取 Apache 项目版本列表（Kafka/RocketMQ/Pulsar/ActiveMQ 复用） |
-| `build_components()` | ~2486 | 构造 36 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家；powershell 无真镜像走三个 GitHub 加速器；nginx 只有 Windows 有官方 zip，且大陆仅华为云两个子域同步） |
+| `build_components()` | ~2486 | 构造 37 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家；powershell 无真镜像走三个 GitHub 加速器；nginx 只有 Windows 有官方 zip，且大陆仅华为云两个子域同步） |
 | `extract_archive(archive, extract_to)` | ~3407 | 解压 zip/tar.gz/tar.xz + 单二进制 + .war 单文件 |
 | `DownloadWorker(urls, dest)` | ~2909 | R1 多源故障转移下载线程（带 `HTTP_UA` 请求头 + `DOWNLOAD_MIN_VALID_BYTES` 字节校验） |
 | `main()` | ~4783（末尾） | 程序入口 |
@@ -965,7 +965,7 @@ main()
   ├─ ensure_dir(CONFIG_DIR)
   └─ MainWindow()
        ├─ setWindowIcon(assets/byte-tools.png)
-       ├─ build_components()           # 构造 36 个组件的默认清单（可安装的走 R1 多源；「开发工具」按 R13 只给官方直链）
+       ├─ build_components()           # 构造 37 个组件的默认清单（可安装的走 R1 多源；「开发工具」按 R13 只给官方直链）
        ├─ _build_ui()                 # 构造标题栏 + 搜索条(含视图切换/日志开关) + 卡片网格 + 日志浮层 + 状态栏(组件总数=26)
        ├─ _apply_qss()                # 应用样式表
        ├─ _load_settings()             # 从 config.json 恢复上次选中版本

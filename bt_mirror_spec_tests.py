@@ -170,6 +170,9 @@ class OfficialIsLast(unittest.TestCase):
         # （实测 erlang/powershell 末位 github.com、nginx 末位 nginx.org），
         # 漏的是检查，不是配置。
         "erlang": "github.com", "powershell": "github.com", "nginx": "nginx.org",
+        # Eclipse 不在"只有官方直链"的豁免里：清华/阿里/华为四个源实测都回同一个
+        # 377,592,420 字节的 PK 包（官方 CDN 本机只有 25 KB/s，镜像 2.7–3.9 MB/s）。
+        "eclipse": "download.eclipse.org",
     }
 
     def test_official_last(self):

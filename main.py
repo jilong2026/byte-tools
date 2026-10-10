@@ -3599,7 +3599,7 @@ COMPONENT_CATEGORY_OF = {
     "idea": "开发工具", "pycharm": "开发工具", "clion": "开发工具",
     "webstorm": "开发工具", "goland": "开发工具", "datagrip": "开发工具",
     "vscode": "开发工具", "dbx": "开发工具", "windterm": "开发工具",
-    "wechat-devtools": "开发工具",
+    "wechat-devtools": "开发工具", "eclipse": "开发工具",
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
     "erlang": "开发环境",
@@ -3658,6 +3658,23 @@ _DEVTOOLS: tuple = (
      "（不写成 2026.09.30 是因为版本框只有约 64px 放文本，10 字符会被滚掉第一个字。）",
      (("2026.09",
        "https://servicewechat.com/wxa-dev-logic/download_redirect?type=x64&from=mpwiki"),)),
+    # Eclipse 是这批里**唯一有真大陆镜像**的：官方 CDN 本机实测只有 25 KB/s（378MB 要下四个多小时），
+    # 清华 2.7–3.9 MB/s。四个源 × 三个列车逐条核过：同一字节数 + `PK` 魔数，
+    # 所以镜像是真镜像，不是 R1 反复防的"200 + 软 404 页"。
+    # EPP 发布包**没有 .exe 安装器**（两种命名都探过，404），只有便携 zip。
+    ("eclipse", "Eclipse IDE（Java 版）", "zip",
+     "开源免费，便携 zip（解压即用，约 360–378 MB）。官方 CDN 在大陆很慢，默认先走清华镜像。"
+     "列车号就是版本号；EPP 没有可机读的 JSON 接口，故清单为手工采集、可能落后官网。",
+     tuple((train, [
+         "https://mirrors.tuna.tsinghua.edu.cn/eclipse/technology/epp/downloads/release/"
+         f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
+         "https://mirrors.aliyun.com/eclipse/technology/epp/downloads/release/"
+         f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
+         "https://mirrors.huaweicloud.com/eclipse/technology/epp/downloads/release/"
+         f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
+         f"https://download.eclipse.org/technology/epp/downloads/release/"
+         f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
+     ]) for train in ("2026-09", "2026-06", "2026-03"))),
 )
 
 
@@ -3671,9 +3688,13 @@ def _devtool_components() -> List["Component"]:
     out: List[Component] = []
     for key, name, arch, note, rows in _DEVTOOLS:
         versions = []
-        for ver, url in rows:
-            # GitHub 产物要加速器优先；别家只有官网一条直链（实测过没有可用大陆镜像，见 R1.5）
-            urls = _gh_accelerated(url) if "github.com/" in url else [url]
+        for ver, src in rows:
+            # 值可以是**单个 URL**，也可以是已经按 R1 排好的**多源列表**（Eclipse 有真镜像）。
+            # GitHub 产物一律过 _gh_accelerated：加速器在前、裸地址末位（本机裸地址实测 http=000）。
+            if isinstance(src, str):
+                urls = _gh_accelerated(src) if "github.com/" in src else [src]
+            else:
+                urls = list(src)
             versions.append(_cv(ver, {"Windows": urls}, {"Windows": arch}))
         out.append(Component(
             key=key, display_name=name,

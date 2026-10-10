@@ -68,7 +68,7 @@ class TabStructure(unittest.TestCase):
         self.components = main.build_components()
         self.groups = main.group_components(self.components)
 
-    def test_new_tab_is_the_third_and_holds_the_ten_keys(self):
+    def test_new_tab_is_the_third_and_holds_the_eleven_keys(self):
         self.assertEqual(list(main.COMPONENT_CATEGORIES),
                          ["开发环境", "开发软件", "开发工具", "一键启停"],
                          "「开发工具」放第 3 个，「一键启停」保持最后")
@@ -90,6 +90,20 @@ class TabStructure(unittest.TestCase):
         self.assertIn("docker", dev_soft)
         self.assertIn("kubectl", dev_soft)
 
+    def test_eclipse_is_the_one_batch_member_with_real_mainland_mirrors(self):
+        """Eclipse 官方 CDN 本机实测只有 25 KB/s（378MB 等于下不动），而清华 2.7–3.9 MB/s。
+
+        四个源都回**同一个字节数** 377,592,420 且魔数 `PK`，所以镜像是真镜像不是软 404。
+        顺序按 R1：清华 → 阿里 → 华为 → 官方末位。
+        """
+        comp = next(c for c in self.components if c.key == "eclipse")
+        urls = comp.versions[0].urls_for_current()
+        self.assertGreaterEqual(len(urls), 4, f"Eclipse 源不够：{urls}")
+        self.assertIn("mirrors.tuna.tsinghua.edu.cn", urls[0])
+        self.assertIn("download.eclipse.org", urls[-1], "末位必须是官方")
+        for u in urls[:-1]:
+            self.assertIn("mirrors.", u, f"排在官方前面的必须是大陆镜像：{u}")
+
     def test_deferred_candidates_are_still_absent(self):
         """没实测到官方直链的候选，不许被"顺手补上"。
 
@@ -100,15 +114,15 @@ class TabStructure(unittest.TestCase):
         for key in DEFERRED_KEYS:
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
-    def test_visible_component_count_is_36(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（26 老 + 10 新）。
+    def test_visible_component_count_is_37(self):
+        """**全仓库唯一一处**写死界面可见组件数的地方（26 老 + 11 新）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 36)
-        self.assertEqual(len(self.components), 37, "36 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 37)
+        self.assertEqual(len(self.components), 38, "37 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):

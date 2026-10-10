@@ -185,7 +185,7 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 ### R1.5 各组件镜像清单
 
 下表 26 个**可安装**组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
-2026-10-10 起另有 10 个「开发工具」是**只下载**的，它们的实测矩阵单独记在 R13.3（那批没有可用大陆镜像，属 R1 例外）。
+2026-10-10 起另有 11 个「开发工具」是**只下载**的，它们的实测矩阵单独记在 R13.3（那批没有可用大陆镜像，属 R1 例外）。
 "默认清单实测"一栏给的是默认版本行里**可用大陆源的数量 / 配置的候选数量**。
 
 #### 首批 8 个组件（2026-09 由单源补齐为多源）
@@ -378,13 +378,13 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 36 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 37 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（10 / 6 / 10 / 10） |
+| 分类 | 判定标准 | 组件（10 / 6 / 11 / 10） |
 |------|----------|--------------------|
 | **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
 | **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | mysql、mongodb、postgresql、pulsar、docker、kubectl |
-| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools |
+| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools、eclipse |
 | **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | jenkins、nacos、activemq、rocketmq、nginx、kafka、tomcat、elasticsearch、rabbitmq、seata |
 
 边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
@@ -419,7 +419,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 （上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（36 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（37 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -1550,6 +1550,8 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答。
 | `mirrors.nju.edu.cn/jetbrains/…` | 404 |
 
 ⇒ JetBrains / VS Code / 微信这批**只有官方直链**，与 R1「镜像优先、官网末位」相反，是实测例外，
+（**Eclipse 是例外中的反例**：官方 CDN 本机实测 25 KB/s，而清华 / 阿里 / 华为三个镜像都回
+同一个 377,592,420 字节的 `PK` 包、清华 2.7–3.9 MB/s ⇒ 它按 R1 正常排多源，不进豁免表。）
 在 `bt_mirror_spec_tests.OFFICIAL_ONLY_EXCEPTION` 里登记；那条用例断的是"大陆源恰好 0 个"而不是跳过，
 以后有人挂镜像会红，逼他带实测来改表。
 

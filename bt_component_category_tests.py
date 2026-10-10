@@ -42,12 +42,12 @@ EXPECTED_MEMBERSHIP = {
     # 用户要求取消它，于是"容器与编排外围"归到同为大件服务的这一组。
     "开发软件": {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl"},
     # 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only）。
-    # 这 10 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
+    # 这 11 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
     # 磁盘上不落 ~/.env-tools/<key>/ 目录**，所以遍历全组件的老断言都要按能力位豁免。
-    # 少掉的 HBuilderX / Apipost / Apifox / Lithe 不是"忘了加"，而是**拿不到可实测的
+    # 少掉的 Apipost / Apifox / HBuilderX / Lithe 不是"忘了加"，而是**拿不到可实测的
     # 官方直链**（前三家下载页全 JS 渲染、Lithe 官方仓库 404），按 R1 不许登记未实测的源。
     "开发工具": {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip",
-               "vscode", "dbx", "windterm", "wechat-devtools"},
+               "vscode", "dbx", "windterm", "wechat-devtools", "eclipse"},
     # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS），
     # 固定排在最后。这里手写一份清单是为了让
     # "扩白名单 = 必须同时改这张表"变成一次可见的改动：
