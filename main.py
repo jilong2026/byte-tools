@@ -78,6 +78,7 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QMenu,
         QMainWindow,
         QMessageBox,
         QProgressBar,
@@ -132,6 +133,30 @@ def _open_in_file_manager(path: str) -> bool:
         return True
     except Exception:                     # noqa: BLE001
         return False
+
+
+def pick_download_artifact(arts, parent=None, at=None):
+    """多种产物时弹一个小菜单让用户挑要下哪一个；返回 None 表示他没选。
+
+    为什么不画两颗主按钮（`下载 zip` / `下载 exe`）：卡片格子只有 271px，按钮行
+    历史上多一颗就把旁边的字裁掉过；而且 11 个下载型组件里有 3 个只有一种产物，
+    两颗按钮会让界面不齐。菜单一行一个，还能把"安装器 vs 便携包 + 多大"写清楚 ——
+    选错一次是重下 1.5 GB，这些信息值得占那一行。
+
+    单独抽成模块级函数是为了可测：用例替掉它就能确定性地模拟"用户选了第二项 / 按了 Esc"，
+    不需要真去点 Qt 菜单。
+    """
+    if len(arts) <= 1:
+        return arts[0] if arts else None
+    menu = QMenu(parent)
+    for art in arts:
+        action = menu.addAction(art.menu_text())
+        action.setData(art.fmt)
+    picked = menu.exec(at or QCursor.pos())
+    if picked is None:
+        return None
+    fmt = picked.data()
+    return next((a for a in arts if a.fmt == fmt), None)
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +448,32 @@ def ensure_dir(path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 组件定义
 # ---------------------------------------------------------------------------
+# 产物格式 → 界面对它的称呼。用户要在"安装器"和"便携包"之间做选择，
+# 这两个词的区别（要不要走安装向导、能不能自己挑目录）比扩展名本身更有用。
+ARTIFACT_LABELS: Dict[str, str] = {
+    "exe": "exe 安装器（走安装向导）",
+    "zip": "zip 便携包（解压即用）",
+}
+
+
+@dataclass
+class DownloadArtifact:
+    """一个版本的**一种**产物。
+
+    同一个版本官方常常发两样东西：走安装向导的 `.exe` 与解压即用的 `.zip` 便携包。
+    它们不是"同一个文件的不同镜像"（那是 `url_list_map` 管的事），而是**两个不同的文件**，
+    所以单独建模，由「下载 ▾」菜单让用户挑，菜单文字带体积。
+    """
+
+    fmt: str                        # "exe" / "zip" —— 同时决定落盘后缀与魔数
+    label: str                      # 界面上怎么称呼它
+    urls: List[str]                 # 已按 R1 排好序的源列表（当前平台）
+    size: int = 0                   # 官方声明的字节数，0 = 未知
+
+    def menu_text(self) -> str:
+        return f"{self.label} · {human_size(self.size)}" if self.size else self.label
+
+
 @dataclass
 class ComponentVersion:
     """描述一个组件版本对应的下载 URL 及归档格式。"""
@@ -434,6 +485,18 @@ class ComponentVersion:
     # 与 url_map 二选一：若当前系统的 url_list_map 非空，则 urls_for_current() 返回该列表；
     # 否则回退到 url_map 的单 URL 模式（仅少数无国内镜像的组件，如 kubectl）。
     url_list_map: Dict[str, List[str]] = field(default_factory=dict)
+    # 「开发工具」专用：这个版本可下的多种产物（R13.4）。空表 = 只有一种产物，
+    # 此时 `download_artifacts()` 直接拿主 URL 造一项，所以单产物组件不必重复登记。
+    artifacts: List[DownloadArtifact] = field(default_factory=list)
+
+    def download_artifacts(self) -> List[DownloadArtifact]:
+        """「下载 ▾」要列的产物清单。"""
+        if self.artifacts:
+            return list(self.artifacts)
+        ext = self.archive_for_current() or "bin"
+        return [DownloadArtifact(fmt=ext,
+                                 label=ARTIFACT_LABELS.get(ext, ext),
+                                 urls=self.urls_for_current())]
 
     def url_for_current(self) -> Optional[str]:
         """当前系统的首选下载地址：多源模式取列表首个（优先级最高的镜像），单源模式取该源。"""
@@ -3423,26 +3486,45 @@ def make_jetbrains_fetcher(key: str, code: str):
         except Exception as exc:
             raise RuntimeError(
                 f"{key} 版本列表抓取失败：JetBrains 接口不可用：{exc}") from exc
-        links: Dict[str, str] = {}
+        links: Dict[str, List[DownloadArtifact]] = {}
         for rel in (payload.get(code) or []):
             ver = str((rel or {}).get("version") or "").strip()
-            win = (rel.get("downloads") or {}).get("windows") or {}
-            link = str(win.get("link") or "").strip()
-            # 只接受 HTTPS 链接。**不钉死域名**：钉了会在官方换 CDN 的那天静默变成
-            # "刷新版本刷不出任何东西"，而接口本身就是 HTTPS 的官方端点。
-            if ver and link.startswith("https://"):
-                links.setdefault(ver, link)
+            if not ver or ver in links:
+                continue
+            dl = rel.get("downloads") or {}
+            arts = []
+            # 顺序 = 菜单顺序 = 默认产物：exe 在前（与改造前一致，老用例与用户习惯都不变）。
+            # 体积取接口给的 size —— 菜单上那个 "1.5 GB" 就是它，选错一次是重下 1.5 GB。
+            for fmt, key in (("exe", "windows"), ("zip", "windowsZip")):
+                entry = dl.get(key) or {}
+                link = str(entry.get("link") or "").strip()
+                if link.startswith("https://"):        # 只认 HTTPS，但不钉死域名
+                    try:
+                        size = int(entry.get("size") or 0)
+                    except (TypeError, ValueError):
+                        size = 0
+                    arts.append(DownloadArtifact(fmt, ARTIFACT_LABELS.get(fmt, fmt),
+                                                 [link], size))
+            if arts:
+                links[ver] = arts
         ordered = _sort_semver_desc(links.keys())
         if not ordered:
             raise RuntimeError(f"{key} 版本列表为空（接口没返回可用的 Windows 链接）")
-        return [_cv(v, {"Windows": [links[v]]}, {"Windows": "exe"})
-                for v in ordered[:20]]
+        out = []
+        for v in ordered[:20]:
+            arts = links[v]
+            cv = _cv(v, {"Windows": list(arts[0].urls)},
+                     {"Windows": arts[0].fmt})
+            cv.artifacts = arts
+            out.append(cv)
+        return out
 
     return _fetch
 
 
 _VSCODE_RELEASES_URL = "https://update.code.visualstudio.com/api/releases/stable"
 _VSCODE_ARCHIVE_URL = "https://update.code.visualstudio.com/{}/win32-x64-archive/stable"
+_VSCODE_USER_URL = "https://update.code.visualstudio.com/{}/win32-x64-user/stable"
 
 
 def fetch_vscode_versions() -> List[ComponentVersion]:
@@ -3460,13 +3542,26 @@ def fetch_vscode_versions() -> List[ComponentVersion]:
     ordered = _sort_semver_desc(versions)
     if not ordered:
         raise RuntimeError("VS Code 版本列表为空（接口没返回可解析的版本号）")
-    return [_cv(v, {"Windows": [_VSCODE_ARCHIVE_URL.format(v)]}, {"Windows": "zip"})
-            for v in ordered[:20]]
+    out = []
+    for v in ordered[:20]:
+        zip_urls = [_VSCODE_ARCHIVE_URL.format(v)]
+        exe_urls = [_VSCODE_USER_URL.format(v)]
+        cv = _cv(v, {"Windows": zip_urls}, {"Windows": "zip"})
+        # 这个接口只回版本号数组，没有 size 字段 ⇒ 菜单上不带体积（宁可不显示，
+        # 也不显示一个猜出来的数）。
+        cv.artifacts = [
+            DownloadArtifact("zip", ARTIFACT_LABELS["zip"], zip_urls),
+            DownloadArtifact("exe", ARTIFACT_LABELS["exe"], exe_urls),
+        ]
+        out.append(cv)
+    return out
 
 
-def make_github_asset_fetcher(key: str, repo: str, asset_hint: str):
-    """GitHub releases 抓取器：tag 给版本号，`asset_hint` 挑 Windows 那个产物。
+def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple):
+    """GitHub releases 抓取器：tag 给版本号，`asset_hints` 按 `((格式, 名字后缀), ...)` 挑产物。
 
+    一个版本可以挑中**多种**产物（DBX 同一次 release 里既有 portable.zip 又有 setup.exe），
+    菜单就按传入顺序列出来，第一个也是默认。
     URL 一律过 `_gh_accelerated`（加速器在前、裸地址末位）—— 本机实测
     `github.com/.../releases/download/...` 直连 http=000 根本连不上，
     只有 gh-proxy 那几条通（实测 206 + `PK`）。这正是 R1 在这批上的落地方式。
@@ -3478,29 +3573,47 @@ def make_github_asset_fetcher(key: str, repo: str, asset_hint: str):
                 f"https://api.github.com/repos/{repo}/releases?per_page=30")
         except Exception as exc:
             raise RuntimeError(f"{key} 版本列表抓取失败：GitHub API 不可用：{exc}") from exc
-        picked: Dict[str, str] = {}
-        hint = asset_hint.lower()
+        found: Dict[str, List[DownloadArtifact]] = {}
         for rel in (data if isinstance(data, list) else []):
             if not rel or rel.get("prerelease") or rel.get("draft"):
                 continue
             tag = str(rel.get("tag_name") or "").lstrip("vV")
             if _version_parts(tag) is None:
                 continue
-            for asset in rel.get("assets") or []:
-                name = str((asset or {}).get("name") or "").lower()
-                url = str((asset or {}).get("browser_download_url") or "")
-                # 只认我们那个产物，且**必须以 asset_hint 结尾**：
-                # 子串匹配会把 `WindTerm_..._x86_64.zip.sha256` 这种旁证文件当成安装包
-                # （用户双击一个校验文件是打不开的），也会让 arm 包混进 x64 的位置。
-                if name.endswith(hint) and url.startswith("https://github.com/"):
-                    picked.setdefault(tag, url)
-                    break
-        ordered = _sort_semver_desc(picked.keys())
+            assets = list(rel.get("assets") or [])
+            arts: List[DownloadArtifact] = []
+            for fmt, hint in asset_hints:
+                want = hint.lower()
+                hit = None
+                for asset in assets:
+                    name = str((asset or {}).get("name") or "").lower()
+                    url = str((asset or {}).get("browser_download_url") or "")
+                    # 只认我们那个产物，且**必须以后缀结尾**：
+                    # 子串匹配会把 `WindTerm_..._x86_64.zip.sha256` 这种旁证文件当成安装包
+                    # （用户双击一个校验文件是打不开的），也会让 arm 包混进 x64 的位置。
+                    if name.endswith(want) and url.startswith("https://github.com/"):
+                        hit = (asset, url)
+                        break
+                if hit:
+                    try:
+                        size = int(hit[0].get("size") or 0)
+                    except (TypeError, ValueError):
+                        size = 0
+                    arts.append(DownloadArtifact(fmt, ARTIFACT_LABELS.get(fmt, fmt),
+                                                 _gh_accelerated(hit[1]), size))
+            if arts:
+                found[tag] = arts
+        ordered = _sort_semver_desc(found.keys())
         if not ordered:
             raise RuntimeError(
-                f"{key} 版本列表为空（release 里没找到匹配 {asset_hint} 的产物）")
-        return [_cv(t, {"Windows": _gh_accelerated(picked[t])}, {"Windows": "zip"})
-                for t in ordered[:20]]
+                f"{key} 版本列表为空（release 里没找到匹配 {asset_hints} 的产物）")
+        out = []
+        for tag in ordered[:20]:
+            arts = found[tag]
+            cv = _cv(tag, {"Windows": list(arts[0].urls)}, {"Windows": arts[0].fmt})
+            cv.artifacts = arts
+            out.append(cv)
+        return out
 
     return _fetch
 
@@ -3543,9 +3656,11 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "goland": make_jetbrains_fetcher("goland", "GO"),
     "datagrip": make_jetbrains_fetcher("datagrip", "DG"),
     "vscode": fetch_vscode_versions,
-    "dbx": make_github_asset_fetcher("dbx", "t8y2/dbx", "x64-portable.zip"),
+    "dbx": make_github_asset_fetcher(
+        "dbx", "t8y2/dbx", (("zip", "x64-portable.zip"), ("exe", "x64-setup.exe"))),
     "windterm": make_github_asset_fetcher(
-        "windterm", "kingToolbox/WindTerm", "windows_portable_x86_64.zip"),
+        "windterm", "kingToolbox/WindTerm",
+        (("zip", "windows_portable_x86_64.zip"),)),   # 官方只发便携包，没有安装器
 }
 
 
@@ -3618,46 +3733,70 @@ COMPONENT_CATEGORY_OF = {
 # IC / Community（idea-2026.2.3.exe），而 Community 线本身停在 2025.3 —— 猜出来的名字会 404。
 #
 # 结构：(key, 显示名, 归档类型, 给用户的说明, ((版本, URL), ...))
+# 每一行版本 = (版本, 主产物 URL 或已排好的多源列表, 官方声明字节数[, 第二种产物])
+# 第四项存在时，界面上那颗「下载」按钮会弹菜单让用户挑，菜单文字带体积 ——
+# 选错一次是重下 1.5 GB，这个信息值得占一行。
+# 只登记 2026-10-10 逐个 range 探过（状态码 + 魔数 + 字节数）的产物；
+# 没写第四项的就是"官方只发这一种"或"另一种我没实测"，界面上就不出现菜单。
 _DEVTOOLS: tuple = (
     ("idea", "IntelliJ IDEA", "exe",
      "商业软件：本工具只提供官方安装包直链，**不含授权**。"
      "官方 Community 线停在 2025.3，之后与 Ultimate 合并为主线，故这里给的是主线包。",
-     (("2026.2.3", "https://download.jetbrains.com/idea/idea-2026.2.3.exe"),
-      ("2026.2.2", "https://download.jetbrains.com/idea/idea-2026.2.2.exe"))),
+     (("2026.2.3", "https://download.jetbrains.com/idea/idea-2026.2.3.exe", 1197026408,
+       ("zip", "https://download.jetbrains.com/idea/idea-2026.2.3.win.zip", 1634879155)),
+      ("2026.2.2", "https://download.jetbrains.com/idea/idea-2026.2.2.exe", 1182846496))),
     ("pycharm", "PyCharm", "exe",
      "商业软件：本工具只提供官方安装包直链，**不含授权**（Community 线同上，已并入主线）。",
-     (("2026.2.3", "https://download.jetbrains.com/python/pycharm-2026.2.3.exe"),
-      ("2026.2.2", "https://download.jetbrains.com/python/pycharm-2026.2.2.exe"))),
+     (("2026.2.3", "https://download.jetbrains.com/python/pycharm-2026.2.3.exe", 962363888,
+       ("zip", "https://download.jetbrains.com/python/pycharm-2026.2.3.win.zip", 1319498231)),
+      ("2026.2.2", "https://download.jetbrains.com/python/pycharm-2026.2.2.exe", 951972040))),
     ("clion", "CLion", "exe", "商业软件：只提供官方直链，**不含授权**。",
-     (("2026.2.3.1", "https://download.jetbrains.com/cpp/CLion-2026.2.3.1.exe"),
-      ("2026.2.3", "https://download.jetbrains.com/cpp/CLion-2026.2.3.exe"))),
+     (("2026.2.3.1", "https://download.jetbrains.com/cpp/CLion-2026.2.3.1.exe", 1742075672,
+       ("zip", "https://download.jetbrains.com/cpp/CLion-2026.2.3.1.win.zip", 2378013331)),
+      ("2026.2.3", "https://download.jetbrains.com/cpp/CLion-2026.2.3.exe", 1742233672))),
     ("webstorm", "WebStorm", "exe", "商业软件：只提供官方直链，**不含授权**。",
-     (("2026.2.3", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.3.exe"),
-      ("2026.2.2", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.2.exe"))),
+     (("2026.2.3", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.3.exe", 884741832,
+       ("zip", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.3.win.zip", 1162475563)),
+      ("2026.2.2", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.2.exe", 874548088))),
     ("goland", "GoLand", "exe", "商业软件：只提供官方直链，**不含授权**。",
-     (("2026.2.3", "https://download.jetbrains.com/go/goland-2026.2.3.exe"),
-      ("2026.2.2.1", "https://download.jetbrains.com/go/goland-2026.2.2.1.exe"))),
+     (("2026.2.3", "https://download.jetbrains.com/go/goland-2026.2.3.exe", 936823520,
+       ("zip", "https://download.jetbrains.com/go/goland-2026.2.3.win.zip", 1256774457)),
+      ("2026.2.2.1", "https://download.jetbrains.com/go/goland-2026.2.2.1.exe", 926661304))),
     ("datagrip", "DataGrip", "exe", "商业软件：只提供官方直链，**不含授权**。",
-     (("2026.2.6", "https://download.jetbrains.com/datagrip/datagrip-2026.2.6.exe"),
-      ("2026.2.5", "https://download.jetbrains.com/datagrip/datagrip-2026.2.5.exe"))),
+     (("2026.2.6", "https://download.jetbrains.com/datagrip/datagrip-2026.2.6.exe", 858005520,
+       ("zip", "https://download.jetbrains.com/datagrip/datagrip-2026.2.6.win.zip", 1109836927)),
+      ("2026.2.5", "https://download.jetbrains.com/datagrip/datagrip-2026.2.5.exe", 847740104))),
     ("vscode", "Visual Studio Code", "zip",
-     "官方便携 zip（解压即用，不需要安装器）。开源免费。",
-     tuple((v, f"https://update.code.visualstudio.com/{v}/win32-x64-archive/stable")
-           for v in ("1.141.0", "1.140.0", "1.139.1"))),
+     "开源免费。默认给便携 zip（解压即用）；另一种是官方 user 安装器，走安装向导。",
+     (("1.141.0", "https://update.code.visualstudio.com/1.141.0/win32-x64-archive/stable",
+       366088429,
+       ("exe", "https://update.code.visualstudio.com/1.141.0/win32-x64-user/stable",
+        251828312)),
+      ("1.140.0", "https://update.code.visualstudio.com/1.140.0/win32-x64-archive/stable",
+       355156158,
+       ("exe", "https://update.code.visualstudio.com/1.140.0/win32-x64-user/stable",
+        244372816)),
+      ("1.139.1", "https://update.code.visualstudio.com/1.139.1/win32-x64-archive/stable",
+       336761238,
+       ("exe", "https://update.code.visualstudio.com/1.139.1/win32-x64-user/stable",
+        232909888)))),
     ("dbx", "DBX 数据库客户端", "zip",
-     "开源（Tauri）便携 zip，约 38MB，支持 70+ 数据库。GitHub 产物，下载走加速器优先。",
+     "开源（Tauri）数据库客户端，支持 70+ 数据库。GitHub 产物，下载走加速器优先。",
      (("0.6.38", "https://github.com/t8y2/dbx/releases/download/v0.6.38/"
-                 "DBX_0.6.38_x64-portable.zip"),)),
+                 "DBX_0.6.38_x64-portable.zip", 38599997,
+       ("exe", "https://github.com/t8y2/dbx/releases/download/v0.6.38/"
+               "DBX_0.6.38_x64-setup.exe", 29228000)),)),
     ("windterm", "WindTerm", "zip",
      "开源 SSH 终端，官方只发便携 zip（无安装器）。GitHub 产物，下载走加速器优先。",
      (("2.7.0", "https://github.com/kingToolbox/WindTerm/releases/download/2.7.0/"
-                "WindTerm_2.7.0_Windows_Portable_x86_64.zip"),)),
+                "WindTerm_2.7.0_Windows_Portable_x86_64.zip", 32678162),)),
     ("wechat-devtools", "微信开发者工具", "exe",
      "官方稳定版直链。**微信不提供可机读的版本号**，所以版本位写的「2026.09」是实测当天"
      "服务端文件的 Last-Modified 年月，不是软件版本号；装完以「关于」面板里的为准。"
      "（不写成 2026.09.30 是因为版本框只有约 64px 放文本，10 字符会被滚掉第一个字。）",
      (("2026.09",
-       "https://servicewechat.com/wxa-dev-logic/download_redirect?type=x64&from=mpwiki"),)),
+       "https://servicewechat.com/wxa-dev-logic/download_redirect?type=x64&from=mpwiki",
+       190935184),)),
     # Eclipse 是这批里**唯一有真大陆镜像**的：官方 CDN 本机实测只有 25 KB/s（378MB 要下四个多小时），
     # 清华 2.7–3.9 MB/s。四个源 × 三个列车逐条核过：同一字节数 + `PK` 魔数，
     # 所以镜像是真镜像，不是 R1 反复防的"200 + 软 404 页"。
@@ -3674,8 +3813,16 @@ _DEVTOOLS: tuple = (
          f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
          f"https://download.eclipse.org/technology/epp/downloads/release/"
          f"{train}/R/eclipse-java-{train}-R-win32-x86_64.zip",
-     ]) for train in ("2026-09", "2026-06", "2026-03"))),
+     ], {"2026-09": 377592420, "2026-06": 368384084, "2026-03": 368790631}[train])
+         for train in ("2026-09", "2026-06", "2026-03"))),
 )
+
+
+def _devtool_urls(src: object) -> List[str]:
+    """行里的 URL 值 → 排好序的源列表。GitHub 裸地址一律过加速器。"""
+    if isinstance(src, str):
+        return _gh_accelerated(src) if "github.com/" in src else [src]
+    return list(src)
 
 
 def _devtool_components() -> List["Component"]:
@@ -3688,14 +3835,18 @@ def _devtool_components() -> List["Component"]:
     out: List[Component] = []
     for key, name, arch, note, rows in _DEVTOOLS:
         versions = []
-        for ver, src in rows:
-            # 值可以是**单个 URL**，也可以是已经按 R1 排好的**多源列表**（Eclipse 有真镜像）。
-            # GitHub 产物一律过 _gh_accelerated：加速器在前、裸地址末位（本机裸地址实测 http=000）。
-            if isinstance(src, str):
-                urls = _gh_accelerated(src) if "github.com/" in src else [src]
-            else:
-                urls = list(src)
-            versions.append(_cv(ver, {"Windows": urls}, {"Windows": arch}))
+        for row in rows:
+            ver, src, size = row[0], row[1], row[2]
+            urls = _devtool_urls(src)
+            cv = _cv(ver, {"Windows": urls}, {"Windows": arch})
+            arts = [DownloadArtifact(arch, ARTIFACT_LABELS.get(arch, arch), urls, size)]
+            if len(row) > 3:            # 官方还发了另一种产物 → 菜单里多一行
+                alt_fmt, alt_src, alt_size = row[3]
+                arts.append(DownloadArtifact(alt_fmt,
+                                             ARTIFACT_LABELS.get(alt_fmt, alt_fmt),
+                                             _devtool_urls(alt_src), alt_size))
+            cv.artifacts = arts
+            versions.append(cv)
         out.append(Component(
             key=key, display_name=name,
             env_var=None,        # 刻意留空：这类组件不配任何 XXX_HOME
@@ -11430,8 +11581,13 @@ class ComponentCard(QFrame):
         # on_download_clicked。不改属性名是因为 _sync_action_buttons、布局与一批用例
         # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
         if self.component.download_only:
-            self.btn_install.setText("下载")
+            # 有两种产物可选时按钮写成「下载 ▾」：不点就不知道有得挑，而选错一次
+            # 是重下 1.5 GB。▾ 只是提示"这里会弹菜单"，真正的挑选在 on_download_clicked 里。
+            multi = any(len(cv.artifacts) > 1 for cv in self.component.versions)
+            self.btn_install.setText("下载 ▾" if multi else "下载")
             tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
+            if multi:
+                tip += "\n这个版本官方同时提供 exe 安装器与 zip 便携包，点了会让你选（带体积）"
             if self.component.data_note:
                 # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
                 # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
@@ -13034,18 +13190,23 @@ class ComponentCard(QFrame):
         "顺手在这里加一行配置"留门 —— 分开写才是把"这类组件不碰环境"钉死。
         """
         cv = self._current_version()
-        urls = cv.urls_for_current()
-        if not urls:
+        arts = cv.download_artifacts()
+        if not any(a.urls for a in arts):
             self._log("error", self.component.unsupported_platform_hint
                       or f"当前系统 {CURRENT_OS} 无可用下载地址。")
             return
-
+        # 先问要哪一种产物，再问下到哪儿：反过来会让用户"选了半天目录又弹一次"。
+        art = pick_download_artifact(arts, self,
+                                     self.btn_install.mapToGlobal(
+                                         QPoint(0, self.btn_install.height())))
+        if art is None:
+            return          # 菜单上按了 Esc：什么都不该发生
         start = load_download_dir()
         chosen = QFileDialog.getExistingDirectory(self, "选择安装包保存位置", str(start))
         if not chosen:
             return          # 用户点了取消：什么都不该发生
         dest_dir = Path(chosen)
-        suffix = self._download_suffix(cv)
+        suffix = f".{art.fmt}" if art.fmt and art.fmt != "bin" else ""
         dest = _unique_download_path(dest_dir / f"{self.component.key}-{cv.version}{suffix}")
         save_download_dir(dest_dir)
 
@@ -13055,31 +13216,22 @@ class ComponentCard(QFrame):
         self.btn_cancel.setVisible(True)
         self.btn_cancel.setEnabled(True)
 
-        self.worker = DownloadWorker(urls, dest, None, _MAGIC_BY_EXT.get(
-            cv.archive_for_current(), b""))
+        self.worker = DownloadWorker(art.urls, dest, None,
+                                     _MAGIC_BY_EXT.get(art.fmt, b""))
         self.worker.progress.connect(self._on_progress)
         self.worker.log.connect(self._log)
-        self.worker.finished_ok.connect(lambda p: self._on_download_only_ok(Path(p)))
+        self.worker.finished_ok.connect(lambda p: self._on_download_only_ok(Path(p), art))
         self.worker.finished_fail.connect(self._on_download_only_fail)
         self.worker.start()
 
-    def _download_suffix(self, cv: ComponentVersion) -> str:
-        """落盘文件后缀：取归档类型表（_DEVTOOLS 里逐条写死的 exe / zip）。
-
-        不从 URL 推 —— GitHub 产物的首选地址是加速器拼出来的
-        `https://gh-proxy.com/https://github.com/...`，尾巴上确实带 .zip，
-        但加速器换一条就变；归档类型表才是我们说清楚了的"这个文件是什么"。
-        """
-        ext = cv.archive_for_current()
-        return f".{ext}" if ext and ext not in ("bin",) else ""
-
-    def _on_download_only_ok(self, path: Path) -> None:
+    def _on_download_only_ok(self, path: Path, art: DownloadArtifact) -> None:
         self.progress.setValue(100)
         self.btn_cancel.setVisible(False)
         self.btn_cancel.setEnabled(False)
-        self._log("ok", f"已下载到 {path}（{human_size(path.stat().st_size)}）。"
-                        f"本工具**不解压、不安装、不配置环境变量** —— "
-                        f"双击这个文件自己装，安装目录由你在安装向导里选。")
+        hint = ("双击这个文件自己装，安装目录由你在安装向导里选。" if art.fmt == "exe"
+                else "解压到任意目录即可使用，不需要安装。")
+        self._log("ok", f"已下载到 {path}（{human_size(path.stat().st_size)}，"
+                        f"{art.label}）。本工具**不解压、不安装、不配置环境变量** —— {hint}")
         answer = QMessageBox.question(
             self, "下载完成",
             f"{path.name}\n已保存到：\n{path.parent}\n\n要打开所在文件夹吗？",

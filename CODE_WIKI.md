@@ -320,6 +320,7 @@ byte-tools/
 | `multi_version` | bool | 是否允许并存多个版本并切换「生效版本」。**只有 7 个组件为 True**：jdk / python / node / go / maven / gradle / bun（真源 `MULTI_VERSION_KEYS`，`main.py:2916`）。**不在 `Component(...)` 构造处手写**：`build_components()` 末尾统一执行 `comp.multi_version = comp.key in MULTI_VERSION_KEYS`（`main.py:3409`），不在白名单就是 False。它是所有多版本分支的唯一门控（状态胶囊、绿勾、按钮启用、卸载范围），非多版本组件的行为与文案必须与改造前逐字一致（见 DEVELOPMENT.md R3.9） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
+| `artifacts` | list[DownloadArtifact] | 仅「开发工具」用：同一个版本的多种产物（exe 安装器 / zip 便携包），各自带 URL 列表与官方声明字节数。**不要把它和 `url_list_map` 混用** —— 后者是同一个文件的多镜像，前者是两个不同的文件 |
 | `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 开发工具 / 一键启停）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
 
 方法：

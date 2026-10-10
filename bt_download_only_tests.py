@@ -414,6 +414,11 @@ class DownloadFlow(_EnvSandbox):
             AssertionError("只下载组件不许走 install_downloaded"))
         main.extract_archive = lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("只下载组件不许解压"))
+        # 默认「用户挑了第一项」。不桩掉的话真 QMenu.exec 会**阻塞**整个测试进程
+        # （offscreen 也不会自己返回），现象是套件卡死而不是报错 —— 这条踩过一次。
+        self._orig_pick = main.pick_download_artifact
+        self.addCleanup(setattr, main, "pick_download_artifact", self._orig_pick)
+        main.pick_download_artifact = lambda arts, parent=None, at=None: arts[0]
 
     def _card(self, key="idea"):
         comp = next(c for c in main.build_components() if c.key == key)
@@ -425,8 +430,9 @@ class DownloadFlow(_EnvSandbox):
         main.QFileDialog.getExistingDirectory = classmethod(
             lambda cls, *a, **k: str(picked))
         card = self._card("idea")
-        self.assertEqual(card.btn_install.text(), "下载",
-                         "只下载型组件的主按钮不能还叫「安装」")
+        # idea 有两种产物 → 标 ▾；只有一种的（windterm / eclipse / 微信）不标。
+        self.assertEqual(card.btn_install.text(), "下载 ▾",
+                         "只下载型组件的主按钮不能还叫「安装」，有第二种产物要标出可展开")
         card.on_download_clicked()
         w = _FakeWorker.last
         self.assertIsNotNone(w, "点下载没起 worker")
@@ -762,6 +768,132 @@ class LicenseLabeling(_EnvSandbox):
                                          card.status_label.toolTip())))
         self.assertIn("不是软件版本号", visible.replace(" ", ""),
                       f"版本位其实是日期，不说明就是骗人：{visible!r}")
+
+
+class ArtifactMenu(_EnvSandbox):
+    """厂商同时发 exe 安装器与 zip 便携包时，让用户点一下再选，并把体积摆在眼前。
+
+    为什么不画两颗主按钮：卡片格子只有 271px，按钮行历史上多一颗就裁过字；
+    而 11 个里有 3 个只有一种产物，两颗按钮会让界面不齐。菜单一行一个，
+    顺手把"这是安装器还是便携包 + 多大"说清楚，这些塞进窄按钮放不下。
+    """
+
+    def setUp(self):
+        super().setUp()
+        main.ComponentCard._detect_status = self._orig_detect
+        self._orig_worker = main.DownloadWorker
+        self._orig_dialog = main.QFileDialog.getExistingDirectory
+        self._orig_pick = main.pick_download_artifact
+        self._orig_install = main.install_downloaded
+        self.addCleanup(setattr, main, "DownloadWorker", self._orig_worker)
+        self.addCleanup(setattr, main.QFileDialog, "getExistingDirectory", self._orig_dialog)
+        self.addCleanup(setattr, main, "pick_download_artifact", self._orig_pick)
+        self.addCleanup(setattr, main, "install_downloaded", self._orig_install)
+        main.DownloadWorker = _FakeWorker
+        main.install_downloaded = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("只下载组件不许走 install_downloaded"))
+        picked = self.root / "dl"
+        picked.mkdir()
+        main.QFileDialog.getExistingDirectory = classmethod(
+            lambda cls, *a, **k: str(picked))
+        self.picked = picked
+
+    def _card(self, key):
+        comp = next(c for c in main.build_components() if c.key == key)
+        return main.ComponentCard(comp, lambda lvl, msg: None)
+
+    def test_jetbrains_versions_carry_both_artifacts_with_sizes(self):
+        comp = next(c for c in main.build_components() if c.key == "idea")
+        arts = comp.versions[0].download_artifacts()
+        self.assertEqual([a.fmt for a in arts], ["exe", "zip"],
+                         "顺序就是菜单顺序：默认那个排第一")
+        self.assertTrue(all(a.size > 10 ** 9 for a in arts),
+                        f"JetBrains 两种产物都是 GB 级，体积必须登记：{[a.size for a in arts]}")
+        self.assertTrue(any(a.urls[0].endswith(".win.zip") for a in arts),
+                        "zip 那条必须是 windowsZip 的链接，不是把 .exe 改了个后缀")
+
+    def test_single_artifact_components_need_no_extra_registration(self):
+        """只有一种产物的（WindTerm / 微信 / Eclipse）不用重复登记，菜单也不出现。"""
+        for key in ("windterm", "wechat-devtools", "eclipse"):
+            comp = next(c for c in main.build_components() if c.key == key)
+            cv = comp.versions[0]
+            arts = cv.download_artifacts()
+            with self.subTest(key=key):
+                self.assertEqual(len(arts), 1)
+                self.assertEqual(arts[0].urls, cv.urls_for_current(),
+                                 "单项产物必须直接复用主 URL，别养出第二份数据")
+
+    def test_menu_text_shows_the_size_next_to_the_kind(self):
+        comp = next(c for c in main.build_components() if c.key == "clion")
+        texts = [a.menu_text() for a in comp.versions[0].download_artifacts()]
+        self.assertEqual(len(texts), 2)
+        for t in texts:
+            self.assertRegex(t, r"(GB|MB)", f"菜单文字要带体积：{t!r}")
+            self.assertTrue(("安装器" in t) or ("便携" in t), f"要说清是什么：{t!r}")
+
+    def test_two_artifacts_ask_before_downloading(self):
+        seen = {}
+
+        def fake_pick(arts, parent=None, at=None):
+            seen["arts"] = [a.fmt for a in arts]
+            return arts[1]                      # 用户选了第二项（zip）
+
+        main.pick_download_artifact = fake_pick
+        card = self._card("idea")
+        card.on_download_clicked()
+        self.assertEqual(seen.get("arts"), ["exe", "zip"], "两种产物却没问用户")
+        w = _FakeWorker.last
+        self.assertTrue(w.dest.name.endswith(".zip"), f"选了 zip 却下成 {w.dest.name}")
+        self.assertEqual(w.urls, card.component.versions[0].download_artifacts()[1].urls)
+        self.assertEqual(w.expect_magic, b"PK", "zip 要按 PK 校验")
+
+    def test_declining_the_menu_starts_nothing(self):
+        main.pick_download_artifact = lambda arts, parent=None, at=None: None
+        card = self._card("pycharm")
+        _FakeWorker.last = None
+        card.on_download_clicked()
+        self.assertIsNone(_FakeWorker.last, "用户没选，就不该起下载线程")
+        self.assertTrue(card.btn_install.isEnabled(), "取消后按钮要能再点")
+        self.assertFalse(list(self.picked.iterdir()), "取消后目录里不该留文件")
+
+    def test_one_artifact_needs_no_extra_click(self):
+        """只有一种产物时不弹菜单 —— 而且这条必须由**真函数**来答，不能靠桩去看。
+
+        上一版把 pick_download_artifact 整个替掉再断"没被调用"，等于把要验的东西
+        先拆了：卡片是无条件调它的，弹不弹由函数内部按数量决定，桩一上就观测不到了。
+        """
+        main.pick_download_artifact = self._orig_pick
+        comp = next(c for c in main.build_components() if c.key == "windterm")
+        arts = comp.versions[0].download_artifacts()
+        self.assertEqual(len(arts), 1, "WindTerm 官方只发便携包，别哪天多登记一种")
+        chosen = main.pick_download_artifact(arts)
+        self.assertIsNotNone(chosen, "单产物时真函数不该返回空")
+        self.assertEqual(chosen.fmt, "zip")
+        card = self._card("windterm")
+        card.on_download_clicked()
+        self.assertTrue(_FakeWorker.last.dest.name.endswith(".zip"))
+
+    def test_every_artifact_url_is_a_measured_host(self):
+        """产物列表里的每个域名都必须是实测过的 —— 包括"另一种产物"那条。
+
+        镜像测试只看主 URL，alt 产物是它看不见的第二扇门；这扇门不设白名单，
+        以后往 alt 里塞个没测过的源就绕过了 R1。
+        """
+        allowed = ("download.jetbrains.com", "update.code.visualstudio.com",
+                   "github.com", "gh-proxy.com", "ghfast.top", "ghproxy.net",
+                   "servicewechat.com", "download.eclipse.org",
+                   "mirrors.tuna.tsinghua.edu.cn", "mirrors.aliyun.com",
+                   "mirrors.huaweicloud.com")
+        for comp in main.build_components():
+            if not comp.download_only:
+                continue
+            for cv in comp.versions:
+                for art in cv.download_artifacts():
+                    for u in art.urls:
+                        with self.subTest(key=comp.key, url=u[:70]):
+                            host = u.split("/", 3)[2]
+                            self.assertIn(host, allowed,
+                                          f"{comp.key} 的产物源 {host} 没实测过")
 
 
 if __name__ == "__main__":

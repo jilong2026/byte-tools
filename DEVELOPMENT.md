@@ -1530,7 +1530,12 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答。
    产品码也要查官方清单（CLion 是 `CL`，不是猜的 `CLW`）。
 7. **抓取器失败一律抛异常，不许返回空表**：返回空会让下拉框被灌成空的，
    用户看到的是"点了刷新版本，版本反而没了"。
-8. **遍历全组件的老断言一律按能力位改判据，不加豁免表**：
+8. **一个版本的多种产物走 `DownloadArtifact`，不许塞进 `url_list_map`**：
+   后者是"同一个文件的不同镜像"（故障转移），前者是**两个不同的文件**（exe 安装器 /
+   zip 便携包）。混用会让镜像测试以为有多源兜底，而实际下的是两个东西。
+   界面上只有一种产物时直接下、不弹菜单；两种以上才弹，菜单文字带体积 ——
+   选错一次是重下 1.5 GB。为什么不画两颗主按钮见 `pick_download_artifact` 的注释。
+9. **遍历全组件的老断言一律按能力位改判据，不加豁免表**：
    `multi_version == not download_only`、角标存在 ⟺ `multi_version`、
    归档布局审计的豁免只能由能力位决定（**不许**把这些 key 写进 `EXPECTED_WIN_SUBDIR`，那等于谎称实测过归档布局）。
 
@@ -1548,8 +1553,12 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答。
 | `gh-proxy.com/https://github.com/...` | 206 + `PK` ✓；**当天实测 116–225 KB/s，而 2026-09-29 同一加速器实测约 9 MB/s** ⇒ 吞吐每天浮动，文档与注释里不写死数字 |
 | `mirrors.huaweicloud.com/jetbrains/…` | **200 + 12 KB HTML，假源** |
 | `mirrors.nju.edu.cn/jetbrains/…` | 404 |
+| JetBrains `downloads.windowsZip`（第二种产物） | 六件逐个实测 206 + `PK`；idea 1,634,879,155 / pycharm 1,319,498,231 / clion 2,378,013,331 / webstorm 1,162,475,563 / goland 1,256,774,457 / datagrip 1,109,836,927 字节 |
+| `update.code.visualstudio.com/<ver>/win32-x64-user/stable` | 206 + `MZ`；1.141.0=251,828,312 / 1.140.0=244,372,816 / 1.139.1=232,909,888 字节 |
+| `github.com/t8y2/dbx/…/DBX_0.6.38_x64-setup.exe` | 206 + `MZ`，29,228,000 字节 |
+| Eclipse `technology/epp/downloads/release/<列车>/R/eclipse-java-…-win32-x86_64.zip` | 清华 / 阿里 / 华为 / 官方**四个源都回同一个字节数**（2026-09=377,592,420、2026-06=368,384,084、2026-03=368,790,631），`PK` ✓；官方 CDN 只有 25 KB/s、清华 2.7–3.9 MB/s |
 
-⇒ JetBrains / VS Code / 微信这批**只有官方直链**，与 R1「镜像优先、官网末位」相反，是实测例外，
+⇒ JetBrains / VS Code / 微信这批**只有官方直链**（Eclipse 例外，它有清华等三个真镜像），与 R1「镜像优先、官网末位」相反，是实测例外，
 （**Eclipse 是例外中的反例**：官方 CDN 本机实测 25 KB/s，而清华 / 阿里 / 华为三个镜像都回
 同一个 377,592,420 字节的 `PK` 包、清华 2.7–3.9 MB/s ⇒ 它按 R1 正常排多源，不进豁免表。）
 在 `bt_mirror_spec_tests.OFFICIAL_ONLY_EXCEPTION` 里登记；那条用例断的是"大陆源恰好 0 个"而不是跳过，
