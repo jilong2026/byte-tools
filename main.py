@@ -471,6 +471,14 @@ class Component:
     # 而不是"先自己去找 Erlang 装好"。界面据此跳过它（见 MainWindow._build_tabs），
     # 但它仍然走同一套下载/解压/版本解析机制 —— 少一套平行实现就少一处会坏的地方。
     hidden: bool = False
+    # **只下载、不配置的 GUI 软件**（2026-10-10 加「开发工具」Tab 时新增，规则 R13）。
+    # 这类组件（IDE / 数据库客户端 / API 工具）下载的是官方安装包，本工具**不碰它**：
+    # 不解压、不落 ~/.env-tools/<key>/ 目录、不写 XXX_HOME 与 PATH、建卡时不扫盘也不跑
+    # `<exec> --version`、下拉框不挂"已装"绿勾、卡片不显示「可多版本」角标，
+    # 而且**绝不代跑安装器** —— 静默执行安装程序等于替用户点了授权协议。
+    # 置上这个位之后，build_components() 末尾会连带把 multi_version 置 False，
+    # 于是角标（条件就是 multi_version）自动不创建；其余短路点见 ComponentCard 各方法开头。
+    download_only: bool = False
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -3399,14 +3407,16 @@ class VersionFetchWorker(QThread):
 
 
 # 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "一键启停", "其它软件")
+COMPONENT_CATEGORIES = ("开发环境", "开发软件", "开发工具", "一键启停")
 
 # 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
 # build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。
 #   开发环境：装完进 PATH、直接用来写 / 编译 / 打包代码
 #   开发软件：本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）
+#             + 容器与编排外围（docker / kubectl —— 2026-10-10 原「其它软件」并入，那个 Tab 已删）
+#   开发工具：**只下载**的 GUI 软件（Component.download_only）——只列版本 + 下官方安装包，
+#             不配环境变量、不扫盘、不代跑安装器（见 R13）
 #   一键启停：卡片上有「启动/停止」按钮的组件 —— 成员由 LAUNCH_KEYS 派生，不写在这里
-#   其它软件：不参与写代码的容器、编排外围
 COMPONENT_CATEGORY_OF = {
     "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
     "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
@@ -3416,11 +3426,98 @@ COMPONENT_CATEGORY_OF = {
     "seata": "开发软件", "kafka": "开发软件", "rocketmq": "开发软件",
     "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
     "nginx": "开发软件",
-    "docker": "其它软件", "kubectl": "其它软件", "jenkins": "其它软件",
+    "docker": "开发软件", "kubectl": "开发软件", "jenkins": "开发软件",
+    "idea": "开发工具", "pycharm": "开发工具", "clion": "开发工具",
+    "webstorm": "开发工具", "goland": "开发工具", "datagrip": "开发工具",
+    "vscode": "开发工具", "dbx": "开发工具", "windterm": "开发工具",
+    "wechat-devtools": "开发工具",
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
     "erlang": "开发环境",
 }
+
+# ---------------------------------------------------------------------------
+# 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only，规则 R13）
+# ---------------------------------------------------------------------------
+# 每条 URL 与版本号都是 2026-10-10 按 R1 实测过的（状态码 + 魔数 + 吞吐）：
+#   download.jetbrains.com      → 206 + `MZ`，741–2938 KB/s，单包 858MB–1.74GB
+#   update.code.visualstudio.com → 206 + `PK`，约 3.9 MB/s（win32-x64-archive 是便携 zip）
+#   servicewechat.com（微信开发者工具稳定版）→ 200，Content-Length 190,935,184，`MZ`
+#   GitHub 产物（DBX / WindTerm）**裸地址本机连不上**（实测 http=000），必须走
+#     _gh_accelerated：加速器在前、裸地址末位 —— 与其它组件的"镜像优先、官网末位"同一条规则。
+# 版本号一律取官方接口给的 link，不按文件名规律拼：JetBrains 2026 年起主线文件名不再带
+# IC / Community（idea-2026.2.3.exe），而 Community 线本身停在 2025.3 —— 猜出来的名字会 404。
+#
+# 结构：(key, 显示名, 归档类型, 给用户的说明, ((版本, URL), ...))
+_DEVTOOLS: tuple = (
+    ("idea", "IntelliJ IDEA", "exe",
+     "商业软件：本工具只提供官方安装包直链，**不含授权**。"
+     "官方 Community 线停在 2025.3，之后与 Ultimate 合并为主线，故这里给的是主线包。",
+     (("2026.2.3", "https://download.jetbrains.com/idea/idea-2026.2.3.exe"),
+      ("2026.2.2", "https://download.jetbrains.com/idea/idea-2026.2.2.exe"))),
+    ("pycharm", "PyCharm", "exe",
+     "商业软件：本工具只提供官方安装包直链，**不含授权**（Community 线同上，已并入主线）。",
+     (("2026.2.3", "https://download.jetbrains.com/python/pycharm-2026.2.3.exe"),
+      ("2026.2.2", "https://download.jetbrains.com/python/pycharm-2026.2.2.exe"))),
+    ("clion", "CLion", "exe", "商业软件：只提供官方直链，**不含授权**。",
+     (("2026.2.3.1", "https://download.jetbrains.com/cpp/CLion-2026.2.3.1.exe"),
+      ("2026.2.3", "https://download.jetbrains.com/cpp/CLion-2026.2.3.exe"))),
+    ("webstorm", "WebStorm", "exe", "商业软件：只提供官方直链，**不含授权**。",
+     (("2026.2.3", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.3.exe"),
+      ("2026.2.2", "https://download.jetbrains.com/webstorm/WebStorm-2026.2.2.exe"))),
+    ("goland", "GoLand", "exe", "商业软件：只提供官方直链，**不含授权**。",
+     (("2026.2.3", "https://download.jetbrains.com/go/goland-2026.2.3.exe"),
+      ("2026.2.2.1", "https://download.jetbrains.com/go/goland-2026.2.2.1.exe"))),
+    ("datagrip", "DataGrip", "exe", "商业软件：只提供官方直链，**不含授权**。",
+     (("2026.2.6", "https://download.jetbrains.com/datagrip/datagrip-2026.2.6.exe"),
+      ("2026.2.5", "https://download.jetbrains.com/datagrip/datagrip-2026.2.5.exe"))),
+    ("vscode", "Visual Studio Code", "zip",
+     "官方便携 zip（解压即用，不需要安装器）。开源免费。",
+     tuple((v, f"https://update.code.visualstudio.com/{v}/win32-x64-archive/stable")
+           for v in ("1.141.0", "1.140.0", "1.139.1"))),
+    ("dbx", "DBX 数据库客户端", "zip",
+     "开源（Tauri）便携 zip，约 38MB，支持 70+ 数据库。GitHub 产物，下载走加速器优先。",
+     (("0.6.38", "https://github.com/t8y2/dbx/releases/download/v0.6.38/"
+                 "DBX_0.6.38_x64-portable.zip"),)),
+    ("windterm", "WindTerm", "zip",
+     "开源 SSH 终端，官方只发便携 zip（无安装器）。GitHub 产物，下载走加速器优先。",
+     (("2.7.0", "https://github.com/kingToolbox/WindTerm/releases/download/2.7.0/"
+                "WindTerm_2.7.0_Windows_Portable_x86_64.zip"),)),
+    ("wechat-devtools", "微信开发者工具", "exe",
+     "官方稳定版直链。**微信不提供可机读的版本号**，所以下面这个「2026.09.30」是实测当天"
+     "服务端文件的 Last-Modified 日期，不是软件版本号；装完以「关于」面板里的为准。",
+     (("2026.09.30",
+       "https://servicewechat.com/wxa-dev-logic/download_redirect?type=x64&from=mpwiki"),)),
+)
+
+
+def _devtool_components() -> List["Component"]:
+    """把 _DEVTOOLS 那张表变成组件。
+
+    集中生成而不是手写十个 Component(...)：这批的字段全是同一套"什么都不配"的取值
+    （env_var / exec_name 为空、version_probe=False、installer_mode=False），
+    抄十遍只会让人漏抄一处 —— 而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+    """
+    out: List[Component] = []
+    for key, name, arch, note, rows in _DEVTOOLS:
+        versions = []
+        for ver, url in rows:
+            # GitHub 产物要加速器优先；别家只有官网一条直链（实测过没有可用大陆镜像，见 R1.5）
+            urls = _gh_accelerated(url) if "github.com/" in url else [url]
+            versions.append(_cv(ver, {"Windows": urls}, {"Windows": arch}))
+        out.append(Component(
+            key=key, display_name=name,
+            env_var=None,        # 刻意留空：这类组件不配任何 XXX_HOME
+            path_subdir="",
+            exec_name=None,      # 留空 + version_probe=False = 永不执行它
+            version_probe=False,
+            versions=versions,
+            download_only=True,
+            unsupported_platform_hint="当前只登记了实测过的 Windows 官方直链；"
+                                      "macOS / Linux 官方也有包，但未按 R1 实测，暂不提供",
+            data_note=note,
+        ))
+    return out
 
 # 允许并存多版本、可切换生效版本的组件（2026-09-29 与用户确认，固定 7 个，别自行扩大）。
 # 排除 conda：installer_mode 组件装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立。
@@ -4895,6 +4992,11 @@ def build_components() -> List[Component]:
         )
     )
 
+    # 「开发工具」Tab：只下载、不配置的 GUI 软件（见 _DEVTOOLS 与 R13）。
+    # 放在最后追加，是为了不打散上面按字母/依赖顺序排的旧组件 —— 卡片顺序会跟着变，
+    # 而网格排布与"最后一个格子"的用例都依赖这个顺序稳定。
+    components.extend(_devtool_components())
+
     for comp in components:
         # 可一键启停的组件全部集中到「一键启停」Tab（2026-10-08 用户要求），
         # 成员**由 LAUNCH_KEYS 派生**而不是再写一张表：那张表的准入条件本来就是
@@ -4906,7 +5008,9 @@ def build_components() -> List[Component]:
         # 多版本一律为 True（2026-06-06 起全量开放）。MULTI_VERSION_KEYS 为空集时
         # 全部组件都算多版本；白名单里再写 key 也不会被排除——它现在只作为
         # "历史上哪些组件是原生多版本"的记录留着，护栏用例靠它标注哪些是新增覆盖的。
-        comp.multi_version = True
+        # **例外：只下载型组件**（2026-10-10 加「开发工具」）。它磁盘上一个版本都不落，
+        # "并存多版本 + 切生效"对它没有对象；顺带让「可多版本」角标不创建（角标条件就是它）。
+        comp.multi_version = not comp.download_only
         comp.launch = LAUNCH_OF.get(comp.key)                     # 新增：不在登记表就是 None
     return components
 

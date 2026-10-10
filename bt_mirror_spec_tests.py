@@ -121,12 +121,27 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
     #     官方 API 退到末位兜底。现在南大 + 清华都可用，14.6 / 13.5 MB/s。
     SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2}
 
+    # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具。
+    # 依据 2026-10-10 实测（DEVELOPMENT.md R1.5）：华为云的 jetbrains 目录回 200 但只有 12KB HTML
+    # （正是本文件反复防的"200 + 小 HTML 应付缺失文件"那种假源）、南大 404；
+    # update.code.visualstudio.com 与 servicewechat.com 无人镜像。
+    # **DBX / WindTerm 不在这个表里** —— 它们是 GitHub 产物，三个加速器都算大陆源，天然满足本条。
+    # 这里断"大陆源恰好 0 个"而不是直接跳过：以后真找到可用镜像时，这条会红，
+    # 逼着人带着实测数据来改表，而不是悄悄多挂一个没验过的源。
+    OFFICIAL_ONLY_EXCEPTION = {"idea", "pycharm", "clion", "webstorm", "goland",
+                               "datagrip", "vscode", "wechat-devtools"}
+
     def test_counts(self):
         for key, comp in COMPS.items():
             lst = comp.versions[0].urls_for_current()
             if not lst:
                 continue          # docker/rabbitmq 在 Windows 不发静态包，属正常
             cn = [u for u in lst if is_mainland(u)]
+            if key in self.OFFICIAL_ONLY_EXCEPTION:
+                self.assertEqual(len(cn), 0,
+                                 f"{key} 登记为「只有官方直链」，现在却出现了大陆源，"
+                                 f"要么是新镜像（带实测改表），要么是硬凑的假源：{lst}")
+                continue
             if key in self.SINGLE_SOURCE_EXCEPTION:
                 expected = self.SINGLE_SOURCE_EXCEPTION[key]
                 self.assertEqual(len(cn), expected, f"{key} 例外源数量变了：{lst}")

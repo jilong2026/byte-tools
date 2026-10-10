@@ -767,7 +767,10 @@ class StatusBarFacts(_UsesRealWindow, unittest.TestCase):
         """
         win = self.win
         visible = len(win.cards)
-        self.assertEqual(visible, 26, "界面可见组件数变了，这条用例的基线要一起核")
+        # 数量从成员表派生（2026-10-10）：全仓库唯一写死可见组件数的地方在
+        # bt_download_only_tests.test_visible_component_count_is_36，这里再钉一份只会多一处要改。
+        agreed = sum(len(v) for v in EXPECTED_MEMBERSHIP.values())
+        self.assertEqual(visible, agreed, "界面卡片数与成员表不符：有组件没进 Tab 或多出来了")
         self.assertIn(f"组件：{visible}", self._plain())
         self.assertNotIn(f"组件：{len(win.components)}", self._plain())
         self.assertNotIn("总数", self._plain(), "还是老长句：底部要的是数字，不是句子")

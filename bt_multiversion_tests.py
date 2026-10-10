@@ -251,25 +251,24 @@ class MultiVersionFlag(EnvSandbox):
         super().setUp()
         self.components = {c.key: c for c in main.build_components()}
 
-    def test_all_components_are_multi_version(self):
-        """**全部 26 个组件都是多版本**（2026-06-06 用户要求，26/26）。
+    def test_every_installable_component_is_multi_version(self):
+        """**能装的组件全是多版本**；唯一的例外是"只下载"那批（2026-10-10 起）。
 
-        这条原来是 `test_only_the_seven_agreed_components_are_multi_version`，
-        断言"恰好是协商好的那 7 个"。白名单是**改造期**的保护措施：当时担心一次改
-        19 个组件的状态胶囊 / 卸载目标 / 绿勾逻辑会连带出事。改造已完成、护栏也补齐，
-        白名单失去意义，保留它只会让 19 个组件的用户拿不到"多装几个版本、随时切回去"。
+        这条原来是 `test_all_components_are_multi_version`，先断"恰好协商好的 7 个"、
+        后改断"26 个全是"。白名单是**改造期**的保护措施，改造完成后失去意义。
+        现在契约变成一条判据而不是一个数字：`multi_version == not download_only` ——
+        只下载型组件磁盘上一个版本都不落，"并存多版本 + 切生效"对它没有对象。
+        组件总数不再写死在这里（评审点见 bt_download_only_tests 的唯一一处数字）。
         """
-        not_multi = {k for k, c in self.components.items() if not c.multi_version}
-        self.assertEqual(not_multi, set(),
-                         f"这些组件还没开多版本：{sorted(not_multi)}")
-        # 2026-10-08：组件数 26 → 27，多出来的是 **隐藏组件 erlang**
-        # （rabbitmq 的前置运行时，不进界面）。用户可见的仍然是 26 个，
-        # 所以两条都要钉：总数含隐藏，可见数不含。
-        self.assertEqual(len(self.components), 27,
-                         f"组件数变了（{len(self.components)} 个），"
-                         f"下面几条按数量写的断言要一起核对")
-        visible = [k for k, c in self.components.items() if not getattr(c, "hidden", False)]
-        self.assertEqual(len(visible), 26, "用户可见组件数必须仍是 26")
+        for key, comp in self.components.items():
+            self.assertEqual(comp.multi_version, not comp.download_only,
+                             f"{key}：multi_version 应当只由「是否只下载」决定")
+        self.assertEqual([k for k, c in self.components.items() if c.multi_version],
+                         [k for k, c in self.components.items() if not c.download_only],
+                         "多版本集合与可安装集合必须一模一样")
+        self.assertEqual([k for k, c in self.components.items()
+                          if getattr(c, "hidden", False)], ["erlang"],
+                         "隐藏组件只应有 rabbitmq 的前置运行时 erlang")
 
     def test_data_bearing_components_all_have_a_data_note(self):
         """带数据的中间件全都要有 data_note：多版本并存后，
@@ -304,11 +303,12 @@ class MultiVersionFlag(EnvSandbox):
 
     def test_every_component_has_the_attribute(self):
         # F3：原来是 isinstance(comp.multi_version, bool)——dataclass 默认值保证了
-        # 类型，永远为真，近似同义反复。改成逐组件核对"标志真的是 bool 且为真"，
-        # 把"全量多版本"这个契约真钉住（不是靠某几个样本推断）。
+        # 类型，永远为真，近似同义反复。改成逐组件核对契约。
+        # 2026-10-10 契约从"恒为真"改成"等于 not download_only"：只下载型组件不是多版本。
         for key, comp in self.components.items():
             self.assertIsInstance(comp.multi_version, bool, key)
-            self.assertTrue(comp.multi_version, f"{key} 不是多版本")
+            self.assertEqual(comp.multi_version, not comp.download_only,
+                             f"{key} 的 multi_version 与 download_only 不互斥")
 
     def test_multi_version_whitelist_has_no_dead_keys(self):
         # F3：MULTI_VERSION_KEYS 里打错一个字母在产品码里静默无效果。
@@ -1047,10 +1047,21 @@ class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
         return {c.key: c for c in main.build_components()}
 
     def test_every_windows_component_is_accounted_for(self):
-        """审过的 + 审不了的 = 全部组件，谁也不许悄悄漏在表外。"""
+        """审过的 + 审不了的 + 只下载的 = 全部组件，谁也不许悄悄漏在表外。
+
+        只下载型（「开发工具」）单独豁免，而且**不许**为了过这条把它们塞进
+        `EXPECTED_WIN_SUBDIR`：那张表记的是"解压后 PATH 该指哪个子目录"的实测结论，
+        而这批组件我们根本不解压、不进 PATH —— 写进去等于谎称实测过归档布局。
+        """
         comps = self._win_comps()
-        missing = sorted(set(comps) - set(self.EXPECTED_WIN_SUBDIR) - self.NOT_AUDITABLE)
+        download_only = {k for k, c in comps.items() if c.download_only}
+        missing = sorted(set(comps) - set(self.EXPECTED_WIN_SUBDIR)
+                         - self.NOT_AUDITABLE - download_only)
         self.assertEqual(missing, [], f"这些组件既没实测也没登记：{missing}")
+        # 豁免面只能由能力位决定，不能顺手扩大：只下载的一定不进 PATH 型审计。
+        for key in download_only:
+            self.assertEqual(comps[key].path_subdir, "",
+                             f"{key} 只下载却配了 path_subdir，会被塞进 PATH")
 
     def test_path_subdir_matches_the_measured_archive_layout(self):
         comps = self._win_comps()
@@ -2301,20 +2312,25 @@ class MultiVersionBadge(EnvSandbox):
                 self.assertTrue(badges[0].toolTip().strip(), "角标必须有悬停说明")
                 self.assertIn("生效", badges[0].toolTip())
 
-    def test_badge_widget_exists_on_every_component(self):
-        """全量多版本后，每个组件都要有「可多版本」角标（2026-06-06）。
+    def test_badge_widget_exists_on_every_multi_version_component(self):
+        """角标必须与 `multi_version` 一一对应，且是"不创建"而不是"创建后隐藏"。
 
-        这条原来叫 `test_no_badge_widget_on_other_components`，
-        断言"非多版本组件不创建角标节点（不是创建后隐藏）"。
-        现在没有非多版本组件了，契约反过来：**全部都要有**，且必须是真节点
-        （不能靠创建后隐藏糊弄——那会让 findChild 查到却看不见）。
+        这条原来叫 `test_no_badge_widget_on_other_components`，后因"没有非多版本组件了"
+        反过来断"全部都要有"。2026-10-10 又出现了非多版本的一类：**只下载**的开发工具
+        —— 它们磁盘上不落任何版本，标"可多版本"是误导。
+        所以契约回到判据：有角标 ⟺ multi_version。两种情况下都要求"不该有就是没这个节点"，
+        因为创建后隐藏会让 findChild 查到却看不见，糊弄得过用例糊弄不了布局。
         """
         self.as_windows()
         for comp in main.build_components():
             with self.subTest(key=comp.key):
                 card = self._card(comp.key)
-                self.assertTrue(self._badges(card),
-                                f"{comp.key} 缺「可多版本」角标")
+                if comp.multi_version:
+                    self.assertTrue(self._badges(card),
+                                    f"{comp.key} 缺「可多版本」角标")
+                else:
+                    self.assertEqual(self._badges(card), [],
+                                     f"{comp.key} 只下载，不该有角标节点")
 
     def test_title_text_stays_exactly_display_name(self):
         self.as_windows()

@@ -1,13 +1,15 @@
-"""组件四类分组 + Tab 页布局的规格测试（离线，不联网）。
+"""组件分类分组 + Tab 页布局的规格测试（离线，不联网）。
 
-分类标准（2026-09-28 与用户确认；2026-10-08 增加「一键启停」）：
+分类标准（2026-09-28 与用户确认；2026-10-08 增加「一键启停」；2026-10-10 增加「开发工具」并取消「其它软件」）：
   开发环境 = 装完进 PATH、直接用来写/编译/打包代码（语言运行时 + 构建与版本工具）
-  开发软件 = 本地跑起来给项目当依赖、但本工具**还不能一键启停**的服务（数据库 / 消息队列）
+  开发软件 = 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）+ 容器与编排外围
+             （docker / kubectl 从原「其它软件」并进来 —— 用户要求少一个 Tab）
+  开发工具 = **只下载**的 GUI 软件（IDE / 数据库客户端 / API 工具）：卡片只有「版本下拉 + 下载」，
+             不解压、不配环境变量、不扫盘、不代跑安装器（见 Component.download_only 与 R13）
   一键启停 = 卡片上有「启动 / 停止」按钮的组件，成员由 LAUNCH_KEYS 派生，不是第二张表
-  其它软件 = 不参与写代码的运维与交付外围（容器 / 编排）
 
-「一键启停」排在「其它软件」之前（2026-10-08 用户要求）：它是本工具最能干活的一组长，
-埋在倒数第二个 Tab 里等于藏起来。
+「一键启停」固定是**最后一个** Tab：它是本工具最能干活的一组长，埋在中间等于藏起来
+（原来那条"紧贴「其它软件」"的护栏因为「其它软件」被取消而改写成这条）。
 """
 import os
 import sys
@@ -36,14 +38,22 @@ EXPECTED_MEMBERSHIP = {
                "gradle", "powershell"},
     # 剩下的服务型组件还不能一键启停（数据目录/端口/前置运行时的收尾还没做），
     # 留在「开发软件」里 —— 它们接进框架后会自动挪到「一键启停」。
-    "开发软件": {"mysql", "mongodb", "postgresql", "pulsar"},
+    # docker / kubectl 是 2026-10-10 从「其它软件」并进来的：那个 Tab 只剩 2 张卡，
+    # 用户要求取消它，于是"容器与编排外围"归到同为大件服务的这一组。
+    "开发软件": {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl"},
+    # 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only）。
+    # 这 10 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
+    # 磁盘上不落 ~/.env-tools/<key>/ 目录**，所以遍历全组件的老断言都要按能力位豁免。
+    # 少掉的 HBuilderX / Apipost / Apifox / Lithe 不是"忘了加"，而是**拿不到可实测的
+    # 官方直链**（前三家下载页全 JS 渲染、Lithe 官方仓库 404），按 R1 不许登记未实测的源。
+    "开发工具": {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip",
+               "vscode", "dbx", "windterm", "wechat-devtools"},
     # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS），
-    # 位置固定在「其它软件」之前（2026-10-08 用户要求）。这里手写一份清单是为了让
+    # 固定排在最后。这里手写一份清单是为了让
     # "扩白名单 = 必须同时改这张表"变成一次可见的改动：
     # 下面 test_launch_tab_membership_is_derived_from_the_whitelist 会把两边钉在一起。
     "一键启停": {"jenkins", "nacos", "activemq", "rocketmq", "nginx", "kafka",
                "tomcat", "elasticsearch", "rabbitmq", "seata"},
-    "其它软件": {"docker", "kubectl"},
 }
 
 ALL_KEYS = {k for group in EXPECTED_MEMBERSHIP.values() for k in group}
@@ -72,9 +82,14 @@ class CategoryOnComponent(unittest.TestCase):
         # **隐藏组件**（不出现在界面），所以它在 build_components() 里、
         # 不在分类成员表里。这里把两件事都钉住：
         self.assertEqual({c.key for c in self.components}, ALL_KEYS | {"erlang"})
-        self.assertEqual(len(self.components), 27)
+        # 数量**从成员表派生**而不是写死：加组件时这里不该红，红的是
+        # bt_download_only_tests.test_visible_component_count_is_38 那唯一一处评审点。
+        # 这条仍然要留：上面比的是"键的集合"，重复登记同一个 key 它看不出来，
+        # 只有比长度才会（清单里出现过两次 jenkins 就是这么被抓到的）。
+        self.assertEqual(len(self.components), len(ALL_KEYS) + 1,
+                         "组件清单里有重复 key，或有成员表外的组件混进来")
         visible = sum(len(v) for v in main.group_components(self.components).values())
-        self.assertEqual(visible, 26, "隐藏组件不许出现在任何 Tab 里")
+        self.assertEqual(visible, len(ALL_KEYS), "隐藏组件不许出现在任何 Tab 里")
 
 
 class GroupComponentsHelper(unittest.TestCase):
@@ -82,7 +97,7 @@ class GroupComponentsHelper(unittest.TestCase):
         groups = main.group_components(main.build_components())
         self.assertEqual(list(groups), list(EXPECTED_MEMBERSHIP),
                          "Tab 顺序必须与 COMPONENT_CATEGORIES 一致")
-        self.assertEqual(sum(len(v) for v in groups.values()), 26)
+        self.assertEqual(sum(len(v) for v in groups.values()), len(ALL_KEYS))
         for name, keys in groups.items():
             self.assertEqual({c.key for c in keys}, EXPECTED_MEMBERSHIP[name], name)
 
@@ -101,10 +116,15 @@ class GroupComponentsHelper(unittest.TestCase):
         groups = main.group_components(main.build_components())
         self.assertEqual({c.key for c in groups["一键启停"]}, set(main.LAUNCH_KEYS))
 
-    def test_launch_tab_sits_right_before_the_other_software_tab(self):
+    def test_launch_tab_is_the_last_one(self):
+        """「一键启停」固定是最后一个 Tab。
+
+        原来这条断的是"紧贴「其它软件」前面"，2026-10-10「其它软件」被取消后失去
+        指涉对象，但护栏的意图没变：最能干活的一组长不许埋在中间。
+        """
         names = list(main.COMPONENT_CATEGORIES)
-        self.assertEqual(names.index("一键启停") + 1, names.index("其它软件"),
-                         "「一键启停」必须紧贴在「其它软件」前面")
+        self.assertEqual(names[-1], "一键启停",
+                         "「一键启停」必须是最后一个 Tab，不许被新分类挤到中间")
 
 
 class MainWindowUsesTabs(unittest.TestCase):
@@ -156,7 +176,7 @@ class MainWindowUsesTabs(unittest.TestCase):
     def test_flat_card_list_is_still_complete(self):
         # 刷新版本 / 存配置 / 关窗等待都靠这个平铺列表，分组不能把它弄缺
         self.assertEqual({c.component.key for c in self.win.cards}, ALL_KEYS)
-        self.assertEqual(len(self.win.cards), 26)
+        self.assertEqual(len(self.win.cards), len(ALL_KEYS))
 
 
 if __name__ == "__main__":
