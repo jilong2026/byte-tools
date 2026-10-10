@@ -565,5 +565,143 @@ class _QuietBox:
         return self.Yes if self._open else self.No
 
 
+class VersionFetchers(unittest.TestCase):
+    """「刷新版本」按钮背后：接口给的链接要逐字用，不许按文件名规律拼。
+
+    全部走注入的假 `_get` / 假 `_github_api_json`，用例不联网。
+    """
+
+    def _fake_get(self, payload, record):
+        class _R:
+            def json(self_inner):
+                return payload
+
+        def fake(url, *a, **k):
+            record.append((url, k.get("timeout")))
+            return _R()
+
+        return fake
+
+    def test_jetbrains_fetcher_uses_the_link_the_api_gives(self):
+        rec = []
+        payload = {"IIU": [
+            {"version": "2099.1.0",
+             "downloads": {"windows": {"link": "https://download.jetbrains.com/zzz/odd.exe",
+                                       "size": 123}}},
+            {"version": "2098.9.9",
+             "downloads": {"windows": {"link": "https://download.jetbrains.com/aaa/older.exe",
+                                       "size": 456}}},
+        ]}
+        orig = main._get
+        self.addCleanup(setattr, main, "_get", orig)
+        main._get = self._fake_get(payload, rec)
+        got = main.FETCHERS["idea"]()
+        self.assertEqual([v.version for v in got], ["2099.1.0", "2098.9.9"],
+                         "接口顺序或版本排序不对")
+        self.assertEqual(got[0].urls_for_current(),
+                         ["https://download.jetbrains.com/zzz/odd.exe"],
+                         "必须逐字用接口给的 link：JetBrains 2026 年起主线文件名不再带 IC，"
+                         "按 `ideaIC-<ver>.exe` 拼必 404")
+        self.assertEqual(got[0].archive_for_current(), "exe")
+
+    def test_six_jetbrains_keys_are_registered_with_their_own_product_code(self):
+        expected = {"idea": "IIU", "pycharm": "PCP", "clion": "CL",
+                    "webstorm": "WS", "goland": "GO", "datagrip": "DG"}
+        for key, code in expected.items():
+            self.assertIn(key, main.FETCHERS, f"{key} 没注册 fetcher，「刷新版本」对它无效")
+            rec = []
+            orig = main._get
+            self.addCleanup(setattr, main, "_get", orig)
+            main._get = self._fake_get({code: [{"version": "1.0",
+                                                "downloads": {"windows": {"link": "https://x/y.exe"}}}]},
+                                       rec)
+            main.FETCHERS[key]()
+            self.assertIn(f"code={code}", rec[0][0],
+                          f"{key} 请求的产品码不对：{rec[0][0]}")
+
+    def test_jetbrains_fetcher_passes_an_explicit_timeout(self):
+        """接口响应实测 2.0–4.8 秒（gzip 后），但 `_get` 会退避重试三次，
+        不显式收紧超时的话最坏能拖到一分钟，「刷新版本」看起来像卡死。"""
+        rec = []
+        payload = {"IIU": [{"version": "1.0",
+                            "downloads": {"windows": {"link": "https://x/y.exe"}}}]}
+        orig = main._get
+        self.addCleanup(setattr, main, "_get", orig)
+        main._get = self._fake_get(payload, rec)
+        main.FETCHERS["idea"]()
+        self.assertIsNotNone(rec[0][1], "没给 JetBrains 显式超时")
+        self.assertLessEqual(rec[0][1], 20, f"超时太宽：{rec[0][1]}")
+
+    def test_fetchers_raise_instead_of_returning_an_empty_list(self):
+        """失败必须抛，不能返回 []。
+
+        返回空表会让 `_on_versions_fetched` 把下拉框灌成空的 —— 用户看到的是
+        "点了刷新之后版本没了"，而正确行为是保留内置清单并记一条降级日志。
+        """
+        def boom(*a, **k):
+            raise OSError("网络不通")
+
+        orig = main._get
+        orig_gh = main._github_api_json
+        self.addCleanup(setattr, main, "_get", orig)
+        self.addCleanup(setattr, main, "_github_api_json", orig_gh)
+        main._get = boom
+        main._github_api_json = boom
+        for key in ("idea", "vscode", "dbx", "windterm"):
+            with self.subTest(key=key):
+                with self.assertRaises(Exception):
+                    main.FETCHERS[key]()
+
+    def test_vscode_fetcher_maps_the_releases_array(self):
+        rec = []
+        orig = main._get
+        self.addCleanup(setattr, main, "_get", orig)
+        main._get = self._fake_get(["1.141.0", "1.140.0", "not-a-version"], rec)
+        got = main.FETCHERS["vscode"]()
+        self.assertEqual([v.version for v in got], ["1.141.0", "1.140.0"],
+                         "非版本号的条目要丢掉")
+        self.assertEqual(
+            got[0].urls_for_current(),
+            ["https://update.code.visualstudio.com/1.141.0/win32-x64-archive/stable"])
+        self.assertEqual(got[0].archive_for_current(), "zip",
+                         "VS Code 走的是便携 zip，不是 exe 安装器")
+
+    def test_github_asset_fetchers_pick_the_windows_portable_and_accelerate(self):
+        """两个 GitHub 产物各自挑对自己那个 x64 便携包，且加速器排在裸地址前面。
+
+        诱饵是真实存在的坑：同一次 release 里还有 arm 包、`.sha256` / `.sig` 旁证文件，
+        按"第一个 .zip"挑会拿到 arm，按名字前缀匹配会拿到校验文件当安装包。
+        """
+        names = {"dbx": "DBX_9.9.9_x64-portable.zip",
+                 "windterm": "WindTerm_9.9.9_Windows_Portable_x86_64.zip"}
+        orig = main._github_api_json
+        self.addCleanup(setattr, main, "_github_api_json", orig)
+        for key, want in names.items():
+            payload = [{"tag_name": "v9.9.9", "prerelease": False, "draft": False,
+                        "assets": [
+                            {"name": want.replace("x64", "arm64").replace("x86_64", "arm64"),
+                             "size": 1,
+                             "browser_download_url": "https://github.com/o/r/releases/"
+                                                     "download/v9.9.9/arm.zip"},
+                            {"name": want + ".sha256", "size": 2,
+                             "browser_download_url": "https://github.com/o/r/releases/"
+                                                     "download/v9.9.9/check.sha256"},
+                            {"name": want, "size": 3,
+                             "browser_download_url": "https://github.com/o/r/releases/"
+                                                     "download/v9.9.9/" + want},
+                        ]}]
+            main._github_api_json = lambda url, *a, **k: payload
+            with self.subTest(key=key):
+                got = main.FETCHERS[key]()
+                urls = got[0].urls_for_current()
+                self.assertEqual(got[0].version, "9.9.9", "tag 上的 v 前缀要剥掉")
+                self.assertEqual(urls[-1], "https://github.com/o/r/releases/download/"
+                                           "v9.9.9/" + want,
+                                 "末位必须是 GitHub 裸地址，且挑中的是 x64 便携包")
+                self.assertGreater(len(urls), 1, "GitHub 产物必须把加速器排在前面")
+                self.assertTrue(all(u.endswith(want) or want in u for u in urls),
+                                f"加速器只是前缀，不能改变挑中的产物：{urls}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

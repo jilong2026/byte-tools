@@ -3390,6 +3390,121 @@ def fetch_elasticsearch_versions() -> List[ComponentVersion]:
     return [_elasticsearch_cv(v) for v in stable[:20]]
 
 
+# ---------------------------------------------------------------------------
+# 「开发工具」的版本抓取器（只下载型组件，规则 R13）
+# ---------------------------------------------------------------------------
+# 与别的抓取器同一条契约：**失败要抛异常**，VersionFetchWorker 接住后保留内置清单并记
+# 一条降级日志。返回空表是更糟的失败 —— 下拉框会被灌成空的，用户看到的就是
+# "点了刷新版本，版本反而没了"。
+
+_JETBRAINS_CODES: Dict[str, str] = {"idea": "IIU", "pycharm": "PCP", "clion": "CL",
+                                    "webstorm": "WS", "goland": "GO", "datagrip": "DG"}
+_JETBRAINS_RELEASES_URL = ("https://data.services.jetbrains.com/products/releases"
+                           "?code={}&type=release")
+# 2026-10-10 实测：单产品码 gzip 后 700KB–1.1MB、2.0–4.8 秒（不带 gzip 是 27–44 秒，
+# 而 requests 默认就发 Accept-Encoding: gzip，所以产品码路径天然吃到快的那条）。
+# 超时不显式收紧的话，_get 的三次退避能把最坏耗时推到一分钟左右，
+# 而六个产品各占一路并发线程，"刷新版本"看起来就像卡死。
+DEVTOOL_FETCH_TIMEOUT = 15
+
+
+def make_jetbrains_fetcher(key: str, code: str):
+    """按产品码生成抓取器（六个产品只差 URL 里那个码，抄六遍迟早漏改一处）。
+
+    版本号与链接**一律取接口给的**，绝不按文件名规律拼：JetBrains 把 Community 并进主线之后，
+    `IIU` 的文件叫 `idea-2026.2.3.exe`（不再带 IC），而 `IIC` 这个码的最新记录还停在 2025.3 ——
+    拼出来的地址必 404。
+    """
+
+    def _fetch() -> List[ComponentVersion]:
+        try:
+            payload = _get(_JETBRAINS_RELEASES_URL.format(code),
+                           timeout=DEVTOOL_FETCH_TIMEOUT).json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"{key} 版本列表抓取失败：JetBrains 接口不可用：{exc}") from exc
+        links: Dict[str, str] = {}
+        for rel in (payload.get(code) or []):
+            ver = str((rel or {}).get("version") or "").strip()
+            win = (rel.get("downloads") or {}).get("windows") or {}
+            link = str(win.get("link") or "").strip()
+            # 只接受 HTTPS 链接。**不钉死域名**：钉了会在官方换 CDN 的那天静默变成
+            # "刷新版本刷不出任何东西"，而接口本身就是 HTTPS 的官方端点。
+            if ver and link.startswith("https://"):
+                links.setdefault(ver, link)
+        ordered = _sort_semver_desc(links.keys())
+        if not ordered:
+            raise RuntimeError(f"{key} 版本列表为空（接口没返回可用的 Windows 链接）")
+        return [_cv(v, {"Windows": [links[v]]}, {"Windows": "exe"})
+                for v in ordered[:20]]
+
+    return _fetch
+
+
+_VSCODE_RELEASES_URL = "https://update.code.visualstudio.com/api/releases/stable"
+_VSCODE_ARCHIVE_URL = "https://update.code.visualstudio.com/{}/win32-x64-archive/stable"
+
+
+def fetch_vscode_versions() -> List[ComponentVersion]:
+    """VS Code 官方接口给的就是一个稳定版号数组，没有别的元数据。
+
+    下的是 `win32-x64-archive` **便携 zip**（实测 206 + `PK`，约 3.9 MB/s），
+    不是 user/system 安装器：便携包能按魔数校验、解压即用，也不需要管理员。
+    """
+    try:
+        raw = _get(_VSCODE_RELEASES_URL, timeout=DEVTOOL_FETCH_TIMEOUT).json()
+    except Exception as exc:
+        raise RuntimeError(f"VS Code 版本列表抓取失败：{exc}") from exc
+    versions = [v for v in (raw if isinstance(raw, list) else [])
+                if isinstance(v, str) and _version_parts(v) is not None]
+    ordered = _sort_semver_desc(versions)
+    if not ordered:
+        raise RuntimeError("VS Code 版本列表为空（接口没返回可解析的版本号）")
+    return [_cv(v, {"Windows": [_VSCODE_ARCHIVE_URL.format(v)]}, {"Windows": "zip"})
+            for v in ordered[:20]]
+
+
+def make_github_asset_fetcher(key: str, repo: str, asset_hint: str):
+    """GitHub releases 抓取器：tag 给版本号，`asset_hint` 挑 Windows 那个产物。
+
+    URL 一律过 `_gh_accelerated`（加速器在前、裸地址末位）—— 本机实测
+    `github.com/.../releases/download/...` 直连 http=000 根本连不上，
+    只有 gh-proxy 那几条通（实测 206 + `PK`）。这正是 R1 在这批上的落地方式。
+    """
+
+    def _fetch() -> List[ComponentVersion]:
+        try:
+            data = _github_api_json(
+                f"https://api.github.com/repos/{repo}/releases?per_page=30")
+        except Exception as exc:
+            raise RuntimeError(f"{key} 版本列表抓取失败：GitHub API 不可用：{exc}") from exc
+        picked: Dict[str, str] = {}
+        hint = asset_hint.lower()
+        for rel in (data if isinstance(data, list) else []):
+            if not rel or rel.get("prerelease") or rel.get("draft"):
+                continue
+            tag = str(rel.get("tag_name") or "").lstrip("vV")
+            if _version_parts(tag) is None:
+                continue
+            for asset in rel.get("assets") or []:
+                name = str((asset or {}).get("name") or "").lower()
+                url = str((asset or {}).get("browser_download_url") or "")
+                # 只认我们那个产物，且**必须以 asset_hint 结尾**：
+                # 子串匹配会把 `WindTerm_..._x86_64.zip.sha256` 这种旁证文件当成安装包
+                # （用户双击一个校验文件是打不开的），也会让 arm 包混进 x64 的位置。
+                if name.endswith(hint) and url.startswith("https://github.com/"):
+                    picked.setdefault(tag, url)
+                    break
+        ordered = _sort_semver_desc(picked.keys())
+        if not ordered:
+            raise RuntimeError(
+                f"{key} 版本列表为空（release 里没找到匹配 {asset_hint} 的产物）")
+        return [_cv(t, {"Windows": _gh_accelerated(picked[t])}, {"Windows": "zip"})
+                for t in ordered[:20]]
+
+    return _fetch
+
+
 FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "jdk": fetch_jdk_versions,
     "maven": fetch_maven_versions,
@@ -3418,6 +3533,19 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "powershell": fetch_powershell_versions,
     "nginx": fetch_nginx_versions,
     "erlang": fetch_erlang_versions,
+    # 「开发工具」：只下载型组件。微信开发者工具**故意不在这里** ——
+    # 官方无可机读的版本号（下载端点只回文件，版本要登录后台才看得到），
+    # 硬编一个"最新版"出来比没有更糟，所以它的清单只能内置、刷新时按缺 fetcher 跳过。
+    "idea": make_jetbrains_fetcher("idea", "IIU"),
+    "pycharm": make_jetbrains_fetcher("pycharm", "PCP"),
+    "clion": make_jetbrains_fetcher("clion", "CL"),
+    "webstorm": make_jetbrains_fetcher("webstorm", "WS"),
+    "goland": make_jetbrains_fetcher("goland", "GO"),
+    "datagrip": make_jetbrains_fetcher("datagrip", "DG"),
+    "vscode": fetch_vscode_versions,
+    "dbx": make_github_asset_fetcher("dbx", "t8y2/dbx", "x64-portable.zip"),
+    "windterm": make_github_asset_fetcher(
+        "windterm", "kingToolbox/WindTerm", "windows_portable_x86_64.zip"),
 }
 
 
