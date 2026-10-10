@@ -7,12 +7,12 @@
 #     git push origin v1.0.0
 #
 # 产物清单（与项目 README 文档一致，3 个平台共 4 个文件）：
-#     byte-tools.exe                  Windows x64 单可执行文件（双击运行）
-#     byte-tools-windows-x64.zip      Windows x64 产物压缩包（分发备份）
-#     byte-tools-macos-arm64.zip      macOS Apple Silicon 原生包
-#     byte-tools-linux-x64            Linux x64 单可执行文件
+#     ByteTools.exe                  Windows x64 单可执行文件（双击运行）
+#     ByteTools-windows-x64.zip      Windows x64 产物压缩包（分发备份）
+#     ByteTools-macos-arm64.zip      macOS Apple Silicon 原生包
+#     ByteTools-linux-x64            Linux x64 单可执行文件
 #
-# 变更记录（2026-09）：Intel 通用包 byte-tools-macos.zip 已停用，原因见 matrix 中的说明
+# 变更记录（2026-09）：Intel 通用包 ByteTools-macos.zip 已停用，原因见 matrix 中的说明
 # 变更记录（2026-09）：Release 改为全自动发布 —— 矩阵各平台先传草稿暂存区，
 #                    sync-to-gitee 任务核对齐全后自动取消草稿，无需人工点 Publish
 # 变更记录（2026-09）：Gitee 同步逻辑抽到 同步Gitee产物.sh —— 加入网络重试
@@ -92,7 +92,7 @@ jobs:
           # macos-14 已被 GitHub 标记 deprecated，随时可能下线）
           - platform_name: macOS (Apple Silicon)
             runner: macos-15
-            artifact_name: byte-tools-macos-arm64.zip
+            artifact_name: ByteTools-macos-arm64.zip
             artifact_extra: ''
             artifact_kind: macos
           # 【已停用 2026-09】macOS 通用版（Intel 构建）：
@@ -103,20 +103,20 @@ jobs:
           #   若账号/仓库不支持该标签会同样卡排队，那就只能自建 runner 或放弃 Intel 包。
           # - platform_name: macOS (通用)
           #   runner: macos-13
-          #   artifact_name: byte-tools-macos.zip
+          #   artifact_name: ByteTools-macos.zip
           #   artifact_extra: ''
           #   artifact_kind: macos
           # Linux x64 单可执行文件
           - platform_name: Linux (x64)
             runner: ubuntu-latest
-            artifact_name: byte-tools-linux-x64
+            artifact_name: ByteTools-linux-x64
             artifact_extra: ''
             artifact_kind: linux
-          # Windows x64：主产物 byte-tools.exe（双击运行），额外打包 byte-tools-windows-x64.zip 作为分发备份
+          # Windows x64：主产物 ByteTools.exe（双击运行），额外打包 ByteTools-windows-x64.zip 作为分发备份
           - platform_name: Windows (x64)
             runner: windows-latest
-            artifact_name: byte-tools.exe
-            artifact_extra: byte-tools-windows-x64.zip
+            artifact_name: ByteTools.exe
+            artifact_extra: ByteTools-windows-x64.zip
             artifact_kind: windows
 
     steps:
@@ -199,7 +199,7 @@ jobs:
           set -e
           cd dist
           # ditto 是 macOS 原生命令，能正确保留 .app 内部可执行权限与符号链接
-          ditto -c -k --keepParent byte-tools.app "../${{ matrix.artifact_name }}"
+          ditto -c -k --keepParent ByteTools.app "../${{ matrix.artifact_name }}"
           cd ..
           # 校验产物文件确实生成，避免后续 softprops 静默跳过上传
           [ -f "${{ matrix.artifact_name }}" ] || { echo "错误：产物 ${{ matrix.artifact_name }} 未生成"; exit 1; }
@@ -212,20 +212,20 @@ jobs:
         if: matrix.artifact_kind == 'linux'
         run: |
           set -e
-          mv dist/byte-tools "${{ matrix.artifact_name }}"
+          mv dist/ByteTools "${{ matrix.artifact_name }}"
           chmod +x "${{ matrix.artifact_name }}"
           [ -f "${{ matrix.artifact_name }}" ] || { echo "错误：产物 ${{ matrix.artifact_name }} 未生成"; exit 1; }
           echo "产物大小: $(du -sh ${{ matrix.artifact_name }} | cut -f1)"
         shell: bash
 
-      # 9. Windows 产物：重命名 dist/byte-tools.exe 为最终名 byte-tools.exe，
-      #    再用 Compress-Archive 打一份 byte-tools-windows-x64.zip 作为分发备份
+      # 9. Windows 产物：重命名 dist/ByteTools.exe 为最终名 ByteTools.exe，
+      #    再用 Compress-Archive 打一份 ByteTools-windows-x64.zip 作为分发备份
       #    $ErrorActionPreference='Stop' 让 PowerShell 命令出错时立即抛异常而非静默继续
       - name: 准备 Windows 产物（.exe + .zip）
         if: matrix.artifact_kind == 'windows'
         run: |
           $ErrorActionPreference = 'Stop'
-          Move-Item -Path dist/byte-tools.exe -Destination ${{ matrix.artifact_name }} -Force
+          Move-Item -Path dist/ByteTools.exe -Destination ${{ matrix.artifact_name }} -Force
           Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ${{ matrix.artifact_extra }}
           if (-not (Test-Path ${{ matrix.artifact_name }})) { throw "产物未生成: ${{ matrix.artifact_name }}" }
           if (-not (Test-Path ${{ matrix.artifact_extra }})) { throw "产物未生成: ${{ matrix.artifact_extra }}" }
@@ -369,7 +369,7 @@ jobs:
           GITHUB_REPO_SLUG: ${{ github.repository }}
           # 产物清单：正文表格、上传资格、收尾校验都以这一处为准。
           # 与上面 build job 的 matrix 产物名同步维护 —— 这是唯一维护点
-          RELEASE_ARTIFACTS: 'byte-tools.exe|byte-tools-windows-x64.zip|byte-tools-macos-arm64.zip|byte-tools-linux-x64'
+          RELEASE_ARTIFACTS: 'ByteTools.exe|ByteTools-windows-x64.zip|ByteTools-macos-arm64.zip|ByteTools-linux-x64'
           # 要真正上传到 Gitee 的子集；留空 = 一个都不传（2026-09-29 起的默认策略）。
           # 确有「Gitee 站内直下」需求时，只把小包填进来（例如 windows zip），
           # 并把本 job 的 runs-on 换成国内 self-hosted runner，否则又是跨境硬推

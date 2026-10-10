@@ -36,8 +36,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 SCRIPT = REPO_ROOT / "同步Gitee产物.sh"
 TAG = "vTEST"
 GH_BASE = f"https://github.com/owner/slug/releases/download/{TAG}"
-ARTIFACTS = ["byte-tools.exe", "byte-tools-windows-x64.zip",
-             "byte-tools-macos-arm64.zip", "byte-tools-linux-x64"]
+ARTIFACTS = ["ByteTools.exe", "ByteTools-windows-x64.zip",
+             "ByteTools-macos-arm64.zip", "ByteTools-linux-x64"]
 
 # 用 Git Bash 跑脚本；必须走登录 shell（-l），否则 mingw64/bin 不在 PATH 里，脚本找不到 curl
 _BASH_CANDIDATES = [
@@ -264,7 +264,7 @@ class SyncScriptTest(unittest.TestCase):
                          "PATCH 必须带 name，否则真实 Gitee 会 400")
 
     def test_existing_release_with_links_is_not_rewritten(self):
-        STATE["body"] = f"产物见 {GH_BASE}/byte-tools.exe"
+        STATE["body"] = f"产物见 {GH_BASE}/ByteTools.exe"
         code, out = self.run_script("existing_links")
         self.assertEqual(code, 0, out)
         self.assertNotIn(("PATCH", "/repos/owner/slug/releases/777"), STATE["reqs"],
@@ -283,19 +283,19 @@ class SyncScriptTest(unittest.TestCase):
     # ---------- 场景 2：显式要求上传（小包）时按清单走 ----------
     def test_upload_subset_skips_existing_and_uploads_missing(self):
         STATE["body"] = GH_BASE  # 让收尾校验通过
-        STATE["assets"] = ["byte-tools.exe"]      # 这个已经在 Gitee 上
+        STATE["assets"] = ["ByteTools.exe"]      # 这个已经在 Gitee 上
         code, out = self.run_script(
             "existing_links",
-            {"UPLOAD_ARTIFACTS": "byte-tools.exe|byte-tools-linux-x64"})
+            {"UPLOAD_ARTIFACTS": "ByteTools.exe|ByteTools-linux-x64"})
         self.assertEqual(code, 0, out)
-        self.assertIn("已存在，跳过: byte-tools.exe", out)
+        self.assertIn("已存在，跳过: ByteTools.exe", out)
         self.assertIn("成功: https://x/", out)
         self.assertIn("同步完成：上传 1 个，跳过已存在 1 个，按策略不上传 2 个", out)
 
     def test_upload_claimed_ok_but_asset_missing_fails(self):
         STATE["body"] = GH_BASE
         code, out = self.run_script("upload_missing",
-                                    {"UPLOAD_ARTIFACTS": "byte-tools-linux-x64"})
+                                    {"UPLOAD_ARTIFACTS": "ByteTools-linux-x64"})
         self.assertEqual(code, 1, out)
         self.assertIn("在上传清单里，但 Gitee 附件清单没有它", out)
 
@@ -321,7 +321,7 @@ class SyncScriptTest(unittest.TestCase):
         (Path(empty) / "byte-tools.png").write_bytes(b"icon")
         (Path(empty) / "alipay.png").write_bytes(b"icon")
         code, out = self.run_script("new", assets_dir=empty,
-                                    extra_env={"UPLOAD_ARTIFACTS": "byte-tools.exe"})
+                                    extra_env={"UPLOAD_ARTIFACTS": "ByteTools.exe"})
         self.assertEqual(code, 1, out)
         self.assertIn("找不到任何产物文件", out)
         self.assertIn("图标目录", out)
@@ -334,7 +334,7 @@ class SyncScriptTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("警告", out)
         self.assertIn("本地未取到", STATE["body"])
-        self.assertIn(f"{GH_BASE}/byte-tools.exe", STATE["body"])
+        self.assertIn(f"{GH_BASE}/ByteTools.exe", STATE["body"])
 
     def test_missing_dir_is_created_not_handed_back(self):
         """目录不存在就自己建，不许把 mkdir + 4 条 curl 甩给维护者（一键契约）。

@@ -3,7 +3,7 @@
 # 把 GitHub Release 的产物信息同步到 Gitee Release。
 #
 # 谁会跑它：发布维护者（以及 release.yml 的 sync-to-gitee 任务）。普通用户不需要
-# 这个脚本，也不需要任何产物目录——他们从 Releases 页下载 byte-tools.exe，或双击
+# 这个脚本，也不需要任何产物目录——他们从 Releases 页下载 ByteTools.exe，或双击
 # 仓库根目录那两个一键脚本。本机暂存产物用的 release-assets/ 被 .gitignore 排除是
 # 故意的：约 220 MB 二进制不该进版本库，同步完就可以删。
 #
@@ -73,7 +73,7 @@ TARGET_COMMITISH="${TARGET_COMMITISH:-master}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 API_MAX_TIME="${API_MAX_TIME:-60}"
 UPLOAD_MAX_TIME="${UPLOAD_MAX_TIME:-300}"
-DEFAULT_ARTIFACTS="byte-tools.exe|byte-tools-windows-x64.zip|byte-tools-macos-arm64.zip|byte-tools-linux-x64"
+DEFAULT_ARTIFACTS="ByteTools.exe|ByteTools-windows-x64.zip|ByteTools-macos-arm64.zip|ByteTools-linux-x64"
 RELEASE_ARTIFACTS="${RELEASE_ARTIFACTS:-${DEFAULT_ARTIFACTS}}"
 UPLOAD_ARTIFACTS="${UPLOAD_ARTIFACTS:-}"
 
@@ -251,7 +251,7 @@ if [ ! -d "${ASSETS_DIR}" ]; then
     echo "      查一下磁盘剩余空间和目录权限，或者换个位置："
     echo "        ASSETS_DIR=/tmp/bt-assets ./\"$0\""
     echo "      谁会跑它：发布维护者。普通用户不需要这个目录——他们从 Releases 页"
-    echo "      下载 byte-tools.exe，或双击仓库根目录那两个一键脚本。"
+    echo "      下载 ByteTools.exe，或双击仓库根目录那两个一键脚本。"
     exit 1
   }
 fi

@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
-title byte-tools sync to Gitee
+title ByteTools sync to Gitee
 REM ==========================================================================
-REM byte-tools: sync release artifacts to Gitee (Windows LOCAL version)
+REM ByteTools: sync release artifacts to Gitee (Windows LOCAL version)
 REM --------------------------------------------------------------------------
 REM Windows counterpart of the sync-gitee .sh script (that one runs in CI on Linux).
 REM
@@ -78,7 +78,7 @@ if not exist "%TMPDIR%" mkdir "%TMPDIR%" >nul 2>nul
 
 echo.
 echo ================================================================
-echo   byte-tools sync to Gitee
+echo   ByteTools sync to Gitee
 echo   repo: %GITEE_OWNER%/%GITEE_REPO%
 echo   dir : %CD%
 echo ================================================================
@@ -117,10 +117,10 @@ REM mistake. Check it here, before spending a round trip to Gitee.
 set /a FOUND_ART=0
 for %%F in ("%ASSETS_DIR%\*") do (
   set "CHK=%%~nxF"
-  if /i "!CHK!"=="byte-tools.exe" set /a FOUND_ART+=1
-  if /i "!CHK!"=="byte-tools-windows-x64.zip" set /a FOUND_ART+=1
-  if /i "!CHK!"=="byte-tools-macos-arm64.zip" set /a FOUND_ART+=1
-  if /i "!CHK!"=="byte-tools-linux-x64" set /a FOUND_ART+=1
+  if /i "!CHK!"=="ByteTools.exe" set /a FOUND_ART+=1
+  if /i "!CHK!"=="ByteTools-windows-x64.zip" set /a FOUND_ART+=1
+  if /i "!CHK!"=="ByteTools-macos-arm64.zip" set /a FOUND_ART+=1
+  if /i "!CHK!"=="ByteTools-linux-x64" set /a FOUND_ART+=1
 )
 if !FOUND_ART! NEQ 0 goto :pre_ok
 echo.
@@ -135,18 +135,18 @@ echo   tag has no release assets yet - check TAG_NAME and the network.
 :no_art_manual
 echo.
 echo   This script wants the release files, named exactly:
-echo     byte-tools.exe
-echo     byte-tools-windows-x64.zip
-echo     byte-tools-macos-arm64.zip
-echo     byte-tools-linux-x64
+echo     ByteTools.exe
+echo     ByteTools-windows-x64.zip
+echo     ByteTools-macos-arm64.zip
+echo     ByteTools-linux-x64
 echo   Note .\assets in this repo is the ICON folder, not the artifact folder.
 echo.
 echo   Last resort, fetch them by hand (no gh CLI needed):
 echo     mkdir "%ASSETS_DIR%"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools.exe"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-windows-x64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-macos-arm64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-macos-arm64.zip"
-echo     curl -L -o "%ASSETS_DIR%\byte-tools-linux-x64" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/byte-tools-linux-x64"
+echo     curl -L -o "%ASSETS_DIR%\ByteTools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools.exe"
+echo     curl -L -o "%ASSETS_DIR%\ByteTools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-windows-x64.zip"
+echo     curl -L -o "%ASSETS_DIR%\ByteTools-macos-arm64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-macos-arm64.zip"
+echo     curl -L -o "%ASSETS_DIR%\ByteTools-linux-x64" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-linux-x64"
 goto :fail_nopause
 
 :pre_ok
@@ -169,7 +169,7 @@ if defined RELEASE_ID (
   echo   release exists, reuse ID: %RELEASE_ID%
 ) else (
   echo   creating release for tag %TAG_NAME% ...
-  curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 -X POST "%API_BASE%/releases" -F "access_token=%GITEE_TOKEN%" -F "tag_name=%TAG_NAME%" -F "name=%TAG_NAME%" -F "body=byte-tools release %TAG_NAME%" -F "target_commitish=master" -o "%TMPDIR%\create.json"
+  curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 -X POST "%API_BASE%/releases" -F "access_token=%GITEE_TOKEN%" -F "tag_name=%TAG_NAME%" -F "name=%TAG_NAME%" -F "body=ByteTools release %TAG_NAME%" -F "target_commitish=master" -o "%TMPDIR%\create.json"
   if errorlevel 1 goto :err_net
 
   set "RELEASE_ID="
@@ -203,7 +203,7 @@ set /a IGNORED=0
 for %%F in ("%ASSETS_DIR%\*") do (
   set "NAME=%%~nxF"
   set "ALLOWED=0"
-  for %%W in (byte-tools.exe byte-tools-windows-x64.zip byte-tools-macos-arm64.zip byte-tools-linux-x64) do (
+  for %%W in (ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64) do (
     if /i "!NAME!"=="%%W" set "ALLOWED=1"
   )
   if "!ALLOWED!"=="0" (
@@ -248,7 +248,7 @@ echo [3/3] verify attachments ...
 curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 "%API_BASE%/releases/%RELEASE_ID%" -o "%TMPDIR%\rel3.json"
 if errorlevel 1 goto :err_net
 
-powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel3.json' | ConvertFrom-Json; $have = @(); if ($j.assets) { $have = @($j.assets | ForEach-Object { $_.name }) }; $want = @('byte-tools.exe','byte-tools-windows-x64.zip','byte-tools-macos-arm64.zip','byte-tools-linux-x64'); $miss = @($want | Where-Object { $have -notcontains $_ }); if ($miss.Count -eq 0) { 'OK' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } else { ($miss -join ', ') | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } } catch { 'UNKNOWN' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' }"
+powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel3.json' | ConvertFrom-Json; $have = @(); if ($j.assets) { $have = @($j.assets | ForEach-Object { $_.name }) }; $want = @('ByteTools.exe','ByteTools-windows-x64.zip','ByteTools-macos-arm64.zip','ByteTools-linux-x64'); $miss = @($want | Where-Object { $have -notcontains $_ }); if ($miss.Count -eq 0) { 'OK' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } else { ($miss -join ', ') | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } } catch { 'UNKNOWN' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' }"
 
 set "CHK="
 if exist "%TMPDIR%\chk.txt" set /p CHK=<"%TMPDIR%\chk.txt"
@@ -281,7 +281,7 @@ REM regression suite offline; same name as the .sh one on purpose.
 if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof
 if not exist "%ASSETS_DIR%\" mkdir "%ASSETS_DIR%" >nul 2>nul
 if not exist "%ASSETS_DIR%\" goto :eof
-for %%N in (byte-tools.exe byte-tools-windows-x64.zip byte-tools-macos-arm64.zip byte-tools-linux-x64) do call :fetch_asset %%N
+for %%N in (ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64) do call :fetch_asset %%N
 goto :eof
 
 :fetch_asset
@@ -339,7 +339,7 @@ echo   them to Gitee, so it has to be writable. Check free disk and permissions,
 echo   or point it somewhere else with the 3rd argument:
 echo     sync.bat %TAG_NAME% ^<token^> D:\somewhere\else
 echo   who runs this at all: the release maintainer. End users never need it,
-echo   they either download byte-tools.exe from the Releases page or run the two
+echo   they either download ByteTools.exe from the Releases page or run the two
 echo   one-click scripts sitting in this folder.
 goto :fail_nopause
 

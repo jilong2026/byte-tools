@@ -177,7 +177,7 @@ byte-tools/
 ├── requirements.txt         # Python 依赖清单（PySide6、requests）
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
-├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/byte-tools.exe
+├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/ByteTools.exe
 ├── 同步Gitee产物.sh     # Gitee Release 同步（Linux/macOS/CI；默认只在正文写 GitHub 直链，可观测快速失败 + 幂等 + 收尾校验），由 release.yml 调用
 ├── 同步Gitee产物.bat    # 本机 Windows 版（双击可运行；它会真的把产物传上 Gitee，国内链路快，与 CI 策略有意不同；内容为纯 ASCII，避免 cmd 按 GBK 解析 UTF-8 出错）
 ├── README.md                # 中文说明（面向最终用户）
@@ -1209,7 +1209,7 @@ im.save("assets/byte-tools.ico", format="ICO",
 RT_GROUP_ICON 里应列出 16/24/32/48/64/128/256 七档，且最大那条 RT_ICON 的字节与 .ico 最大图完全一致
 ```
 
-> 注意两点：① 窗口/任务栏图标由 `main.py` 里 `setWindowIcon(QIcon("assets/byte-tools.png"))` 控制，与 exe 图标是两回事，换图要同时改；② 原地覆盖 `dist/byte-tools.exe` 后资源管理器可能仍显示旧图，那是 **图标缓存**，换个文件名或 `ie4uinit.exe -show` 即可看到新图标。
+> 注意两点：① 窗口/任务栏图标由 `main.py` 里 `setWindowIcon(QIcon("assets/byte-tools.png"))` 控制，与 exe 图标是两回事，换图要同时改；② 原地覆盖 `dist/ByteTools.exe` 后资源管理器可能仍显示旧图，那是 **图标缓存**，换个文件名或 `ie4uinit.exe -show` 即可看到新图标。
 
 
 ### 7.5 模块间依赖图
@@ -1256,14 +1256,14 @@ RT_GROUP_ICON 里应列出 16/24/32/48/64/128/256 七档，且最大那条 RT_IC
 
 | 系统 | 文件 | 说明 |
 |------|------|------|
-| Windows | `byte-tools.exe` | 双击运行 |
-| macOS (Apple Silicon) | `byte-tools-macos-arm64.zip` | 解压后双击 `.app` |
-| Linux (x64) | `byte-tools-linux-x64` | `chmod +x` 后执行 |
+| Windows | `ByteTools.exe` | 双击运行 |
+| macOS (Apple Silicon) | `ByteTools-macos-arm64.zip` | 解压后双击 `.app` |
+| Linux (x64) | `ByteTools-linux-x64` | `chmod +x` 后执行 |
 
 > **macOS (Intel)**：自 v1.0.5 起不再发布 Intel 通用包（GitHub 已下线 Intel runner），Intel 机器请按 8.3 从源码运行。
 
 首次启动提示：
-- macOS：未签名，需到「系统设置 → 隐私与安全性」点"仍要打开"，或 `xattr -cr byte-tools.app`
+- macOS：未签名，需到「系统设置 → 隐私与安全性」点"仍要打开"，或 `xattr -cr ByteTools.app`
 - Windows：SmartScreen 弹窗点"更多信息 → 仍要运行"
 - Linux：双击无响应时改用终端 `chmod +x ... && ./...`
 
@@ -1285,7 +1285,7 @@ RT_GROUP_ICON 里应列出 16/24/32/48/64/128/256 七档，且最大那条 RT_IC
 | `[2/4]` | `.venv\Scripts\python.exe` 存在且版本落在 3.10–3.14 就复用；缺失则新建，损坏或版本越界则 `venv --clear` 重建 | `:err_no_python` / `:err_venv` |
 | `[3/4]` | `import PySide6, requests` 失败才 `pip install -r requirements.txt`；镜像顺序 **清华 TUNA → 阿里云 → 官方 PyPI** | `:err_deps` |
 | `[3/4] 前置` | **WMI 只做一次 2 秒有界探测**（daemon 线程 + `os._exit`，保证一定返回），只提示不阻塞；以前"等 15 秒再等 120 秒"是让用户白看，已删。打包侧真正的问题由 `pyinstaller_no_wmi.py` 解决 | 无（提示后继续） |
-| `[4/4]` | `call "%RUN_PY%" main.py`，或 `call "%RUN_PY%" pyinstaller_no_wmi.py --noconfirm byte-tools.spec` 并校验 `dist\byte-tools.exe` | `:err_main` / `:err_no_dist` |
+| `[4/4]` | `call "%RUN_PY%" main.py`，或 `call "%RUN_PY%" pyinstaller_no_wmi.py --noconfirm byte-tools.spec` 并校验 `dist\ByteTools.exe` | `:err_main` / `:err_no_dist` |
 
 实现约束（改动时请保持，护栏用例 `bt_boot_script_tests.py`）：
 - **`.bat` 本体必须 100% 纯 ASCII**。这不是格式洁癖：cmd.exe 用字节偏移量记录它读批处理的位置，文件里有多字节字符、又在中途 `chcp 65001` 时，偏移会错位，于是从**行的中间**开始解析——`REM` 注释与 `echo` 文案被当成命令执行，整条语句被吞掉。2026-10-05 本机实测：原 UTF-8 版脚本跑出 7 行 `'xxx' is not recognized as an internal or external command`，被吞的正好是 `:bootstrap_python` 的后半段（下载安装包 → 静默安装 → 复扫），于是"机器上没装 Python"就直落到"叫用户自己 winget / 自己去 python.org 下载"。同一份内容转成纯 ASCII（保留 `chcp 65001`）或转成 GBK + `chcp 936`，异常都是 0 行
@@ -1333,8 +1333,8 @@ pyinstaller byte-tools.spec --noconfirm --clean
 ```
 
 产物：
-- Windows：`dist/byte-tools.exe`
-- macOS：`dist/byte-tools.app`
+- Windows：`dist/ByteTools.exe`
+- macOS：`dist/ByteTools.app`
 - Linux：`dist/byte-tools`
 
 打包配置关键点（见 [byte-tools.spec](./byte-tools.spec)）：
@@ -1355,7 +1355,7 @@ git push origin v1.0.1
 推 tag 触发 `.github/workflows/release.yml`：Windows / macOS / Linux 三个 runner 分别打包并上传到 GitHub Release（先以草稿暂存），随后 `sync-to-gitee` job 自动取消草稿完成 GitHub 发布，并调用根目录的 `同步Gitee产物.sh` 在 Gitee 建 Release、写入各平台产物的 GitHub 直链。
 
 发布说明：
-- 构建产物共 3 个平台 4 个文件：`byte-tools.exe`、`byte-tools-windows-x64.zip`、`byte-tools-macos-arm64.zip`、`byte-tools-linux-x64`
+- 构建产物共 3 个平台 4 个文件：`ByteTools.exe`、`ByteTools-windows-x64.zip`、`ByteTools-macos-arm64.zip`、`ByteTools-linux-x64`
 - **2026-09-29 起 Gitee 侧默认不接收大二进制**：`sync-to-gitee` 只在 Gitee Release 正文写一张「文件 / 大小 / GitHub 直链」表格。原因见 `同步Gitee产物.sh` 顶部——境外 runner 往 gitee.com 推 84MB 会长时间挂死且服务端不落地（v1.0.3 实测挂 70 分钟、零附件、零日志）
 - 产物名单只有一个维护点：workflow step 的 `RELEASE_ARTIFACTS`（脚本内同名环境变量），它同时决定正文表格、上传资格与收尾校验；`UPLOAD_ARTIFACTS`（默认空）是要真正推给 Gitee 的子集，需要站内直下时填小包并把 job 改成国内 `self-hosted` runner
 - 脚本只在**创建** Release 时写正文：Gitee「更新 Release」接口的方法/路径未能在官方文档核实（swagger 是 JS 页），所以不猜。补同步老 tag 时若正文缺直链，脚本会硬失败并打印「网页端粘正文 / 删 Release 重建」两条路子
@@ -1365,7 +1365,7 @@ git push origin v1.0.1
 - 同步依赖仓库 Secret `GITEE_TOKEN`（Gitee 私人令牌，需 projects 权限），owner / repo 由 workflow 顶层的 `GITEE_OWNER` / `GITEE_REPO` 指定，GitHub 侧仓库标识由 `GITHUB_REPO_SLUG` 传入以生成直链
 - **每次发版的固定三步**（2026-09-29 与用户确认的分工）：① `git tag vA.B.C && git push origin vA.B.C` —— 必须先把改动推到 master，因为 workflow 取的是 tag 指向那个 commit 里的 release.yml；② 等 Actions 全绿，此时 GitHub 有 4 个产物且已正式发布，Gitee 只有带 GitHub 直链的正文、附件区为空；③ 本机 `curl`（走 `gh-proxy.com`）取 4 个产物到 `release-assets/`，再跑 `同步Gitee产物.bat <tag>` 把附件传上 Gitee。要省掉第 ③ 步就改用国内 `self-hosted` runner + 填 `UPLOAD_ARTIFACTS`
 - **补同步历史 tag**：workflow 支持 `workflow_dispatch`（输入 `tag_name`），在 GitHub → Actions → release → Run workflow 触发，跳过三平台构建。因为 `workflow_dispatch` 读的是默认分支的 workflow，改动合入 master 后即可对任意历史 tag 生效
-- **本机手动补同步**：Windows 跑 `同步Gitee产物.bat`（双击或传参；它会真的把产物传上 Gitee，国内链路快，与 CI 的「只写直链」策略有意不同），Linux/macOS/Git Bash 跑 `同步Gitee产物.sh`（默认只写直链，设 `UPLOAD_ARTIFACTS` 才上传）。两个脚本都**先预检产物目录再请求 Gitee**：目录里没有 `byte-tools.exe` 等四个文件时立刻报错并打印取产物的 curl 命令，不会白跑一趟。`.bat` 的默认产物目录是 `release-assets/`（已 gitignore），**不是仓库自带的 `assets/`**——后者是图标目录（`byte-tools.png`/`.ico`/`alipay.png`/`wechat.png`），指过去就会「一个产物都没有」。脚本对 JSON 解释器做握手测试，避开 Windows 上 `python3` 是 Microsoft Store 占位别名的坑
+- **本机手动补同步**：Windows 跑 `同步Gitee产物.bat`（双击或传参；它会真的把产物传上 Gitee，国内链路快，与 CI 的「只写直链」策略有意不同），Linux/macOS/Git Bash 跑 `同步Gitee产物.sh`（默认只写直链，设 `UPLOAD_ARTIFACTS` 才上传）。两个脚本都**先预检产物目录再请求 Gitee**：目录里没有 `ByteTools.exe` 等四个文件时立刻报错并打印取产物的 curl 命令，不会白跑一趟。`.bat` 的默认产物目录是 `release-assets/`（已 gitignore），**不是仓库自带的 `assets/`**——后者是图标目录（`byte-tools.png`/`.ico`/`alipay.png`/`wechat.png`），指过去就会「一个产物都没有」。脚本对 JSON 解释器做握手测试，避开 Windows 上 `python3` 是 Microsoft Store 占位别名的坑
 - 同步脚本的离线回归测试：[bt_gitee_sync_tests.py](./bt_gitee_sync_tests.py)（本地 mock Gitee + 产物名一致性守卫，15 个用例，绝不碰真实站点）；覆盖「不传二进制只写直链 / 幂等复用 / 已存在但缺直链→硬失败并给出补救 / 上传子集跳过与补传 / 接口回成功但附件没落地→硬失败 / 5xx 有界重试且可见 / 4xx 不浪费重试 / 产物目录指错时在请求 Gitee 之前就拦下 / Gitee 用 200+null 表示『该 tag 没有 Release』/ 4 处产物名清单一致」
 - **全自动发布，无需人工操作**：矩阵各平台先上传到草稿 Release 作暂存区（构建中途失败不会对外暴露半成品），待全部平台成功、`sync-to-gitee` 启动后自动 `gh release edit --draft=false` 取消草稿；因此跑绿即等于 `releases/latest/download/...` 已指向新版本
 - 任一平台的构建/上传失败，或 Gitee 侧任一步校验不通过，都会让整个 run 直接变红（不会静默放过）

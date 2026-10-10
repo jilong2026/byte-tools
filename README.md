@@ -1,4 +1,4 @@
-# 字节-开发环境与工具自动安装 (byte-tools)
+# 字节-开发环境与工具自动安装 (ByteTools)
 
 <p align="center">
    <img src="assets/byte-tools.png" alt="byte-tools 软件图标" height="150" width="150"/>
@@ -28,17 +28,17 @@
 
 | 系统 | 下载文件 | 说明 |
 |------|----------|------|
-| 🪟 **Windows** | [`byte-tools.exe`](https://github.com/jilong2026/byte-tools/releases/latest/download/byte-tools.exe) | 双击运行，无需安装 |
-| 🍎 **macOS (Apple Silicon)** | [`byte-tools-macos-arm64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/byte-tools-macos-arm64.zip) | 解压后双击 `byte-tools.app` |
-| 🐧 **Linux (x64)** | [`byte-tools-linux-x64`](https://github.com/jilong2026/byte-tools/releases/latest/download/byte-tools-linux-x64) | `chmod +x` 后直接运行 |
+| 🪟 **Windows** | [`ByteTools.exe`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools.exe) | 双击运行，无需安装 |
+| 🍎 **macOS (Apple Silicon)** | [`ByteTools-macos-arm64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-macos-arm64.zip) | 解压后双击 `ByteTools.app` |
+| 🐧 **Linux (x64)** | [`ByteTools-linux-x64`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-linux-x64) | `chmod +x` 后直接运行 |
 
 > **Intel 芯片 Mac 用户注意**：自 v1.0.5 起不再提供 Intel 通用包（GitHub 已下线 Intel runner），Intel 机器请参考下方[快速开始](#-快速开始)从源码运行。
 
 ### 首次启动提示
 
-- **macOS**：由于未做代码签名，首次打开时系统可能提示"无法验证开发者"。请到「系统设置 → 隐私与安全性」下方点击 **"仍要打开"**；或用 `xattr -cr byte-tools.app` 移除隔离属性。
+- **macOS**：由于未做代码签名，首次打开时系统可能提示"无法验证开发者"。请到「系统设置 → 隐私与安全性」下方点击 **"仍要打开"**；或用 `xattr -cr ByteTools.app` 移除隔离属性。
 - **Windows**：Defender / SmartScreen 可能弹出"未识别应用"，点击 **"更多信息 → 仍要运行"** 即可。
-- **Linux**：如果双击无响应，请在终端执行 `chmod +x byte-tools-linux-x64 && ./byte-tools-linux-x64`。
+- **Linux**：如果双击无响应，请在终端执行 `chmod +x ByteTools-linux-x64 && ./ByteTools-linux-x64`。
 
 > 💡 只想看看代码 / 自己二次开发？往下翻到 [开发者指南](#-快速开始)。
 
@@ -82,7 +82,7 @@
 
 ## 📌 项目描述
 
-**byte-tools** 是一款开源的桌面小工具，目标是把开发者最常用的语言运行时、构建工具、中间件的下载与配置全部自动化。
+**ByteTools**（原名 byte-tools）是一款开源的桌面小工具，目标是把开发者最常用的语言运行时、构建工具、中间件的下载与配置全部自动化。
 
 它做了这几件事：
 
@@ -245,7 +245,7 @@
 | 脚本 | 作用 |
 | --- | --- |
 | `一键启动项目.bat` | 准备环境后直接启动 GUI（源码方式，改完代码立刻生效） |
-| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/byte-tools.exe` |
+| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/ByteTools.exe` |
 
 两者共用同一套自动装配流程：
 
@@ -257,7 +257,7 @@
 
 ```text
 双击 一键启动项目.bat  →  自动配置 + 启动 GUI
-双击 一键打包exe.bat   →  自动配置 + 生成 dist/byte-tools.exe
+双击 一键打包exe.bat   →  自动配置 + 生成 dist/ByteTools.exe
 ```
 
 > 💡 脚本只读写项目目录内的 `.venv`，不会修改系统 PATH，也不会动系统全局 Python。
@@ -579,9 +579,9 @@ pyinstaller byte-tools.spec --noconfirm --clean
 > 双击 `一键打包exe.bat` 走的已经是这条路径。
 
 产物：
-- Windows：`dist/byte-tools.exe`
-- macOS：`dist/byte-tools.app`
-- Linux：`dist/byte-tools`
+- Windows：`dist/ByteTools.exe`
+- macOS：`dist/ByteTools.app`
+- Linux：`dist/ByteTools`
 
 > 🎨 Windows 产物已带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出的 16~256 七档尺寸）。换 logo 后重新生成 ICO 的方法见 [CODE_WIKI.md](./CODE_WIKI.md) 7.4；若覆盖打包后资源管理器仍是旧图标，那是 Windows 图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
 
@@ -628,10 +628,10 @@ git push origin v1.0.1
    ```bat
    cd /d E:\file\test\byte-tools
    mkdir release-assets
-   curl -L -o release-assets\byte-tools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools.exe"
-   curl -L -o release-assets\byte-tools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools-windows-x64.zip"
-   curl -L -o release-assets\byte-tools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools-macos-arm64.zip"
-   curl -L -o release-assets\byte-tools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/byte-tools-linux-x64"
+   curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools.exe"
+   curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools-windows-x64.zip"
+   curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools-macos-arm64.zip"
+   curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.4/ByteTools-linux-x64"
    dir release-assets
    同步Gitee产物.bat v1.0.4
    ```
@@ -657,10 +657,10 @@ v1.0.2 这类「GitHub 成功、Gitee 没同步好」的情况不用重发包。
 ```bat
 REM Windows：先用 curl（走加速器）取产物，再跑脚本；令牌建议用交互提示输入
 mkdir release-assets
-curl -L -o release-assets\byte-tools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools.exe"
-curl -L -o release-assets\byte-tools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-windows-x64.zip"
-curl -L -o release-assets\byte-tools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-macos-arm64.zip"
-curl -L -o release-assets\byte-tools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/byte-tools-linux-x64"
+curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/ByteTools.exe"
+curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/ByteTools-windows-x64.zip"
+curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/ByteTools-macos-arm64.zip"
+curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/ByteTools-linux-x64"
 dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 同步Gitee产物.bat v1.0.2 <Gitee私人令牌> release-assets
 ```
@@ -668,7 +668,7 @@ dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 ```bash
 # Linux / macOS / Git Bash。同样走加速器前缀，直连 github.com 会超时
 mkdir -p ./release-assets
-for f in byte-tools.exe byte-tools-windows-x64.zip byte-tools-macos-arm64.zip byte-tools-linux-x64; do
+for f in ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64; do
   curl -L -o "./release-assets/$f" "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.0.2/$f"
 done
 

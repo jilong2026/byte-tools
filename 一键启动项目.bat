@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM byte-tools one-click launcher.
+REM ByteTools one-click launcher.
 REM --------------------------------------------------------------------------
 REM Double-click to run. This script takes care of everything: it finds a
 REM usable Python, installs one when the machine has none, creates .venv,
@@ -26,7 +26,7 @@ set "OEM_CP="
 for /f "tokens=2 delims=:" %%P in ('chcp 2^>nul') do set "OEM_CP=%%P"
 set "OEM_CP=!OEM_CP: =!"
 chcp 65001 >nul
-title byte-tools launcher
+title ByteTools launcher
 
 cd /d "%~dp0"
 
@@ -35,7 +35,7 @@ set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "MSG_FILE=assets\msg_zh.txt"
 set "PY_VER=3.12.10"
 set "PY_FILE=python-%PY_VER%-amd64.exe"
-set "PY_SETUP=%TEMP%\byte-tools-%PY_FILE%"
+set "PY_SETUP=%TEMP%\ByteTools-%PY_FILE%"
 set "PIP_TUNA=https://pypi.tuna.tsinghua.edu.cn/simple"
 set "PIP_TUNA_HOST=pypi.tuna.tsinghua.edu.cn"
 set "PIP_ALIYUN=https://mirrors.aliyun.com/pypi/simple"
@@ -46,7 +46,7 @@ call :detect_lang
 
 echo.
 echo ================================================================
-call :say hdr_1 "  byte-tools one-click launcher"
+call :say hdr_1 "  ByteTools one-click launcher"
 call :say hdr_2 "  Work dir: {0}" "%CD%"
 echo ================================================================
 echo.
@@ -140,7 +140,7 @@ REM ==========================================================================
 REM [4/4] Launch
 REM ==========================================================================
 echo.
-call :say step4 "[4/4] Starting the byte-tools GUI. Closing its window exits the program."
+call :say step4 "[4/4] Starting the ByteTools GUI. Closing its window exits the program."
 echo.
 call "%RUN_PY%" main.py
 set "RC=%errorlevel%"
@@ -346,8 +346,8 @@ REM Error exits. Reaching :err_no_python now means winget and three download
 REM sources all failed, so the manual hint is a last resort, not the plan.
 REM ==========================================================================
 :err_no_app
-call :say err_no_app_1 "[error] This directory does not contain the byte-tools project."
-call :say err_no_app_2 "        Put this script in the byte-tools project root and run it again."
+call :say err_no_app_1 "[error] This directory does not contain the ByteTools project."
+call :say err_no_app_2 "        Put this script in the ByteTools project root and run it again."
 call :say err_no_app_3 "        Current directory: {0}" "%CD%"
 goto :finish_fail
 

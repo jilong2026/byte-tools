@@ -2,7 +2,7 @@
 
 A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 common developer components** such as **JDK, Python, Node.js, Maven, MySQL and Docker** — each one installed in a single click with the environment variables configured for you. **Tomcat, Nginx, Kafka, Jenkins** and 6 other services additionally get **one-click start/stop** and **direct access pages**, with URLs, usernames and passwords printed to the log automatically.
 
-> Project: **byte-tools**
+> Project: **ByteTools**
 > Author: **jilong2026**
 > Platforms: Windows 10/11, macOS 12+, Ubuntu 20.04+
 > License: MIT License
@@ -189,7 +189,7 @@ Two Chinese-named one-click scripts live in the project root — **just double-c
 | Script | Purpose |
 | --- | --- |
 | `一键启动项目.bat` | Prepares the environment, then launches the GUI from source |
-| `一键打包exe.bat` | Prepares the environment, then runs PyInstaller to build `dist/byte-tools.exe` |
+| `一键打包exe.bat` | Prepares the environment, then runs PyInstaller to build `dist/ByteTools.exe` |
 
 Both share the same bootstrap flow:
 
@@ -201,7 +201,7 @@ Both share the same bootstrap flow:
 
 ```text
 double-click 一键启动项目.bat  →  auto-configure + launch GUI
-double-click 一键打包exe.bat   →  auto-configure + build dist/byte-tools.exe
+double-click 一键打包exe.bat   →  auto-configure + build dist/ByteTools.exe
 ```
 
 > 💡 The scripts only touch `.venv` inside the project directory — they never modify the system PATH or your global Python.

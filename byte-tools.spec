@@ -1,19 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for byte-tools.
+PyInstaller spec file for ByteTools.
 
 跨平台构建脚本，在 Windows/macOS/Linux 上分别运行：
     pyinstaller byte-tools.spec
 
 产物路径：
-    dist/byte-tools           # Linux 单可执行文件
-    dist/byte-tools.exe       # Windows 单可执行文件
-    dist/byte-tools.app       # macOS .app bundle
+    dist/ByteTools            # Linux 单可执行文件
+    dist/ByteTools.exe       # Windows 单可执行文件
+    dist/ByteTools.app       # macOS .app bundle
 """
 import sys
 from pathlib import Path
 
-APP_NAME = "byte-tools"
+APP_NAME = "ByteTools"
 SPEC_DIR = Path(SPECPATH).resolve() if 'SPECPATH' in globals() else Path.cwd()
 
 # Windows 的 exe 图标必须是 .ico（PyInstaller 不接受 PNG），由 assets/byte-tools.png 生成，

@@ -1,11 +1,11 @@
 @echo off
 REM ==========================================================================
-REM byte-tools one-click exe packaging script.
+REM ByteTools one-click exe packaging script.
 REM --------------------------------------------------------------------------
 REM Double-click to run. Like the launcher it needs nothing from the user: it
 REM finds a usable Python, installs one when the machine has none, creates
 REM .venv, installs the dependencies and PyInstaller, then builds
-REM dist\byte-tools.exe. Pass "nopause" for scripted use.
+REM dist\ByteTools.exe. Pass "nopause" for scripted use.
 REM --------------------------------------------------------------------------
 REM KEEP THIS FILE PURE ASCII, for the same reason as the launcher: cmd.exe
 REM tracks its position in a .bat as a byte offset, and a multibyte file plus a
@@ -22,7 +22,7 @@ set "OEM_CP="
 for /f "tokens=2 delims=:" %%P in ('chcp 2^>nul') do set "OEM_CP=%%P"
 set "OEM_CP=!OEM_CP: =!"
 chcp 65001 >nul
-title byte-tools packer
+title ByteTools packer
 
 cd /d "%~dp0"
 
@@ -31,7 +31,7 @@ set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "MSG_FILE=assets\msg_zh.txt"
 set "PY_VER=3.12.10"
 set "PY_FILE=python-%PY_VER%-amd64.exe"
-set "PY_SETUP=%TEMP%\byte-tools-%PY_FILE%"
+set "PY_SETUP=%TEMP%\ByteTools-%PY_FILE%"
 set "PIP_TUNA=https://pypi.tuna.tsinghua.edu.cn/simple"
 set "PIP_TUNA_HOST=pypi.tuna.tsinghua.edu.cn"
 set "PIP_ALIYUN=https://mirrors.aliyun.com/pypi/simple"
@@ -42,7 +42,7 @@ call :detect_lang
 
 echo.
 echo ================================================================
-call :say hdr_pack "  byte-tools one-click exe packaging"
+call :say hdr_pack "  ByteTools one-click exe packaging"
 call :say hdr_2 "  Work dir: {0}" "%CD%"
 echo ================================================================
 echo.
@@ -157,19 +157,19 @@ call "%RUN_PY%" pyinstaller_no_wmi.py --noconfirm byte-tools.spec
 set "RC=%errorlevel%"
 if %RC% neq 0 goto :err_main
 
-if not exist "dist\byte-tools.exe" goto :err_no_dist
-for %%F in ("dist\byte-tools.exe") do (
+if not exist "dist\ByteTools.exe" goto :err_no_dist
+for %%F in ("dist\ByteTools.exe") do (
     echo ================================================================
-    call :say pack_ok_1 "  Built: {0}" "%CD%\dist\byte-tools.exe"
+    call :say pack_ok_1 "  Built: {0}" "%CD%\dist\ByteTools.exe"
     call :say pack_ok_2 "  Size: {0} bytes" "%%~zF"
     call :say pack_ok_3 "  Built at: {0}" "%%~tF"
-    call :say pack_ok_4 "  Double-click dist\byte-tools.exe, or copy it to any Win10/11 64-bit machine"
+    call :say pack_ok_4 "  Double-click dist\ByteTools.exe, or copy it to any Win10/11 64-bit machine"
     echo ================================================================
 )
 if /i not "%~1"=="nopause" start "" explorer "%CD%\dist"
 goto :done
 :err_no_dist
-call :say err_no_dist "[error] Packaging finished but dist\byte-tools.exe was not found."
+call :say err_no_dist "[error] Packaging finished but dist\ByteTools.exe was not found."
 goto :finish_fail
 :done
 
@@ -373,8 +373,8 @@ REM Error exits. Reaching :err_no_python now means winget and three download
 REM sources all failed, so the manual hint is a last resort, not the plan.
 REM ==========================================================================
 :err_no_app
-call :say err_no_app_1 "[error] This directory does not contain the byte-tools project."
-call :say err_no_app_2 "        Put this script in the byte-tools project root and run it again."
+call :say err_no_app_1 "[error] This directory does not contain the ByteTools project."
+call :say err_no_app_2 "        Put this script in the ByteTools project root and run it again."
 call :say err_no_app_3 "        Current directory: {0}" "%CD%"
 goto :finish_fail
 
