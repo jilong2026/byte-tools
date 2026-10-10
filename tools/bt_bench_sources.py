@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # 仓库根（本脚本在 tools/ 下）
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import requests

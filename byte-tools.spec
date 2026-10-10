@@ -20,6 +20,23 @@ SPEC_DIR = Path(SPECPATH).resolve() if 'SPECPATH' in globals() else Path.cwd()
 # 重新生成方式见 CODE_WIKI.md 7.4。macOS/Linux 暂不设图标，保持原有 CI 行为。
 ICON_WIN = SPEC_DIR / "assets" / "byte-tools.ico"
 
+
+def _app_version() -> str:
+    """从 main.py 读 APP_VERSION —— 打包产物与界面显示必须是同一个版本号。
+
+    不 import main：那是个要拉 PySide6 的 GUI 模块，spec 里只想要一串常量，
+    用正则取比 import 便宜也不会被它的导入期副作用带崩。
+    读不到时返回 0.0.0（宁可显示一个明显的假版本，也不要在打包阶段炸）。
+    """
+    import re
+
+    src = (SPEC_DIR / "main.py").read_text(encoding="utf-8", errors="replace")
+    m = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', src, re.M)
+    return m.group(1) if m else "0.0.0"
+
+
+APP_VERSION = _app_version()
+
 # 打进包里的静态资源（打赏二维码、应用截图等）
 datas = [
     (str(SPEC_DIR / "assets"), "assets"),
@@ -105,10 +122,12 @@ if sys.platform == "darwin":
         # icon=str(SPEC_DIR / "assets" / "icon.icns"),
         bundle_identifier="com.rgh.byte-tools",
         info_plist={
-            "CFBundleName": "编程开发环境自动装配小工具",
-            "CFBundleDisplayName": "编程开发环境自动装配小工具",
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            # 中文名与界面标题栏一致（以前这里写的是第三个名字，
+            # 且版本号常年停在 1.0.0 —— macOS「关于」面板会显示一个从没发布过的版本）。
+            "CFBundleName": "字节工具箱",
+            "CFBundleDisplayName": "字节工具箱",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13.0",
         },

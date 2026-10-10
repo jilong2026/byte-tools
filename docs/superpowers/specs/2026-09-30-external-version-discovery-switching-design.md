@@ -283,7 +283,7 @@ class ActiveTarget:
 3. **真机演练（用户在场，2026-09-30 已接受为完成标准）**：本机三个 JDK 都出现在折叠区；
    把生效版本切到 `E:\soft\jdk\jdk17`，新开终端 `java -version` 与界面一致；点「还原」后
    `HKLM JAVA_HOME` 与 `Path` 原文与改动前**逐字节相同**（用导出的原文 diff 证明）。
-   演练手段已固化在 `bt_real_machine_drill.py`（默认只读体检，`--yes` 才切换并保证还原），
+   演练手段已固化在 `tools/bt_real_machine_drill.py`（默认只读体检，`--yes` 才切换并保证还原），
    验收必须同时看三层：注册表真值、explorer 自己的环境块、由 explorer 现场启动的探针进程
    —— 判据与理由见 `DEVELOPMENT.md` R3.16。**本期这条已在 bun 上跑通**（双向切换三关全 PASS、
    还原与基线逐字一致），jdk / uv-Python 那份要在本功能交付时再跑一次。

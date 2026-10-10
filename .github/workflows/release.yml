@@ -124,6 +124,21 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # 1b. 版本号闸门：tag 与 main.py 的 APP_VERSION 必须逐字相同。
+      #     界面与 macOS「关于」面板显示的都是 APP_VERSION —— 发出去的包写着 v1.1.1
+      #     而里面装的是 v1.2.0 的修复，比不显示版本号更糟（用户报问题会对错版本）。
+      #     浅克隆拿不到 tag 列表，所以比对的是 GITHUB_REF_NAME（tag 推送时就是那个 tag）。
+      - name: 校验 APP_VERSION 与 tag 一致
+        shell: bash
+        run: |
+          V=$(grep -m1 '^APP_VERSION' main.py | sed -E 's/.*"([^"]+)".*/\1/')
+          T="${GITHUB_REF_NAME#v}"
+          if [ -z "$V" ] || [ "$V" != "$T" ]; then
+            echo "::error title=版本号不一致::main.py 的 APP_VERSION=$V 与本次 tag $GITHUB_REF_NAME 不一致 —— 发版前把常量一起提交"
+            exit 1
+          fi
+          echo "APP_VERSION=$V 与 tag $GITHUB_REF_NAME 一致"
+
       # 2. 安装指定版本的 Python 解释器
       - name: 设置 Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5

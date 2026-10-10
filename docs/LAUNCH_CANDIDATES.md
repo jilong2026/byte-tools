@@ -206,7 +206,7 @@ POST /api/v1/auth/login 用 seata/seata → 200 + Bearer token
 
 ### 演练结果
 
-`bt_real_machine_drill.py --launch seata --yes` ——
+`tools/bt_real_machine_drill.py --launch seata --yes` ——
 启动后 7091/8091 全簇在听、控制台可达、停止后端口全释放、无登记残留。
 护栏 13 条（含 5 组变异自检，全部 CAUGHT）。
 
@@ -236,7 +236,7 @@ POST /api/v1/auth/login 用 seata/seata → 200 + Bearer token
 | **rabbitmq** | 5672 + 25672 | `rabbitmqctl stop`（官方） | PASS（**需前置 Erlang 27**） |
 | **nginx** | **8080** | `nginx -s quit`（官方） | PASS（**主端口由 80 改成 8080**） |
 
-演练命令：`bt_real_machine_drill.py --launch <key> --yes`。
+演练命令：`tools/bt_real_machine_drill.py --launch <key> --yes`。
 9 套护栏全绿（含 33 条新组件护栏 + 13 条接线护栏），真机 6/6 PASS。
 
 ### 演练逼出来的 6 个真缺陷（都已修，且都有护栏钉住）
@@ -283,7 +283,7 @@ POST /api/v1/auth/login 用 seata/seata → 200 + Bearer token
 
 ## ✅ 2026-10-06：十个组件全部在「干净环境」真机验证通过
 
-演练命令：`bt_clean_env_drill.py`（**主动剔掉组件类 `*_HOME` 与 `CLASSPATH`** 再跑，
+演练命令：`tools/bt_clean_env_drill.py`（**主动剔掉组件类 `*_HOME` 与 `CLASSPATH`** 再跑，
 模拟 exe 的干净环境 —— 详见下面「为什么必须剔干净」）。
 结果 **10/10 PASS**，护栏 226 条全绿。
 
@@ -342,7 +342,7 @@ POST /api/v1/auth/login 用 seata/seata → 200 + Bearer token
    我做源码演练时 shell 里带着 4 个 `*_HOME`（早期多版本测试写进去的），
    `dict(os.environ)` 顺手带给了子进程 → **演练全过**；
    而 **exe 启动的进程没有这些变量** → 用户那边立刻失败。
-   → `bt_clean_env_drill.py` 主动剔掉组件类 `*_HOME` 与 `CLASSPATH`。
+   → `tools/bt_clean_env_drill.py` 主动剔掉组件类 `*_HOME` 与 `CLASSPATH`。
    **但保留 `JAVA_HOME`**：产品里压根没装 jdk（`~/.env-tools/jdk` 是空的），
    java 系组件靠用户系统自带的 JDK，剔掉它等于在测另一台机器。
 2. **探活必须用 `health_path`，不能直接探 `console_path`。**

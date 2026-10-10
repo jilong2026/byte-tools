@@ -1491,8 +1491,53 @@ class CardLaunchUi(unittest.TestCase):
         # 会漏给同一进程里后跑的任何类 —— 别的用例就在猜这台机器有没有在听了。
         self._orig_listen = main.SERVICE_MANAGER._is_listening
         self.addCleanup(setattr, main.SERVICE_MANAGER, "_is_listening", self._orig_listen)
+        # 本类绝大多数用例测的是"启动/停止按钮在不同状态下该做什么"，
+        # 而 2026-10-10 起「启动」的启用条件多了一条"磁盘上得有已安装版本"
+        # （resolve_launch_version）。不重定向 CONFIG_DIR 的话，判据会去读**这台机器
+        # 真实的 ~/.env-tools**，用例结果就随宿主机装没装 jenkins 飘。
+        self._orig_dir = main.CONFIG_DIR
+        main.CONFIG_DIR = Path(self.dir.name) / "env-tools"
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
         comp = next(c for c in main.build_components() if c.key == "jenkins")
+        # 造一个"已安装"的版本目录（形状 <CONFIG_DIR>/<key>/<key>-<version>）
+        (main.CONFIG_DIR / "jenkins" / "jenkins-2.568.3").mkdir(parents=True)
+        self.jenkins = comp
         self.card = main.ComponentCard(comp, lambda msg, level: None)
+
+    def test_start_is_disabled_when_nothing_is_installed(self):
+        """没装任何版本 → 「启动」置灰并说清为什么（2026-10-10 用户在两个方案里选的）。
+
+        另一条路（点下去再提示"没装"）实测更差：未安装时点启动会**先弹端口与风险确认框**，
+        用户做完决定才在日志里看到"没装"，等于骗他做一次无用的决定。
+        """
+        empty = Path(self.dir.name) / "empty"
+        empty.mkdir(parents=True)
+        main.CONFIG_DIR = empty
+        comp = next(c for c in main.build_components() if c.key == "jenkins")
+        card = main.ComponentCard(comp, lambda msg, level: None)
+        self.assertIsNone(main.resolve_launch_version(comp), "前提：这台机器上没有已装版本")
+        self.assertFalse(card.btn_start.isEnabled(),
+                         "没装还能点启动 = 给一个做不到的承诺")
+        self.assertIn("安装", card.btn_start.toolTip(),
+                      "禁用态必须自己说清为什么点不动（先装 or 切到已装版本）")
+
+    def test_clicking_start_never_auto_installs_a_prereq_for_an_uninstalled_component(self):
+        """兜底那道闸必须排在"自动装前置 JDK"之前：否则没装的组件会先白装一个 JDK。"""
+        empty = Path(self.dir.name) / "empty2"
+        empty.mkdir(parents=True)
+        main.CONFIG_DIR = empty
+        comp = next(c for c in main.build_components() if c.key == "nacos")
+        card = main.ComponentCard(comp, lambda msg, level: None)
+        called = []
+        orig_prereq = main.prereq_components
+        orig_box = main.QMessageBox.question
+        self.addCleanup(setattr, main, "prereq_components", orig_prereq)
+        self.addCleanup(setattr, main.QMessageBox, "question", orig_box)
+        main.prereq_components = lambda *a, **k: called.append("prereq") or ["jdk"]
+        main.QMessageBox.question = lambda *a, **k: called.append("confirm") or 0
+        card.on_start_clicked()
+        self.assertEqual(called, [],
+                         f"未安装时不该走到前置安装或确认框，实际走了：{called}")
 
     def test_launch_buttons_exist_only_for_launchable_components(self):
         self.assertTrue(hasattr(self.card, "btn_start"))
@@ -4658,9 +4703,11 @@ class DrillCoversEveryLaunchableComponent(unittest.TestCase):
     """
     def test_clean_env_drill_iterates_over_launch_keys_not_a_hand_written_list(self):
         import re
-        # 用 __file__ 定位，不依赖 cwd（演练脚本可能在别处跑）
+        # 用 __file__ 定位，不依赖 cwd（演练脚本可能在别处跑）。
+        # 2026-10-10 演练脚本归进 tools/ —— 这条护栏当场把搬迁漏改的地方照出来：
+        # 路径不跟着改，用例直接 FileNotFoundError，比"静默不再检查演练脚本"好得多。
         here = Path(__file__).resolve().parent
-        src = (here / "bt_clean_env_drill.py").read_text(encoding="utf-8")
+        src = (here / "tools" / "bt_clean_env_drill.py").read_text(encoding="utf-8")
         # 找 main_run 里给 order 赋值的那一行
         m = re.search(r"order\s*=\s*(.+)", src)
         self.assertIsNotNone(m, "演练脚本里找不到 order 赋值")
@@ -4684,6 +4731,76 @@ class DrillCoversEveryLaunchableComponent(unittest.TestCase):
                     (spec.credentials_hint or "").strip(),
                     f"{key} 既没有控制台、也没写访问说明"
                     f"（credentials_hint为空）——用户会看到'启动成功'却不知道怎么用")
+
+
+class AccessPageStopsAnsweringAfterStop(unittest.TestCase):
+    """组件停了，工具自带那张访问页也必须立刻不再给内容。
+
+    2026-10-10 用户报：「软件内启动某组件，浏览器能正常访问；点停止后浏览器还是能访问，
+    直到关掉整个软件才真停」。工具进程内的小页面服务以前存的是**启动那一刻渲染好的 HTML**，
+    `register` 之后没有任何失效路径 —— 组件停了页面还挂着，内容还写着"正在运行"，
+    只有进程退出才跟着消失。现在存的是渲染回调，每次请求现查运行记录与端口。
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self._orig_file, self._orig_dir = main.RUNNING_FILE, main.CONFIG_DIR
+        main.RUNNING_FILE = Path(self.dir.name) / "running.json"
+        main.CONFIG_DIR = Path(self.dir.name) / "env-tools"
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
+        self._orig_any = main._is_listening_any
+        self.addCleanup(setattr, main, "_is_listening_any", self._orig_any)
+        self.comp = next(c for c in main.build_components() if c.key == "rocketmq")
+        self.rec = main.RunRecord(
+            key="rocketmq", version="5.3.1", home=str(main.CONFIG_DIR / "rocketmq"),
+            data_dir=str(main.CONFIG_DIR / "rocketmq-data"), port=9876,
+            console_url="", pid=1, pid_role="launcher", started_at=0.0,
+            launcher_cmd=[])
+
+    def _get(self, url):
+        import urllib.error
+        import urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(url, timeout=10) as r:
+                return r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def test_page_says_running_while_the_record_is_live(self):
+        main.save_running_map({"rocketmq": self.rec})
+        main._is_listening_any = lambda ports: True
+        url = main.show_launch_page(self.comp, self.comp.launch, self.rec)
+        self.assertTrue(url, "没有页面服务时应当返回 None，有服务时必须给 URL")
+        code, body = self._get(url)
+        self.assertEqual(code, 200, body[:200])
+        self.assertIn("正在运行", body)
+
+    def test_same_url_404s_once_the_component_is_stopped(self):
+        """停止清掉登记之后，同一个地址必须不再返回"正在运行"的旧快照。"""
+        main.save_running_map({"rocketmq": self.rec})
+        main._is_listening_any = lambda ports: True
+        url = main.show_launch_page(self.comp, self.comp.launch, self.rec)
+        self.assertEqual(self._get(url)[0], 200, "前提：运行中这一页要能打开")
+
+        main.save_running_map({})          # 停止：登记被清（force_stop 成功那条路）
+        code, body = self._get(url)
+        self.assertEqual(code, 404, "记录已经没了，这一页还在 200 就是假告示")
+        self.assertIn("已经停止", body)
+        self.assertNotIn("✔ 正在运行", body)
+
+    def test_index_only_lists_components_that_still_have_a_page(self):
+        main.save_running_map({"rocketmq": self.rec})
+        main._is_listening_any = lambda ports: True
+        url = main.show_launch_page(self.comp, self.comp.launch, self.rec)
+        root = url.rsplit("/page/", 1)[0] + "/"
+        self.assertIn("rocketmq", self._get(root)[1])
+        main.save_running_map({})
+        self.assertNotIn("/page/rocketmq", self._get(root)[1],
+                         "首页还挂着已停止的组件 = 点进去是一张假告示")
 
 
 if __name__ == "__main__":

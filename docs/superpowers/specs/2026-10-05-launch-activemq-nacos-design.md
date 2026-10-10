@@ -319,7 +319,7 @@ risk_note           = 控制台默认账号 admin/admin（conf/users.properties 
 - **A2** 端口被占时：实际监听端口集合 == 我们登记的簇（证明厂商的派生规则真按 +1000/+1001 走）。
 - **A3** 控制台路径确认（Nacos `/` vs `/nacos`；ActiveMQ `/admin`），据此回填 `console_path`。
   同时给 `health_path` 定值：计划二的 `health_path` 取"A3 实测能拿到可达响应的那个路径"，
-  由 `bt_real_machine_drill.py` 的可达判据消费（计划一已把该脚本的硬编码 `"/login"` 改成读 `spec.health_path`）。
+  由 `tools/bt_real_machine_drill.py` 的可达判据消费（计划一已把该脚本的硬编码 `"/login"` 改成读 `spec.health_path`）。
   **`health_path=None` 不是"不测"，是"尚未实测"**：A3 出结论前两个组件都填 `None`，出结论后必须回填真实值，
   否则 §0 D3 的"控制台可达"这条判据对它们形同虚设。
 - **A4** `--server.port=` 是否真的压过 `application.properties:23`（若否，Nacos 退到 `conf_copy`，需回补设计）。
@@ -396,7 +396,7 @@ CI 与发布流程一律不跑真启动。
 **演练脚本自身的一处修正**：判据一原来只查一次 HTTP。Jenkins 2.580.1 实测里 Jetty 在
 T+0s 就bind 了 8080，而 Jenkins 还在 `Started initialization`（T+1s）——
 **端口在听 ≠ 服务可用**，一次性检查稳定误报"控制台不可达"。已改成有界重试
-（`bt_real_machine_drill.py:_wait_console`），与 `start()` 的有界探活同一套约定。
+（`tools/bt_real_machine_drill.py:_wait_console`），与 `start()` 的有界探活同一套约定。
 
 1. Windows 上 ActiveMQ、Nacos 各完成一次：点启动 → 卡片"运行中 · 实际端口簇" → 打开控制台拿到登录页 →
    停止 → **整簇端口释放** → 数据/副本位置被告知。

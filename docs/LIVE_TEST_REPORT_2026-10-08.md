@@ -4,7 +4,7 @@
 - **被测对象**：工作区 `D:\file\idea_project\byte-tools`（`main.py` 单文件核心，改动前 10164 行 → 改动后约 10780 行）
 - **验收标准（用户原话）**：用户下载了这个软件后，对软件内**所有组件**进行**任何操作都要成功**；环境变量等配置或基础配置软件没装，就**默认帮用户安装和配置好**；让用户**开机就能用**，不需要用户自己修改任何文件。
 - **测试机**：Windows 11 专业版（22631）、AMD64、非管理员会话（`Life`）、主机名 `鹅城剑仙`（**非 ASCII**）、C: 剩余空间测试期间从 10.2GB 降到 3.0GB（见"环境约束"）
-- **测试方式**：真机端到端，走产品真实代码路径（不 mock），装置为本次新增的 `bt_live_matrix.py`
+- **测试方式**：真机端到端，走产品真实代码路径（不 mock），装置为本次新增的 `tools/bt_live_matrix.py`
 
 ---
 
@@ -27,14 +27,14 @@
 
 ## 二、测试装置（新增文件）
 
-`bt_live_matrix.py` —— 真机功能矩阵演练器，与既有离线护栏的分工是"不 mock、真下载、真起进程"：
+`tools/bt_live_matrix.py` —— 真机功能矩阵演练器，与既有离线护栏的分工是"不 mock、真下载、真起进程"：
 
 ```
-python bt_live_matrix.py --keys all,erlang --phase install      # 下载+落位+配置+可用性
-python bt_live_matrix.py --keys nginx,tomcat --phase launch     # 启停+探活
-python bt_live_matrix.py --keys kubectl --phase switch \
+python tools/bt_live_matrix.py --keys all,erlang --phase install      # 下载+落位+配置+可用性
+python tools/bt_live_matrix.py --keys nginx,tomcat --phase launch     # 启停+探活
+python tools/bt_live_matrix.py --keys kubectl --phase switch \
        --switch-to kubectl                                     # 多版本切换
-python bt_live_matrix.py --keys autoprereq --phase all          # 缺 JDK→自动装好→门控放行
+python tools/bt_live_matrix.py --keys autoprereq --phase all          # 缺 JDK→自动装好→门控放行
 ```
 
 装置的设计纪律（也是这次能查出问题的原因）：
@@ -319,7 +319,7 @@ jenkins 起后约 30-60 秒内控制台返回 `503 Please wait while Jenkins is 
    或在卸载时一并清理。当前 26 个组件的归档会长期占 2-3GB。
 3. **补一次真正的空目录全量演练**（需要一台空机器或先扩磁盘），
    作为"发布前"的门禁，而不是靠本报告的部件级结论。
-4. **把 `bt_live_matrix.py` 纳入发布前手工门禁清单**（它与 9 个离线护栏互补：
+4. **把 `tools/bt_live_matrix.py` 纳入发布前手工门禁清单**（它与 9 个离线护栏互补：
    护栏防回归，矩阵防"代码对但环境不通"）。
 5. **`jenkins` 的停止**可评估改成 `stop_kind="port_lookup"`（与 nacos/activemq 一致，
    一次确认即可），代价是要同步调整 `bt_launch_tests.py` 里钉住"Windows 上 pid 型要先请示"的用例。
@@ -334,7 +334,7 @@ jenkins 起后约 30-60 秒内控制台返回 `503 Please wait while Jenkins is 
 | 文件 | 类型 | 内容 |
 |---|---|---|
 | `main.py` | 代码 | 12 个缺陷的修复；新增 `install_downloaded()` 等模块级落位函数；新增 Erlang 隐藏组件与 4 个抓取/URL 函数；新增 6 个前置自举函数（`prereq_components` / `java_major_of` / `jdk_home_version` / `prereq_install_versions` / `pick_prereq_version` / `prereq_already_installed` / `installed_erlang_erl`）；新增 `sync_runtime_assets()`；`process_alive` 精确化；`stop`/`force_stop` 端口归属兜底；启动后控制台就绪提示；加速器顺序重排；docker/pulsar 平台说明重写 |
-| `bt_live_matrix.py` | 新增 | 真机功能矩阵演练器（install / verify / switch / launch / autoprereq 五个阶段） |
+| `tools/bt_live_matrix.py` | 新增 | 真机功能矩阵演练器（install / verify / switch / launch / autoprereq 五个阶段） |
 | `DEVELOPMENT.md` | 文档 | 新增 **R6 前置运行时自举**、**R7 单文件落位文件名**、**R8 动态内容目录同步**、**R9 非 ASCII 主机名节点名**；R1.3 加速器速度表更新 |
 | `bt_launch_tests.py` | 测试 | `min_java_major` 用例从"jenkins 必须 None"改为"jenkins 必须 11（实测），其余必须 None"；prereq 文案断言改为关键信息断言；桩掉自家 Erlang 查找 |
 | `bt_component_category_tests.py` / `bt_search_and_newcmp_tests.py` / `bt_multiversion_tests.py` | 测试 | 组件数 26 → 27（+隐藏 erlang），并新增"界面可见数仍是 26"的反向断言 |

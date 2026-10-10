@@ -1,7 +1,7 @@
-# 字节-开发环境与工具自动安装 (ByteTools)
+# 字节工具箱 (ByteTools)
 
 <p align="center">
-   <img src="assets/byte-tools.png" alt="byte-tools 软件图标" height="150" width="150"/>
+   <img src="assets/byte-tools.png" alt="字节工具箱 软件图标" height="150" width="150"/>
 </p>
 
 <p align="center">
@@ -82,7 +82,7 @@
 
 ## 📌 项目描述
 
-**ByteTools**（原名 byte-tools）是一款开源的桌面小工具，目标是把开发者最常用的语言运行时、构建工具、中间件的下载与配置全部自动化。
+**字节工具箱（ByteTools，仓库名仍是 byte-tools）** 是一款开源的桌面小工具，目标是把开发者最常用的语言运行时、构建工具、中间件的下载与配置全部自动化。
 
 它做了这几件事：
 
@@ -102,7 +102,7 @@
 |------|------|
 | 🖥️ **跨平台** | 一份代码同时支持 Windows / macOS / Linux；ARM64 分支自动切换（如 Apple Silicon 下 JDK 走 aarch64、Node 走 arm64） |
 | 📦 **一键装配** | 内置 **26 个** 常用开发组件，从下载 → 解压 → 环境变量配置全流程自动化 |
-| ▶️ **一键启动 + 打开控制台** | 自带控制台的组件不必再自己敲启动命令：卡片上点「启动」即拉起，「控制台」直接用浏览器进到它自己的页面（当前支持 **Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins** 共 10 个）。端口被占用时按既定策略**结束占用者**并在确认框里说清楚（不平移端口 —— 平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker 都算），关掉工具重开也能认出现在正在跑什么，且识别状态的过程绝不执行任何启动脚本。✅ **已在 Windows 真机逐个验证**：10 个组件每一个都完成「下载安装 → 启动 → 整簇端口监听 → 控制台/协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」，由 497 条离线用例 + 真机矩阵（`bt_live_matrix.py`）共同守护。**macOS 与 Linux 尚未真机验证**，详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R5 |
+| ▶️ **一键启动 + 打开控制台** | 自带控制台的组件不必再自己敲启动命令：卡片上点「启动」即拉起，「控制台」直接用浏览器进到它自己的页面（当前支持 **Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins** 共 10 个）。端口被占用时按既定策略**结束占用者**并在确认框里说清楚（不平移端口 —— 平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker 都算），关掉工具重开也能认出现在正在跑什么，且识别状态的过程绝不执行任何启动脚本。✅ **已在 Windows 真机逐个验证**：10 个组件每一个都完成「下载安装 → 启动 → 整簇端口监听 → 控制台/协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」，由 497 条离线用例 + 真机矩阵（`tools/bt_live_matrix.py`）共同守护。**macOS 与 Linux 尚未真机验证**，详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R5 |
 | 🧩 **前置运行时自动就位** | 需要 JDK 的组件（Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata）在宿主上**没有 JDK 或版本太低**时，点「启动」会先自动下载安装一个够用的 JDK，再继续启动；RabbitMQ 需要的 Erlang/OTP 同理（按 RabbitMQ 版本自动配 27.x / 26.x）。**用户不需要自己去装任何前置依赖**，也不需要手改任何文件。详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R6 |
 | 🌐 **每件启动完都有页面可看** | 启动成功后组件日志里会打出醒目的访问地址（含**实际端口**与启动日志路径），卡片上也有「控制台 / 访问页」按钮：自带 Web 界面的直接进它自己的页面（Nginx 首页 :8888、Tomcat 首页 :8081、Nacos / Seata / ActiveMQ 控制台、Jenkins）；Kafka / RocketMQ / RabbitMQ 这类**协议端口型（浏览器打开必然失败）**的组件，由工具自带的小服务给一张「启动成功」页 —— 写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成「已停止」**，不会留一张永远说"成功"的假告示。详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 规则 R10 |
 | 🚫 **平台不支持时会说清楚** | 有 2 个组件在 Windows 上**没有可用的免安装形态**：`Docker`（官方 static binary 只发 Linux/macOS，Windows 必须装 Docker Desktop）与 `Pulsar`（主命令只有 POSIX shell 脚本，官方起步要求 Docker 或 WSL）。卡片上会写明原因并给出替代做法，**不会**先装一个跑不起来的东西再让用户自己猜 |

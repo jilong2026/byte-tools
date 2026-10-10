@@ -23,7 +23,7 @@ DIRTY = [k for k in os.environ
          or k in ("CLASSPATH", "RABBITMQ_NODENAME")]
 for k in DIRTY:
     os.environ.pop(k, None)
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # 仓库根（本脚本在 tools/ 下）
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import main  # noqa: E402  必须在剔变量之后 import

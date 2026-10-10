@@ -1,8 +1,8 @@
-# Byte Tools — by jilong2026
+# 字节工具箱 ByteTools — by jilong2026
 
 A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 common developer components** such as **JDK, Python, Node.js, Maven, MySQL and Docker** — each one installed in a single click with the environment variables configured for you. **Tomcat, Nginx, Kafka, Jenkins** and 6 other services additionally get **one-click start/stop** and **direct access pages**, with URLs, usernames and passwords printed to the log automatically.
 
-> Project: **ByteTools**
+> Project: **ByteTools**（中文名：字节工具箱）
 > Author: **jilong2026**
 > Platforms: Windows 10/11, macOS 12+, Ubuntu 20.04+
 > License: MIT License

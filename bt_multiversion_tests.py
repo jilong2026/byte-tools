@@ -1018,7 +1018,7 @@ class PythonPathDirHoldsTheInterpreter(EnvSandbox):
 class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
     r"""Windows 上**每个**组件"要放进 PATH 的那个目录"，必须和归档里的真实布局一致。
 
-    这张期望表不是按惯例推的，是 2026-10-10 用 `bt_archive_layout_audit.py` 读归档
+    这张期望表不是按惯例推的，是 2026-10-10 用 `tools/bt_archive_layout_audit.py` 读归档
     中央目录实测出来的（zip 只取尾部几 KB～几 MB，不下载整包）。为什么必须有这张表：
     Python 那次是 `path_subdir="Scripts"` 指到一个没有解释器的目录，Node 这次是
     `"bin"` —— Windows 官方 node zip 的 `node.exe` 在解压根目录，压根没有 bin 子目录。
@@ -1093,7 +1093,7 @@ class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
 class PosixExecNamesCoverTheShellScript(EnvSandbox):
     r"""POSIX 上"这个组件的可执行文件"要认 `.sh`，否则 tomcat 这类只有 shell 入口的组件永远探测不到。
 
-    2026-10-10 用 bt_archive_layout_audit.py 读 apache-tomcat-10.1.60.tar.gz 实测：
+    2026-10-10 用 tools/bt_archive_layout_audit.py 读 apache-tomcat-10.1.60.tar.gz 实测：
     `bin/` 下 29 个文件里**没有**不带扩展名的 `catalina`，只有 `catalina.sh` 与 `catalina.bat`。
     而 `_exec_name_variants()` 在非 Windows 只返回裸名 —— 于是 Linux/macOS 上装完 tomcat 之后：
       · `exec_path_in_home()` 找不到入口 → 卡片状态与版本探测都落空；

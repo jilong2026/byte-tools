@@ -75,7 +75,7 @@
 
 #### 2.4.1 演练记录（2026-10-05，Task 12）
 
-- 已完成：`bt_real_machine_drill.py` 新增 `--launch <key> [--yes]` 三层判据入口（拉得起 → 控制台可达 → `登记残留=[]`）。
+- 已完成：`tools/bt_real_machine_drill.py` 新增 `--launch <key> [--yes]` 三层判据入口（拉得起 → 控制台可达 → `登记残留=[]`）。
   dry-run 已在本机真跑通：只打印将做什么，退出码 0，无 java 进程、无 `~/.env-tools/running.json`、无任何目录新增。
 - 第 3、5 项：**仍无结论**。判据要靠 `--yes` 真机执行，而本机未装 JDK 与 Jenkins（`~/.env-tools` 仅有
   config.json / powershell / python），真跑会走镜像下载 ~200MB、写用户环境变量与 PATH、创建 `jenkins-data`
@@ -159,7 +159,7 @@
 5. **门控**：未装或 JDK 不足时 `start()` 拒绝且原因可行动。
 6. **不变量护栏**：把 `subprocess.Popen` 与 `_probe_version` 桩成"一调用就抛"，跑完 `status()` / `adopt_running()` 全流程（手法照 `bt_startup_tests.py` 的 `PROBE_CHILD`）。
 
-**真机验证**：扩展 `bt_real_machine_drill.py` 加 `--launch <key>`，复用它已有的"三层判据 + 自动还原"结构：启动 → 探活 → 控制台 URL 拿 200 → 停止 → 端口释放 → `<key>-data` 仍在 → 运行中禁卸 → 停止后可卸 → 环境还原。Windows 执行；macOS/Linux 标未验证。
+**真机验证**：扩展 `tools/bt_real_machine_drill.py` 加 `--launch <key>`，复用它已有的"三层判据 + 自动还原"结构：启动 → 探活 → 控制台 URL 拿 200 → 停止 → 端口释放 → `<key>-data` 仍在 → 运行中禁卸 → 停止后可卸 → 环境还原。Windows 执行；macOS/Linux 标未验证。
 
 **CI**：不跑真启动（runner 要装 JDK + 三件，太重）。发布流程只跑离线套件。
 

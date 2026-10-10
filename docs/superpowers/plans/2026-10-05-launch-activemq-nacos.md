@@ -35,7 +35,7 @@
 |---|---|---|
 | `main.py` | 唯一产品文件 | 改：`LaunchSpec`（+3 字段）、`LAUNCH_OF`（+2 登记）、`RunRecord`/`load_running_map`（`ports` 与归一化）、新增 `parse_netstat_listeners` / `pids_listening_on`、新增 conf 副本与回写三函数、`ServiceManager.status/reconcile/start/stop/force_stop` 改按簇、`build_launch_plan` 按 `port_writeback` 分派、卡片簇文案与卸载告知 |
 | `bt_launch_tests.py` | 一键启动离线护栏（现 80 用例） | 追加 6 个测试类，本期结束约 124 用例（数字按实际数出来写报告，不许凑） |
-| `bt_real_machine_drill.py` | 真机演练 | 扩 `launch_drill`：按簇判据 + A1–A7 记录 |
+| `tools/bt_real_machine_drill.py` | 真机演练 | 扩 `launch_drill`：按簇判据 + A1–A7 记录 |
 | `DEVELOPMENT.md` | 规则 R5 | 更新 R5.2/R5.3/R5.6（本期把多条"待办"变成"已做"） |
 | `CODE_WIKI.md` / `README*.md` | 文档 | 补两个组件、簇语义、端口释放判据 |
 
@@ -1605,16 +1605,16 @@ git commit -m "feat(launch): ActiveMQ 接入启动登记，卸载确认按组件
 ### Task 10: 真机演练扩到两个组件（A1–A7 判据）
 
 **Files:**
-- Modify: `bt_real_machine_drill.py`（`launch_drill`，现 `:240`；参数解析不动）
+- Modify: `tools/bt_real_machine_drill.py`（`launch_drill`，现 `:240`；参数解析不动）
 - Test: 无新增离线用例（本任务只改脚本；离线护栏已在 Task 1–9 建完）
 
 **Interfaces:**
 - Consumes: `SERVICE_MANAGER.start/stop/force_stop`、`main.load_running_map`、`main.RunRecord.ports`、`main.port_is_listening`、`main.http_ok`
-- Produces: `bt_real_machine_drill.py --launch nacos|activemq|jenkins [--yes]`，输出四行判据 + 一份 A1–A7 结论
+- Produces: `tools/bt_real_machine_drill.py --launch nacos|activemq|jenkins [--yes]`，输出四行判据 + 一份 A1–A7 结论
 
 - [ ] **Step 1: 先看清当前判据形状**
 
-打开 `bt_real_machine_drill.py`，读 `launch_drill()` 全文（现 `:240-283`）与入口分派（现 `:278-283`）。
+打开 `tools/bt_real_machine_drill.py`，读 `launch_drill()` 全文（现 `:240-283`）与入口分派（现 `:278-283`）。
 **不要照抄本计划下面的代码就开始改**——计划一的演练里有"Windows 上 `stop` 只请示、脚本替用户点是"
 的既有处理，改动要保住它。
 
@@ -1664,10 +1664,10 @@ git commit -m "feat(launch): ActiveMQ 接入启动登记，卸载确认按组件
 
 - [ ] **Step 4: 干跑验证（这是本任务的通过判据）**
 
-Run: `.venv/Scripts/python.exe bt_real_machine_drill.py --launch nacos`
+Run: `.venv/Scripts/python.exe tools/bt_real_machine_drill.py --launch nacos`
 Expected: 只打印 `[dry-run]` 一行（含"程序目录 + 数据目录"），退出码 0；`tasklist` 里没有 java 进程新增；`~/.env-tools/running.json` 不存在（本机现状）；**不产生 `activemq-data`/`nacos-data` 目录**。
-Run: `.venv/Scripts/python.exe bt_real_machine_drill.py --launch activemq` → 同上，且 dry-run 打印的数据目录是 `~/.env-tools/activemq-data`。
-Run: `.venv/Scripts/python.exe bt_real_machine_drill.py --launch jenkins` → 计划一行为不变（回归确认）。
+Run: `.venv/Scripts/python.exe tools/bt_real_machine_drill.py --launch activemq` → 同上，且 dry-run 打印的数据目录是 `~/.env-tools/activemq-data`。
+Run: `.venv/Scripts/python.exe tools/bt_real_machine_drill.py --launch jenkins` → 计划一行为不变（回归确认）。
 Run: 不带参数 → 原 bun 多版本演练路径行为不变。
 
 **`--yes` 不在本任务的验收里**：它需要用户在场并下载组件（Nacos 153MB / ActiveMQ 57MB），属真机动作。

@@ -9,7 +9,9 @@ import sys
 import time
 from pathlib import Path
 
-PY = ".venv/Scripts/python.exe"
+HERE = Path(__file__).resolve().parent      # tools/
+REPO = HERE.parent                          # 仓库根：.venv 与一键脚本都在那里
+PY = str(REPO / ".venv" / "Scripts" / "python.exe")
 # 已装且用户要求保留的：只加装一个版本、测切换、不卸载
 KEEP = {"jenkins", "nacos", "activemq", "python", "powershell"}
 ORDER = [
@@ -23,12 +25,12 @@ ORDER = [
     ("jdk", None), ("jenkins", None), ("nacos", None), ("activemq", None),
 ]
 
-LOG = Path("bt_mv_results.txt")
+LOG = HERE / "bt_mv_results.txt"
 results = []
 
 
 def run(key, v2=None):
-    args = [PY, "-u", "bt_mv_drill.py", "install", key]
+    args = [PY, "-u", str(HERE / "bt_mv_drill.py"), "install", key]
     if v2:
         args.append(v2)
     t0 = time.time()
@@ -59,7 +61,7 @@ def cleanup(key):
     if key in KEEP:
         print(f"  · {key} 保留（用户要求），只卸掉多出来的那个版本", flush=True)
         return
-    p = subprocess.run([PY, "-u", "bt_mv_drill.py", "uninstall", key],
+    p = subprocess.run([PY, "-u", str(HERE / "bt_mv_drill.py"), "uninstall", key],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=300)
     print(f"  · 已卸载 {key}：{(p.stdout or '').strip().splitlines()[-1] if p.stdout else '?'}",

@@ -52,6 +52,8 @@ if "--shadow-fix" in sys.argv:
 else:
     SHADOW_FIX_KEY = None
 sys.argv = [sys.argv[0]]           # 别让 main.py 的 argparse/入口看到本脚本的参数
+# 本脚本住在 tools/ 下，仓库根要显式加进 sys.path，否则 `import main` 找不到
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import main                        # noqa: E402
 
 

@@ -14,7 +14,7 @@
 # eats it. Full-width punctuation is fine.
 # Indentation is part of the message, keep it aligned with the English text.
 
-hdr_1=  ByteTools 一键启动
+hdr_1=  字节工具箱 一键启动
 hdr_2=  工作目录: {0}
 step1=[1/4] 查找可用的 Python 3.10-3.14 ...
 step1_found=      找到: {0}
@@ -37,7 +37,7 @@ wmi_2=             但「一键打包exe.bat」会卡住，要打包就先修 wi
 wmi_3=             管理员 CMD 里 net stop winmgmt，再 net start winmgmt。
 press_key=按任意键关闭窗口...
 
-hdr_pack=  ByteTools 一键打包 exe
+hdr_pack=  字节工具箱 一键打包 exe
 pyi_check=      检查 PyInstaller...
 pyi_ready=      已就绪
 pyi_installing=      未安装 PyInstaller，开始安装...

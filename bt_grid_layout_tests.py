@@ -747,6 +747,68 @@ class BadgeNeverStretchesVertically(unittest.TestCase):
 
 
 # ======================================================================
+# F3. 底部状态条：组件数、可点的工作目录、版本号（2026-10-10 用户三条要求）
+# ======================================================================
+class StatusBarFacts(_UsesRealWindow, unittest.TestCase):
+    """状态条上那三个数字/链接必须是真话，而且彼此不能打架。"""
+
+    def _plain(self):
+        import re
+        return re.sub("<[^>]+>", "", self.win.status_bar.text())
+
+    def test_component_count_is_what_the_user_can_actually_see(self):
+        """总数按**界面可见**的卡片算，与搜索提示同一个分母。
+
+        erlang 是 hidden 组件（只作 rabbitmq 的前置依赖，不出现在任何 Tab），
+        以前状态条写 `len(self.components)` = 27，而搜索框右边写的是 / 26 ——
+        同一屏两个数字互相矛盾，用户自然怀疑清单是不是漏了一个。
+        """
+        win = self.win
+        visible = len(win.cards)
+        self.assertEqual(visible, 26, "界面可见组件数变了，这条用例的基线要一起核")
+        self.assertIn(f"组件总数：{visible} 个", self._plain())
+        self.assertNotIn(f"组件总数：{len(win.components)} 个", self._plain())
+        # 隐藏组件不许悄悄消失：总数旁边要交代它去哪了
+        self.assertIn("前置依赖", self._plain())
+
+    def test_working_directory_is_a_link_pointing_at_the_real_dir(self):
+        import re
+        hrefs = re.findall(r'href="([^"]+)"', self.win.status_bar.text())
+        self.assertTrue(hrefs, "工作目录没做成链接 = 用户只能照着路径手敲")
+        target = hrefs[0][len("dir://"):]
+        self.assertEqual(Path(target).as_posix(), Path(main.CONFIG_DIR).as_posix())
+
+    def test_clicking_the_link_asks_the_os_to_open_the_folder(self):
+        import re
+        href = re.findall(r'href="([^"]+)"', self.win.status_bar.text())[0]
+        calls = []
+        orig = main._open_in_file_manager
+        self.addCleanup(setattr, main, "_open_in_file_manager", orig)
+        main._open_in_file_manager = lambda p: calls.append(p) or True
+        self.win._on_status_link(href)
+        self.assertEqual([Path(p).as_posix() for p in calls],
+                         [Path(main.CONFIG_DIR).as_posix()])
+
+    def test_version_shows_up_in_ui_and_matches_the_latest_tag(self):
+        self.assertIn(f"v{main.APP_VERSION}", self._plain(),
+                      "状态条要显示版本号，用户报问题时第一眼就能对上版本")
+        title = self.win.findChild(QLabel, "titleText")
+        self.assertIn(main.APP_VERSION, title.toolTip() or title.text())
+        import subprocess
+        try:
+            out = subprocess.run(["git", "describe", "--tags", "--abbrev=0"],
+                                 capture_output=True, text=True, timeout=20,
+                                 cwd=str(Path(main.__file__).parent))
+            tag = (out.stdout or "").strip()
+        except Exception:      # noqa: BLE001  没有 git 就不硬失败
+            tag = ""
+        if not tag:
+            self.skipTest("拿不到 git tag，无法核对 APP_VERSION 是否落后于最新发布")
+        self.assertEqual(f"v{main.APP_VERSION}", tag,
+                         f"APP_VERSION 落后于最新发布 {tag}：发版前把 main.py 的常量一起提")
+
+
+# ======================================================================
 # G. 既有行为不得回归
 # ======================================================================
 class ExistingBehaviourStillHolds(_UsesRealWindow, unittest.TestCase):

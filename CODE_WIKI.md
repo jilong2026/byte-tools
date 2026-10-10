@@ -187,6 +187,11 @@ byte-tools/
 ├── LICENSE                  # MIT 许可证
 ├── .gitignore               # Git 忽略规则
 ├── .github/workflows/       # 发布工作流（release.yml：三平台打包 + Gitee 同步）
+├── tools/                   # 真机与测量脚本（**不是测试、也不进安装包**）：
+│                            #   bt_live_matrix / bt_real_machine_drill / bt_mv_drill(_all) / bt_clean_env_drill
+│                            #   bt_bench_sources / bt_probe_newcmp / bt_jdk_mirror_files / bt_render_search
+│                            #   bt_archive_layout_audit（归档布局实测，见 R3.22）/ bt_spike_elevated_hklm（一次性验证）
+│                            #   都靠 `sys.path` 指向仓库根来 import main，跑法：python tools/<脚本名>
 ├── bt_multiversion_tests.py       # 离线回归测试：多版本并存与生效版本切换（见 4.9，覆盖清单与用例数以运行输出为准）
 ├── bt_component_category_tests.py # 离线回归测试：组件四类分组与 Tab（11 个用例，见 R2）
 ├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）

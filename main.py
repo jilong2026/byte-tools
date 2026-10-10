@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-编程开发环境自动装配小工具 By jilong2026
+字节工具箱 By jilong2026
 ==========================
 
 Copyright (c) 2026 jilong2026
@@ -101,11 +101,38 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # 全局常量与工具函数
 # ---------------------------------------------------------------------------
-APP_NAME = "字节-开发环境与工具自动安装"
+APP_NAME = "字节工具箱"
+# 界面与 macOS bundle 都显示它；**发版前必须和要打的 tag 一起改**。
+# release.yml 第一步会拿 tag 比对，不一致就直接红 —— 因为发出去的 exe 上写的版本
+# 骗人，比没有版本号更糟（用户报问题时给的是 v1.1.1，实际装的是 v1.2.0 的修复）。
+APP_VERSION = "1.1.1"
 GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 RUNNING_FILE = CONFIG_DIR / "running.json"      # 本机进程事实，与用户偏好分开（设计 §3）
+
+
+def _open_in_file_manager(path: str) -> bool:
+    """用系统自带的文件管理器打开一个目录（状态条上那个工作目录链接）。
+
+    单独抽出来是为了可测：用例把 `_open_in_file_manager` 换成记录调用的桩，
+    就不会真在用户桌面上弹一个资源管理器窗口（那是测试不该有的副作用）。
+    返回是否成功发起，失败由调用方写进日志，不弹窗打断。
+    """
+    target = str(path)
+    try:
+        if not target or not Path(target).is_dir():
+            return False
+        if CURRENT_OS == "Windows":
+            os.startfile(target)          # noqa: S606 - 系统自带命令，路径来自我们自己
+        elif CURRENT_OS == "Darwin":
+            subprocess.Popen(["open", target])
+        else:
+            subprocess.Popen(["xdg-open", target])
+        return True
+    except Exception:                     # noqa: BLE001
+        return False
+
 
 # 当前操作系统标识与 CPU 架构：刻意不用 platform.system() / platform.machine()。
 # 那两个函数内部会走 platform.uname() -> win32_ver() -> 一次 WMI 查询，而 WINMGMT
@@ -5810,7 +5837,7 @@ class ComponentPageServer:
 
         self.host = host
         self._lock = threading.Lock()
-        self._pages: Dict[str, str] = {}      # key → 已完成渲染的 HTML 片段
+        self._pages: Dict[str, object] = {}   # key → 渲染回调（每次请求现渲染）
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -5829,15 +5856,14 @@ class ComponentPageServer:
                 if name.endswith(".html"):
                     name = name[:-len(".html")]
                 if name == "index":
-                    body = outer._index_html()
-                else:
-                    body = outer._page_for(name)
+                    return self._send(200, outer._index_html())
+                body, code = outer._page_and_code(name)
                 if body is None:
                     body = error_page("没有这个组件的访问页",
-                                      f"路径 {path} 不对。可用的组件页："
-                                      f"{'、'.join(sorted(outer._pages)) or '（还没有）'}。")
+                                      f"路径 {path} 不对。当前有内容可看的组件页："
+                                      f"{'、'.join(sorted(outer._live_keys())) or '（还没有）'}。")
                     return self._send(404, body)
-                return self._send(200, body)
+                return self._send(code, body)
 
             def _send(self, code: int, body: str) -> None:
                 raw = body.encode("utf-8")
@@ -5862,12 +5888,19 @@ class ComponentPageServer:
                          name="byte-tools-page-server", daemon=True).start()
 
     # -- 对外 ---------------------------------------------------------------
-    def register(self, key: str, section_html: str) -> Optional[str]:
-        """登记/更新一个组件的页面片段，返回它的可访问 URL。服务没起来返回 None。"""
+    def register(self, key: str, render) -> Optional[str]:
+        """登记一个组件页的**渲染回调**，返回可访问 URL；服务没起来返回 None。
+
+        存回调而不是存启动那一刻渲染好的 HTML（2026-10-10 改）：这一页由本工具进程内
+        的小服务提供，成品 HTML 会一直挂着 —— 组件停了、端口换了、甚至重启成另一个版本，
+        页面上还写着"正在运行 · 端口 N"。用户报的现象就是这么来的：
+        「停止组件后浏览器还能访问，直到关掉软件才真停」。
+        现在每次请求现渲染，没有运行记录就返回"已停止"，页面不再撒谎。
+        """
         if self._httpd is None:
             return None
         with self._lock:
-            self._pages[key] = section_html
+            self._pages[key] = render
         return f"http://{self.host}:{self.port}/page/{key}"
 
     def shutdown(self) -> None:
@@ -5875,19 +5908,45 @@ class ComponentPageServer:
             self._httpd.shutdown()
 
     # -- 页面渲染 -----------------------------------------------------------
-    def _index_html(self) -> str:
+    def _live_keys(self) -> List[str]:
+        """此刻真的能出内容的组件页（停了的那些不算）。"""
         with self._lock:
-            keys = sorted(self._pages)
+            items = list(self._pages.items())
+        out: List[str] = []
+        for key, render in items:
+            try:
+                if render():
+                    out.append(key)
+            except Exception:      # noqa: BLE001  首页不许被一个坏页面带崩
+                continue
+        return out
+
+    def _index_html(self) -> str:
+        keys = sorted(self._live_keys())
         if not keys:
-            return error_page("还没有启动过任何组件",
+            return error_page("还没有正在运行的组件",
                               "启动一个组件后，这里会列出它的访问页。")
         cards = "".join(
             f'<li><a href="/page/{k}">{html_escape(k)}</a></li>' for k in keys)
-        return page_shell("已启动的组件", f"<ul class='links'>{cards}</ul>")
+        return page_shell("正在运行的组件", f"<ul class='links'>{cards}</ul>")
 
-    def _page_for(self, key: str) -> Optional[str]:
+    def _page_and_code(self, key: str) -> Tuple[Optional[str], int]:
+        """(正文, HTTP 状态)。从未登记 → (None, 404)；登记了但已停 → 说明页 + 404。"""
         with self._lock:
-            return self._pages.get(key)
+            render = self._pages.get(key)
+        if render is None:
+            return None, 404
+        try:
+            body = render()
+        except Exception as exc:   # noqa: BLE001
+            return error_page("页面生成失败",
+                              f"这一页在生成时出错：{type(exc).__name__}: {exc}"), 500
+        if body is None:
+            return error_page(
+                "这个组件已经停止",
+                f"{key} 已经没有运行记录了，这一页不再有意义。"
+                "要再看它，请回工具里点「启动」。"), 404
+        return body, 200
 
 
 def launch_success_lines(comp: "Component", spec: "LaunchSpec", rec: "RunRecord",
@@ -6068,7 +6127,15 @@ def show_launch_page(comp: "Component", spec: "LaunchSpec", rec: "RunRecord") ->
     server = get_page_server()
     if server is None:
         return None
-    return server.register(comp.key, launch_page_html(comp, spec, rec))
+
+    def _render() -> Optional[str]:
+        # 每次请求现查运行记录：停了就没了，端口换了就跟着换。
+        rec_now = load_running_map().get(comp.key)
+        if rec_now is None:
+            return None
+        return launch_page_html(comp, spec, rec_now)
+
+    return server.register(comp.key, _render)
 
 
 @dataclass
@@ -11291,7 +11358,13 @@ class ComponentCard(QFrame):
     def _refresh_launch_state_impl(self) -> None:
         st = self._launch_status()
         running = st.state == "running"
-        self.btn_start.setEnabled(self.launch_worker is None)
+        # 磁盘上没有任何已安装版本时，「启动」就**该是灰的**（2026-10-10 用户给的
+        # 两个方案里选这个）：与"选中版本已装则置灰「安装」"是同一条设计语言 ——
+        # 做不到的事不给点。另一个方案（点了再弹"没装"提示）被否掉的实测理由：
+        # 以前点下去会先弹一个**端口与风险确认框**，用户确认完才在日志里看到"没装"，
+        # 等于先骗他做一次决定。
+        launchable = resolve_launch_version(self.component) is not None
+        self.btn_start.setEnabled(self.launch_worker is None and (running or launchable))
         # **每个可启停组件都有一个能打开的地址**（2026-10-08 用户要求）：
         #   自带 Web 界面 → 按钮文字「控制台」，指向它自己的页面；
         #   协议端口型（kafka/rocketmq/rabbitmq）→ 文字「访问页」，
@@ -11324,7 +11397,10 @@ class ComponentCard(QFrame):
                 self.btn_start.setText("启动")
                 self.btn_start.setObjectName("primaryBtn")
                 self.btn_start.setToolTip(
-                    f"启动 {self.component.display_name}（端口 {self.component.launch.main_port}）")
+                    f"启动 {self.component.display_name}（端口 {self.component.launch.main_port}）"
+                    if launchable else
+                    f"磁盘上还没有 {self.component.display_name} 的已安装版本，"
+                    "先点「安装」装一个，或把版本切到已装的那个，才能启动")
             # 换objectName 后要重刷 QSS，否则配色停留在上一个状态。
             self.btn_start.style().unpolish(self.btn_start)
             self.btn_start.style().polish(self.btn_start)
@@ -11360,6 +11436,15 @@ class ComponentCard(QFrame):
 
     def on_start_clicked(self) -> None:
         spec = self.component.launch
+        # 按钮平时就是灰的（见 _refresh_launch_state_impl 的 launchable 判据），
+        # 这一道是兜底：状态是异步刷的，磁盘可能在两次刷新之间被外部删掉。
+        # **必须排在自动装前置依赖之前** —— 否则一个没装的组件会先被拉去装一个 JDK，
+        # 装完再告诉他"没装"，白折腾一遍网络。
+        if resolve_launch_version(self.component) is None:
+            self._log("warn",
+                      f"磁盘上还没有 {self.component.display_name} 的已安装版本，"
+                      "先点「安装」装一个，或把版本切到已装的那个，再点启动。")
+            return
         # 「开机就能用」：缺前置运行时（JDK / Erlang）时**先自动装好再启动**，
         # 而不是弹一句"请先装一个 JDK"把活儿交回给用户。
         missing = prereq_components(self.component, MainWindow.current_components())
@@ -12976,6 +13061,9 @@ class MainWindow(QMainWindow):
         title_label = QLabel(APP_NAME)
         title_label.setObjectName("titleText")
         title_label.setFont(QFont("", 12, QFont.Bold))
+        # 版本号放在标题的 tooltip 里（状态条上也有一份）：标题栏那 48px 已经挤了
+        # 五个按钮，再塞一串 v1.1.1 会在小窗口下把按钮裁掉（本项目栽过两次）。
+        title_label.setToolTip(f"{APP_NAME} v{APP_VERSION}")
         tb.addWidget(title_label)
         tb.addStretch(1)
 
@@ -13236,12 +13324,26 @@ class MainWindow(QMainWindow):
         overlay_lay.addWidget(self.log_view)
         self.log_overlay.hide()
 
-        # 底部状态条（含组件总数，方便用户一眼掌握支持范围）
+        # 底部状态条：系统 / **可点的工作目录** / 组件总数 / 版本号。
+        # 总数按 `self.cards`（界面可见）算，不是 `self.components`：erlang 是 hidden
+        # 组件，只当 rabbitmq 的前置依赖，用户在四个 Tab 里都找不到它 —— 以前这里写 27、
+        # 搜索框右边写 /26，同一屏两个数字互相矛盾（2026-10-10 用户第一条质疑）。
+        hidden = len(self.components) - len(self.cards)
         self.status_bar = QLabel(
-            f"系统：{CURRENT_OS} ({MACHINE})   工作目录：{CONFIG_DIR}   "
-            f"组件总数：{len(self.components)} 个"
+            f"系统：{CURRENT_OS} ({MACHINE})   工作目录："
+            f'<a href="dir://{html_escape(Path(CONFIG_DIR).as_posix())}" '
+            f'style="color:#8fa3b8;text-decoration:underline">'
+            f"{html_escape(str(CONFIG_DIR))}</a>   "
+            f"组件总数：{len(self.cards)} 个"
+            + (f"（另有 {hidden} 个仅作前置依赖，不在界面显示）" if hidden > 0 else "")
+            + f"   版本：v{APP_VERSION}"
         )
         self.status_bar.setObjectName("statusBar")
+        self.status_bar.setTextFormat(Qt.RichText)
+        # 不许开 setOpenExternalLinks(True)：那会把 dir:// 丢给系统的"未知协议"处理，
+        # 用户点一下什么也不会发生。链接自己接，见 _on_status_link。
+        self.status_bar.setOpenExternalLinks(False)
+        self.status_bar.linkActivated.connect(self._on_status_link)
         outer.addWidget(self.status_bar)
 
         # 日志浮层的未读计数与自动收起定时器（QTimer 挂在窗口上，测试可注入时钟）
@@ -13466,6 +13568,19 @@ class MainWindow(QMainWindow):
             return
         height = min(300, max(160, int(host.height() * 0.45)))
         overlay.setGeometry(0, host.height() - height, host.width(), height)
+
+    def _on_status_link(self, link: str) -> None:
+        """状态条里的 `dir://…` → 用系统文件管理器打开那个目录（2026-10-10 用户要求）。
+
+        为什么值得给：工作目录 `~/.env-tools` 是用户排查问题第一眼要看的地方
+        （下载包、各组件版本目录、日志、takeover 备份都在里面）。以前那串路径是纯文本，
+        照着敲进资源管理器地址栏是个体力活。
+        """
+        if not link.startswith("dir://"):
+            return
+        target = link[len("dir://"):]
+        if not _open_in_file_manager(target):
+            self._log("warn", f"打不开工作目录 {target}：目录不存在，或系统不允许从本工具打开")
 
     def _set_log_open(self, open_: bool) -> None:
         """展开/收起日志浮层。

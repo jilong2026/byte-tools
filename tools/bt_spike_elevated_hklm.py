@@ -28,6 +28,9 @@ import sys
 import tempfile
 import time
 
+# 本脚本住在 tools/ 下：把仓库根加进 sys.path，函数里的 `import main` 才找得到
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 REG_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
 SPIKE_DIR_NAME = "bt_spike_empty_dir"
 KEY_SUBSTRINGS = ("system32", os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), ""))

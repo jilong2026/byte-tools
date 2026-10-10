@@ -2107,7 +2107,7 @@ git commit -m "feat(ui): 打开工具时认清本机运行中的组件（只读�
 ### Task 12: 真机演练 `--launch`（Windows 验收）
 
 **Files:**
-- Modify: `bt_real_machine_drill.py`（`main_drill` 现在 `:178`；参数解析在 `:26-27` ——
+- Modify: `tools/bt_real_machine_drill.py`（`main_drill` 现在 `:178`；参数解析在 `:26-27` ——
   `APPLY_FLAG = "--yes" in sys.argv` 之后立刻 `sys.argv = [sys.argv[0]]` 把参数清掉，
   所以 `--launch <key>` 必须和 `APPLY_FLAG` 一样在清 argv **之前**取走，否则永远读不到）
 - Modify: 脚本开头的用法说明（`:3-5`）
@@ -2115,12 +2115,12 @@ git commit -m "feat(ui): 打开工具时认清本机运行中的组件（只读�
 
 **Interfaces:**
 - Consumes: `SERVICE_MANAGER.start/stop/force_stop`、`ComponentCard` 之外的无 UI 路径
-- Produces: `bt_real_machine_drill.py --launch <key> [--yes]` —— **沿用本脚本既有的 `--yes` 表示"真动手"**，
+- Produces: `tools/bt_real_machine_drill.py --launch <key> [--yes]` —— **沿用本脚本既有的 `--yes` 表示"真动手"**，
   不要再造一个 `--apply`：一个脚本两套"要不要真做"的开关，迟早有人只传对一个。
 
 - [ ] **Step 1: 加失败判据（脚本内断言，不是单测）**
 
-在 `bt_real_machine_drill.py` 里新增：
+在 `tools/bt_real_machine_drill.py` 里新增：
 
 ```python
 def launch_drill(comp_key: str, apply: bool) -> int:
@@ -2172,14 +2172,14 @@ sys.argv = [sys.argv[0]]           # 别让 main.py 的 argparse/入口看到本
 
 - [ ] **Step 2: 干跑一次，确认脚本不碰进程（这一条是本任务的**通过判据**）**
 
-Run: `.venv/Scripts/python.exe bt_real_machine_drill.py --launch jenkins`
+Run: `.venv/Scripts/python.exe tools/bt_real_machine_drill.py --launch jenkins`
 Expected: 只打印 `[dry-run]`，`tasklist` 里没有 java 进程新增。
 **dry-run 必须真跑通并作为验收**；`--yes` 那一层要求本机已装 JDK + Jenkins 两个组件（会走下载解压），
 还要面对 Jenkins 首次解锁向导 —— 组件没装齐就如实报"需要用户在场验证"，**绝不把没跑的东西记成通过**。
 
 - [ ] **Step 3: 真机执行（Windows，需用户在旁边）**
 
-Run: `.venv/Scripts/python.exe bt_real_machine_drill.py --launch jenkins --yes`
+Run: `.venv/Scripts/python.exe tools/bt_real_machine_drill.py --launch jenkins --yes`
 Expected: 三行判据全过，末行 `登记残留=[]`。同时记录 spec §2.4 的三项结论：
 Jenkins `--httpPort` 是否生效、初始管理员密码文件的确切路径、Jenkins 要求的 JDK 最低大版本。
 

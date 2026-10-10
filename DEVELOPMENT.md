@@ -722,7 +722,7 @@ explorer 的环境块 1/3/6 秒后仍是 `bun-1.4.1` —— 于是用户从开�
 
 ### R3.16 端到端验收要跑真机演练脚本，单元测试不算数
 
-`bt_real_machine_drill.py` 是唯一允许碰真注册表的验收手段（默认只读体检，加 `--yes` 才切换，
+`tools/bt_real_machine_drill.py` 是唯一允许碰真注册表的验收手段（默认只读体检，加 `--yes` 才切换，
 且结束时必然还原回演练前的生效版本并逐字比对基线）。它验的是三层，缺一层都不算通过：
 
 1. **注册表真值** —— 产品写完后的持久层；
@@ -935,7 +935,7 @@ HKLM 的，主进程拿到回报后只做了复验和登记，**一声没出**�
 
 所以硬约束是三条：
 
-1. **新增或改动组件时，`path_subdir` 要跑 `bt_archive_layout_audit.py` 实测**，不许按惯例猜。
+1. **新增或改动组件时，`path_subdir` 要跑 `tools/bt_archive_layout_audit.py` 实测**，不许按惯例猜。
    手法：zip 的中央目录在文件**尾部**，用 HTTP Range 只取几 KB～几 MB 就能列出全部条目
    （JDK 一个包 190MB，不必下载）；tar.gz 是流式、无法随机读，就按预算（40MB）顺着读，
    超预算只能判 `UNKNOWN` —— **拿残缺清单判失败等于凭空造一个假 bug**。
@@ -1095,6 +1095,14 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
    （自己的基准），"运行中"必须整簇都在听；只判主口会把半死的 Nacos 报成运行中。
 9. 端口回写只允许写 `~/.env-tools/<key>-data` 下的副本；厂商官方文件在任何策略下都不被修改。
    锚不到官方默认那一行时**拒改并指名要改哪一行**，不许猜用户的改法。
+10. **磁盘上没有已安装版本时「启动」必须置灰**（2026-10-10 用户在"提示 vs 置灰"两案里选的），
+    判据就是 `resolve_launch_version(comp) is not None`，禁用原因写进 tooltip
+    （"先点「安装」，或把版本切到已装的那个"）。为什么不是"点了再提示"：
+    未安装时点启动会先弹一个**端口与风险确认框**，用户做完决定才在日志里看到"没装"——
+    那是骗他做一次无用的决定。`on_start_clicked()` 里还留一道同判据的兜底，
+    且**必须排在自动装前置依赖（JDK / Erlang）之前**，否则一个没装的组件会先白装一个 JDK。
+    用例：`CardLaunchUi.test_start_is_disabled_when_nothing_is_installed`、
+    `test_clicking_start_never_auto_installs_a_prereq_for_an_uninstalled_component`。
 
 ### R5.4 失败处理
 
@@ -1224,7 +1232,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R6.5 真机验证入口
 
-`bt_live_matrix.py --keys autoprereq`：把 `JAVA_HOME` 与 PATH 里的 java 摘掉、
+`tools/bt_live_matrix.py --keys autoprereq`：把 `JAVA_HOME` 与 PATH 里的 java 摘掉、
 屏蔽自家 JDK 目录，让判据真的报"缺 jdk"，然后走一遍下载 → 落位 → 读回 major →
 切换生效 → 确认 `launch_gate` 放行。六项全绿才算这条规则立住。
 
@@ -1263,7 +1271,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R7.4 真机验证入口
 
-`bt_live_matrix.py --keys jenkins --phase all`：装完断言
+`tools/bt_live_matrix.py --keys jenkins --phase all`：装完断言
 `<home>/jenkins.war` 存在、`detect()` 说已配置、然后 `--phase launch` 能起来。
 
 ---
@@ -1289,7 +1297,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R8.3 真机验证入口
 
-`bt_live_matrix.py --keys nginx,tomcat --phase launch`：`console_http_ok` 必须 2xx/3xx。
+`tools/bt_live_matrix.py --keys nginx,tomcat --phase launch`：`console_http_ok` 必须 2xx/3xx。
 
 ---
 
@@ -1311,7 +1319,7 @@ RabbitMQ **服务器起得来、5672/25672 都在听、日志一切正常**，�
 
 ### R9.3 真机验证入口
 
-`bt_live_matrix.py --keys rabbitmq --phase launch`：`service_probe` 必须 rc=0，
+`tools/bt_live_matrix.py --keys rabbitmq --phase launch`：`service_probe` 必须 rc=0，
 且探针要用**产品注入的那份环境**（`build_launch_plan(...).env`），
 否则会把"产品能跑"误判成"探针失败"。
 
@@ -1336,6 +1344,15 @@ RabbitMQ **服务器起得来、5672/25672 都在听、日志一切正常**，�
 
 1. **页面状态必须现算**：每次请求重新探端口，所以服务停掉后再刷新那张页会显示
    「已停止」——静态 HTML 文件做不到这一点，会变成一张永远说"成功"的假告示。
+   **这条以前只是写在规则里，代码没做到**（2026-10-10 用户报"停止组件后浏览器还能访问，
+   关掉软件才真停"才暴露）：`show_launch_page()` 把 `launch_page_html(...)` **渲染一次**
+   就把成品塞进 `_pages`，而页面服务跑在本工具进程里、又没有 `unregister` ——
+   于是那张"正在运行 · 端口 N"永久挂着，只有进程退出才消失。
+   现在 `register(key, render)` 收的是**渲染回调**，每次请求现查
+   `load_running_map()`：记录没了就 404 并明说「这个组件已经停止」，
+   首页也只列当前真出得了内容的组件。判据见
+   `bt_launch_tests.AccessPageStopsAnsweringAfterStop`（3 条，其中两条对着
+   "渲染一次"的旧写法会红）。
 2. **只监听 127.0.0.1，端口由 OS 分配**（`PAGE_SERVER_PORT = 0`）：不占用户端口、不对外网暴露。
 3. **页服务起不来不许影响启动**：`get_page_server()` 失败返回 None，调用方退化成
    "只在日志里写访问方式"，绝不能因为一个展示页把服务启动搞失败。
@@ -1351,7 +1368,7 @@ RabbitMQ **服务器起得来、5672/25672 都在听、日志一切正常**，�
 ### R10.3 真机验证入口
 
 ```
-python bt_live_matrix.py --keys nginx,tomcat,activemq,rocketmq,kafka,elasticsearch,seata,nacos,rabbitmq,jenkins --phase launch
+python tools/bt_live_matrix.py --keys nginx,tomcat,activemq,rocketmq,kafka,elasticsearch,seata,nacos,rabbitmq,jenkins --phase launch
 ```
 
 10 个组件、**63 项检查必须全绿**（2026-10-08 实测：58 → 63 项，全绿）。每个组件都有：
@@ -1362,7 +1379,7 @@ python bt_live_matrix.py --keys nginx,tomcat,activemq,rocketmq,kafka,elasticsear
 
 ---
 
-## 规则 R11：产品名是 ByteTools，但四处旧名 `byte-tools` 是承重墙，不许顺手改
+## 规则 R11：产品名是 ByteTools / 字节工具箱，但四处旧名 `byte-tools` 是承重墙，不许顺手改
 
 2026-10-10 把**产物名与文档里的产品名**从 `byte-tools` 改成 `ByteTools`：
 `byte-tools.spec` 的 `APP_NAME` → 产出 `ByteTools.exe` / `ByteTools.app` / `ByteTools`，
@@ -1371,6 +1388,19 @@ python bt_live_matrix.py --keys nginx,tomcat,activemq,rocketmq,kafka,elasticsear
 README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文件的一次性对齐**：
 任何一处漏改，下一次发版就会出现"CI 造出 `ByteTools.exe`，Gitee 同步脚本却去找
 `byte-tools.exe`"这种半截状态（`RELEASE_ARTIFACTS` 与 `DEFAULT_ARTIFACTS` 必须逐字相同）。
+
+同日第二轮：中文产品名统一成 **字节工具箱**（`main.APP_NAME`、README 标题、
+一键脚本的中文横幅、macOS 的 `CFBundleName` / `CFBundleDisplayName`）。
+改名前界面上同时存在三个名字（`字节-开发环境与工具自动安装` / `编程开发环境自动装配小工具` /
+`byte-tools`），macOS「关于」面板的版本号还常年写着 `1.0.0`。
+
+**版本号只有一个真源：`main.APP_VERSION`。** 界面状态条、标题 tooltip、
+macOS bundle 的 `CFBundleShortVersionString` / `CFBundleVersion`（spec 用正则从
+`main.py` 读，不 import —— 那是个要拉 PySide6 的 GUI 模块）全部取自它；
+`release.yml` 在**任何构建之前**有一步闸门比对 `APP_VERSION` 与被推送的 tag，
+不一致就直接红。发版动作因此是两步：改常量 → 打同名 tag。
+用例 `StatusBarFacts.test_version_shows_up_in_ui_and_matches_the_latest_tag`
+会在本地拿 `git describe --tags` 对一遍（没有 git 时 skip，不硬失败）。
 
 以下四处**保留 `byte-tools` 原样**，各自都有具体后果，不是"没改完"：
 
