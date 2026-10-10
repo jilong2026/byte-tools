@@ -789,7 +789,7 @@ class StatusBarFacts(_UsesRealWindow, unittest.TestCase):
         self.assertEqual([Path(p).as_posix() for p in calls],
                          [Path(main.CONFIG_DIR).as_posix()])
 
-    def test_version_shows_up_in_ui_and_matches_the_latest_tag(self):
+    def test_version_shows_up_in_ui_and_is_not_behind_the_latest_tag(self):
         self.assertIn(f"v{main.APP_VERSION}", self._plain(),
                       "状态条要显示版本号，用户报问题时第一眼就能对上版本")
         title = self.win.findChild(QLabel, "titleText")
@@ -804,8 +804,12 @@ class StatusBarFacts(_UsesRealWindow, unittest.TestCase):
             tag = ""
         if not tag:
             self.skipTest("拿不到 git tag，无法核对 APP_VERSION 是否落后于最新发布")
-        self.assertEqual(f"v{main.APP_VERSION}", tag,
-                         f"APP_VERSION 落后于最新发布 {tag}：发版前把 main.py 的常量一起提")
+        # 判据是**不许落后**，不是"必须相等"：正常的发版顺序是"先改常量提交 → 再打 tag"，
+        # 中间那段时间常量本来就领先一个版本。第一版我写成 assertEqual，
+        # 结果把这条正当流程判成红 —— 自己造的护栏反过来挡了发版。
+        self.assertFalse(main.version_is_newer(main.APP_VERSION, tag.lstrip("v")),
+                         f"APP_VERSION={main.APP_VERSION} 落后于最新发布 {tag}："
+                         "发版前把 main.py 的常量一起提，否则发出去的包显示的是旧版本")
 
 
 # ======================================================================

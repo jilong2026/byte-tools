@@ -105,7 +105,7 @@ APP_NAME = "字节工具箱"
 # 界面与 macOS bundle 都显示它；**发版前必须和要打的 tag 一起改**。
 # release.yml 第一步会拿 tag 比对，不一致就直接红 —— 因为发出去的 exe 上写的版本
 # 骗人，比没有版本号更糟（用户报问题时给的是 v1.1.1，实际装的是 v1.2.0 的修复）。
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"

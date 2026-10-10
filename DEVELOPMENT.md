@@ -1399,8 +1399,16 @@ macOS bundle 的 `CFBundleShortVersionString` / `CFBundleVersion`（spec 用正�
 `main.py` 读，不 import —— 那是个要拉 PySide6 的 GUI 模块）全部取自它；
 `release.yml` 在**任何构建之前**有一步闸门比对 `APP_VERSION` 与被推送的 tag，
 不一致就直接红。发版动作因此是两步：改常量 → 打同名 tag。
-用例 `StatusBarFacts.test_version_shows_up_in_ui_and_matches_the_latest_tag`
-会在本地拿 `git describe --tags` 对一遍（没有 git 时 skip，不硬失败）。
+用例 `StatusBarFacts.test_version_shows_up_in_ui_and_is_not_behind_the_latest_tag`
+会在本地拿 `git describe --tags --abbrev=0` 对一遍（没有 git 时 skip，不硬失败）。
+这条用例有两个坑，都踩过：
+
+1. **断言写成"不落后"，不能写成"相等"**。上面那个两步流程的中间态（常量已改、tag 未打）
+   用 `assertEqual` 会被自己判红，而它其实是正当提交。相等性由 `release.yml` 在打 tag 那一步兜。
+2. **`--abbrev=0` 不能和 `-n1` 同时给**。两个选项都以 `-n` 开头，git 把 `-n1` 解析成
+   `--abbrev=1`，于是同一依赖给了两次 → `fatal: Cannot deal with the same dependencies more than once`，
+   而 **stdout 是空的**。用 `subprocess` 包 git 时只看 `stdout` 会把"命令失败"读成"没有 tag"，
+   必须把 `stderr` 一起当证据。
 
 以下四处**保留 `byte-tools` 原样**，各自都有具体后果，不是"没改完"：
 
