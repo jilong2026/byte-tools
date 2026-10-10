@@ -1,6 +1,6 @@
 # 字节工具箱 ByteTools — by jilong2026
 
-A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 common developer components** such as **JDK, Python, Node.js, Maven, MySQL and Docker** — each one installed in a single click with the environment variables configured for you. **Tomcat, Nginx, Kafka, Jenkins** and 6 other services additionally get **one-click start/stop** and **direct access pages**, with URLs, usernames and passwords printed to the log automatically.
+A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 common developer components** such as **JDK, Python, Node.js, Maven, MySQL and Docker** — each one installed in a single click with the environment variables configured for you — plus **10 popular dev tools** (IDEs, a database client, a terminal, WeChat DevTools) offered as official installer downloads. **Tomcat, Nginx, Kafka, Jenkins** and 6 other services additionally get **one-click start/stop** and **direct access pages**, with URLs, usernames and passwords printed to the log automatically.
 
 > Project: **ByteTools**（中文名：字节工具箱）
 > Author: **jilong2026**
@@ -13,6 +13,7 @@ A cross-platform desktop GUI tool built with Python + PySide6. Covering **26 com
 
 - 🖥️ **Cross-platform.** Detects Windows / macOS / Linux (and x64 / arm64) at runtime and picks the correct distribution.
 - 📦 **One-click provisioning.** Preloaded with **26 built-in developer components** — the whole pipeline (download → unpack → configure) is automated. See [Supported Components](#2-supported-components) below for the full list.
+- 🧰 **Download-only dev tools.** A separate tab lists **10** GUI tools people install anyway (IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools): you can browse the official version list and download the installer **into a folder you choose** (the tool remembers the folder and can open it when the download finishes). This tool deliberately **does not** unpack them, **does not** touch environment variables, and **never runs the installer on your behalf** — licence prompts stay yours to read.
 - ▶️ **One-click launch + open console.** Components that ship their own web console no longer need a manual start command: hit **Launch** on the card and the tool brings it up, then **Open console** takes you straight to its page in the browser (**Jenkins, ActiveMQ and Nacos** today). If the default port is taken it silently moves to a free one and the UI follows the actual port; **Stop** only asks before force-killing and never does it behind your back. State is judged by **whether the port is actually listening** (for Nacos the whole cluster — main port plus its two gRPC ports — must be listening, anything less counts as half-alive), so reopening the tool recognises what is still running — and recognising never executes a start script. ✅ The feature is **verified end-to-end on Windows**: Jenkins, Nacos and ActiveMQ each completed a full download → launch → reachable console → stop → whole port cluster released → no stale record run (JDK 21 / ActiveMQ 6.3.2 / Nacos 2.3.2). Guarded by 133 offline cases plus the real-machine drill. **macOS and Linux are not yet verified on real machines.** See rule R5 in [DEVELOPMENT.md](./DEVELOPMENT.md).
 - 🇨🇳 **China mirror priority.** Since v2.0 the tool ships **11 mainland-China mirror bases** (Huawei Cloud repo / Huawei Cloud mirrors / Tsinghua TUNA / Aliyun / NJU / USTC / BFSU / Tencent Cloud / SJTUG / npmmirror / DaoCloud files) plus **3 GitHub accelerators** (ghproxy.net / gh-proxy.com / ghfast.top). Downloads try China sources first with multi-source failover — the official site is only used after all China sources fail (404 / timeout). Full Chinese logs report which source failed, which one it switched to, and which source finally served the file. Users do **not** need to manually edit URLs to enjoy China-mirror acceleration. Per-component exceptions measured on 2026-09-28: mongodb and postgresql have **no** China mirror (official site only); nacos, bun, powershell and the macOS/Linux source tarballs of git go through the GitHub accelerators (no true mirror exists); nginx ships Windows-only binaries and only the two Huawei Cloud sub-domains carry them (Tsinghua / BFSU / NJU / Aliyun / Tencent all 404); kubectl prefers the DaoCloud `files.m.daocloud.io` proxy; seata is served from the Apache distribution directory via eight China mirrors.
 - 🛡️ **Reliable downloads.** Every request carries a custom `byte-tools` User-Agent (several university mirrors return 403 for the default UA), and each finished download is checked against the declared byte count — a "fake 200" empty file from a mirror automatically triggers a switch to the next source instead of leaving a broken archive behind.
@@ -40,9 +41,11 @@ The UI groups them into **four tabs** along the top, each titled with its compon
 | Tab | Count | Rule | Components |
 |-----|-------|------|------------|
 | **开发环境** (Dev environment) | 10 | Goes on PATH, used to write / compile / package code | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7 |
-| **开发软件** (Dev services) | 4 | Runs locally as a project dependency, but this tool cannot start/stop it yet | MySQL, MongoDB, PostgreSQL, Pulsar |
+| **开发软件** (Dev services) | 6 | Runs locally as a project dependency + container / orchestration tooling | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl |
+| **开发工具** (Dev tools) | 10 | **Download-only**: the card has just a version drop-down and a Download button. The official installer goes into a folder you pick; this tool does **not** unpack it, does **not** configure environment variables and **never runs the installer for you** | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools |
 | **一键启停** (Start & stop) | 10 | The card has a Start / Stop button and it really works (membership is derived from the launch whitelist `LAUNCH_KEYS`) | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins |
-| **其它软件** (Other) | 2 | Container / orchestration periphery, not part of coding | Docker, kubectl |
+
+> CLion / WebStorm / GoLand / DataGrip / IntelliJ IDEA / PyCharm are **commercial subscription products**: this tool only offers the vendor's official download link and ships **no licence**. The tooltip on the Download button says so.
 
 > To re-assign a component, edit the single `COMPONENT_CATEGORY_OF` map in `main.py`; the tabs follow automatically.
 > The **一键启停** tab needs no entry: registering a component in the launch table (`LAUNCH_OF`) moves it there, and dropping it moves it back.
@@ -149,7 +152,7 @@ The UI groups them into **four tabs** along the top, each titled with its compon
 │  Byte Tools By jilong2026                     ★ GitHub — ▢ ×  │
 ├───────────────────────────────────────────────────────────────┤
 │  [ Search components          ]  ▦ ☰  Log                     │
-│  [ Dev Env 10 ][ Dev Tools 4 ][ One-click 10 ][ Others 2 ]    │
+│  [ Dev Env 10 ][ Dev Svcs 6 ][ Dev Tools 10 ][ Start/Stop 10 ]│
 │                                                               │
 │  ┌─ JDK (Temurin) ───────────┐ ┌─ Python ──────────────────┐  │
 │  │ ● active 17 (17, 11)      │ │ ● not configured          │  │
@@ -264,7 +267,7 @@ The working directory `~/.env-tools/` is created automatically on first launch a
     - the corresponding `XXX_HOME` variable is written and the `bin` directory is appended to `PATH`;
     - the card status is refreshed automatically — no need to click "Switch" afterwards;
     - previously installed versions of the same component are **not** deleted, so installing a second one gives you side-by-side versions. Installation repoints the environment variables at the version just installed; click **"Switch"** once more if you want the pill to state that version as the active one and this component's `PATH` entries collapsed into a single entry.
-    - if the version selected in the drop-down **is already installed on disk**, **"Install" is greyed out** and its tooltip says to uninstall first. This applies to all 26 components, so a finished install can never be overwritten by a second click; to reinstall, uninstall then install again.
+    - if the version selected in the drop-down **is already installed on disk**, **"Install" is greyed out** and its tooltip says to uninstall first. This applies to all 26 provisionable components, so a finished install can never be overwritten by a second click; to reinstall, uninstall then install again. (The 10 download-only tools show **"Download"** instead and are never greyed out that way.)
 4. Click **"Switch"** ("切换") to only write the environment variables:
     - **Multi-version components**: it makes the version selected in the drop-down the **active version** (`XXX_HOME` repointed, this component's `PATH` entries collapsed into that one entry). The button is greyed out when the selected version already is the active one, and its tooltip tells you to pick another version in the drop-down first.
     - **All other components**: it configures the highest version found among the locally extracted directories, without re-downloading (handy when you fetched the archive yourself).

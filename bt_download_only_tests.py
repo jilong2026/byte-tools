@@ -703,5 +703,52 @@ class VersionFetchers(unittest.TestCase):
                                 f"加速器只是前缀，不能改变挑中的产物：{urls}")
 
 
+class LicenseLabeling(_EnvSandbox):
+    """商业档必须把"不含授权"写在用户看得见的地方，而不是只写在注释里。
+
+    只下载型卡片没有卸载确认框，而 `data_note` 平时恰恰是靠那个框露出来的
+    —— 所以这批的说明只能挂在按钮 tooltip 上。这条用例存在的意义就是防住
+    "改了文案却没地方显示"。
+    """
+
+    def setUp(self):
+        super().setUp()
+        main.ComponentCard._detect_status = self._orig_detect
+
+    def _card(self, key):
+        comp = next(c for c in main.build_components() if c.key == key)
+        return main.ComponentCard(comp, lambda lvl, msg: None)
+
+    def test_commercial_products_are_labeled_no_license(self):
+        commercial = {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip"}
+        for key in sorted(commercial):
+            card = self._card(key)
+            visible = " ".join(filter(None, (card.btn_install.toolTip(),
+                                             card.status_label.toolTip())))
+            with self.subTest(key=key):
+                self.assertIn("不含授权", visible,
+                              f"{key} 的授权说明没出现在任何悬停可见的文案里")
+                self.assertNotIn("免费", visible,
+                                 f"{key} 是商业订阅软件，界面里不许出现「免费」")
+
+    def test_open_source_batch_says_what_the_file_is(self):
+        for key in ("vscode", "dbx", "windterm"):
+            card = self._card(key)
+            tip = card.btn_install.toolTip() or ""
+            with self.subTest(key=key):
+                self.assertTrue(tip.strip(), f"{key} 主按钮没有悬停说明")
+                self.assertNotIn("不含授权", tip,
+                                 f"{key} 是开源软件，不该挂商业授权的措辞")
+
+    def test_wechat_version_label_says_it_is_not_a_version_number(self):
+        """微信开发者工具没有可机读版本号，界面必须自己讲清楚这点。"""
+        card = self._card("wechat-devtools")
+        visible = " ".join(filter(None, (card.btn_install.toolTip(),
+                                         card.version_combo.toolTip(),
+                                         card.status_label.toolTip())))
+        self.assertIn("不是软件版本号", visible.replace(" ", ""),
+                      f"版本位其实是日期，不说明就是骗人：{visible!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -28,7 +28,7 @@
 
 > 让"新机器 → 一套完整开发环境"这件事变成点几下鼠标就搞定。
 
-支持 **26 个组件**，按分类组织如下（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 R1 规则）：
+支持 **36 个可见组件**（26 个可一键装配 + 10 个只下载的「开发工具」），按分类组织如下（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 R1 规则）：
 
 | 分类 | 组件 | 内部 key | 环境变量 | 默认版本来源 |
 |------|------|---------|---------|-------------|
@@ -193,7 +193,8 @@ byte-tools/
 │                            #   bt_archive_layout_audit（归档布局实测，见 R3.22）/ bt_spike_elevated_hklm（一次性验证）
 │                            #   都靠 `sys.path` 指向仓库根来 import main，跑法：python tools/<脚本名>
 ├── bt_multiversion_tests.py       # 离线回归测试：多版本并存与生效版本切换（见 4.9，覆盖清单与用例数以运行输出为准）
-├── bt_component_category_tests.py # 离线回归测试：组件四类分组与 Tab（11 个用例，见 R2）
+├── bt_component_category_tests.py # 离线回归测试：组件分类分组与 Tab（见 R2）
+├── bt_download_only_tests.py     # 离线回归测试：「开发工具」只下载那一类（见 R13）
 ├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
 ├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
 ├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（见 4.9，全量回归 9 套件之一）
@@ -319,7 +320,7 @@ byte-tools/
 | `multi_version` | bool | 是否允许并存多个版本并切换「生效版本」。**只有 7 个组件为 True**：jdk / python / node / go / maven / gradle / bun（真源 `MULTI_VERSION_KEYS`，`main.py:2916`）。**不在 `Component(...)` 构造处手写**：`build_components()` 末尾统一执行 `comp.multi_version = comp.key in MULTI_VERSION_KEYS`（`main.py:3409`），不在白名单就是 False。它是所有多版本分支的唯一门控（状态胶囊、绿勾、按钮启用、卸载范围），非多版本组件的行为与文案必须与改造前逐字一致（见 DEVELOPMENT.md R3.9） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
-| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 一键启停 / 其它软件）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
+| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 开发工具 / 一键启停）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
 
 方法：
 - `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`（`main.py:203`）；**这个 `<key>-<version>` 命名是多版本模型的唯一契约**，反解靠模块函数 `version_from_install_dir()`
@@ -732,14 +733,14 @@ UI 组成（自上而下，四行 + 进度条；这么切是为了塞进 300px �
 UI 组成：
 1. **窗口图标**：`setWindowIcon(QIcon("assets/byte-tools.png"))`，缺失时不报错（继续走默认 Qt 图标）
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
-3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 26 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了。
+3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 36 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了。
 搜索条右侧还挂着「▦ 网格 / ☰ 列表」与「📋 日志」两颗按钮——**它们也不放标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽
 4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分四个 Tab，Tab 外层
    `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向），**标题带组件数量**：
-   `开发环境（10）` / `开发软件（4）` / `一键启停（10）` / `其它软件（2）`（数字由 `len(comps)` 现算，不写死）；
+   `开发环境（10）` / `开发软件（6）` / `开发工具（10）` / `一键启停（10）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 26 项
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 36 项
 5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
 6. **底部状态栏**：显示当前系统信息、可点开的工作目录与 `组件：N`（N=26，界面可见数；只写数字不写句子，版本号在标题栏 chip 上不重复）
 
@@ -787,7 +788,7 @@ UI 组成：
 
 关键方法：
 - `_on_cleanup_path_clicked()` — "清理残留 PATH"入口：先用 `find_dead_tool_path_entries()` 只读预览并弹确认框，确认后 `cleanup_dead_tool_path_entries()` 删除死条目、写日志并逐卡片 `_detect_status()` 刷新
-- `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（26 个并发），计数器 `_fetch_pending` 等所有完成后再恢复按钮
+- `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（并发，150ms 错峰），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
 - `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`；**只有 `warn`/`error` 会顺带自动弹开日志浮层并累加未读条数**
 - `_card_columns()` — 当前该排几列（列表模式恒 1 列，网格模式按 `QScrollArea` **视口**净宽算，不是窗口宽度）
@@ -828,7 +829,7 @@ def main() -> int:
 | 文件 | 盯住的东西 |
 |------|-----------|
 | `bt_multiversion_tests.py` | 组件多版本与生效版本切换（规则 R3，见下文覆盖面） |
-| `bt_component_category_tests.py` | 四类分组与 Tab（R2；`EXPECTED_MEMBERSHIP` 是分类基线，另有一条用例把「一键启停」钉成 `LAUNCH_KEYS` 的派生） |
+| `bt_component_category_tests.py` | 分类分组与 Tab（R2；`EXPECTED_MEMBERSHIP` 是分类基线，另有一条用例把「一键启停」钉成 `LAUNCH_KEYS` 的派生） |
 | `bt_search_and_newcmp_tests.py` | 组件搜索匹配与新增组件的自动登记（R2.5） |
 | `bt_mirror_spec_tests.py` | R1 镜像规范（镜像基址集中在 `MIRROR_BASES`、官网末位等） |
 | `bt_refresh_versions_tests.py` | 刷新版本链路 |
@@ -947,7 +948,7 @@ Component
 | `_sort_semver_desc(vs)` | ~1626 | 语义化版本倒序排序 |
 | `_fetch_github_releases_versions(repo, prefix)` | ~2322 | R1 公共辅助：抓取 GitHub Releases 版本列表（Nacos/Seata/RabbitMQ 等复用） |
 | `_fetch_apache_versions(key)` | ~2213 | R1 公共辅助：抓取 Apache 项目版本列表（Kafka/RocketMQ/Pulsar/ActiveMQ 复用） |
-| `build_components()` | ~2486 | 构造 26 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家；powershell 无真镜像走三个 GitHub 加速器；nginx 只有 Windows 有官方 zip，且大陆仅华为云两个子域同步） |
+| `build_components()` | ~2486 | 构造 36 个组件的默认（离线）清单，全部用 `url_list_map` 走 R1 多源（实测例外：mongodb / postgresql 无国内镜像、官网单源；kubectl 大陆源仅 DaoCloud 一家；powershell 无真镜像走三个 GitHub 加速器；nginx 只有 Windows 有官方 zip，且大陆仅华为云两个子域同步） |
 | `extract_archive(archive, extract_to)` | ~3407 | 解压 zip/tar.gz/tar.xz + 单二进制 + .war 单文件 |
 | `DownloadWorker(urls, dest)` | ~2909 | R1 多源故障转移下载线程（带 `HTTP_UA` 请求头 + `DOWNLOAD_MIN_VALID_BYTES` 字节校验） |
 | `main()` | ~4783（末尾） | 程序入口 |
@@ -964,7 +965,7 @@ main()
   ├─ ensure_dir(CONFIG_DIR)
   └─ MainWindow()
        ├─ setWindowIcon(assets/byte-tools.png)
-       ├─ build_components()           # 构造 26 个组件的默认清单（全部用 url_list_map 走 R1 多源）
+       ├─ build_components()           # 构造 36 个组件的默认清单（可安装的走 R1 多源；「开发工具」按 R13 只给官方直链）
        ├─ _build_ui()                 # 构造标题栏 + 搜索条(含视图切换/日志开关) + 卡片网格 + 日志浮层 + 状态栏(组件总数=26)
        ├─ _apply_qss()                # 应用样式表
        ├─ _load_settings()             # 从 config.json 恢复上次选中版本
@@ -1451,7 +1452,7 @@ def fetch_foo_versions() -> List[ComponentVersion]:
 3. 注册到 `FETCHERS`：`"foo": fetch_foo_versions`
 4. 在 `build_components()` 末尾 `components.append(Component(key="foo", ...))`
 5. 若该组件在特定平台不支持自动下载（如 Docker 在 Windows），设 `unsupported_platform_hint="Windows 下请安装 Docker Desktop"`，对应 OS 的 `url_list_map` 返回空列表
-6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`开发环境` / `开发软件` / `其它软件`；能一键启停的组件会被 `LAUNCH_KEYS` 自动改归「一键启停」，所以这里给它们写的是「退出白名单之后回哪儿」）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
+6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`开发环境` / `开发软件` / `开发工具` / `一键启停`；能一键启停的组件会被 `LAUNCH_KEYS` 自动改归「一键启停」，所以这里给它们写的是「退出白名单之后回哪儿」）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
 7. UI 会自动在对应 Tab 下出现一张新卡片，无需改动布局代码
 
 > **R1 硬性要求**（见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.1）：新增组件的**下载 URL** 未配置 ≥2 个国内镜像地址，不予合入；确实凑不出 2 个源时（实测国内无该制品镜像，如 MongoDB / PostgreSQL 二进制包），必须在 R1.5 登记实测结论并保留官网单源，不得用猜测的镜像路径凑数。版本**索引页**不适用本要求（见 R1.7 第 4 节，镜像索引版本数残缺）。

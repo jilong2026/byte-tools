@@ -165,6 +165,11 @@ class OfficialIsLast(unittest.TestCase):
         "elasticsearch": "elastic.co", "nacos": "github.com", "rabbitmq": "github.com",
         "seata": "archive.apache.org",
         "bun": "github.com", "docker": "download.docker.com",
+        # 2026-10-10 补：这三个一直在配置里，却从没进过这张表 —— 上面那条
+        # `test_no_component_escapes_this_table` 一加上就暴露了。它们的末位其实是对的
+        # （实测 erlang/powershell 末位 github.com、nginx 末位 nginx.org），
+        # 漏的是检查，不是配置。
+        "erlang": "github.com", "powershell": "github.com", "nginx": "nginx.org",
     }
 
     def test_official_last(self):
@@ -176,6 +181,23 @@ class OfficialIsLast(unittest.TestCase):
                     self.assertIn(host, lst[-1],
                                   f"{key}/{cv.version}/{os_key} 末位应是 {host}，"
                                   f"实际 {lst[-1]}")
+
+    def test_no_component_escapes_this_table(self):
+        """新组件不许靠"表里没写 = 不用查"悄悄逃过本条。
+
+        「开发工具」那批确实不在 OFFICIAL_HOST 里：八个只有官方直链（见
+        `WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION`），
+        两个是 GitHub 产物、末位天然是 github.com。但这两组都要**点名**，
+        加组件时得来这里登记一句，而不是让检查自动跳过它。
+        """
+        github_assets = {"dbx", "windterm"}
+        accounted = (set(self.OFFICIAL_HOST)
+                     | WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION
+                     | github_assets)
+        escaped = sorted(set(COMPS) - accounted)
+        self.assertEqual(escaped, [], f"这些组件既没进官方域名表也没登记豁免：{escaped}")
+        hidden = sorted(accounted - set(COMPS))
+        self.assertEqual(hidden, [], f"表里有已不存在的组件（死键）：{hidden}")
 
 
 class UstcMustBeUsedWhereMeasured(unittest.TestCase):

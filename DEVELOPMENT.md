@@ -18,7 +18,8 @@
 ## 规则索引
 
 - [规则 R1：国内镜像优先 + 多源故障转移](#规则-r1国内镜像优先--多源故障转移)
-- [规则 R2：组件四类分组与界面 Tab](#规则-r2组件四类分组与界面-tab)
+- [规则 R2：组件分类分组与界面 Tab](#规则-r2组件分类分组与界面-tab)
+- [规则 R13：「开发工具」是只下载的一类，八个短路点少一个就污染用户机器](#规则-r13开发工具是只下载的一类八个短路点少一个就污染用户机器)
 - [规则 R3：组件多版本与生效版本切换](#规则-r3组件多版本与生效版本切换)
 - [规则 R4：一键脚本自举契约](#规则-r4一键脚本自举契约)
 - [规则 R5：组件一键启动契约](#规则-r5组件一键启动契约)
@@ -183,7 +184,8 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 
 ### R1.5 各组件镜像清单
 
-下表 26 个组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
+下表 26 个**可安装**组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
+2026-10-10 起另有 10 个「开发工具」是**只下载**的，它们的实测矩阵单独记在 R13.3（那批没有可用大陆镜像，属 R1 例外）。
 "默认清单实测"一栏给的是默认版本行里**可用大陆源的数量 / 配置的候选数量**。
 
 #### 首批 8 个组件（2026-09 由单源补齐为多源）
@@ -372,21 +374,22 @@ tmp.replace(self.dest)
 
 ---
 
-## 规则 R2：组件四类分组与界面 Tab
+## 规则 R2：组件分类分组与界面 Tab
 
 ### R2.1 规则描述
 
-26 个可见组件在界面上归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 36 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（10 / 4 / 10 / 2） |
+| 分类 | 判定标准 | 组件（10 / 6 / 10 / 10） |
 |------|----------|--------------------|
 | **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
-| **开发软件** | 本地跑起来给项目当依赖、但本工具**还不能一键启停**的服务 | mysql、mongodb、postgresql、pulsar |
+| **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | mysql、mongodb、postgresql、pulsar、docker、kubectl |
+| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools |
 | **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | jenkins、nacos、activemq、rocketmq、nginx、kafka、tomcat、elasticsearch、rabbitmq、seata |
-| **其它软件** | 不参与写代码的容器 / 编排外围 | docker、kubectl |
 
-边界争议按此顺序裁决：**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件；都不是则其它软件。
-（「一键启停」放在「其它软件」之前：它是本工具最能干活的一组，埋在倒数第二页等于藏起来。2026-10-08 用户要求。）
+边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
+（「一键启停」固定是**最后一个** Tab：它是本工具最能干活的一组，埋在中间等于藏起来。2026-10-08 用户要求它紧贴「其它软件」；2026-10-10「其它软件」被取消，护栏改写成"必须是最后一个"。）
+（2026-10-10 取消「其它软件」Tab：它只剩 docker、kubectl 两张卡，用户要求并进「开发软件」。注意 `group_components()` 给每个分类都建空列表、建 Tab 的循环**不跳过空组** —— 只挪成员而不从 `COMPONENT_CATEGORIES` 删名字，界面上会多出一个「其它软件（0）」空白页。）
 （例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；Nginx 与 Tomcat 同理，本地跑起来当 Web / 反向代理依赖，属开发软件。）
 
 ### R2.2 适用范围
@@ -416,7 +419,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 （上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（26 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（36 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -434,7 +437,7 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 - **relayout 只排可见卡片**（`chunk_visible`）：`QBoxLayout` 会给隐藏控件留位，
   留着隐藏卡片等于"搜索命中 1 个时网格出现空洞"
 - **视图切换**是搜索条上一颗 `▦ 网格 / ☰ 列表`，持久化到 `config.json` 的 `view_mode`，默认 `grid`；
-  列表模式 = 强制 1 列，卡片内部一模一样。**按钮在搜索条上，不在标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，
+  列表模式 = 强制 1 列，卡片内部一模一样。**按钮在搜索条上，不在标题栏**：标题栏已有 6 个按钮 + 3 个窗口控制，
   实测需要 ~992px，窗口才 1000 宽，再加必然把已有按钮压到裁字
 
 底部日志区已**移出 `QSplitter` 的 3:2 分配**，改成浮层（同 parent + `raise_()`，几何随 resize 跟随），
@@ -451,6 +454,7 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 - [ ] `bt_component_category_tests.py` 通过（其中 `EXPECTED_MEMBERSHIP` 是分类基线，改归类要同步改它）
 - [ ] 未新增 `if category == ...` 之类的界面特判——分组渲染只走 `group_components()`
 - [ ] README / README_EN 的四 Tab 表格与 `CODE_WIKI.md` 的 `category` 字段说明同步
+- [ ] 只下载型的还要逐条过 R13.2 的八个短路点，并按 R1 实测过每一条 URL；新组件不许靠「表里没写就不用查」逃过 `bt_mirror_spec_tests`，要在豁免表里点名登记
 
 ### R2.5 组件搜索框
 
@@ -1423,7 +1427,7 @@ README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文�
 | shell rc 标记 | `# >>> byte-tools:NAME >>>` / `# >>> byte-tools:PATH:<entry> >>>` | 老用户 `.zshrc` / `.bash_profile` 里已写入的块**再也匹配不上**，清理与幂等更新双双失效，留下永久残块 |
 | 文件与内部名 | `byte-tools.spec`、`assets/byte-tools.png/.ico/byte-tools-pt.png`、日志 `byte-tools.out`、`com.rgh.byte-tools` | 都是既有路径/标识：换名要连着搬用户数据、重生成图标引用，macOS 上换 bundle id 还会丢已授予的权限 |
 
-新增文档里提到"这个软件"时用 **ByteTools**；提到上面四类时按原样写。
+新增文档里提到"这个软件"时用 **ByteTools**；提到上面几类时按原样写。
 
 ## 规则 R12：检查更新只读、后台、自动路径失败完全静默，且绝不替换自己
 
@@ -1483,6 +1487,85 @@ README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文�
 测试不联网）：响应解析与拒绝形状、无产物 Release、数值版本比较、两时代产物挑选、
 24 小时频控、同版本只提示一次、失败静默位、加速器兜底、隐私线、
 chip 初始文字、自动失败不写日志 / 手动失败要回答。
+
+---
+
+## 规则 R13：「开发工具」是只下载的一类，八个短路点少一个就污染用户机器
+
+### R13.1 为什么单独立一条规则
+
+用户要的是别家工具箱那种「常见开发软件」页：IDEA / PyCharm / CLion / Navicat / Xshell / 微信开发者工具 / HBuilderX…
+本工具原有的整条链路是为**可解压、靠环境变量生效**的组件设计的：下载 → 解压到 `~/.env-tools/<key>/<key>-<ver>`
+→ 写 `XXX_HOME` + `PATH` → 下拉框绿勾 → 切换生效版本 → 卸载。GUI 软件走这条链的每一环都是错的：
+`.exe` 解压不出可用程序，写 PATH 没有意义，"生效版本切换"更无从谈起。
+
+结论是**不改造老链路，而是加一类**：`Component.download_only`。它只干两件事——列版本、把官方安装包下到用户挑的目录。
+
+### R13.2 硬约束（缺一条就是 bug）
+
+1. **绝不代跑安装器**。`installer_mode` 那条路（Miniconda 在用）会静默执行安装程序，
+   而 JetBrains / 微信 / Apipost 的安装器第一步就是 EULA —— 静默跑等于**我们替用户点了同意**。
+   只下载型组件的收尾最多是"要打开所在文件夹吗"，安装由用户自己双击。
+2. **八个短路点**，逐条对应一个会被污染的地方：
+   | 位置 | 不短路的后果 |
+   |---|---|
+   | `multi_version = not download_only`（`build_components` 末尾） | 长出「可多版本」角标（角标条件就是它） |
+   | 卡片不创建 `btn_configure` / `btn_uninstall` 节点 | 给用户两个点了会写注册表的按钮 |
+   | `_sync_action_buttons` 首行 return | 访问不存在的按钮 + 按"装没装"算启用条件（要扫盘） |
+   | `_detect_status_impl` 首行 return | 建卡即 `installed_versions` → `installed_dirs` 扫 `~/.env-tools/<key>` |
+   | `_reload_combo_items` 里"默认选中已装版本"那次扫描 | **计划里漏了这条**，是用例抓出来的：建卡时照样扫盘 |
+   | `_combo_version_list` 只返回官方清单 | 合成"磁盘已装"的伪条目 |
+   | `_refresh_installed_marks` 首行 return | 下拉框挂绿勾，用户以为已安装 |
+   | 槽位用 `on_download_clicked` 而不是 `on_install_clicked` | 下游 `install_downloaded → _configure_after_extract → apply_active_version → _configure_env` 每步都写环境（`_configure_env` 连 `env_var=None` 都会 append PATH） |
+3. **下载要校验文件头魔数**。`DownloadWorker` 的 `expect_magic` 默认空（26 个老组件行为逐字不变），
+   只下载型必须传 `PK` / `MZ`。理由不是洁癖：实测 `mirrors.huaweicloud.com/jetbrains/…` 回
+   **200 + 12 KB HTML**，这个体量轻松越过 `DOWNLOAD_MIN_VALID_BYTES`(4096) 那道字节数下限，
+   只比字节数会判它成功，用户拿到的是后缀写着 `.exe`、内容是网页的文件。
+4. **落盘不许覆盖同名文件**（补 ` (2)`），**目录记在 `config.json` 的 `download_dir`**
+   （读-改-写，整体覆盖会连带清掉 `active` / `selections` / `takeover`），记录被删则安静回落 `~/Downloads`。
+5. **商业档必须把"不含授权"写在看得见处**。只下载卡片没有卸载确认框，而 `data_note` 平时恰恰是靠那个框露出来的
+   —— 所以这批的说明挂在主按钮 tooltip 上，有专门用例钉住（`test_commercial_products_are_labeled_no_license`）。
+6. **版本号一律取接口给的 link，不按文件名规律拼**。JetBrains 把 Community 并进主线后
+   `IIU` 的文件叫 `idea-2026.2.3.exe`（不再带 IC），而 `IIC` 这个码最新只停在 2025.3；
+   产品码也要查官方清单（CLion 是 `CL`，不是猜的 `CLW`）。
+7. **抓取器失败一律抛异常，不许返回空表**：返回空会让下拉框被灌成空的，
+   用户看到的是"点了刷新版本，版本反而没了"。
+8. **遍历全组件的老断言一律按能力位改判据，不加豁免表**：
+   `multi_version == not download_only`、角标存在 ⟺ `multi_version`、
+   归档布局审计的豁免只能由能力位决定（**不许**把这些 key 写进 `EXPECTED_WIN_SUBDIR`，那等于谎称实测过归档布局）。
+
+### R13.3 实测矩阵（2026-10-10，`User-Agent: byte-tools`）
+
+| 端点 | 结果 |
+|---|---|
+| `data.services.jetbrains.com/products/releases?code=IIU&type=release` | 200；**不带 gzip 1 MB / 27–44 秒，带 gzip 700 KB–1.1 MB / 2.0–4.8 秒**（`requests` 默认发 `Accept-Encoding: gzip`，所以产品路径天然吃快的）；`items=` / `platform=` 参数**被忽略**，多码合并请求要 2.7 MB / >90 秒反而更慢 |
+| `download.jetbrains.com/{idea,python,cpp,webstorm,go,datagrip}/*.exe` | range → 206，魔数 `MZ`，741–2938 KB/s；单包 **858 MB – 1.74 GB** |
+| `update.code.visualstudio.com/api/releases/stable` | 200，稳定版号数组 |
+| `update.code.visualstudio.com/<ver>/win32-x64-archive/stable` | 206 + `PK`，约 3.9 MB/s（便携 zip） |
+| `servicewechat.com/wxa-dev-logic/download_redirect?type=x64&from=mpwiki` | 200，`Content-Length 190,935,184`，`MZ`；**无可机读版本号**，只有 `Last-Modified` |
+| `api.github.com/repos/{t8y2/dbx,kingToolbox/WindTerm}/releases` | 200，都有 x64 便携 zip（DBX 38.6 MB / WindTerm 32.7 MB），另有 `.sha256` / `.sig` 旁证文件与 arm 包 |
+| `github.com/.../releases/download/...`（裸地址） | 本机 **http=000 连不上** |
+| `gh-proxy.com/https://github.com/...` | 206 + `PK` ✓；**当天实测 116–225 KB/s，而 2026-09-29 同一加速器实测约 9 MB/s** ⇒ 吞吐每天浮动，文档与注释里不写死数字 |
+| `mirrors.huaweicloud.com/jetbrains/…` | **200 + 12 KB HTML，假源** |
+| `mirrors.nju.edu.cn/jetbrains/…` | 404 |
+
+⇒ JetBrains / VS Code / 微信这批**只有官方直链**，与 R1「镜像优先、官网末位」相反，是实测例外，
+在 `bt_mirror_spec_tests.OFFICIAL_ONLY_EXCEPTION` 里登记；那条用例断的是"大陆源恰好 0 个"而不是跳过，
+以后有人挂镜像会红，逼他带实测来改表。
+
+### R13.4 点名要过但没进表的（别当成漏加）
+
+| 候选 | 为什么没进 |
+|---|---|
+| Navicat、Xshell、Xftp | 商业授权 / 仅限个人免费使用，官方直链指向试用包，等于我们替厂商发试用版 |
+| JetBrains Ultimate | 同上（主线已含在 `idea` / `pycharm` 里，授权由用户自己解决） |
+| Visual Studio | bootstrapper 要联网选 workload，体积与失败率都不划算 |
+| Xcode | macOS 专属，且本平台支持还没定 |
+| HBuilderX、Apipost、Apifox | 下载页全 JS 渲染，拿不到可实测的官方直链（探过的候选路径 403 / 404 / 跳首页） |
+| Lithe | 官方仓库 `1lck/Lithe-IDEA` 经 API 已 404，新 `Lithe-IDEA/Lithe-IDEA` 建于 2026-10-09、0 个 release |
+
+补进来的前提是先按 R1 实测，然后"分类表一行 + `_DEVTOOLS` 一条 + 必要时注册 fetcher"，
+并删掉 `bt_download_only_tests.DEFERRED_KEYS` 里对应那项。
 
 ---
 
