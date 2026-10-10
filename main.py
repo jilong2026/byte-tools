@@ -3653,9 +3653,10 @@ _DEVTOOLS: tuple = (
      (("2.7.0", "https://github.com/kingToolbox/WindTerm/releases/download/2.7.0/"
                 "WindTerm_2.7.0_Windows_Portable_x86_64.zip"),)),
     ("wechat-devtools", "微信开发者工具", "exe",
-     "官方稳定版直链。**微信不提供可机读的版本号**，所以下面这个「2026.09.30」是实测当天"
-     "服务端文件的 Last-Modified 日期，不是软件版本号；装完以「关于」面板里的为准。",
-     (("2026.09.30",
+     "官方稳定版直链。**微信不提供可机读的版本号**，所以版本位写的「2026.09」是实测当天"
+     "服务端文件的 Last-Modified 年月，不是软件版本号；装完以「关于」面板里的为准。"
+     "（不写成 2026.09.30 是因为版本框只有约 64px 放文本，10 字符会被滚掉第一个字。）",
+     (("2026.09",
        "https://servicewechat.com/wxa-dev-logic/download_redirect?type=x64&from=mpwiki"),)),
 )
 
