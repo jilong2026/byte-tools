@@ -1123,6 +1123,38 @@ def _probe_version(exe: str, args: List[str]) -> str:
         return ""
 
 
+def _qthread_state(worker) -> str:
+    """安全地问一个 QThread 现在的状态：`running` / `finished` / `idle` / `dead`。
+
+    `dead` 是这一层最容易漏掉的一种：worker 连了 `finished → deleteLater` 之后，
+    Python 侧的引用照旧留着，但 C++ 对象已经被事件循环删掉了，这时调**任何**方法
+    抛的都是 `RuntimeError: Internal C++ object … already deleted`，不是返回 False。
+    未捕获的这种异常若发生在 closeEvent 里（2026-10-11 真机复现过），会把后半段
+    "等在途抓取线程收尾"整段跳过，剩下的线程在窗口析构时还在跑 = 进程级 abort
+    （Windows 退出码 0xC0000409，没有 traceback）。
+    """
+    if worker is None:
+        return "dead"
+    try:
+        if worker.isRunning():
+            return "running"
+        if worker.isFinished():
+            return "finished"
+        return "idle"
+    except RuntimeError:
+        return "dead"
+
+
+def _qthread_wait(worker, ms: int) -> bool:
+    """等线程收尾；C++ 对象已经没了的直接当成等过了（否则收尾流程会被一条死引用中断）。"""
+    if worker is None:
+        return True
+    try:
+        return bool(worker.wait(ms))
+    except RuntimeError:
+        return True
+
+
 class VersionProbeWorker(QThread):
     """在后台线程跑一次版本探测。
 
@@ -5688,6 +5720,25 @@ def uninstall_confirm_text(comp: Component) -> str:
 _MAGIC_BY_EXT: Dict[str, bytes] = {"zip": b"PK", "exe": b"MZ", "msi": b"\xd0\xcf"}
 
 
+def _safe_download_name(name: object, *, fallback: str = "download.bin") -> str:
+    """把远端给的产物名削成一个**纯文件名**。
+
+    `Path(目录) / 名字` 在名字里带绝对路径或 `..` 时会直接丢掉目录：
+    实测 `Path('C:/Users/x/Downloads') / 'C:\\\\Windows\\\\a.exe'` → `C:\\Windows\\a.exe`，
+    `'/etc/passwd'` → `C:\\etc\\passwd`。产物名来自公开的 release API，属于外部输入，
+    下载完成时是 `tmp.replace(dest)`，所以这个洞等于"往任意路径写文件"。
+    """
+    raw = str(name or "").strip().replace("\\", "/")
+    tail = raw.rsplit("/", 1)[-1].strip()
+    if not tail or tail in (".", ".."):
+        return fallback
+    # Windows 不允许的字符一律去掉（远端名字里出现 `:*?"<>|` 会让 open 直接抛错）
+    for ch in ':*?"<>|':
+        tail = tail.replace(ch, "")
+    tail = tail.strip()
+    return tail or fallback
+
+
 def _unique_download_path(target: Path) -> Path:
     """目标文件已存在时补 ` (2)`、` (3)`… 直到不冲突。
 
@@ -5741,6 +5792,7 @@ class DownloadWorker(QThread):
         self.dest = dest
         self.expect_magic = bytes(expect_magic or b"")
         self._cancel = False
+        self._cancelled = False          # 用户取消过（终态由 run() 统一发一次）
         # 记录每个源的失败原因，最终汇总输出
         self._failures: List[str] = []
 
@@ -5749,12 +5801,22 @@ class DownloadWorker(QThread):
         self._cancel = True
 
     def run(self) -> None:  # noqa: D401
-        """QThread 入口：按 urls 顺序尝试下载。"""
-        ensure_dir(self.dest.parent)
+        """QThread 入口：按 urls 顺序尝试下载。
+
+        两个约定：**终态信号恰好发一次**，且**任何异常都不许逃出 run()**。
+        QThread 里抛异常在 Windows 上是进程级 abort（0xC0000409 / 退出码 127，
+        一行 traceback 都没有），而且上层收不到 finished_fail 会永远停在"下载中"。
+        """
+        try:
+            ensure_dir(self.dest.parent)
+        except OSError as exc:
+            # 父目录被同名文件挡路、只读盘、OneDrive 占位、盘满 —— 都到不了下载那一步
+            self.log.emit("error", f"建不出下载目录 {self.dest.parent}：{exc}")
+            self.finished_fail.emit(f"下载目录不可用：{exc}")
+            return
         for idx, url in enumerate(self.urls, 1):
             if self._cancel:
-                self._emit_cancel()
-                return
+                break
             try:
                 self.log.emit("info",
                     f"开始下载（第 {idx}/{len(self.urls)} 个源）：{url}")
@@ -5771,6 +5833,9 @@ class DownloadWorker(QThread):
                     self.log.emit("error",
                         f"第 {idx} 个源（最后一个）下载失败：{exc}")
         # 所有源都失败 → 汇总中文日志 + 抛错
+        if self._cancelled:
+            self._emit_cancel()          # 取消只在这里发一次，别和"源不可用"混在一起
+            return
         summary = "所有镜像与官网地址均下载失败，已尝试：\n" + "\n".join(self._failures)
         self.log.emit("error", summary)
         self.finished_fail.emit("所有下载源均不可用")
@@ -5798,7 +5863,9 @@ class DownloadWorker(QThread):
                         self.log.emit("warn", "已取消下载。")
                         f.close()
                         tmp.unlink(missing_ok=True)
-                        self._emit_cancel()
+                        # 只置标志、不发信号：终态由 run() 统一发一次，
+                        # 否则上层会先弹一次"用户取消"再弹一次"所有源均不可用"
+                        self._cancelled = True
                         return False
                     if chunk:
                         f.write(chunk)
@@ -11745,6 +11812,9 @@ class ComponentCard(QFrame):
         self._mv_installed_set: set = set()
         self._mv_buttons_ready: bool = False
         self._version_worker: Optional["VersionProbeWorker"] = None
+        # 本卡片起过的、还没跑完的探测线程（含被顶替掉的那些）。closeEvent 只认得
+        # _version_worker 那一条，被顶替的旧线程没人等就是进程级 abort。
+        self._probe_workers: List["VersionProbeWorker"] = []
         # 卸载按钮是否被"运行中"锁过：只有锁过才允许在停止后解冻。
         # 未运行时把 btn_uninstall 一律设成可用会顶掉 _detect_status 按"选中版本
         # 装没装"算出的状态，给出一张未安装也能点卸载的卡片（做不到的承诺）。
@@ -12917,9 +12987,18 @@ class ComponentCard(QFrame):
         QTimer.singleShot(0, lambda: self._start_version_probe(exe_path))
 
     def _start_version_probe(self, exe_path: str) -> None:
+        # 关窗途中事件循环还会转（closeEvent 里那些 wait 就是机会），残留的 singleShot
+        # 这时再起一条线程 = 窗口析构时它还在跑 = 进程 abort。_launch_fetch_worker 早有这道闸。
+        if getattr(self.window(), "_closing", False):
+            return
         worker = VersionProbeWorker(exe_path, list(self.component.version_args), self)
         worker.done.connect(lambda text, w=worker: self._on_version_probed(text, w))
         worker.finished.connect(worker.deleteLater)
+        # 顶替掉的旧线程不能没人等：`_version_worker` 只代表最新那一条，
+        # 而三处 `_version_worker = None` 和这里的重赋值都会把在跑的旧线程变成孤儿。
+        self._probe_workers = [w for w in self._probe_workers
+                               if _qthread_state(w) == "running"]
+        self._probe_workers.append(worker)
         self._version_worker = worker
         worker.start()
 
@@ -13525,7 +13604,15 @@ class ComponentCard(QFrame):
         self.btn_cancel.setEnabled(False)
         hint = ("双击这个文件自己装，安装目录由你在安装向导里选。" if art.fmt == "exe"
                 else "解压到任意目录即可使用，不需要安装。")
-        self._log("ok", f"已下载到 {path}（{human_size(path.stat().st_size)}，"
+        try:
+            size_txt = human_size(path.stat().st_size)
+        except OSError as exc:
+            # 下载线程说成功了却读不到文件（被杀软秒删、目录被移动）：
+            # 记一条错误就返回，别在 Qt 槽里抛出去，也别弹一个指向空气的对话框。
+            self._log("error", f"下载报告成功，但读不到文件 {path}：{exc}")
+            self._sync_action_buttons()
+            return
+        self._log("ok", f"已下载到 {path}（{size_txt}，"
                         f"{art.label}）。本工具**不解压、不安装、不配置环境变量** —— {hint}")
         answer = QMessageBox.question(
             self, "下载完成",
@@ -14199,6 +14286,8 @@ class MainWindow(QMainWindow):
         self.btn_version.clicked.connect(self._on_version_clicked)
         self._chip_state = "idle"
         self._chip_latest = ""
+        self._chip_folder: Optional[Path] = None
+        self._chip_pct: Optional[int] = None
         self._update_res: dict = {}
         tb.addWidget(self.btn_version)
         tb.addStretch(1)
@@ -14707,7 +14796,7 @@ class MainWindow(QMainWindow):
     def _start_update_check(self, auto: bool) -> None:
         """查一次更新。auto=True 是启动后的静默检查，False 是用户点了版本号。"""
         worker = getattr(self, "_update_worker", None)
-        if worker is not None and worker.isRunning():
+        if _qthread_state(worker) == "running":
             if not auto:
                 self._append_log("info", "已经在检查更新了，稍等一下。")
             return
@@ -14757,8 +14846,8 @@ class MainWindow(QMainWindow):
                             f"{latest.get('page_url') or GITHUB_URL}"
                             "（点左上角那颗 ↓ 直接下载到默认目录）")
         if not auto and not isinstance(res.get("asset"), dict):
-            # 没有本平台可下的产物时才弹窗 —— 有产物的话点 chip 就下，不该多问一句。
-            self._offer_update_download(res)
+            # 没有本平台可下的产物时才弹窗；有产物的话点 chip 就下，不该多问一句。
+            self._notify_update_without_asset(res)
 
     def _set_chip_state(self, state: str, *, new_version: str = "",
                         pct=None, reason: str = "", dest=None) -> None:
@@ -14772,14 +14861,24 @@ class MainWindow(QMainWindow):
         if chip is None:
             return
         self._chip_state = state
-        folder = Path(dest) if dest else load_download_dir()
+        # 目录只在"要点下载之前"那次读一次（tooltip 要承诺落点），进度回调按 64 KB 一次，
+        # 每次都读 config.json 的话一个 50 MB 的包就是约 800 次磁盘往返，全在 GUI 线程上。
+        if dest is not None:
+            self._chip_folder = Path(dest)
+        elif state == "update" or not getattr(self, "_chip_folder", None):
+            self._chip_folder = load_download_dir()
+        folder = self._chip_folder
+        if isinstance(pct, int) and not isinstance(pct, bool):
+            self._chip_pct = max(0, min(int(pct), 99))
+        elif state != "downloading":
+            self._chip_pct = None        # 下载中不传 pct = 沿用上一次，别把进度打回"…"
         if state == "update":
             text = f"↓ v{new_version}"
             tip = (f"发现新版本 v{new_version}（当前 v{APP_VERSION}）\n"
                    f"点击直接下载到：{folder}\n"
                    "下载不会改动、也不会替换正在运行的本程序")
         elif state == "downloading":
-            text = f"↓ {pct}%" if isinstance(pct, int) else "↓ …"
+            text = f"↓ {self._chip_pct}%" if self._chip_pct is not None else "↓ …"
             tip = (f"正在下载 v{new_version or self._chip_latest or '新版本'}"
                    f"（进度只写百分比，速度和字节数在日志里）\n保存到：{folder}")
         elif state == "latest":
@@ -14809,9 +14908,7 @@ class MainWindow(QMainWindow):
         """点 chip：有新版就直接下，正在下就别开第二路，其余情况都是"再查一次"。"""
         state = getattr(self, "_chip_state", "idle")
         worker = getattr(self, "_update_dl", None)
-        if state == "downloading" or (worker is not None
-                                      and getattr(worker, "isRunning", None)
-                                      and worker.isRunning()):
+        if state == "downloading" or _qthread_state(worker) == "running":
             self._append_log("info", "新版本正在下载中，进度就在左上角这颗 ↓ 上。")
             self._set_chip_state("downloading")
             return
@@ -14839,7 +14936,7 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._append_log("error", f"建不出下载目录 {folder}：{exc}")
             return False
-        dest = _unique_download_path(folder / str(asset.get("name") or "ByteTools.exe"))
+        dest = _unique_download_path(folder / _safe_download_name(asset.get("name")))
         urls = update_download_urls(asset, str(latest.get("tag") or ""))
         size = int(asset.get("size") or 0)
         magic = _MAGIC_BY_EXT.get(dest.suffix.lstrip(".").lower(), b"")
@@ -14873,20 +14970,16 @@ class MainWindow(QMainWindow):
         self._append_log("error", f"[更新] 下载失败：{message}")
         self._set_chip_state("update", new_version=version)
 
-    def _offer_update_download(self, res) -> None:
-        """**没有本平台产物时**才走的提示路径。
+    def _notify_update_without_asset(self, res) -> None:
+        """**这个 Release 里没有本平台可下的产物**时唯一的说法。
 
-        有产物的情况不再弹这个框：点 chip 直接下（见 `_begin_app_update_download`），
-        弹一次"要下载吗"再弹一次"存到哪"，对标题栏上的一次点击来说是两道多余的坎。
+        有产物的路径不经过这里：点 chip 直接下（`_begin_app_update_download`），
+        弹一次"要下载吗"再弹一次"存到哪"，对标题栏上的一次点击是两道多余的坎。
         """
         res = res if isinstance(res, dict) else {}
         latest = res.get("latest") or {}
-        asset = res.get("asset")
         page = str(latest.get("page_url") or GITHUB_URL)
         version = str(latest.get("version") or "")
-        if isinstance(asset, dict) and asset.get("browser_download_url"):
-            self._begin_app_update_download(res)
-            return
         QMessageBox.information(
             self, "发现新版本",
             f"v{version} 已发布，但这个 Release 里找不到本平台可用的安装包。\n"
@@ -15764,10 +15857,12 @@ class MainWindow(QMainWindow):
         """从各官网并发拉取版本列表。可反复调用（刷新）。"""
         if self._closing:
             return
-        # 若有 worker 仍在运行、或已排期但尚未启动（错峰未触发），等它跑完再触发新一轮。
-        # 注意：错峰未启动的线程 isRunning()=False 但 isFinished()=False，必须用 isFinished() 判定，
-        # 否则会被下面 cleanup 提前 deleteLater 导致定时器回调访问已释放对象。
-        busy = [w for w in self._fetch_workers if w.isRunning() or not w.isFinished()]
+        # 若有 worker 仍在运行、或已排期但尚未启动（错峰未触发），等它跑完再触发新一轮：
+        # 未启动的线程 isRunning()=False 但也没跑完，必须一并算"忙"，否则会被下面
+        # cleanup 提前 deleteLater，定时器回调再来访问就是已释放对象。
+        # 判定走 _qthread_state 而不是裸调 isRunning()：引用可能还留着但 C++ 对象已经被
+        # 删掉了，这时裸调抛的是 RuntimeError，会把整条"刷新版本"打断。
+        busy = [w for w in self._fetch_workers if _qthread_state(w) in ("running", "idle")]
         if busy:
             self._append_log("warn", f"仍有 {len(busy)} 个抓取任务在进行，请稍候…")
             return
@@ -15797,7 +15892,7 @@ class MainWindow(QMainWindow):
 
     def _launch_fetch_worker(self, worker: VersionFetchWorker) -> None:
         """错峰定时器到点后的启动入口；关窗途中则放弃启动。"""
-        if self._closing or worker.isRunning() or worker.isFinished():
+        if self._closing or _qthread_state(worker) != "idle":
             return
         worker.start()
 
@@ -15941,6 +16036,50 @@ class MainWindow(QMainWindow):
             w.wait(2000)
         return len(workers)
 
+    def _drain_background_workers(self, budget_ms: int = 6000) -> int:
+        """关窗前收掉所有还可能在跑的后台线程，返回处理掉几条。
+
+        QThread 运行时被析构 = Windows 进程级 abort（0xC0000409，退出码 127，
+        没有 traceback）—— 这仓库为同类问题已经写过 R3.14 / R14.1。要等的成员一共六类：
+        应用更新下载（`_update_dl`）、更新检查（`_update_worker`）、卡片的下载
+        （`card.worker`，含安装与"只下载"两条）、前置下载（`card.prereq_worker`）、
+        外部版本探测（`card._external_worker`）、版本探测（`card._version_worker`
+        以及**被它顶替掉的历史** `card._probe_workers`）。用户点完"下载新版本"
+        再在 49 MB 中途关窗，就是必现场景。
+
+        状态判定一律走 `_qthread_state`：这些 worker 大多连了 `finished → deleteLater`，
+        引用还挂在成员上但 C++ 对象早被删了，裸调 `isRunning()` 抛的 RuntimeError 会把
+        整个收尾打断 —— 2026-10-11 那个 127 就是这么来的（closeEvent 后半段没执行，
+        18 条抓取线程在窗口析构时还活着）。
+
+        先统一 cancel 再统一 wait：反过来的话第二个 worker 要白等第一个的超时。
+        """
+        cands: list = []
+        for attr in ("_update_dl", "_update_worker"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                cands.append(w)
+        for card in getattr(self, "cards", []):
+            for attr in ("worker", "prereq_worker", "_external_worker", "_version_worker"):
+                w = getattr(card, attr, None)
+                if w is not None:
+                    cands.append(w)
+            cands.extend(getattr(card, "_probe_workers", ()))
+        running: list = []
+        seen: set = set()
+        for w in cands:                      # 当前探测线程同时挂在两个成员上，按 id 去重
+            if id(w) in seen or _qthread_state(w) != "running":
+                continue
+            seen.add(id(w))
+            running.append(w)
+        for w in running:
+            cancel = getattr(w, "cancel", None)
+            if cancel is not None:
+                cancel()
+        for w in running:
+            _qthread_wait(w, budget_ms)
+        return len(running)
+
     def closeEvent(self, event) -> None:
         # 关窗前先让在跑的 LaunchWorker 体面收尾（cancel+wait 的顺序理由见 _cancel_launch_workers）。
         self._cancel_launch_workers()
@@ -15949,22 +16088,18 @@ class MainWindow(QMainWindow):
         # 而版本抓取是启动即触发的，所以关窗必须等这些线程收尾。
         self._closing = True
         FETCH_ABORT.set()
+        # 下载/检查/外部探测/版本探测这几类线程统一在这里等（含被顶替的探测历史线程）
+        self._drain_background_workers()
         self._save_settings()
-        # 版本探测线程还在跑就退出会触发 "QThread destroyed while running"，
-        # 探测本身有 4 秒超时，这里等它收尾再关窗。
-        for card in self.cards:
-            worker = card._version_worker
-            if worker is not None and worker.isRunning():
-                worker.wait(5000)
         # 抓取线程：_get / _github_api_json 已能协作取消，剩下的是一个在途请求的超时
         # （最长 DOWNLOAD_PROBE_TIMEOUT*2 = 10s），给 FETCH_EXIT_WAIT 秒总预算，逐个等剩余时间。
         import time as _time
         deadline = _time.monotonic() + FETCH_EXIT_WAIT
         for w in self._fetch_workers:
-            if not w.isRunning():
+            if _qthread_state(w) != "running":
                 continue
             remain = max(0.0, deadline - _time.monotonic())
-            w.wait(int(remain * 1000))
+            _qthread_wait(w, int(remain * 1000))
         super().closeEvent(event)
 
 

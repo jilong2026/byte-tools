@@ -2253,6 +2253,55 @@ class MainWindowAdopt(unittest.TestCase):
         self.assertIn("self._cancel_launch_workers()", inspect.getsource(main.MainWindow.closeEvent),
                       "closeEvent 没接关窗取消在跑 worker 的步骤")
 
+    def test_close_waits_for_every_download_check_and_probe_thread(self):
+        """关窗时还在跑的 DownloadWorker / UpdateCheckWorker / 外部版本探测线程被析构，
+        就是 Windows 进程级 abort（0xC0000409，退出码 127，没有 traceback）。
+
+        closeEvent 原先只等 LaunchWorker、`card._version_worker` 与 `_fetch_workers`；
+        而"点版本号下载新包"和"展开系统里检测到的版本"这两条都会起**没被等**的线程，
+        用户在 49 MB 下载中途关窗就会闪退。这里用替身测收口函数，不构造真窗口。
+        """
+        logs = []
+        win = self.bare_win(logs)
+
+        class W:
+            def __init__(self, name, cancellable=True):
+                self.name, self.cancelled, self.waited = name, False, []
+                self._cancellable = cancellable
+
+            def isRunning(self):
+                return True
+
+            def cancel(self):
+                self.cancelled = True
+
+            def wait(self, ms):
+                self.waited.append(ms)
+                return True
+
+        dl, upd, ext, pre = W("dl"), W("upd"), W("ext"), W("pre")
+        win._update_dl = dl
+        win._update_worker = upd
+        card = type("Card", (), {})()
+        card._version_worker = None       # 这条 closeEvent 已经单独等了，不该被重复收
+        card.worker = ext
+        card.prereq_worker = pre
+        win.cards = [card]
+
+        drained = win._drain_background_workers()
+        self.assertEqual(drained, 4, f"四个后台线程都该被收掉：{drained}")
+        self.assertTrue(dl.cancelled and ext.cancelled and pre.cancelled,
+                        "下载类线程必须先 cancel 再 wait，否则白等一个完整超时")
+        self.assertTrue(dl.waited and upd.waited, "wait 没调用 = 线程仍在跑就被析构")
+        self.assertEqual([lvl for lvl, _m in logs], [], "正常收尾不该往日志里写东西")
+
+    def test_close_event_wires_the_background_drain(self):
+        """接线守护：删掉这一行的话，行为用别的用例看不出来（同 `_cancel_launch_workers` 的规矩）。"""
+        import inspect
+        src = inspect.getsource(main.MainWindow.closeEvent)
+        self.assertIn("self._drain_background_workers()", src,
+                      "closeEvent 没接「等下载/检查/探测线程收尾」这一步")
+
     def test_adopt_running_never_blocks_startup_when_reconcile_fails(self):
         """reconcile 清僵尸会回写 running.json：目录只读/被锁/磁盘满时，异常若从
         _adopt_running 抛出就是从入口抛出，工具直接打不开。识别失败只该留下一条 warn。"""
@@ -2265,6 +2314,153 @@ class MainWindowAdopt(unittest.TestCase):
         self.bare_win(logs)._adopt_running()   # 兜底没生效时异常会在这儿把用例打红
         self.assertEqual([lvl for lvl, _m in logs], ["warn"], "失败只该记一条中文 warn")
         self.assertIn("权限不足", logs[0][1])
+
+
+class DeadWorkerDrainGuards(unittest.TestCase):
+    """QThread 连了 `finished → deleteLater` 之后，Python 侧那个引用照旧留着，但 C++ 对象已经没了；
+    这时调**任何**方法抛的都是 `RuntimeError: Internal C++ object … already deleted`，
+    不是返回 False。
+
+    2026-10-11 本机最小复现（`.probe_orphan_repro.py`，两种模式都稳定退出 127）抓到的是这条链：
+    `closeEvent` 里 `card._version_worker.isRunning()` 正好撞上已析构的探测线程 →
+    未捕获的异常把 closeEvent 后半段（等在途 `VersionFetchWorker` 收尾）整段跳过 →
+    窗口析构时那 18 条线程还在跑 → 进程级 abort（Windows 退出码 0xC0000409）。
+    同一句还咬第二处：检查更新跑完一轮后 `_update_worker` 变死引用，再点版本号就直接抛。
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+
+    def _dead_worker(self):
+        import shiboken6
+
+        class _T(main.QThread):
+            def run(self):
+                pass
+
+        t = _T()
+        t.start()
+        t.wait(2000)
+        # 等价于 deleteLater 已被事件循环处理完：C++ 对象没了，Python 引用还在
+        shiboken6.delete(t)
+        return t
+
+    def test_state_helper_never_raises_on_a_dead_worker(self):
+        t = self._dead_worker()
+        with self.assertRaises(RuntimeError):        # 前提：裸调用确实抛，不是返回 False
+            t.isRunning()
+        self.assertEqual(main._qthread_state(t), "dead", "已析构的线程必须报 dead，不许抛")
+        self.assertEqual(main._qthread_state(None), "dead")
+        self.assertTrue(main._qthread_wait(t, 100),
+                        "对象都已经没了 = 没什么要等的，按等到处理")
+
+    def test_state_helper_distinguishes_running_idle_and_finished(self):
+        """错峰定时器要认得出"还没启动"的线程：把 idle 当成 finished 就会漏起线程，
+        当成 running 就会白等一轮。"""
+
+        class _Slow(main.QThread):
+            def run(self):
+                time.sleep(0.5)
+
+        slow = _Slow()
+        self.assertEqual(main._qthread_state(slow), "idle", "没 start() 过的是 idle")
+        slow.start()
+        self.addCleanup(slow.wait, 3000)
+        self.assertEqual(main._qthread_state(slow), "running")
+        slow.wait(3000)
+        self.assertEqual(main._qthread_state(slow), "finished")
+
+    def test_drain_survives_a_dead_reference_and_still_waits_the_live_ones(self):
+        logs = []
+        win = main.MainWindow.__new__(main.MainWindow)
+        win._append_log = lambda level, msg: logs.append((level, msg))
+
+        class Dead:
+            def isRunning(self):
+                raise RuntimeError("libshiboken: Internal C++ object already deleted.")
+
+            def isFinished(self):
+                raise RuntimeError("libshiboken: Internal C++ object already deleted.")
+
+            def cancel(self):
+                raise RuntimeError("libshiboken: Internal C++ object already deleted.")
+
+            def wait(self, _ms):
+                raise RuntimeError("libshiboken: Internal C++ object already deleted.")
+
+        class Live:
+            def __init__(self):
+                self.cancelled = False
+                self.waited = []
+
+            def isRunning(self):
+                return True
+
+            def cancel(self):
+                self.cancelled = True
+
+            def wait(self, ms):
+                self.waited.append(ms)
+                return True
+
+        live_dl, live_probe = Live(), Live()
+        win._update_dl = Dead()
+        win._update_worker = live_dl
+        card = type("Card", (), {})()
+        card.worker = None
+        card.prereq_worker = None
+        card._external_worker = None
+        card._version_worker = Dead()
+        card._probe_workers = [Dead(), live_probe]
+        win.cards = [card]
+
+        drained = win._drain_background_workers()
+        self.assertTrue(live_dl.cancelled and live_dl.waited,
+                        "第一个成员抛异常就中断 = 后面的线程全没人等，正是那 127 的成因")
+        self.assertTrue(live_probe.waited, "被顶替掉、已从 _version_worker 摘下的探测线程也要被等到")
+        self.assertEqual(drained, 2, f"只该统计真正在跑的：{drained}")
+        self.assertEqual([lvl for lvl, _m in logs], [], "收尾路径不该往日志里写东西")
+
+    def test_replaced_probe_thread_is_still_tracked(self):
+        """`_start_version_probe` 顶掉旧 worker 时，旧线程还在跑且没有别的引用吊着它 ——
+        关窗就析构 = abort。三处 `self._version_worker = None` 是同一个洞的另外三个入口。"""
+        comp = next(c for c in main.build_components()
+                    if c.version_probe and c.version_args)
+        orig_probe = main._probe_version
+        main._probe_version = lambda _e, _a: (time.sleep(1.2), "1.2.3")[1]
+        self.addCleanup(setattr, main, "_probe_version", orig_probe)
+        card = main.ComponentCard(comp, lambda _lvl, _msg: None)
+        card._status_shows_configured = True
+        self.addCleanup(lambda: [w.wait(4000) for w in list(card._probe_workers)])
+
+        card._start_version_probe("fake.exe")
+        first = card._version_worker
+        card._start_version_probe("fake.exe")
+        self.assertEqual(main._qthread_state(first), "running",
+                         "前提没成立：旧线程已经跑完了，这条用例测不到顶替")
+        self.assertIsNot(first, card._version_worker, "前提没成立：第二次没起新线程")
+        self.assertIn(first, card._probe_workers,
+                      "被顶替的探测线程必须还挂在卡片上，否则关窗时没人等它")
+
+    def test_probe_does_not_start_after_quit_intent(self):
+        """关窗途中事件循环还会跑（closeEvent 里那些 wait 就是机会），
+        残留的 `QTimer.singleShot` 这时再起一条线程 = 析构时它还在跑。
+        `_launch_fetch_worker` 早就有这道闸，探测这一路是漏的。"""
+        comp = next(c for c in main.build_components()
+                    if c.version_probe and c.version_args)
+        orig_probe = main._probe_version
+        main._probe_version = lambda _e, _a: "1.2.3"
+        self.addCleanup(setattr, main, "_probe_version", orig_probe)
+        card = main.ComponentCard(comp, lambda _lvl, _msg: None)
+        card._closing = True          # 独立卡片不套窗口时 window() 就是它自己
+
+        started = []
+        orig_start = main.VersionProbeWorker.start
+        main.VersionProbeWorker.start = lambda self, *a, **k: started.append(self)
+        self.addCleanup(setattr, main.VersionProbeWorker, "start", orig_start)
+        card._start_version_probe("fake.exe")
+        self.assertEqual(started, [], "已表达退出意图还起新线程 = 关窗时又多条没等的")
+        self.assertEqual(card._probe_workers, [], "闸生效时不该留下登记")
 
 
 class NetstatParse(unittest.TestCase):

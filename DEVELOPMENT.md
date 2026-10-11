@@ -1557,7 +1557,8 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R1
 2. **签名地址不许进日志**。302 链里那条 `foruda...?token=` 带令牌与时效；
    `DownloadWorker` 打的是我们自己传入的稳定 URL，实测整次日志 0 行含 `token=` / `foruda`。
    改成打 `url_effective` 就会泄漏 —— 别那么改。
-3. **拿不到 size 时要如实说**。从 Gitee 清单来的产物 size=0，开始下载前记一句
+3. **远端产物名要削**（`_safe_download_name`，见 R14.2）。Gitee 与 GitHub 的 `name` 都是外部输入，直接 `目录 / 名字` 会被绝对路径劫持。
+4. **拿不到 size 时要如实说**。从 Gitee 清单来的产物 size=0，开始下载前记一句
    「本次的官方清单没给字节数，完成后只核对文件头魔数」，完成日志也不再写"字节数已核对"。
    魔数（`.exe` → `MZ` / `.zip` → `PK`）现在无论哪个源都必带。
 
@@ -1676,6 +1677,91 @@ Electron 系应用一律先探 `<cdn>/download/latest.yml`。这条教训已写�
 
 补进来的前提是先按 R1 实测，然后"分类表一行 + `_DEVTOOLS` 一条 + 必要时注册 fetcher"，
 并删掉 `bt_download_only_tests.DEFERRED_KEYS` 里对应那项。
+
+---
+
+## 规则 R14：四条通用不变量（2026-10-10 全面审计 + 2026-10-11 关窗崩溃查出来的）
+
+这四条都不是"设计得不好"，是**会崩、会被劫持、会谎报**的缺陷。每条都有对应用例，
+将来谁删了接线，源码守护用例就会红。
+
+### R14.1 关窗前必须等完**所有** QThread，一类都不能漏
+
+`QThread` 在运行时被析构，Windows 上是进程级 abort：`0xC0000409` / 退出码 127 /
+`QThread: Destroyed while thread is still running` —— **一行 traceback 都没有**，
+用户看到的只是"我关了个窗口，它闪退了"。
+
+`closeEvent` 历史上只等三类：`LaunchWorker`、`card._version_worker`、`_fetch_workers`。
+漏掉的有五类，全都是点得动的功能：`_update_dl`（下载新版本）、`_update_worker`（检查更新）、
+`card.worker`（安装下载与「开发工具」的只下载）、`card.prereq_worker`（前置组件下载）、
+`card._external_worker`（"系统里检测到的版本"探测，会真跑 `java -version`，多秒）。
+现场就是：用户点左上角那颗 ↓ 下 49 MB，中途关窗 → 闪退。
+
+还有第六类，是 2026-10-11 那台真机抓到的：**被顶替掉的版本探测线程**。
+`card._version_worker` 只代表最新那一条，而 `_start_version_probe` 每次重探都换新 worker，
+另有三处 `_version_worker = None` 直接把在跑的线程摘掉引用 —— 旧线程还在跑，closeEvent 却看不见它。
+所以卡片上多了 `card._probe_workers`（起过、还没跑完的全部登记），
+`_start_version_probe` 顶替前先把仍在跑的旧线程留下、再追自己。
+
+收口在 `MainWindow._drain_background_workers()`：**先全部 cancel，再统一 wait**
+（顺序反过来的话第二个 worker 要白等第一个的超时）。`UpdateCheckWorker` 没有 `cancel()`，
+用 `getattr` 取，取不到就只等它自己跑完（它有 8 秒硬超时，见 R12.2）。
+
+接线由 `bt_launch_tests.MainWindowAdopt.test_close_event_wires_the_background_drain`
+用源码守护钉住 —— 和 `_cancel_launch_workers` 同一套规矩：`closeEvent` 本身测不了
+（要调 `super()`），所以测收口函数 + 守护那一行调用。**断言要匹配调用形状**
+（`self._drain_background_workers()`），只匹配函数名的话注释里提一句也算绿。
+
+### R14.4 不许对可能被 `deleteLater` 的 worker 裸调方法
+
+worker 连了 `finished → deleteLater`（探测线程、检查更新线程都这么写）之后，
+**Python 侧那个引用照旧留着，但 C++ 对象已经被事件循环删了**。这时调任何方法
+抛的都是 `RuntimeError: libshiboken: Internal C++ object (…) already deleted`，
+**不是返回 False**。所以判定线程状态一律走 `main._qthread_state(worker)`
+（`running` / `finished` / `idle` / `dead`）和 `main._qthread_wait(worker, ms)`。
+
+这条不是理论：2026-10-11 用 `tools/bt_close_crash_repro.py` 在 HEAD 代码上稳定复现出两级后果——
+
+| 炸点 | 后果 |
+|---|---|
+| `closeEvent` 里 `card._version_worker.isRunning()` | 异常把后半段（等 12~18 条在途 `VersionFetchWorker`）整段跳过 → 窗口析构时它们还在跑 → **退出码 -1073740791**，正是用户报的"关窗闪退" |
+| `_start_update_check` 里 `worker.isRunning()` | 检查更新跑完后**第二次点版本号直接抛**，用户看到"这颗按钮点一次有效、之后再点没反应" |
+
+`_qthread_state` 认得出 `idle`（错峰定时器排了还没启动）——那一类必须算"忙"，
+否则会被 `_start_fetch_versions` 的 cleanup 提前 `deleteLater`，定时器回调再来访问就是已释放对象。
+
+用例：`bt_launch_tests.DeadWorkerDrainGuards`（5 条，含用 `shiboken6.delete()` 造真死引用）、
+`bt_update_check_tests.ChipStateMachine.test_second_click_after_a_finished_check_still_checks`。
+
+### R14.2 远端 API 返回的字符串不许直接当路径用
+
+产物名来自公开的 GitHub / Gitee release API，是**外部输入**。
+`Path(目录) / 名字` 在名字是绝对路径或含 `..` 时会直接丢掉目录，实测：
+
+| 远端 name | `Path("C:/Users/x/Downloads") / name` |
+|---|---|
+| `C:\Windows\System32\evil.exe` | `C:\Windows\System32\evil.exe`（目录整个被丢弃） |
+| `/etc/passwd` | `C:\etc\passwd` |
+| `../../escape.exe` | 逃出目录（解析时才生效，所以看起来"没越界"） |
+| `sub/dir/x.zip` | 多深都建（`ensure_dir` 会把它爹们建出来） |
+
+下载完成是 `tmp.replace(dest)`，所以这等于"往任意路径写文件"。
+`_safe_download_name()` 只取最后一段、拒空名与 `.`/`..`、去掉 Windows 不允许的 `:*?"<>|`。
+组件卡片那条不受影响：它的文件名是本地拼的 `{key}-{版本}{后缀}`。
+
+### R14.3 `QThread.run()` 里任何异常都会变成进程 abort，终态信号只能发一次
+
+`ensure_dir(self.dest.parent)` 原先写在 `run()` 的 `try` **外面**：目标目录建不出来
+（同名文件挡路、只读盘、OneDrive 占位、盘满）时 `OSError` 逃出 `run()` → 就是 R14.1 那个 abort，
+而且上层收不到 `finished_fail`，界面永远停在"下载中"。
+
+同一个函数还有第二个毛病：取消时 `_try_download` 发一次 `finished_fail("用户取消")`，
+`run()` 的循环下一圈又发一次，最后一次的文案还是"所有下载源均不可用" ——
+**把用户主动取消说成了网络故障**，而且弹两次。
+现在 `_try_download` 只置 `self._cancelled` 标志，终态由 `run()` 统一发一次。
+
+用例：`bt_download_only_tests.WorkerRobustness`（四条：削名、目录建不出来要报错不抛异常、
+取消只发一次终态、非法名字回落 fallback）。
 
 ---
 

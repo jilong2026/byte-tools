@@ -18,6 +18,7 @@ URL 一律按 R1 实测过才登记（状态码 + 魔数 + 吞吐），实测矩
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -1083,6 +1084,95 @@ class ArtifactMenu(_EnvSandbox):
                             host = u.split("/", 3)[2]
                             self.assertIn(host, allowed,
                                           f"{comp.key} 的产物源 {host} 没实测过")
+
+
+class WorkerRobustness(unittest.TestCase):
+    """DownloadWorker 的两条健壮性缺口（2026-10-10 全面审计查出来，逐条回磁盘核实过）。"""
+
+    def _dir(self):
+        d = Path(tempfile.mkdtemp())
+        return d
+
+    def test_safe_download_name_strips_any_path_from_the_remote_name(self):
+        """产物名来自公开的 release API，不能当可信文件名用。
+
+        `Path(目录) / 名字` 在名字是绝对路径或含 `..` 时会**直接跳出目录**：
+        实测 `Path('C:/Users/x/Downloads') / 'C:\\\\Windows\\\\a.exe'` → `C:\\Windows\\a.exe`，
+        `'/etc/passwd'` → `C:\\etc\\passwd`，`'../../escape.exe'` 也一样逃出去。
+        """
+        cases = {
+            "C:\\Windows\\System32\\evil.exe": "evil.exe",
+            "/etc/passwd": "passwd",
+            "../../escape.exe": "escape.exe",
+            "sub/dir/real.zip": "real.zip",
+            "ByteTools.exe": "ByteTools.exe",
+            "带 空格 和-中文.zip": "带 空格 和-中文.zip",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(main._safe_download_name(raw, fallback="x.bin"), want)
+
+    def test_safe_download_name_falls_back_on_names_that_are_not_files(self):
+        for raw in ("", "   ", ".", "..", "/", "\\", "a/b/"):
+            with self.subTest(raw=raw):
+                self.assertEqual(main._safe_download_name(raw, fallback="fb.exe"), "fb.exe")
+
+    def test_run_reports_an_unusable_destination_instead_of_raising(self):
+        """dest 的父目录建不出来时（同名文件挡路、只读盘、OneDrive 占位）必须发 finished_fail。
+
+        `ensure_dir` 原先在 `run()` 的 try 外面：OSError 逃出 QThread.run 在 Windows 上是
+        进程级 abort（0xC0000409 / 退出码 127，一行 traceback 都没有），
+        而且上层收不到任何信号，界面永远停在"下载中"。
+        """
+        root = self._dir()
+        blocker = root / "afile"
+        blocker.write_text("x")
+        w = main.DownloadWorker(["https://example.invalid/x.bin"], blocker / "sub" / "out.bin")
+        got = []
+        w.finished_fail.connect(lambda m: got.append(m))
+        w.finished_ok.connect(lambda p: got.append(("ok", p)))
+        w.log.connect(lambda lvl, msg: None)
+        w.run()                      # run() 是普通方法，同步跑不起线程
+        self.assertEqual(len(got), 1, f"应当恰好一个终态信号：{got}")
+        self.assertIsInstance(got[0], str, f"不该报成功：{got}")
+        self.assertIn("目录", got[0], f"要说清是目录建不出来：{got[0]}")
+
+    def test_cancel_emits_finished_fail_exactly_once(self):
+        """取消时 `_try_download` 和 `run()` 各发一次 finished_fail。
+
+        后果不是多一行日志：上层弹两次"下载失败"，而且第二次文案是
+        "所有下载源均不可用" —— 把用户主动取消说成了网络故障。
+        """
+        root = self._dir()
+        w = main.DownloadWorker(["https://a.invalid/x.bin", "https://b.invalid/x.bin"],
+                                root / "out.bin")
+        hits = []
+        w.finished_fail.connect(lambda m: hits.append(m))
+        w.finished_ok.connect(lambda p: hits.append(("ok", p)))
+        w.log.connect(lambda lvl, msg: None)
+
+        class FakeResp:
+            headers = {"Content-Length": "99999999"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, chunk_size=0):
+                w._cancel = True              # 第一个 chunk 之后用户点了取消
+                yield b"x" * 64
+
+        orig = main.requests.get
+        self.addCleanup(setattr, main.requests, "get", orig)
+        main.requests.get = lambda *a, **k: FakeResp()
+        w.run()
+        self.assertEqual(len(hits), 1, f"取消只该发一次终态：{hits}")
+        self.assertIn("取消", hits[0], f"取消不该被说成源不可用：{hits}")
 
 
 if __name__ == "__main__":

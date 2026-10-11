@@ -259,7 +259,7 @@ class UiWiring(unittest.TestCase):
         self.win._apply_update_result(res, auto=True)
         chip = self.win.findChild(main.QPushButton, "versionChip")
         self.assertIn("9.9.9", chip.text() + chip.toolTip())
-        self.assertTrue(hasattr(self.win, "_offer_update_download"),
+        self.assertTrue(hasattr(self.win, "_begin_app_update_download"),
                         "发现新版要能走下载（B 方案）")
 
 
@@ -430,6 +430,70 @@ class GiteeAsFirstSource(unittest.TestCase):
         self.assertTrue(seen.get("started"))
 
 
+    def test_remote_asset_name_cannot_escape_the_download_folder(self):
+        """release API 给的 `name` 是外部数据：绝对路径或 `..` 会让 `目录 / 名字` 跳出目录。
+
+        实测 `Path('C:/Users/x/Downloads') / 'C:\\\\Windows\\\\a.exe'` 直接得到
+        `C:\\Windows\\a.exe` —— 下载完 `tmp.replace(dest)` 就是往那个位置写。
+        """
+        seen = {}
+        orig_w, orig_dir = main.DownloadWorker, main.load_download_dir
+        self.addCleanup(setattr, main, "DownloadWorker", orig_w)
+        self.addCleanup(setattr, main, "load_download_dir", orig_dir)
+        folder = Path(self._tmpdir) / "dl"
+        folder.mkdir(exist_ok=True)
+        main.load_download_dir = lambda: folder
+
+        class FakeWorker:
+            def __init__(self, urls, dest, parent=None, expect_magic=b""):
+                seen["dest"] = Path(dest)
+
+            def __getattr__(self, name):
+                class _S:
+                    def connect(_s, fn):
+                        pass
+                return _S()
+
+            def start(self):
+                pass
+
+        main.DownloadWorker = FakeWorker
+        win = self._win
+        win._update_res = {"latest": {"version": "9.9.9", "tag": "v9.9.9"},
+                           "asset": {"name": "C:\\Windows\\System32\\evil.exe", "size": 0,
+                                     "browser_download_url":
+                                         "https://gitee.com/x/releases/download/v9.9.9/evil.exe"}}
+        win._set_chip_state("update", new_version="9.9.9")
+        self.assertTrue(win._begin_app_update_download(win._update_res))
+        self.assertEqual(seen["dest"].parent, folder)
+        self.assertEqual(seen["dest"].name, "evil.exe",
+                         f"只该取远端名的最后一段：{seen['dest']}")
+
+    def test_progress_tick_does_not_read_the_config_file(self):
+        """`load_download_dir()` 每次要读 config.json 并 json.loads —— 进度回调按 64KB 一次，
+        50 MB 的包就是约 800 次磁盘往返，全在 GUI 线程上。"""
+        win = self._win
+        calls = []
+        orig = main.load_download_dir
+        self.addCleanup(setattr, main, "load_download_dir", orig)
+        main.load_download_dir = lambda: (calls.append(1) or Path(self._tmpdir))
+        win._set_chip_state("downloading", new_version="9.9.9", pct=0)
+        before = len(calls)
+        for i in range(6):
+            win._on_update_progress(i * 1000, 10000)
+        self.assertEqual(len(calls), before,
+                         f"进度回调里又读了 {len(calls) - before} 次配置")
+
+    def test_clicking_mid_download_keeps_the_percentage_on_the_chip(self):
+        win = self._win
+        chip = win.findChild(main.QPushButton, "versionChip")
+        win._set_chip_state("downloading", new_version="9.9.9", pct=43)
+        self.assertEqual(chip.text(), "↓ 43%")
+        win._on_version_clicked()
+        self.assertEqual(chip.text(), "↓ 43%",
+                         "下载中点一下不该把进度打回 `↓ …`（下一次回调之前它就是空的）")
+
+
 class ChipStateMachine(unittest.TestCase):
     """chip 从"点一下=检查更新"变成一个**按状态分派**的控件（2026-10-10 用户提的方案）。
 
@@ -593,6 +657,27 @@ class ChipStateMachine(unittest.TestCase):
         self.win._on_update_progress(10000, 10000)
         self.assertEqual(self._chip().text(), "↓ 99%",
                          "100% 之前先停在 99%：字节还没落盘就说满了是撒谎")
+
+
+    def test_second_click_after_a_finished_check_still_checks(self):
+        """第一轮检查跑完之后，`_update_worker` 是个已经被 `deleteLater` 析构的死引用：
+        裸调 `isRunning()` 抛的是 RuntimeError，于是第二下点击死在门口 —— 用户看到的就是
+        "这颗版本号点一次有用，之后再点就没反应了"。
+        2026-10-11 真机抓到的关窗崩溃（0xC0000409）是同一颗雷在 closeEvent 里炸。
+        """
+        import shiboken6
+        self.win._update_worker = None
+        before = self.win.log_view.toPlainText()
+        self.win._start_update_check(auto=False)
+        worker = self.win._update_worker
+        self.assertTrue(worker is not None and worker.wait(3000),
+                        "前提不成立：第一轮检查线程没跑完")
+        shiboken6.delete(worker)        # 等价于事件循环把 deleteLater 处理完
+        with self.assertRaises(RuntimeError):
+            worker.isRunning()          # 前提：这时裸调确实抛，不是返回 False
+        self.win._start_update_check(auto=False)
+        self.assertNotEqual(self.win.log_view.toPlainText(), before,
+                            "第二次点版本号要照样回答，否则像按钮坏了")
 
 
 if __name__ == "__main__":
