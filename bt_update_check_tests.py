@@ -263,6 +263,173 @@ class UiWiring(unittest.TestCase):
                         "发现新版要能走下载（B 方案）")
 
 
+class GiteeAsFirstSource(unittest.TestCase):
+    """下载与查询都要先试 Gitee —— 2026-10-10 实测出来的排序，不是猜的。
+
+    实测：`gitee.com/<owner>/<repo>/releases/download/<tag>/<name>` 匿名可下
+    （302 → 302 → foruda 签名地址），200 / 49,963,621 B / `MZ`，**2 MB/s**；
+    同一天 `gh-proxy.com` 只有 116–225 KB/s，而 `github.com:443` 在这台机器上经常整天不通。
+    另外 main.py 原来那句"Gitee 不能当更新源（API 回 404）"是**拿 GitHub 的 owner 去问 Gitee**
+    —— Gitee 那边是 `jack_liujilong`，用对 owner 之后 API 免鉴权 200。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        from pathlib import Path
+        cls.app = main.QApplication.instance() or main.QApplication([])
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls._tmpdir = cls._tmp.name
+        cls._orig_dir, cls._orig_file = main.CONFIG_DIR, main.CONFIG_FILE
+        main.CONFIG_DIR = Path(cls._tmp.name)
+        main.CONFIG_FILE = main.CONFIG_DIR / "config.json"
+        cls._orig_fetch = main.check_for_update
+        # staticmethod 包一层：类属性直接放函数会在 self._real_check 时变成绑定方法，
+        # 调用时把 self 当第一个位置参传进去 → "multiple values for argument 'fetch'"
+        cls._real_check = staticmethod(main.check_for_update)
+        main.check_for_update = lambda *a, **k: {"ok": False, "silent": True,
+                                                 "newer": False, "latest": None,
+                                                 "asset": None, "error": "测试里不联网"}
+        cls._win = main.MainWindow()
+        cls._win.show()
+        for _ in range(10):
+            cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        main.check_for_update = cls._orig_fetch
+        main.CONFIG_DIR, main.CONFIG_FILE = cls._orig_dir, cls._orig_file
+        cls._win.deleteLater()
+        cls._tmp.cleanup()
+
+    def _gh_release(self, tag="v9.9.9"):
+        return {"tag_name": tag, "html_url": "https://github.com/x/releases/latest",
+                "assets": [{"name": "ByteTools.exe", "size": 49963621,
+                            "browser_download_url":
+                                f"https://github.com/x/releases/download/{tag}/ByteTools.exe"}]}
+
+    def _gitee_releases(self):
+        # Gitee 回的是**数组**，而且实测按 tag 升序（v1.1.2 在 v1.2.0 前面）——
+        # 所以"取第一条"会拿到旧版，必须按版本号挑最大。
+        def one(tag):
+            return {"tag_name": tag, "prerelease": False,
+                    "assets": [{"name": "ByteTools.exe",
+                                "browser_download_url":
+                                    f"https://gitee.com/jack_liujilong/byte-tools/"
+                                    f"releases/download/{tag}/ByteTools.exe"}]}
+        return [one("v1.1.2"), one("v9.9.9")]
+
+    def test_gitee_is_only_tried_after_both_github_sources_fail(self):
+        seen = []
+
+        def fetch(url, timeout):
+            seen.append(url)
+            if "gitee.com" in url:
+                return 200, self._gitee_releases()
+            return 502, {}
+
+        # 类级把 check_for_update 换成假的了（建窗口时不许联网），这条用例要跑真函数
+        main.check_for_update = self._real_check
+        self.addCleanup(setattr, main, "check_for_update", self._real_check)
+        res = main.check_for_update(fetch=fetch, current="1.1.1")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["latest"]["version"], "9.9.9",
+                         "Gitee 的列表要按版本号挑最大，不能取第一条")
+        self.assertLess(seen.index(main.UPDATE_SOURCES[0]),
+                        seen.index(main.GITEE_RELEASES_API),
+                        f"Gitee 只该在 GitHub 两源都失败后登场：{seen}")
+        self.assertNotIn("?", main.GITEE_RELEASES_API,
+                         "隐私线：更新源的 URL 不许带查询参数（连 per_page 都不加）")
+
+    def test_gitee_payload_fills_the_same_shape_and_marks_size_unknown(self):
+        parsed = main.parse_gitee_releases(self._gitee_releases())
+        self.assertEqual(parsed["version"], "9.9.9")
+        self.assertEqual(parsed["assets"][0]["size"], 0,
+                         "Gitee 的 assets 没有 size 字段 —— 只能标成 0，不许瞎估")
+        self.assertIn("gitee.com", parsed["page_url"])
+        self.assertIsNone(main.parse_gitee_releases([]), "空列表要判失败，好让上层继续兜底")
+        self.assertIsNone(main.parse_gitee_releases(
+            [{"tag_name": "v1.0", "prerelease": True, "assets": []}]))
+
+    def test_download_urls_put_gitee_first_and_never_accelerate_it(self):
+        urls = main.update_download_urls(self._gh_release()["assets"][0], "v9.9.9")
+        self.assertEqual(urls[0],
+                         "https://gitee.com/jack_liujilong/byte-tools/releases/download/"
+                         "v9.9.9/ByteTools.exe", f"第一源该是 Gitee：{urls}")
+        for u in urls:
+            if "gitee.com" in u:
+                self.assertNotIn("gh-proxy", u, f"Gitee 不许套 GitHub 加速器：{u}")
+                self.assertNotIn("ghfast", u)
+                self.assertNotIn("ghproxy", u)
+        self.assertIn("github.com/x/releases/download/v9.9.9/ByteTools.exe", urls[-1],
+                      f"末位该是 GitHub 裸地址：{urls}")
+
+    def test_gitee_only_asset_still_reports_size_as_unverified(self):
+        asset = {"name": "ByteTools.exe", "size": 0,
+                 "browser_download_url":
+                     "https://gitee.com/jack_liujilong/byte-tools/releases/download/"
+                     "v9.9.9/ByteTools.exe"}
+        urls = main.update_download_urls(asset, "v9.9.9")
+        self.assertEqual(urls[0], asset["browser_download_url"],
+                         "接口已经给了 Gitee 直链，就别再拼一遍")
+
+    def test_asset_from_the_gitee_api_still_keeps_a_github_fallback(self):
+        """检查是从 Gitee 拿的时候，asset 里根本没有 GitHub 地址。
+
+        首轮真机实测抓到的：那种情况下把 `browser_download_url` 直接丢给
+        `_gh_accelerated`，会得到 `ghfast.top/https://gitee.com/...` 这种没人代理过的地址，
+        四个源全废、GitHub 兜底反而消失了。
+        """
+        asset = {"name": "ByteTools.exe", "size": 0,
+                 "browser_download_url":
+                     "https://gitee.com/jack_liujilong/byte-tools/releases/download/"
+                     "v9.9.9/ByteTools.exe"}
+        urls = main.update_download_urls(asset, "v9.9.9")
+        self.assertEqual(urls[0], asset["browser_download_url"])
+        for u in urls:
+            if "gitee.com" in u:
+                host = u.split("://", 1)[1].split("/")[0]
+                self.assertFalse(host.startswith("gh"),
+                                 f"Gitee 那条被套了 GitHub 加速器：{u}")
+        self.assertTrue(any("github.com/jilong2026/byte-tools/releases/download/v9.9.9" in u
+                            for u in urls),
+                        f"Gitee 附件没同步时得有 GitHub 兜底：{urls}")
+
+    def test_exe_download_carries_a_magic_check(self):
+        """Gitee 那条不通时会退到镜像/加速器 —— 正是"200 + 小 HTML"能骗过的地方。"""
+        seen = {}
+        orig_w, orig_dir = main.DownloadWorker, main.load_download_dir
+        self.addCleanup(setattr, main, "DownloadWorker", orig_w)
+        self.addCleanup(setattr, main, "load_download_dir", orig_dir)
+        main.load_download_dir = lambda: Path(self._tmpdir)
+
+        class FakeWorker:
+            def __init__(self, urls, dest, parent=None, expect_magic=b""):
+                seen["magic"] = expect_magic
+                seen["dest"] = str(dest)
+
+            def __getattr__(self, name):
+                class _S:
+                    def connect(_s, fn):
+                        pass
+                return _S()
+
+            def start(self):
+                seen["started"] = True
+
+        main.DownloadWorker = FakeWorker
+        win = self._win
+        win._update_res = {"latest": {"version": "9.9.9"},
+                           "asset": {"name": "ByteTools.exe", "size": 0,
+                                     "browser_download_url":
+                                         "https://gitee.com/jack_liujilong/byte-tools/"
+                                         "releases/download/v9.9.9/ByteTools.exe"}}
+        win._set_chip_state("update", new_version="9.9.9")
+        self.assertTrue(win._begin_app_update_download(win._update_res))
+        self.assertEqual(seen.get("magic"), b"MZ", "下 .exe 必须带 MZ 魔数校验")
+        self.assertTrue(seen.get("started"))
+
+
 class ChipStateMachine(unittest.TestCase):
     """chip 从"点一下=检查更新"变成一个**按状态分派**的控件（2026-10-10 用户提的方案）。
 

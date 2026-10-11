@@ -1440,7 +1440,7 @@ README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文�
 |---|---|---|
 | `https://api.github.com/repos/jilong2026/byte-tools/releases/latest` | **200 / 1.2s / 8.6KB / 免鉴权** | 主源 |
 | `https://gh-proxy.com/<上面这个 URL>` | **200，代理回来的也是真 JSON** | 兜底源 |
-| `gitee.com/api/v5/repos/.../releases/latest` | **404 "Not Found Project"**（仓库不公开） | **不能当更新源** |
+| `gitee.com/api/v5/repos/jilong2026/byte-tools/releases` | 404 "Not Found Project" | **当时据此写了"Gitee 不能当更新源"，是错的**：Gitee 侧 owner 是 `jack_liujilong` 不是 `jilong2026`。用对 owner 免鉴权 200，见 R12.6 |
 | `github.com:443` | 本机偶发**整天**连不上 | 只出现在下载 URL 里，所以下载一律加速器优先 |
 
 `latest` 天然只给非 draft 的最新正式版，正好和"各平台先传草稿、Gitee 同步核对齐全后
@@ -1524,6 +1524,47 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R1
 点 chip 走的是 `_on_version_clicked()` → 有新版才 `_begin_app_update_download()`，
 其余状态一律退回"查一次"。
 
+
+---
+
+### R12.6 下载第一源是 Gitee，查询第三源也是 Gitee（2026-10-10 实测改的）
+
+**先记一条被打脸的结论**：R12.1 的表里原本写着「Gitee API 回 404『Not Found Project』
+⇒ 不能当更新源」。那是**拿 GitHub 的 owner 去问 Gitee** —— 本仓库两边不同名
+（GitHub `jilong2026`，Gitee `jack_liujilong`）。用对 owner 之后免鉴权 200。
+又一例「0 命中 ≠ 不存在」：域名对了、路径对了，owner 猜错就是一份 404。
+
+| 端点 | 实测（2026-10-10 深夜，UA=byte-tools） |
+|---|---|
+| `gitee.com/api/v5/repos/jack_liujilong/byte-tools/releases` | 200 / 5,835 B。**回的是数组、按 tag 升序**（v1.1.2 在 v1.2.0 前面），且没有 `draft` / `html_url` / `asset.size` 三个字段 ⇒ 单独一个 `parse_gitee_releases`，按版本号挑最大，size 记 0 |
+| `gitee.com/<owner>/<repo>/releases/download/v1.2.0/ByteTools.exe` | 302 → 302 → `foruda.gitee.com/attach_file/...?token=<时效签名>` → **200 / 49,963,621 B / `MZ`，2 MB/s**，匿名可下。**Range 被忽略**（发 `-r 0-3` 照样回整包）⇒ 不能断点续传 |
+| 同一形状、tag 换成没同步过的 | 404（Gitee 的附件靠本机 `同步Gitee产物.bat` 手工上传，没同步就是没有）|
+| `gh-proxy.com` 代理 GitHub 产物 | 当天 116–225 KB/s（49 MB 要 4–7 分钟）|
+| `api.github.com/.../releases/latest` | 未认证 **60 次/小时/IP**，今天被探测打到 403 `remaining=0` |
+
+于是两条排序，理由不同：
+
+- **查询**：GitHub 官方 → GitHub 加速器 → **Gitee**。GitHub 放前面只因为它的响应带 `size`，
+  那是下载完成后唯一能核对的强校验；Gitee 排第三是给"GitHub 被拦/超配额"的日子兜底。
+- **下载**：**Gitee 直链** → GitHub 加速器 → GitHub 裸地址。2 MB/s 对 0.12–0.23 MB/s，
+  实测端到端 24.5 秒下完 49,963,621 字节。
+
+三条纪律，都是这轮踩出来的：
+
+1. **Gitee 的 URL 绝不进 `_gh_accelerated`**。首轮真机实测就中招了：把 Gitee 直链丢进去，
+   得到 `ghfast.top/https://gitee.com/...` 这种没人代理过的地址，四个源全废，
+   而 GitHub 兜底反而消失了。`update_download_urls()` 里对 `github.com/` 的判断就是这道闸。
+2. **签名地址不许进日志**。302 链里那条 `foruda...?token=` 带令牌与时效；
+   `DownloadWorker` 打的是我们自己传入的稳定 URL，实测整次日志 0 行含 `token=` / `foruda`。
+   改成打 `url_effective` 就会泄漏 —— 别那么改。
+3. **拿不到 size 时要如实说**。从 Gitee 清单来的产物 size=0，开始下载前记一句
+   「本次的官方清单没给字节数，完成后只核对文件头魔数」，完成日志也不再写"字节数已核对"。
+   魔数（`.exe` → `MZ` / `.zip` → `PK`）现在无论哪个源都必带。
+
+用例在 `bt_update_check_tests.GiteeAsFirstSource`（6 条，全离线）：Gitee 只在 GitHub 两源
+失败后才登场、URL 不带查询参数、Gitee 数组按版本号挑最大、size 记 0、
+**Gitee 那条不许被加速器套前缀**、产物来自 Gitee 时仍要补出 GitHub 兜底、
+下 `.exe` 必须带 `expect_magic=b"MZ"`。
 
 ---
 

@@ -164,13 +164,29 @@ def pick_download_artifact(arts, parent=None, at=None):
 # ---------------------------------------------------------------------------
 # 为什么走 api.github.com 而不是 github.com：2026-10-10 本机实测，git/下载端点
 # github.com:443 会整天连不上，而 api.github.com 免鉴权 1.2 秒回 200（8.6KB JSON）。
-# 第二源是 GitHub 加速器（实测代理回来的也是真 JSON）。**Gitee 不能当更新源**：
-# 它的开放 API 对这个仓库回 404「Not Found Project」（仓库不是公开的）。
+# 第二源是 GitHub 加速器（实测代理回来的也是真 JSON）。
+# 未认证限额是 60 次/小时/IP，实测今天就打到过 403（remaining=0）—— 这正是第三个源
+# 必须是 Gitee 的原因：查询不能只吊在一条有配额、又常被拦的线上（见 R12.6）。
 _REPO_SLUG = GITHUB_URL.split("github.com/", 1)[-1].strip("/")
 # 必须带 /repos/ 段：`api.github.com/<owner>/<repo>/...` 会回 404（真踩过 —— 用例当时
 # 只断言"以 /releases/latest 结尾"，所以没拦住，是拿真接口跑了一遍才发现的）。
 UPDATE_API_URL = f"https://api.github.com/repos/{_REPO_SLUG}/releases/latest"
-UPDATE_SOURCES = [UPDATE_API_URL, "https://gh-proxy.com/" + UPDATE_API_URL]
+
+# Gitee 那一侧。这里的 owner 与 GitHub **不同名**（GitHub 是 jilong2026，Gitee 是
+# jack_liujilong），本文件以前写着"Gitee API 回 404，不能当更新源"，那是拿 GitHub 的
+# owner 去问 Gitee 的结果 —— 用对 owner 之后免鉴权 200（2026-10-10 实测，见 R12.6）。
+GITEE_OWNER = "jack_liujilong"
+GITEE_REPO = "byte-tools"
+GITEE_REPO_URL = f"https://gitee.com/{GITEE_OWNER}/{GITEE_REPO}"
+# 不加 ?per_page=N：隐私线要求更新源的 URL 一个查询参数都不许带（R12.2），
+# 默认页宽对本项目（两个 release）已经够；顺带也避开"参数变了形状变了"。
+GITEE_RELEASES_API = f"https://gitee.com/api/v5/repos/{GITEE_OWNER}/{GITEE_REPO}/releases"
+
+# 顺序就是优先级：GitHub 官方 → GitHub 加速器 → Gitee。
+# 查询把 GitHub 放前面是有意的：它的响应里有 `size`，那是下载完成后唯一能核对的强校验；
+# Gitee 的 assets 只有 name + browser_download_url，拿它当第一源会让"字节数对不对"变成未知。
+UPDATE_SOURCES = [UPDATE_API_URL, "https://gh-proxy.com/" + UPDATE_API_URL,
+                  GITEE_RELEASES_API]
 UPDATE_CHECK_INTERVAL_SEC = 24 * 3600      # 自动检查的频控：一天最多一次
 UPDATE_HTTP_TIMEOUT = 8.0                  # 后台线程也要有硬超时，不许挂在那儿
 
@@ -239,6 +255,77 @@ def parse_latest_release(payload: object):
             "version": tag[1:] if tag[:1] in ("v", "V") else tag,
             "page_url": str(payload.get("html_url") or ""),
             "assets": assets}
+
+
+def parse_gitee_releases(payload: object):
+    """把 Gitee 的 `releases` API 响应读成和 `parse_latest_release` 一样的形状。
+
+    三个接口差别都是实测出来的，不是想当然：
+      1. Gitee 回的是**数组**，而且按 tag 升序（实测 v1.1.2 排在 v1.2.0 前面）——
+         "取第一条"会拿到旧版，必须按版本号挑最大的。
+      2. 没有 `draft` 字段（Gitee 不暴露草稿态），也没有 `html_url` ⇒ page_url 自己拼。
+      3. `assets[]` 只有 `name` 与 `browser_download_url`，**没有 size** ⇒ 只能记 0，
+         下载完成后就没法核字节数了，这一点要在日志里如实说。
+    """
+    best = None
+    for item in (payload if isinstance(payload, list) else []):
+        if not isinstance(item, dict) or item.get("prerelease"):
+            continue
+        parsed = parse_latest_release(item)
+        if parsed is None or not parsed["assets"]:
+            continue
+        if best is None or version_is_newer(best["version"], parsed["version"]):
+            best = parsed
+    if best is None:
+        return None
+    best["page_url"] = f"{GITEE_REPO_URL}/releases/tag/{best['tag']}"
+    for a in best["assets"]:
+        a["gitee_url"] = a["browser_download_url"]
+    return best
+
+
+# 每个更新源用自己的解析器；不在表里的按 GitHub 形状读。
+UPDATE_PARSERS = {GITEE_RELEASES_API: parse_gitee_releases}
+
+
+def update_download_urls(asset: dict, tag: str = "") -> list:
+    """一个产物的下载源排序：**Gitee 直链 → GitHub 加速器 → GitHub 裸地址**。
+
+    2026-10-10 实测（本机，带 byte-tools UA）：
+      Gitee 附件 匿名可下（302→302→foruda 签名），200 / 49,963,621 B / `MZ`，**2 MB/s**；
+      gh-proxy.com  116–225 KB/s；github.com:443 经常整天连不通（本仓库自己推 git 都撞过）。
+    所以查询用 GitHub 优先（为了那个 size），下载却让 Gitee 打头。
+
+    两条纪律：
+      - Gitee 那条**绝不套加速器前缀** —— `_gh_accelerated` 是给 GitHub 产物用的。
+      - Gitee 的附件靠本机 `同步Gitee产物.bat` 手工上传，没同步时这条直链回 404
+        （实测 v9.9.9 → 404），由 DownloadWorker 的故障转移退到后两源 —— 这正是
+        多源顺序该有的行为，不必为此加探测。
+    """
+    name = str((asset or {}).get("name") or "")
+    official = str((asset or {}).get("browser_download_url") or "")
+    gitee = str((asset or {}).get("gitee_url") or "")
+    if not gitee and name and tag:
+        gitee = f"{GITEE_REPO_URL}/releases/download/{tag}/{name}"
+    if "github.com/" not in official and name and tag:
+        # 检查是从 Gitee 拿的，产物里就没有 GitHub 地址 —— 按已实测的形状补一条，
+        # 否则 Gitee 附件没同步时后面一个源都不剩了。形状是 releases/download/<tag>/<name>，
+        # 与 Gitee 同构；补错就 404，由故障转移吃掉，不会下错文件。
+        official = f"https://github.com/{_REPO_SLUG}/releases/download/{tag}/{name}"
+    urls: list = []
+    if gitee.startswith("https://gitee.com/"):
+        urls.append(gitee)
+    if official.startswith("http"):
+        if "github.com/" in official:
+            # 加速器只给 GitHub 产物套：把 gitee.com 的 URL 交给 _gh_accelerated
+            # 会得到 "ghfast.top/https://gitee.com/..." 这种没人代理过的地址（真踩过，
+            # 见 .gitee_live 的首轮实测），四个源全废。
+            for u in _gh_accelerated(official):
+                if u not in urls:
+                    urls.append(u)
+        elif official not in urls:
+            urls.append(official)
+    return urls
 
 
 def pick_update_asset(assets, os_name: str):
@@ -386,7 +473,7 @@ def check_for_update(fetch=None, current=None, timeout: float = UPDATE_HTTP_TIME
         if int(status or 0) != 200:
             last_err = f"HTTP {status}"
             continue
-        parsed = parse_latest_release(payload)
+        parsed = UPDATE_PARSERS.get(url, parse_latest_release)(payload)
         if parsed is None:
             out["error"] = last_err or "更新源返回的内容读不出版本号"
             return out
@@ -14753,12 +14840,17 @@ class MainWindow(QMainWindow):
             self._append_log("error", f"建不出下载目录 {folder}：{exc}")
             return False
         dest = _unique_download_path(folder / str(asset.get("name") or "ByteTools.exe"))
-        urls = _gh_accelerated(str(asset["browser_download_url"]))
+        urls = update_download_urls(asset, str(latest.get("tag") or ""))
         size = int(asset.get("size") or 0)
+        magic = _MAGIC_BY_EXT.get(dest.suffix.lstrip(".").lower(), b"")
         self._chip_latest = version
         self._set_chip_state("downloading", new_version=version, pct=0, dest=folder)
         self._append_log("info", f"开始下载 v{version}：{dest}（{len(urls)} 个源依次尝试）")
-        self._update_dl = DownloadWorker(urls, dest, parent=self)
+        if not size:
+            # 从 Gitee 的 releases API 拿到的清单没有 size 字段 —— 明说核不了字节数，
+            # 别等下完悄悄放行，那和"没验"不是一回事。
+            self._append_log("info", "（本次的官方清单没给字节数，完成后只核对文件头魔数）")
+        self._update_dl = DownloadWorker(urls, dest, parent=self, expect_magic=magic)
         self._update_dl.progress.connect(self._on_update_progress)
         self._update_dl.log.connect(lambda lvl, msg: self._append_log(lvl, f"[更新] {msg}"))
         self._update_dl.finished_ok.connect(
@@ -14813,7 +14905,9 @@ class MainWindow(QMainWindow):
             self._append_log("error", f"[更新] 字节数对不上：声明 {expected_size}，实际 {got}"
                                "（别用这个文件，去发布页重新下）")
             return
-        self._append_log("ok", f"[更新] v{version} 已下载到 {path}（{human_size(got)}，字节数已核对）")
+        self._append_log("ok", f"[更新] v{version} 已下载到 {path}（{human_size(got)}，"
+                         + (f"字节数已核对，与官方声明的 {expected_size} 一致）"
+                            if expected_size else "未能核对字节数：官方清单没给 size）"))
         reply = QMessageBox.question(
             self, "下载完成",
             f"已下载到：\n{path}\n\n要打开所在文件夹吗？"
