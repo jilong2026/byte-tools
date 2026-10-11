@@ -3090,7 +3090,12 @@ class CleanTerminalWindow(EnvSandbox):
                           "开不了要返回 None 让界面如实说，不许把异常抛给 Qt 槽")
 
     def test_title_bar_buttons_are_not_clipped_at_minimum_width(self):
-        """多一个按钮不许把标题栏挤裁字（实测最窄窗口下「清理残留 PATH」曾裁字）。"""
+        """多一个按钮不许把标题栏挤裁字（实测最窄窗口下「清理残留 PATH」曾裁字）。
+
+        判据是 `fontMetrics().horizontalAdvance(text)`：offscreen 平台的字体度量大 ~1.6 倍
+        （同一句 `v1.2.0` 的 minimumSizeHint 是 92，真实渲染 54），换成 minimumSizeHint
+        就会报出真机上并不存在的裁字。真字体下的宽度预算用 `tools/bt_titlebar_budget.py` 量。
+        """
         win = self.win
         win.show()
         win.resize(win.minimumWidth(), 700)

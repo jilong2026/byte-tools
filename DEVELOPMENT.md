@@ -1765,6 +1765,96 @@ worker 连了 `finished → deleteLater`（探测线程、检查更新线程都�
 
 ---
 
+## 规则 R15：GitHub 匿名额度是硬预算，抓到的清单必须落盘（2026-10-12）
+
+`api.github.com` 未鉴权限额是 **60 次/小时/IP**，而本工具一次启动要替 26 个组件各打一次。
+现场：用户日志里 11 个组件集体「官网版本获取失败」，同一时刻实测
+`https://api.github.com/rate_limit` 回 `remaining=0/60` —— **一小时内第二次开工具、或者多点几次
+「⟳ 刷新版本」，额度必然见底**。这不是源坏了，也不是软件坏了，是预算超了。
+
+四条不变量：
+
+### R15.1 抓成功的清单要落盘，启动那一次不许重复要打
+
+`save_version_entry()` 把每个组件的清单写进 `~/.env-tools/version_cache.json`
+（TTL 24 小时，`VERSION_CACHE_TTL_SEC`），`_start_fetch_versions(force=False)` 只给
+"没缓存或已过期"的组件派线程，命中的直接 `card.set_versions()` 回填。
+**点「⟳ 刷新版本」= `force=True`，绕过缓存全量重抓** —— 用户主动要最新，绝不能拿旧缓存糊他。
+
+`version_cache_path()` 必须是**函数**而不是 import 期常量：常量会把缓存钉在真实用户目录上，
+测试挪 `CONFIG_DIR` 就挪不动它。读缓存要容坏：文件被手改过 / 只写了一半时按"没有缓存"处理，
+不许让启动抛异常。
+
+### R15.2 `clicked` 会把 `checked=False` 当第一个实参传进来
+
+按钮信号的第一个实参是**可选参数**，裸 `connect(self._start_fetch_versions)` 之后
+那个位置就是新增的 `force` —— 于是"点刷新"变成 `force=False`，**按钮永远刷不动而且不报错**。
+现在写成 `lambda _checked=False: self._start_fetch_versions(force=True)`。
+**给已有槽函数加参数时，必须先查它被哪些信号直连过**；这条由
+`bt_refresh_versions_tests.VersionListCache.test_button_wiring_does_not_swallow_checked_argument`
+用源码守护钉住（断言里带调用形状，光匹配函数名拦不住）。
+
+### R15.3 命中限流要立旗，整批快速收尾，别再一个个退避重试
+
+原来 403 + `X-RateLimit-Remaining: 0` 走的是"退避 5s/10s 重试三次"，实测**每个组件白等 31 秒**，
+11 个就是五分多钟的转圈，而且每次重试都在继续烧已经见底的额度。
+现在 `_gh_mark_limited()` 记下解锁时刻（`_GH_LIMITED_UNTIL`，`X-RateLimit-Reset` 只信一小时内的，
+缺头或被加速器改写时兜底 `GH_LIMIT_MIN_SEC = 60`），旗子没倒之前所有调用直接抛
+`GH_LIMITED_TEXT`，一次网络都不发。
+
+实现细节坑：`raise RuntimeError(...)` 写在 `try` 里会被下面的 `except Exception` 接去重试 ——
+必须加一条 `except RuntimeError: raise` 让限流这个**终局判断**穿透出去。
+
+### R15.4 失败原因要进日志面板，不能只 print 到 stdout
+
+`VersionFetchWorker` 原来把原因 `print` 到 stdout —— **打包成 exe 后没有控制台，那句话永远不会
+出现在界面上**，用户只剩一句误导性的「官网版本获取失败」。现在原因存在 `worker.error_text`，
+`_on_versions_fetched` 按它分句：限流说"GitHub 匿名额度已用完，一小时后再刷新"，
+其余把真实原因（含超时/404/DNS）带进同一行日志。
+
+用例：`bt_refresh_versions_tests`（`VersionListCache` 6 条 + `WorkerFailureReason` 2 条，
+外加原有 4 条刷新流程）。`RefreshVersionsFlow` 现在也 redirect 了 `CONFIG_DIR` 并在
+`setUp` 里清缓存 —— 抓成功会写盘之后，不隔离的用例会写用户的
+`~/.env-tools/version_cache.json`（R12 的教训再来一遍）。
+
+---
+
+## 规则 R16：像素裁字只能在真实渲染下判，offscreen 的度量会把你带偏
+
+顶栏是一行 `QPushButton`，`setMinimumSize` 是它的唯一预算。给 chip 加状态文字
+（`⟳ v1.2.0 检查中` / `v1.2.0 最新` / `↓ v1.2.1 待更新` / `? v1.2.0 未查到`）之前，
+必须先量这一行还放不放得下 —— 但**量的人是谁很关键**：
+
+| 环境 | `v1.2.0` 的 `minimumSizeHint` | `↓ v1.10.0 待更新` | 整行总需（含标题、五个按钮、三个窗口控制） |
+|---|---|---|---|
+| `QT_QPA_PLATFORM=offscreen` | 92 px | 174 px | 846 px（看起来 1000 一档已经不够） |
+| 真实平台（不设 offscreen） | **54 px** | **110 px** | **697 px**（1000 一档余量充足） |
+
+offscreen 没有系统中文字体的回退链，Qt 换了一个宽得多的替代字体，度量整体大约 **1.6 倍**。
+2026-10-12 就是拿这套数字下结论，连着做了三件真机上根本不需要的事：把窗口最小宽从 1000
+抬到 1060、把「🧹 清理残留 PATH」「🖥 开验证终端」两个文案削短、并据此认定
+「清理残留 PATH 今天就在裁字」。**全部已回退**（真字体下它从来没裁过）。
+
+三条落地规矩：
+
+1. **量宽度用 `tools/bt_titlebar_budget.py`**（它显式 `pop("QT_QPA_PLATFORM")`，走真实平台），
+   别在 offscreen 里量完就下结论。
+2. **单元测试只断言与字体度量无关的不变量**：控件的文字内容、`sizePolicy` 是不是
+   `QSizePolicy.Fixed`、谁在谁左边。裁字这类像素断言在 offscreen 下必然失真，
+   `bt_multiversion_tests.test_title_bar_buttons_are_not_clipped_at_minimum_width`
+   保留 `fontMetrics` 判据也是这个原因（它比 minimumSizeHint 更接近"文字本体"，
+   且历史上真裁过字时它确实报红过）。
+3. **chip 进定宽名单**（`btn_version` 与其余顶栏按钮一起 `QSizePolicy.Fixed`）：
+   它的文字按状态变长，不定宽的话宽度一紧张布局先压它，状态字等于没写。这条与度量环境无关，
+   是纯策略约束，所以可以放心写进用例。
+
+另外两个通用细节：换文字或改窗口尺寸后要转一轮 `processEvents()` 再量几何，
+不等这一轮量到的是旧尺寸（假绿假红都从这来）；`grab()` 出来的图在 offscreen 下也是替代字体，
+**看版式可以，看文字有没有被裁不行**。
+
+---
+
+
 ## 接新组件的流程与经验
 
 **要写需求时看 `docs/HOW-TO-REQUEST-COMPONENT-LAUNCH.md`** —— 那是需求说明书模板 +

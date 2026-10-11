@@ -106,7 +106,7 @@ APP_NAME = "字节工具箱"
 # 界面与 macOS bundle 都显示它；**发版前必须和要打的 tag 一起改**。
 # release.yml 第一步会拿 tag 比对，不一致就直接红 —— 因为发出去的 exe 上写的版本
 # 骗人，比没有版本号更糟（用户报问题时给的是 v1.1.1，实际装的是 v1.2.0 的修复）。
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -436,6 +436,154 @@ def update_check_due(now: float, state, interval_sec: float = UPDATE_CHECK_INTER
 def update_notify_due(state, version: str) -> bool:
     """同一个新版本只提示一次；否则每次开软件都弹同一句话，用户会烦到关掉功能。"""
     return str((state or {}).get("notified") or "") != str(version)
+
+
+# ---------------------------------------------------------------------------
+# 版本清单的磁盘缓存与 GitHub 额度（规则 R15）
+# ---------------------------------------------------------------------------
+# GitHub 匿名 API 限额是 60 次/小时/IP，而一次启动要替 26 个组件各打一次
+# api.github.com。2026-10-11 用户日志里 11 个组件集体「官网版本获取失败」，
+# 同一时刻实测 `api.github.com/rate_limit` 就是 `remaining=0/60` —— 一小时内
+# 第二次开工具（或多点几次刷新）额度必然见底。当天抓到的清单没必要在一小时内再要一遍，
+# 所以抓成功就落盘，启动时只补"没有或过期"的那些；「⟳ 刷新版本」force=True 绕过缓存。
+VERSION_CACHE_NAME = "version_cache.json"
+VERSION_CACHE_TTL_SEC = 24 * 3600
+# 命中限流后至少立旗这么久：X-RateLimit-Reset 会缺、也会被加速器改写，
+# 完全照着它走等于"后面 25 个组件各自再撞一次、每个白等 31 秒"。
+GH_LIMIT_MIN_SEC = 60
+GH_LIMITED_TEXT = "GitHub API 触发限流（remaining=0），本机这一小时的匿名额度已用完"
+_GH_LIMITED_UNTIL: float = 0.0          # time.monotonic() 的绝对时刻
+
+
+def version_cache_path() -> Path:
+    """每次现取而不是 import 期常量：测试会把 CONFIG_DIR 挪进临时目录。"""
+    return CONFIG_DIR / VERSION_CACHE_NAME
+
+
+def _component_version_to_row(v: "ComponentVersion") -> dict:
+    """显式列字段，不用 asdict：将来 ComponentVersion 加个不能序列化的字段，
+    显式写法只会漏掉新字段（旧缓存照读），而 asdict 会当场炸在写盘上。"""
+    return {
+        "version": str(v.version),
+        "url_map": {str(k): str(u) for k, u in (v.url_map or {}).items()},
+        "archive_map": {str(k): str(a) for k, a in (v.archive_map or {}).items()},
+        "url_list_map": {str(k): [str(u) for u in (urls or [])]
+                         for k, urls in (v.url_list_map or {}).items()},
+        "artifacts": [{"fmt": str(a.fmt), "label": str(a.label),
+                       "urls": [str(u) for u in (a.urls or [])], "size": int(a.size or 0)}
+                      for a in (v.artifacts or [])],
+    }
+
+
+def _row_to_component_version(row) -> Optional["ComponentVersion"]:
+    """一行缓存 → ComponentVersion；形状不对就返回 None 跳过这一行。
+
+    缓存是磁盘上的旧数据，可能被手改过、也可能来自只写了一半的文件：
+    宁可少一个版本，也不能让启动流程抛异常。
+    """
+    if not isinstance(row, dict):
+        return None
+    try:
+        version = str(row.get("version") or "").strip()
+        if not version:
+            return None
+        artifacts: List[DownloadArtifact] = []
+        for a in row.get("artifacts") or []:
+            if isinstance(a, dict) and str(a.get("fmt") or ""):
+                artifacts.append(DownloadArtifact(
+                    fmt=str(a["fmt"]), label=str(a.get("label") or ""),
+                    urls=[str(u) for u in (a.get("urls") or [])],
+                    size=int(a.get("size") or 0)))
+        return ComponentVersion(
+            version=version,
+            url_map={str(k): str(u) for k, u in (row.get("url_map") or {}).items()},
+            archive_map={str(k): str(x) for k, x in (row.get("archive_map") or {}).items()},
+            url_list_map={str(k): [str(u) for u in (urls or [])]
+                          for k, urls in (row.get("url_list_map") or {}).items()},
+            artifacts=artifacts,
+        )
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def load_version_cache() -> Dict[str, dict]:
+    path = version_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _cached_versions_from(cache: dict, key: str, now: Optional[float] = None,
+                          ttl: float = VERSION_CACHE_TTL_SEC) -> List[ComponentVersion]:
+    entry = cache.get(str(key))
+    if not isinstance(entry, dict):
+        return []
+    try:
+        ts = float(entry.get("ts") or 0)
+    except (TypeError, ValueError):
+        return []
+    moment = time.time() if now is None else float(now)
+    if moment - ts > max(0.0, ttl):
+        return []
+    out: List[ComponentVersion] = []
+    for row in entry.get("versions") or []:
+        v = _row_to_component_version(row)
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def cached_versions_for(key: str, now: Optional[float] = None,
+                        ttl: float = VERSION_CACHE_TTL_SEC) -> List[ComponentVersion]:
+    """该组件新鲜缓存里的清单；没有 / 过期 / 形状不对一律回空表。"""
+    return _cached_versions_from(load_version_cache(), key, now, ttl)
+
+
+def save_version_entry(key: str, versions: List["ComponentVersion"],
+                       now: Optional[float] = None) -> None:
+    """抓成功就落盘。读-改-写：整体覆盖会把别的组件当天已抓的结果一起清掉。
+
+    写失败（只读盘、目录被删、磁盘满）只影响"下次要不要重抓"，不值得让界面报错，
+    所以这里静默吞掉 OSError。
+    """
+    try:
+        data = load_version_cache()
+        data[str(key)] = {
+            "ts": float(time.time() if now is None else now),
+            "versions": [_component_version_to_row(v) for v in versions],
+        }
+        ensure_dir(CONFIG_DIR)
+        _atomic_write(version_cache_path(), json.dumps(data, ensure_ascii=False))
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _gh_limited_now(now_mono: Optional[float] = None) -> bool:
+    return _GH_LIMITED_UNTIL > (time.monotonic() if now_mono is None else now_mono)
+
+
+def _gh_mark_limited(reset_header=None) -> float:
+    """命中 403 remaining=0 就立旗：这一小时内剩下的调用快速失败，别再各自撞一次。"""
+    global _GH_LIMITED_UNTIL
+    now_mono = time.monotonic()
+    until = now_mono + GH_LIMIT_MIN_SEC
+    try:
+        secs_left = float(reset_header) - time.time()
+    except (TypeError, ValueError):
+        secs_left = -1.0
+    # 只信一小时内的 reset：更远的多半是代理改写过或压根没刷新的值
+    if 0.0 < secs_left <= 3600.0:
+        until = max(until, now_mono + secs_left)
+    _GH_LIMITED_UNTIL = max(_GH_LIMITED_UNTIL, until)
+    return _GH_LIMITED_UNTIL
+
+
+def _is_rate_limit_text(reason: str) -> bool:
+    return "限流" in reason or "remaining=0" in reason
 
 
 def _fetch_release_json(url: str, timeout: float):
@@ -2718,21 +2866,23 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
     for attempt in range(3):
         if FETCH_ABORT.is_set():
             raise FetchAborted("应用正在退出，已取消版本抓取")
+        if _gh_limited_now():
+            # 额度旗已立，再发请求就是继续烧额度、继续让界面转圈
+            raise RuntimeError(GH_LIMITED_TEXT)
         try:
             r = requests.get(url, timeout=timeout, headers=headers)
-            # 限流：GitHub 在 remaining=0 时返回 403，此时立即重试无意义，
-            # 但短退避可覆盖「突发被临时拒绝」场景，长期限流仍靠 token / 错峰缓解。
+            # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
+            # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
+            # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
             if r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0":
-                wait = 5 * (attempt + 1)
-                if FETCH_ABORT.wait(wait):
-                    raise FetchAborted("应用正在退出，已取消版本抓取")
-                last_exc = RuntimeError(
-                    f"GitHub API 触发限流（remaining=0），已退避 {wait}s 后重试"
-                )
-                continue
+                _gh_mark_limited(r.headers.get("X-RateLimit-Reset"))
+                raise RuntimeError(GH_LIMITED_TEXT)
             r.raise_for_status()
             return r.json()
         except FetchAborted:
+            raise
+        except RuntimeError:
+            # 限流是终局判断（这一小时别再试了），不能被下面的退避重试吞掉重跑
             raise
         except Exception as e:  # noqa: BLE001
             last_exc = e
@@ -3939,6 +4089,9 @@ class VersionFetchWorker(QThread):
         super().__init__(parent)
         self.key = key
         self.fetcher = fetcher
+        # 失败原因。界面必须把它写进日志面板：打包成 exe 后没有控制台，
+        # 原来那句 print 永远看不见，用户只看到一句误导性的"官网版本获取失败"。
+        self.error_text: str = ""
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -3948,8 +4101,9 @@ class VersionFetchWorker(QThread):
         except Exception as exc:  # pragma: no cover
             # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
             # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
+            self.error_text = str(exc)[:220]
             if not FETCH_ABORT.is_set():
-                print(f"[fetch:{self.key}] {exc}")
+                print(f"[fetch:{self.key}] {self.error_text}")
             self.done.emit(self.key, None)
         else:
             self.done.emit(self.key, vs)
@@ -14226,8 +14380,10 @@ class MainWindow(QMainWindow):
         if _icon_path.exists():
             self.setWindowIcon(QIcon(str(_icon_path)))
         self.resize(1000, 680)
-        # 标题栏（标题 + 5 个按钮 + 窗口控制）实测需要 ~992 像素；原来 880 时布局已经
-        # 在挤压，多一个「开验证终端」后开始把「清理残留 PATH」压到裁字（178→144）。
+        # 标题栏的宽度预算必须用**真字体**量（`tools/bt_titlebar_budget.py`）：offscreen 平台的
+        # 字体度量大 ~1.6 倍（同一句 `v1.2.0` 的 minimumSizeHint 是 92，真实渲染是 54），
+        # 拿它当依据会把最小宽抬到根本不需要的位置。2026-10-12 实测量：chip 最长文案
+        # `↓ v1.10.0 待更新`(110) + 标题 + 五个按钮 + 三个窗口控制 = 697 像素，1000 这一档余量充足。
         self.setMinimumSize(1000, 560)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -14245,7 +14401,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_qss()
         self._load_settings()
-        self._start_fetch_versions()
+        # 版本抓取不在这里发起（见 main() 里的注释）：它会起 26 条线程、
+        # 抓成功还要写 version_cache.json，挂在 __init__ 上等于每个构造窗口的测试
+        # 都替用户打一遍网络。
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -14307,7 +14465,10 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setObjectName("iconBtn")
         self.btn_refresh.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_refresh.setToolTip("重新从官网抓取所有组件的可用版本列表")
-        self.btn_refresh.clicked.connect(self._start_fetch_versions)
+        # clicked 会带 checked=False 当第一个实参：裸 connect 到 _start_fetch_versions
+        # 就等于 force=False，用户点刷新只会读缓存 —— 必须显式包一层传 force=True。
+        self.btn_refresh.clicked.connect(
+            lambda _checked=False: self._start_fetch_versions(force=True))
         tb.addWidget(self.btn_refresh)
 
         # 清理残留 PATH 按钮
@@ -14334,9 +14495,12 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_clean_terminal)
 
         # 标题栏按钮定宽：空间不足时宁可让窗口最小宽去兜（见上面 setMinimumSize），
-        # 也不许把按钮压扁裁字。
-        for _btn in (self.btn_github, self.btn_refresh, self.btn_cleanup_path,
-                     self.btn_clean_terminal):
+        # 也不许把按钮压扁裁字。chip 也在名单里：它的文字按状态变
+        # （`v1.2.0` → `↓ v1.2.1 待更新`），不定宽的话一旦某档宽度紧张，布局会先压它 ——
+        # 那状态字就等于没写。真实字体下这一行总共需要 697 像素（见
+        # tools/bt_titlebar_budget.py），1000 这一档余量充足，定宽只是兜底。
+        for _btn in (self.btn_version, self.btn_github, self.btn_refresh,
+                     self.btn_cleanup_path, self.btn_clean_terminal):
             _btn.setSizePolicy(QSizePolicy.Fixed, _btn.sizePolicy().verticalPolicy())
 
         # 捐赠图标（不在 README 中提及）
@@ -14873,24 +15037,25 @@ class MainWindow(QMainWindow):
         elif state != "downloading":
             self._chip_pct = None        # 下载中不传 pct = 沿用上一次，别把进度打回"…"
         if state == "update":
-            text = f"↓ v{new_version}"
+            text = f"↓ v{new_version} 待更新"
             tip = (f"发现新版本 v{new_version}（当前 v{APP_VERSION}）\n"
                    f"点击直接下载到：{folder}\n"
                    "下载不会改动、也不会替换正在运行的本程序")
         elif state == "downloading":
+            # 这一态不加状态字：进度本身就是状态，而标题栏是最窄的一档（见裁字用例）
             text = f"↓ {self._chip_pct}%" if self._chip_pct is not None else "↓ …"
             tip = (f"正在下载 v{new_version or self._chip_latest or '新版本'}"
                    f"（进度只写百分比，速度和字节数在日志里）\n保存到：{folder}")
         elif state == "latest":
-            text = f"v{APP_VERSION}"
+            text = f"v{APP_VERSION} 最新"
             tip = (f"当前 v{APP_VERSION} 已是最新版本\n点击可以再查一次"
                    "（启动后一天最多自动查一次）")
         elif state == "error":
-            text = f"? v{APP_VERSION}"
+            text = f"? v{APP_VERSION} 未查到"
             tip = (f"没查到新版本：{reason}\n"
                    "不影响软件本身使用，点击可以再查一次")
         elif state == "checking":
-            text = f"v{APP_VERSION}"
+            text = f"⟳ v{APP_VERSION} 检查中"
             tip = f"正在检查更新…（当前 v{APP_VERSION}）"
         else:                                    # idle
             text = f"v{APP_VERSION}"
@@ -15853,8 +16018,13 @@ class MainWindow(QMainWindow):
             card._detect_status()
 
     # ------------------------------------------------------------------
-    def _start_fetch_versions(self) -> None:
-        """从各官网并发拉取版本列表。可反复调用（刷新）。"""
+    def _start_fetch_versions(self, force: bool = False) -> None:
+        """从各官网并发拉取版本列表。可反复调用（刷新）。
+
+        force=False（启动那一次）：24 小时内抓过的组件直接用磁盘缓存，不再打网络 ——
+        GitHub 匿名额度只有 60 次/小时/IP，一次启动 26 路，一小时内第二次开工具就会
+        集体失败（见 R15）。force=True（用户点「⟳ 刷新版本」）：绕过缓存全量重抓。
+        """
         if self._closing:
             return
         # 若有 worker 仍在运行、或已排期但尚未启动（错峰未触发），等它跑完再触发新一轮：
@@ -15875,20 +16045,53 @@ class MainWindow(QMainWindow):
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("⟳ 抓取中…")
         self._fetch_pending = 0
-        self._append_log("info", "正在从各官网获取最新版本列表…")
-        for i, card in enumerate(self.cards):
+
+        cache = {} if force else load_version_cache()
+        todo = []
+        cached_ok = 0
+        for card in self.cards:
             fetcher = FETCHERS.get(card.component.key)
             if not fetcher:
                 continue
+            if not force:
+                vs = _cached_versions_from(cache, card.component.key)
+                if vs:
+                    card.set_versions(vs)
+                    cached_ok += 1
+                    continue
+            todo.append((card, fetcher))
+
+        if cached_ok:
+            self._append_log(
+                "info", f"沿用 {VERSION_CACHE_TTL_SEC // 3600} 小时内抓到的版本清单"
+                        f"（{cached_ok} 个组件），没有再打官网；"
+                        "要拿最新版本号请点「⟳ 刷新版本」。")
+        if not todo:
+            # 全缓存命中：一个 worker 都没起，也就没人来收尾按钮和打完成日志
+            self._fetch_finished()
+            return
+        self._append_log("info", "正在从各官网获取最新版本列表…")
+        for i, (card, fetcher) in enumerate(todo):
             w = VersionFetchWorker(card.component.key, fetcher, self)
             w.done.connect(self._on_versions_fetched)
             self._fetch_workers.append(w)
             self._fetch_pending += 1
             # 错峰启动：避免 26 路线程同时打 api.github.com 触发未认证限额（60 次/小时/IP）。
-            # 间隔 150ms，最晚一个约在 3.9s 后启动；单发失败由 _github_api_json 退避重试兜底。
+            # 间隔 150ms，最晚一个约在 3.9s 后启动；命中限流由 _github_api_json 立旗快速失败。
             # 走 _launch_fetch_worker 而不是裸 w.start：关窗后残留的定时器不能再起新线程，
             # 否则线程会在窗口析构时还在跑，直接把进程 abort 掉。
             QTimer.singleShot(i * 150, lambda w=w: self._launch_fetch_worker(w))
+
+    def _fetch_finished(self) -> None:
+        """一轮抓取的收尾：恢复按钮 + 一句完成日志（缓存全命中时也要走这里）。"""
+        if hasattr(self, "btn_refresh"):
+            self.btn_refresh.setEnabled(True)
+            self.btn_refresh.setText("⟳ 刷新版本")
+        self._append_log("info", "版本列表获取完成。")
+
+    def _fetch_failure_reason(self, key: str) -> str:
+        worker = next((w for w in self._fetch_workers if w.key == key), None)
+        return str(getattr(worker, "error_text", "") or "")
 
     def _launch_fetch_worker(self, worker: VersionFetchWorker) -> None:
         """错峰定时器到点后的启动入口；关窗途中则放弃启动。"""
@@ -15902,14 +16105,23 @@ class MainWindow(QMainWindow):
         card = next((c for c in self.cards if c.component.key == key), None)
         if card:
             if versions is None:
-                self._append_log("warn", f"[{card.component.display_name}] 官网版本获取失败，使用内置默认列表")
+                name = card.component.display_name
+                reason = self._fetch_failure_reason(key)
+                if _is_rate_limit_text(reason):
+                    # 这是额度问题，不是"官网挂了"，也不是软件坏了：说清是谁的额度、
+                    # 什么时候恢复，用户才不会去重装或者反复点刷新（越点越糟）。
+                    self._append_log(
+                        "warn", f"[{name}] GitHub 匿名额度已用完（每个 IP 每小时 60 次），"
+                                f"本次用内置默认清单；一小时后再点「⟳ 刷新版本」就行。")
+                else:
+                    self._append_log("warn", f"[{name}] 官网版本获取失败"
+                                             f"（{reason or '未知原因'}），使用内置默认列表")
             else:
                 card.set_versions(versions)
+                save_version_entry(key, versions)
         self._fetch_pending -= 1
-        if self._fetch_pending <= 0 and hasattr(self, "btn_refresh"):
-            self.btn_refresh.setEnabled(True)
-            self.btn_refresh.setText("⟳ 刷新版本")
-            self._append_log("info", "版本列表获取完成。")
+        if self._fetch_pending <= 0:
+            self._fetch_finished()
 
     # ------------------------------------------------------------------
     def _on_donate_clicked(self) -> None:
@@ -16125,6 +16337,11 @@ def main() -> int:
     win = MainWindow()
     win._adopt_running()      # 认清本机在跑什么；不放 __init__——它会读写用户 running.json、探测真端口，构造窗口的测试会跟着遭殃
     win.show()
+    # 版本抓取也挂在**程序入口**、不挂 `__init__`（和 `_adopt_running`、检查更新同一个理由）：
+    # 它一次要起 26 条线程、抓成功还要往 `~/.env-tools/version_cache.json` 落盘，
+    # 放在构造函数里就是"每个构造窗口的测试都替用户打一遍网络、写一次缓存"。
+    # 放 singleShot(0) 而不是直接调：先让界面画完，抓取不在首帧的关键路径上。
+    QTimer.singleShot(0, win._start_fetch_versions)
     # 检查更新只挂在**程序入口**、不挂 __init__：理由与上面 `_adopt_running` 那条注释一样。
     # 第一版犯过这个错 —— 测试直接构造 MainWindow，4 秒后定时器一响，真发了一次 HTTP
     # 请求并把 `last_check_ts` 写进了用户真实的 config.json（延迟 4 秒是为了不给启动添负担）。

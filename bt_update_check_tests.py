@@ -680,5 +680,58 @@ class ChipStateMachine(unittest.TestCase):
                             "第二次点版本号要照样回答，否则像按钮坏了")
 
 
+    def test_chip_shows_the_state_in_words_not_only_in_the_tooltip(self):
+        """用户看不到 tooltip 就等于没提示：查到结果后 chip 上要直接写「最新」/「待更新」。
+
+        2026-10-11 用户明确否掉了"弹窗"这条路子，改成"版本号 + 小字状态"，
+        所以文字状态就是这次交互的唯一交付物 —— 只改颜色不算做到。
+        """
+        chip = self._chip()
+        self.win._apply_update_result({"ok": True, "silent": False, "newer": False,
+                                       "latest": {"version": main.APP_VERSION},
+                                       "asset": None, "error": ""}, auto=True)
+        self.assertIn("最新", chip.text(), f"已是最新要写在 chip 上：{chip.text()}")
+        self.assertIn(str(main.APP_VERSION), chip.text(),
+                      "加了状态字也不许把版本号挤掉（R12.5：报问题第一眼要对上版本）")
+
+        self.win._apply_update_result({"ok": False, "silent": True, "newer": False,
+                                       "latest": None, "asset": None,
+                                       "error": "connect failed"}, auto=True)
+        self.assertIn("未查到", chip.text(), f"没查到要如实写：{chip.text()}")
+        self.assertIn(str(main.APP_VERSION), chip.text())
+
+    def test_checking_state_puts_a_refresh_glyph_on_the_chip(self):
+        """点下去到出结果之间有几秒，那几秒必须有个"在办事"的图标，
+        否则用户以为没响应会连着点好几下。"""
+        self.win._set_chip_state("checking")
+        chip = self._chip()
+        self.assertIn("⟳", chip.text(), f"检查中要有刷新图标：{chip.text()}")
+        self.assertIn(str(main.APP_VERSION), chip.text())
+
+    def test_pending_update_shows_both_versions_and_the_label(self):
+        self._newer()
+        chip = self._chip()
+        self.assertIn("待更新", chip.text(), f"有新版要写明「待更新」：{chip.text()}")
+        self.assertIn("9.9.9", chip.text())
+
+    def test_chip_is_fixed_width_so_its_state_text_survives(self):
+        """chip 必须定宽：宽度一紧张，不定宽的控件会先被布局压扁，状态字等于没写。"
+
+        这里**不量像素**：offscreen 平台的字体度量大 ~1.6 倍（同一句 `v1.2.0` 的
+        minimumSizeHint 是 92，真实渲染 54），拿它判"裁没裁字"会把产品改错方向 ——
+        2026-10-12 就据此误把窗口最小宽抬到 1060。真字体下的宽度预算用
+        `tools/bt_titlebar_budget.py` 量（实测这一行总共 697 像素，1000 一档余量充足）。
+        """
+        from PySide6.QtWidgets import QSizePolicy
+        self.win._set_chip_state("update", new_version="1.10.0")
+        for _ in range(20):
+            self.app.processEvents()
+        chip = self._chip()
+        self.assertEqual(chip.text(), "↓ v1.10.0 待更新")
+        self.assertEqual(chip.sizePolicy().horizontalPolicy(), QSizePolicy.Fixed,
+                         "chip 不在定宽名单里：宽度一紧就被压扁，状态字白加")
+        self.assertLess(chip.geometry().x(), self.win.btn_github.geometry().x(),
+                        "chip 不在 GitHub 按钮左边，标题栏顺序被改了")
+
 if __name__ == "__main__":
     unittest.main()
