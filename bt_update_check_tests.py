@@ -14,6 +14,7 @@
 import os
 import sys
 import unittest
+from pathlib import Path
 
 import platform as _platform
 
@@ -260,6 +261,171 @@ class UiWiring(unittest.TestCase):
         self.assertIn("9.9.9", chip.text() + chip.toolTip())
         self.assertTrue(hasattr(self.win, "_offer_update_download"),
                         "发现新版要能走下载（B 方案）")
+
+
+class ChipStateMachine(unittest.TestCase):
+    """chip 从"点一下=检查更新"变成一个**按状态分派**的控件（2026-10-10 用户提的方案）。
+
+    四条硬约束，每条一个用例钉住：
+      1. 版本号任何时刻都在（它是全 app 唯一的版本落点，报问题要对上版本）；
+         只有下载中那一分钟换成 `↓ 37%`。
+      2. "已是最新"和"没查到"必须是两个态 —— 静默失败在这个控件上等于说谎。
+      3. 有新版时点击 = 直接下到记住的 `download_dir`，不弹确认、不弹目录框。
+      4. 下载中再点不许开第二路（49 MB 不是免费的）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        import tempfile
+        cls.app = main.QApplication.instance() or main.QApplication([])
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls._orig_dir, cls._orig_file = main.CONFIG_DIR, main.CONFIG_FILE
+        main.CONFIG_DIR = Path(cls._tmp.name)
+        main.CONFIG_FILE = main.CONFIG_DIR / "config.json"
+        cls._orig_fetch = main.check_for_update
+        main.check_for_update = lambda *a, **k: {"ok": False, "silent": True,
+                                                 "newer": False, "latest": None,
+                                                 "asset": None, "error": "测试里不联网"}
+        cls.win = main.MainWindow()
+        cls.win.show()
+        for _ in range(10):
+            cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        main.check_for_update = cls._orig_fetch
+        main.CONFIG_DIR, main.CONFIG_FILE = cls._orig_dir, cls._orig_file
+        cls._tmp.cleanup()
+        cls.win.deleteLater()
+
+    def setUp(self):
+        # 每条用例自己把状态摆到位，不依赖类内顺序（上一版共用窗口就被顺序咬过）
+        self.win._update_dl = None
+        self.win._chip_state = "idle"
+
+    def _chip(self):
+        return self.win.findChild(main.QPushButton, "versionChip")
+
+    def _newer(self, auto=True):
+        self.win._apply_update_result(
+            {"ok": True, "silent": False, "newer": True,
+             "latest": {"version": "9.9.9", "tag": "v9.9.9", "page_url": "u"},
+             "asset": {"name": "ByteTools-9.9.9.exe", "size": 4200,
+                       "browser_download_url": "https://x/ByteTools-9.9.9.exe"},
+             "error": ""}, auto=auto)
+
+    def test_update_available_state_points_down_at_the_new_version(self):
+        self._newer()
+        chip = self._chip()
+        self.assertTrue(chip.text().startswith("↓"),
+                        f"可下载要用向下的箭头（↑ 是升级的意思，动作其实是下载）：{chip.text()}")
+        self.assertIn("9.9.9", chip.text())
+        self.assertEqual(chip.property("chipState"), "update")
+        self.assertIn(str(main.APP_VERSION), chip.toolTip(),
+                      "tooltip 要同时给出当前版本，用户才知道自己在从哪版升")
+        self.assertIn("下载", chip.toolTip())
+
+    def test_up_to_date_and_check_failed_are_two_different_states(self):
+        """断网显示成"已是最新"比不显示更糟 —— 这两态必须能从文字和属性上分开。"""
+        self.win._apply_update_result({"ok": True, "silent": False, "newer": False,
+                                       "latest": {"version": main.APP_VERSION},
+                                       "asset": None, "error": ""}, auto=True)
+        chip = self._chip()
+        self.assertEqual(chip.property("chipState"), "latest")
+        self.assertIn("最新", chip.toolTip())
+        self.assertIn(f"v{main.APP_VERSION}", chip.text(),
+                      "没有新版时版本号必须还写在 chip 上")
+
+        self.win._apply_update_result({"ok": False, "silent": True, "newer": False,
+                                       "latest": None, "asset": None,
+                                       "error": "URLError: 连不上"}, auto=True)
+        self.assertEqual(chip.property("chipState"), "error")
+        self.assertIn("?", chip.text())
+        self.assertNotIn("最新", chip.toolTip())
+        self.assertIn("连不上", chip.toolTip(), "失败原因要进 tooltip，否则用户无从判断")
+        self.assertIn("不影响", chip.toolTip())
+
+    def test_click_with_an_update_downloads_without_any_dialog(self):
+        """点一下就开始下：不弹"确定要下载吗"，也不弹目录选择框（标题栏上弹文件框很突兀）。"""
+        self._newer()
+        called = []
+
+        def no_dialog(*a, **k):
+            called.append("QFileDialog 被调用了")
+            return ""
+
+        started = {}
+
+        class FakeWorker:
+            def __init__(self, urls, dest, parent=None, expect_magic=b""):
+                started["urls"] = urls
+                started["dest"] = str(dest)
+
+            def __getattr__(self, name):
+                class _Sig:
+                    def connect(_s, fn):
+                        pass
+                return _Sig()
+
+            def start(self):
+                started["started"] = True
+
+        orig_dlg = main.QFileDialog.getExistingDirectory
+        orig_w = main.DownloadWorker
+        orig_dir = main.load_download_dir
+        self.addCleanup(setattr, main.QFileDialog, "getExistingDirectory", orig_dlg)
+        self.addCleanup(setattr, main, "DownloadWorker", orig_w)
+        self.addCleanup(setattr, main, "load_download_dir", orig_dir)
+        main.QFileDialog.getExistingDirectory = staticmethod(no_dialog)
+        main.DownloadWorker = FakeWorker
+        main.load_download_dir = lambda: Path(self._tmp.name) / "dl"
+        (Path(self._tmp.name) / "dl").mkdir(exist_ok=True)
+
+        self.win._on_version_clicked()
+
+        self.assertEqual(called, [], "点击下载时不该弹目录选择框")
+        self.assertTrue(started.get("started"), f"没真的开始下载：{started}")
+        self.assertIn("9.9.9", started["dest"])
+        self.assertEqual(Path(started["dest"]).parent,
+                         (Path(self._tmp.name) / "dl").resolve(),
+                         "要落在用户上次记住的目录里")
+
+    def test_click_while_downloading_does_not_start_a_second_one(self):
+        self._newer()
+
+        class Running:
+            def isRunning(self):
+                return True
+
+        self.win._update_dl = Running()
+        hits = []
+        orig = main.DownloadWorker
+        self.addCleanup(setattr, main, "DownloadWorker", orig)
+
+        def boom(*a, **k):
+            hits.append(1)
+            return orig(*a, **k)
+
+        main.DownloadWorker = boom
+        self.win._on_version_clicked()
+        self.assertEqual(hits, [], "下载中再点 = 开第二路 49 MB 下载")
+        self.assertEqual(self._chip().property("chipState"), "downloading",
+                         "chip 要还停在下载态，不能被这次点击打回可下载")
+
+    def test_progress_line_shows_only_a_percentage(self):
+        """标题栏宽度紧（之前多加一个按钮就把「清理残留 PATH」裁掉过），速度留给日志。"""
+        self.win._begin_app_update_download(
+            {"latest": {"version": "9.9.9", "page_url": "u"},
+             "asset": {"name": "ByteTools-9.9.9.exe", "size": 10000,
+                       "browser_download_url": "https://x/ByteTools-9.9.9.exe"}})
+        self.win._on_update_progress(2500, 10000)
+        text = self._chip().text()
+        self.assertEqual(text, "↓ 25%", f"chip 上只要百分比：{text}")
+        self.assertNotIn("KB/s", text)
+        self.win._on_update_progress(10000, 10000)
+        self.assertEqual(self._chip().text(), "↓ 99%",
+                         "100% 之前先停在 99%：字节还没落盘就说满了是撒谎")
 
 
 if __name__ == "__main__":

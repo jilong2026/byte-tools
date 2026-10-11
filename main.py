@@ -14101,14 +14101,18 @@ class MainWindow(QMainWindow):
         title_label.setToolTip(f"{APP_NAME} v{APP_VERSION}")
         tb.addWidget(title_label)
 
-        # 版本号 chip：常驻显示当前版本，点一下 = 手动检查更新（规则 R12）。
+        # 版本号 chip：常驻显示当前版本，点一下按当前状态分派（规则 R12）。
+        # 它同时是这四种状态的唯一指示灯：没查过 / 已是最新 / 有新版可下 / 没查到。
         self.btn_version = QPushButton(f"v{APP_VERSION}")
         self.btn_version.setObjectName("versionChip")
         self.btn_version.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_version.setToolTip(
             f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
-            "（启动后一天最多自动查一次，查不到不打扰你）")
-        self.btn_version.clicked.connect(lambda: self._start_update_check(auto=False))
+            "（启动后一天最多自动查一次）")
+        self.btn_version.clicked.connect(self._on_version_clicked)
+        self._chip_state = "idle"
+        self._chip_latest = ""
+        self._update_res: dict = {}
         tb.addWidget(self.btn_version)
         tb.addStretch(1)
 
@@ -14624,6 +14628,7 @@ class MainWindow(QMainWindow):
             return                     # 24 小时内查过：一个字都不说
         if not auto:
             self._append_log("info", f"检查更新中…（当前 v{APP_VERSION}）")
+            self._set_chip_state("checking")
         self._update_worker = UpdateCheckWorker(parent=self)
         self._update_worker.done.connect(
             lambda res, a=auto: self._apply_update_result(res, auto=a))
@@ -14633,90 +14638,171 @@ class MainWindow(QMainWindow):
     def _apply_update_result(self, res, auto: bool) -> None:
         """把检查结果落到界面与日志。
 
-        **自动检查失败时一个字都不写**（用户明确要求"连不上要完全静默"）：
-        这台机器对 github.com 偶发整天连不上是常态，弹一句"检查失败"对普通用户
-        等于凭空多出一个故障。手动点版本号时才必须回答，否则像按钮坏了。
+        **自动检查失败时不写日志**（用户明确要求"连不上别弹窗"），但 chip 仍要变灰带 `?`：
+        这颗控件现在兼任状态灯，"没查到"若继续显示成普通版本号，就等于说"没有新版"，
+        而它其实什么都不知道。手动点版本号时另外再回答一句，否则像按钮坏了。
         """
         if not isinstance(res, dict):
             res = {}
         if not res.get("ok"):
+            reason = str(res.get("error") or "未知原因")
+            self._set_chip_state("error", reason=reason)
             if auto and res.get("silent"):
                 return
             self._append_log("info",
-                      f"没检查成更新：{res.get('error') or '未知原因'}"
+                      f"没检查成更新：{reason}"
                       "（不影响软件本身使用，稍后可以再点一次版本号）")
             return
         latest = res.get("latest") or {}
         version = str(latest.get("version") or "")
         save_update_check(last_check_ts=time.time())
         if not res.get("newer"):
+            self._update_res = {}
+            self._set_chip_state("latest")
             if not auto:
                 self._append_log("ok", f"已经是最新版本 v{APP_VERSION}。")
             return
-        chip = getattr(self, "btn_version", None)
-        if chip is not None:
-            # chip 只写新版本号（不写"当前→新"那种长串）：标题栏宽度紧，之前裁过按钮。
-            # 换色用**动态属性**而不是改 objectName：改了名字，之后按名字找它的代码与
-            # 用例就再也找不到了（真踩了一次：test_version_chip 跑在改色之后直接查不到）。
-            chip.setText(f"↑ v{version}")
-            chip.setProperty("hasUpdate", True)
-            chip.style().unpolish(chip)
-            chip.style().polish(chip)
-            chip.setToolTip(f"新版本 v{version} 已发布，点击查看详情并选择是否下载")
+        self._update_res = res
+        self._set_chip_state("update", new_version=version)
         if update_notify_due(load_update_state(), version):
             save_update_check(notified=version)
             self._append_log("ok", f"发现新版本 v{version}（当前 v{APP_VERSION}）："
-                            f"{latest.get('page_url') or GITHUB_URL}")
-        if not auto:
+                            f"{latest.get('page_url') or GITHUB_URL}"
+                            "（点左上角那颗 ↓ 直接下载到默认目录）")
+        if not auto and not isinstance(res.get("asset"), dict):
+            # 没有本平台可下的产物时才弹窗 —— 有产物的话点 chip 就下，不该多问一句。
             self._offer_update_download(res)
 
-    def _offer_update_download(self, res) -> None:
-        """把新包下到**用户挑的目录**，绝不替换正在运行的自己（规则 R12）。
+    def _set_chip_state(self, state: str, *, new_version: str = "",
+                        pct=None, reason: str = "", dest=None) -> None:
+        """版本号 chip 的文字 / 配色 / tooltip 只有这一个出口。
 
-        为什么不做"一键升级"：改名/覆盖运行中的 exe 在 Windows 上做得到，但杀软与
-        SmartScreen 对"程序自我替换"极易误报，onefile 又解包在 %TEMP% —— 一旦失手，
-        用户手里是一个既没更新完也打不开的软件。宁可让他自己把文件拖过去。
+        以前 setText + setProperty + unpolish 三行散在结果处理里，只有"发现新版"
+        一种状态有地方表达；现在四种状态都要有确定的样子，收口到一处才改得动。
+        配色挂在**动态属性**上（objectName 不许改，改了按名字找它的代码与用例就失效）。
+        """
+        chip = getattr(self, "btn_version", None)
+        if chip is None:
+            return
+        self._chip_state = state
+        folder = Path(dest) if dest else load_download_dir()
+        if state == "update":
+            text = f"↓ v{new_version}"
+            tip = (f"发现新版本 v{new_version}（当前 v{APP_VERSION}）\n"
+                   f"点击直接下载到：{folder}\n"
+                   "下载不会改动、也不会替换正在运行的本程序")
+        elif state == "downloading":
+            text = f"↓ {pct}%" if isinstance(pct, int) else "↓ …"
+            tip = (f"正在下载 v{new_version or self._chip_latest or '新版本'}"
+                   f"（进度只写百分比，速度和字节数在日志里）\n保存到：{folder}")
+        elif state == "latest":
+            text = f"v{APP_VERSION}"
+            tip = (f"当前 v{APP_VERSION} 已是最新版本\n点击可以再查一次"
+                   "（启动后一天最多自动查一次）")
+        elif state == "error":
+            text = f"? v{APP_VERSION}"
+            tip = (f"没查到新版本：{reason}\n"
+                   "不影响软件本身使用，点击可以再查一次")
+        elif state == "checking":
+            text = f"v{APP_VERSION}"
+            tip = f"正在检查更新…（当前 v{APP_VERSION}）"
+        else:                                    # idle
+            text = f"v{APP_VERSION}"
+            tip = (f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
+                   "（启动后一天最多自动查一次）")
+        if chip.text() != text:
+            chip.setText(text)
+        if chip.property("chipState") != state:
+            chip.setProperty("chipState", state)
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
+        chip.setToolTip(tip)
+
+    def _on_version_clicked(self) -> None:
+        """点 chip：有新版就直接下，正在下就别开第二路，其余情况都是"再查一次"。"""
+        state = getattr(self, "_chip_state", "idle")
+        worker = getattr(self, "_update_dl", None)
+        if state == "downloading" or (worker is not None
+                                      and getattr(worker, "isRunning", None)
+                                      and worker.isRunning()):
+            self._append_log("info", "新版本正在下载中，进度就在左上角这颗 ↓ 上。")
+            self._set_chip_state("downloading")
+            return
+        if state == "update" and self._begin_app_update_download(self._update_res):
+            return
+        self._start_update_check(auto=False)
+
+    def _begin_app_update_download(self, res) -> bool:
+        """把新包下到**记住的目录**，绝不替换正在运行的自己（规则 R12）。
+
+        为什么不弹"确定要下载吗"、也不弹目录选择框：这是标题栏上的一次点击，
+        弹一个模态文件框很突兀，而落点已经有 `download_dir` 这个偏好可用；
+        下载本身不改注册表、不碰本程序，误点的代价只是一次网络传输。
+        返回 False 表示没有可下的产物，调用方该退回"查一次"。
+        """
+        res = res if isinstance(res, dict) else {}
+        latest = res.get("latest") or {}
+        asset = res.get("asset")
+        version = str(latest.get("version") or "")
+        if not isinstance(asset, dict) or not asset.get("browser_download_url"):
+            return False
+        folder = load_download_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._append_log("error", f"建不出下载目录 {folder}：{exc}")
+            return False
+        dest = _unique_download_path(folder / str(asset.get("name") or "ByteTools.exe"))
+        urls = _gh_accelerated(str(asset["browser_download_url"]))
+        size = int(asset.get("size") or 0)
+        self._chip_latest = version
+        self._set_chip_state("downloading", new_version=version, pct=0, dest=folder)
+        self._append_log("info", f"开始下载 v{version}：{dest}（{len(urls)} 个源依次尝试）")
+        self._update_dl = DownloadWorker(urls, dest, parent=self)
+        self._update_dl.progress.connect(self._on_update_progress)
+        self._update_dl.log.connect(lambda lvl, msg: self._append_log(lvl, f"[更新] {msg}"))
+        self._update_dl.finished_ok.connect(
+            lambda p: self._on_update_downloaded(p, size, version))
+        self._update_dl.finished_fail.connect(
+            lambda e: self._on_update_download_failed(e, version))
+        self._update_dl.start()
+        return True
+
+    def _on_update_progress(self, got: int, total: int) -> None:
+        """chip 上只写百分比：标题栏宽度紧（之前多加一个按钮就把「清理残留 PATH」裁过）。
+
+        封顶 99%：字节还没落盘就显示 100% 是撒谎，落盘与核对完成另有回调。
+        """
+        pct = 0 if total <= 0 else int(got * 100 / total)
+        self._set_chip_state("downloading", new_version=self._chip_latest,
+                             pct=min(pct, 99))
+
+    def _on_update_download_failed(self, message: str, version: str) -> None:
+        self._append_log("error", f"[更新] 下载失败：{message}")
+        self._set_chip_state("update", new_version=version)
+
+    def _offer_update_download(self, res) -> None:
+        """**没有本平台产物时**才走的提示路径。
+
+        有产物的情况不再弹这个框：点 chip 直接下（见 `_begin_app_update_download`），
+        弹一次"要下载吗"再弹一次"存到哪"，对标题栏上的一次点击来说是两道多余的坎。
         """
         res = res if isinstance(res, dict) else {}
         latest = res.get("latest") or {}
         asset = res.get("asset")
         page = str(latest.get("page_url") or GITHUB_URL)
         version = str(latest.get("version") or "")
-        if not isinstance(asset, dict) or not asset.get("browser_download_url"):
-            QMessageBox.information(
-                self, "发现新版本",
-                f"v{version} 已发布，但这个 Release 里找不到本平台可用的安装包。\n"
-                f"可以到发布页看看：{page}")
+        if isinstance(asset, dict) and asset.get("browser_download_url"):
+            self._begin_app_update_download(res)
             return
-        name = str(asset["name"])
-        size = int(asset.get("size") or 0)
-        reply = QMessageBox.question(
+        QMessageBox.information(
             self, "发现新版本",
-            f"新版本 v{version}（当前 v{APP_VERSION}）\n"
-            f"要下载的产物：{name}（约 {human_size(size)}）\n\n"
-            "下载不会改动、也不会替换正在使用的本程序；下完你自己放到任意目录即可。\n"
-            "现在下载吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if reply != QMessageBox.Yes:
-            return
-        folder = QFileDialog.getExistingDirectory(self, "选择保存位置",
-                                                  str(Path.home() / "Downloads"))
-        if not folder:
-            self._append_log("info", "没选保存位置，已取消下载。")
-            return
-        dest = Path(folder) / name
-        urls = _gh_accelerated(str(asset["browser_download_url"]))
-        self._append_log("info", f"开始下载 v{version}：{dest}（{len(urls)} 个源依次尝试）")
-        self._update_dl = DownloadWorker(urls, dest, parent=self)
-        self._update_dl.log.connect(lambda lvl, msg: self._append_log(lvl, f"[更新] {msg}"))
-        self._update_dl.finished_ok.connect(
-            lambda p: self._on_update_downloaded(p, size, version))
-        self._update_dl.finished_fail.connect(
-            lambda e: self._append_log("error", f"[更新] 下载失败：{e}"))
-        self._update_dl.start()
+            f"v{version} 已发布，但这个 Release 里找不到本平台可用的安装包。\n"
+            f"可以到发布页看看：{page}")
 
     def _on_update_downloaded(self, path: str, expected_size: int, version: str) -> None:
         """下完了先核字节数，再问要不要打开所在文件夹。"""
+        self._set_chip_state("update", new_version=version)
         got = 0
         try:
             got = Path(path).stat().st_size
@@ -15158,9 +15244,11 @@ class MainWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.26);
                 color: white;
             }
-            /* 发现新版本时才换色：一个安静的琥珀色小牌，不弹窗、不抢视线。
-               选择器挂在**动态属性**上（objectName 不许改，改了按名字找它的代码会失效） */
-            #versionChip[hasUpdate="true"] {
+            /* chip 的四种状态配色，全挂在**动态属性**上（objectName 不许改，
+               改了按名字找它的代码与用例就失效）。琥珀色=有新版可点，
+               灰色带问号=没查到（跟"已是最新"必须一眼能分）。 */
+            #versionChip[chipState="update"],
+            #versionChip[chipState="downloading"] {
                 background: #f9a825;
                 color: #3e2723;
                 border: none;
@@ -15169,8 +15257,21 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 border-radius: 10px;
             }
-            #versionChip[hasUpdate="true"]:hover {
+            #versionChip[chipState="update"]:hover,
+            #versionChip[chipState="downloading"]:hover {
                 background: #ffb74d;
+            }
+            #versionChip[chipState="error"] {
+                background: rgba(255, 255, 255, 0.08);
+                color: #9aa7b3;
+                border: 1px dashed rgba(255, 255, 255, 0.34);
+                padding: 4px 9px;
+                font-size: 12px;
+                border-radius: 10px;
+            }
+            #versionChip[chipState="error"]:hover {
+                color: #dfe7ee;
+                border-color: rgba(255, 255, 255, 0.5);
             }
             #iconBtn, #donateBtn, #ctrlBtn, #closeBtn {
                 background: transparent;
