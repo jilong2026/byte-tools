@@ -28,6 +28,13 @@
 - [规则 R8：动态内容目录要同步进 prefix / BASE](#规则-r8动态内容目录要同步进-prefix--base)
 - [规则 R9：非 ASCII 主机名下的服务节点名](#规则-r9非-ascii-主机名下的服务节点名)
 - [规则 R10：启动后必须有可访问页面 + 启动日志必须给出地址](#规则-r10启动后必须有可访问页面--启动日志必须给出地址)
+- [规则 R11：产品名是 ByteTools / 字节工具箱，四处旧名 byte-tools 是承重墙](#规则-r11产品名是-bytetools--字节工具箱但四处旧名-byte-tools-是承重墙不许顺手改)
+- [规则 R12：检查更新只读、后台、失败完全静默，且绝不替换自己](#规则-r12检查更新只读后台自动路径失败完全静默且绝不替换自己)
+- [规则 R14：四条通用不变量](#规则-r14四条通用不变量2026-10-10-全面审计--2026-10-11-关窗崩溃查出来的)
+- [规则 R15：GitHub 匿名额度是硬预算，抓到的清单必须落盘](#规则-r15github-匿名额度是硬预算抓到的清单必须落盘2026-10-12)
+- [规则 R16：像素裁字只能在真实渲染下判](#规则-r16像素裁字只能在真实渲染下判offscreen-的度量会把你带偏)
+- [规则 R17：组件详情弹窗](#规则-r17组件详情弹窗2026-10-12)
+- [规则 R18：冷启动预算——建卡不许逐个扫 PATH](#规则-r18冷启动预算建卡不许逐个扫-path2026-10-13)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -61,7 +68,7 @@
 
 ### R1.2 适用范围
 
-- **全部 26 个组件**（语言运行时：jdk / python / node / go / bun；Shell：powershell；构建工具：maven / gradle；应用服务器与 Web 服务：tomcat / nginx；数据库：mysql / mongodb / postgresql；容器与编排：docker / kubectl；CI/CD：jenkins；消息队列：rabbitmq / kafka / rocketmq / pulsar / activemq；服务发现与事务：nacos / seata；搜索引擎：elasticsearch；版本控制：git；Python 发行版：conda）
+- **全部可装配组件**（语言运行时：jdk / python / node / go / bun / kotlin / graalvm / rust / dart；Shell：powershell；构建工具：maven / gradle / protoc / ant / cmake / ninja；应用服务器与 Web 服务：tomcat / nginx / caddy / traefik；数据库：mysql / mongodb / postgresql / sqlite / duckdb；键值缓存：redis；容器与编排：docker / kubectl / docker-compose / helm / k9s / trivy / jmeter；CI/CD：jenkins；消息队列：rabbitmq / kafka / rocketmq / pulsar / activemq / nats-server；服务发现与事务：nacos / seata / etcd / consul / zookeeper；搜索引擎：elasticsearch；版本控制：git；Python 发行版：conda；Python 工具链：uv；命令行小工具：jq / yq / ripgrep / fd / fzf / bat / eza / zoxide；单二进制运行时：deno / bun / dotnet-sdk / pnpm；对象存储：minio）
 - `build_components()` 的默认（离线）清单
 - `DownloadWorker` 的实际下载请求（按 `url_list_map` 顺序遍历，失败自动切换）
 - `ComponentVersion.url_list_map` 多源故障转移 URL 列表（向后兼容旧的 `url_map` 单 URL 模式）
@@ -184,8 +191,8 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 
 ### R1.5 各组件镜像清单
 
-下表 26 个**可安装**组件的镜像路径**全部逐条实测**（2026-09-28，GET + `User-Agent: byte-tools`）。
-2026-10-10 起另有 17 个「开发工具」是**只下载**的，它们的实测矩阵单独记在 R13.3（那批没有可用大陆镜像，属 R1 例外）。
+下表 57 个**可装配**组件的镜像路径**全部逐条实测**（2026-09-28 主体，2026-10-12 分四批补齐，GET + `User-Agent: byte-tools`）。
+2026-10-10 起另有 26 个「开发工具」是**只下载**的，它们的实测矩阵记在 R13.3（那批绝大多数没有可用大陆镜像，属 R1 例外）。
 "默认清单实测"一栏给的是默认版本行里**可用大陆源的数量 / 配置的候选数量**。
 
 #### 首批 8 个组件（2026-09 由单源补齐为多源）
@@ -223,6 +230,99 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 | `elasticsearch` | Elasticsearch | M1、M1b `/elasticsearch/<v>/elasticsearch-<v>-<os>-<arch>.<ext>`（清华/阿里无此制品；镜像只同步新版本，8.15.0 一类旧版本 404 由故障转移兜到官网） | `artifacts.elastic.co/downloads/elasticsearch/` | 9.2.3：2/2 家 200（471~687 MB）；8.15.0/8.9.2 只有官网 |
 | `powershell` | PowerShell 7 | **无真镜像**（清华 / 南大 / 阿里 / npmmirror 的 `powershell` 目录一律 404；华为 `mirrors.huaweicloud.com/powershell/` 只是镜像站门户壳页），走 `GH_ACCELERATORS` 三个加速器 | `github.com/PowerShell/PowerShell/releases/download/v<v>/…`；资产名大小写不统一：Windows 是 `PowerShell-<v>-win-<arch>.zip`，Linux/macOS 是 `powershell-<v>-{linux,osx}-<arch>.tar.gz` | 12 版本 × 三平台 × 4 源全 200（zip / gzip 魔数已验）；`ghproxy.net` 偶发 503，重试即通且故障转移会自动换下一个加速器 |
 | `nginx` | Nginx | M1b `mirrors.huaweicloud.com/nginx/nginx-<v>.zip`、M1 `repo.huaweicloud.com/nginx/nginx-<v>.zip`（实测两家都同步了 zip；清华 / 北外 / 南大 / 阿里 / 腾讯对同一文件名一律 404——它们的 `nginx/` 目录是给 apt/yum 用的包仓库，没有 nginx.org 那套 Windows zip） | `nginx.org/download/nginx-<v>.zip` | Windows 3/3 全 200（约 2.1 MB，解压根目录即 `nginx.exe`）；Linux/macOS **不给 URL**——上游只发源码 `.tar.gz`（需自行 configure + make），由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
+
+#### 2026-10-12 新增四个组件（Kotlin / GraalVM / Rust / Redis）
+
+| key | 组件 | 国内镜像（按优先级） | 末位官网 | 默认清单实测 |
+|------|------|-----------------------|---------|--------------|
+| `kotlin` | Kotlin 编译器 | 无真镜像，走 `GH_ACCELERATORS`：`ghfast.top` → `gh-proxy.com` → `ghproxy.net` | `github.com/JetBrains/kotlin/releases/download/v<v>/kotlin-compiler-<v>.zip` | 三平台同一个 zip（89 MB，编译器是 JVM 产物）。Range 取样实测 206 + `PK`：**gh-proxy.com 18.4 Mbps、ghfast.top 7.2、gh-proxy.org 6.5**；裸 `github.com` 本机 SSLError。包顶层只有 `kotlinc/`（133 条），`bin/kotlinc.bat` 在里面 ⇒ `path_subdir="bin"` |
+| `graalvm` | GraalVM CE | 同上三个加速器 | `github.com/graalvm/graalvm-ce-builds/releases/download/graal-<tag>/graalvm-community-jdk-<stem>_<os>-<arch>_bin.<ext>` | 206 + `zip`：gh-proxy.com 14.7、ghfast.top 7.3、gh-proxy.org 7.3 Mbps；裸地址 SSLError。**版本号在资产名里**（tag 是 `graal-25.4.4.1.1`，版本是 `25.0.4.1.1`），fetcher 用 `-(\d+(?:\.\d+)+)_(?:windows\|macos\|linux)-` 从资产名读，**不许从 tag 切**。`env_var` 必须是 `GRAALVM_HOME`——写 `JAVA_HOME` 会和 `jdk`(Temurin) 抢同一个变量，两个组件互相覆盖对方的生效版本 |
+| `rust` | Rust | `rsproxy.cn/dist/<日期>/rust-<v>-x86_64-pc-windows-msvc.msi`（Rust 中文社区维护） | `static.rust-lang.org/dist/<日期>/…msi` | **1/1 家：16.9 MB/s（官方 15.5），206 + `\xd0\xcf`**（OLE）。**只有 1 个大陆源**，已登记 `SINGLE_SOURCE_EXCEPTION["rust"]=1`。踩过的坑：清华 `rustup/dist/<日期>/…msi` 404（它只镜像 tar.xz）、中科大整个 `rustup` 目录 404、腾讯云 `ChunkedEncodingError`。**日期目录不能省**（`/dist/<YYYY-MM-DD>/`）<br>**归档类型是 `msi`，走 `extract_archive` 里的 `msiexec /a` 管理性提取，不是 `msiexec /i` 真装机** —— 三条理由都是实测出来的：① 官方 `.exe`(NSIS) 已停发（带日期目录与不带的一律 404）；② 合并 `tar.xz` 内部是 `rustc/` + `cargo/` + `clippy-preview/` 等**组件目录，没有统一 `bin/`**，直接解压出来的 `rustc` 找不到标准库；③ `/a` 免提权、不写注册表，产出统一 prefix（`Rust/{bin,lib,share}`），且提取出来的 `rustc 1.99.0` / `cargo 1.99.0` / `rustfmt 1.10.0-stable` 真能跑 —— 而 `/i` 会留一个我们删不掉的注册表项、且大概率弹 UAC。清单里 **没有 `msi_url`**，只能把官方 `xz_url` 的后缀换成 `.msi`（1.99.0 / 1.98.0 / 1.97.1 三版换完都是 206 + OLE）<br>⚠ **装完仍需要一个链接器**：本机没装 VS Build Tools 时 `rustc` 能编译、**链接不过**，而且 Git for Windows 自带的 coreutils `link.exe` 会冒充 MSVC 链接器，报出莫名其妙的 `link: extra operand`。gnu 变体也不解决：实测合并包里**不含** `mingw-version/`（rust-mingw 是独立组件） |
+| `redis` | Redis | 无真镜像，走 `GH_ACCELERATORS` | `github.com/redis-windows/redis-windows/releases/download/<v>/Redis-<v>-Windows-x64-msys2.zip` | 206 + `zip`：gh-proxy.com 17.9、ghfast.top 8.0、gh-proxy.org 7.2 Mbps；裸地址 SSLError。**⚠ 非官方构建**（社区 `redis-windows`）——官方只发源码，`download.redis.io` 的 tar.gz 装不出 Windows 可执行文件，卡片 `data_note` 已写明。不选 `with-Service` 变体：那个 `RedisService.exe` 会把自己注册成 Windows 服务，进程就不归本工具管了 |
+
+#### 2026-10-12 B1：protoc / uv —— 「zip 形态的单二进制 / 无 XXX_HOME」的两个变体
+
+| key | 组件 | 国内镜像（按优先级） | 末位官网 | 默认清单实测 |
+|------|------|-----------------------|---------|--------------|
+| `protoc` | protoc（Protobuf 编译器） | `registry.npmmirror.com/-/binary/protobuf/v<v>/protoc-<v>-win64.zip`（**目录名必须带 v 前缀**：不带 v 实测 404），再 `GH_ACCELERATORS` | `github.com/protocolbuffers/protobuf/releases/download/v<v>/protoc-<v>-win64.zip` | npmmirror 206 + `PK`：**3.5 / 2.7 Mbps**（两轮一致）；gh-proxy.com 3.3 / 3.5。裸 `github.com` 本机 ConnectionError。中科大与清华的 `github-release` 代理对 protobuf **恒 404**；华为云回 200 但只有 12 KB HTML（软 404）。整包 3,565,086 B / 27 条，顶层是 `bin/` + `include/` 两个并列目录 + `readme.txt` ⇒ **顶层目录 ≥2，`extract_archive` 返回 install_dir，`path_subdir="bin"`**；`protoc --version` → `libprotoc 36.2` |
+| `uv` | uv（Python 包/环境管理） | `mirrors.ustc.edu.cn/github-release/astral-sh/uv/<tag>/uv-x86_64-pc-windows-msvc.zip`，再 `GH_ACCELERATORS` | `github.com/astral-sh/uv/releases/download/<tag>/uv-x86_64-pc-windows-msvc.zip` | 中科大 206 + `PK`：**2.0 / 1.9 Mbps**（两轮；慢于 gh-proxy.com 的 3.7 / 3.6，但"真镜像优先于加速器"是既有惯例，bun 那行同）。⚠ **中科大只同步最新版**：0.12.24 实测 404，旧版本靠故障转移兜到加速器。npmmirror 没有 uv 目录（`{"error":…}`）。整包 15,722,003 B / 3 条，顶层**一个目录都没有**（直接 `uv.exe` / `uvw.exe` / `uvx.exe`）⇒ **`path_subdir=""`**；`uv --version` → `uv 0.13.0 (…msvc)` |
+
+#### 2026-10-12 B3/B5：GitHub Releases 单二进制批（15 个，表驱动 `GH_BIN_COMPONENTS`）
+
+统一形态：**Windows 一个 zip（yq 是裸 exe）+ 官方只在 GitHub 发版 + 无 XXX_HOME**。全部只登记 Windows；裸 `github.com` 本机 ConnectionError，按 R1 放末位兜底，前面三个加速器都在 `MAINLAND_MARKERS` 里。
+
+| key | 资产名（严格匹配） | tag 前缀 | 整包实测 | 顶层布局 ⇒ `path_subdir` |
+|-----|--------------------|---------|---------|--------------------------|
+| `deno` | `deno-x86_64-pc-windows-msvc.zip` | `v` | 42,630,221 B / 1 条 | 顶层 0 目录（`deno.exe`）⇒ `""` |
+| `ninja` | `ninja-win.zip` | `v` | 291,570 B / 1 条 | 0 目录 ⇒ `""` |
+| `duckdb` | `duckdb_cli-windows-amd64.zip` | `v` | 12,910,895 B / 1 条 | 0 目录 ⇒ `""` |
+| `cmake` | `cmake-<v>-windows-x86_64.zip` | `v` | 54,400,562 B / 8979 条 | **1 个目录**（`cmake-<v>-windows-x86_64/`），⚠ `cmake.exe` 在那层的 **`bin/`** 里 ⇒ `"bin"`。这一格先前抄成了 `""`（"顶层 1 目录的 exe 都在根"是想当然），2026-10-12 由 `bt_archive_layout_audit` 判 BAD 后改回；同批的 ripgrep/fd/bat 才是"exe 在根" |
+| `ripgrep` | `ripgrep-<v>-x86_64-pc-windows-msvc.zip` | **无 v** | 1,789,611 B / 16 条 | 1 个目录，`rg.exe` 在根 ⇒ `""` |
+| `fd` | `fd-v<v>-x86_64-pc-windows-msvc.zip` | `v` | 1,535,063 B / 14 条 | 1 个目录 ⇒ `""` |
+| `bat` | `bat-v<v>-x86_64-pc-windows-msvc.zip` | `v` | 3,613,318 B / 11 条 | 1 个目录 ⇒ `""` |
+| `eza` | `eza.exe_x86_64-pc-windows-gnu.zip` | `v` | 1,491,797 B / 1 条 | 0 目录 ⇒ `""` |
+| `zoxide` | `zoxide-<v>-x86_64-pc-windows-msvc.zip` | `v` | 545,663 B / 21 条 | **3 个顶层项**（`CHANGELOG.md` / `LICENSE` / `README.md` / `completions` / `man` + 根上 `zoxide.exe`）⇒ `""` |
+| `fzf` | `fzf-<v>-windows_amd64.zip` | `v` | 2,544,236 B / 1 条 | 0 目录 ⇒ `""` |
+| `yq` | `yq_windows_amd64.exe`（**裸 exe**） | `v` | 5,829,372 B | 单文件 ⇒ 走"拷贝 + 改名"分支，`exec_name` 才能是干净的 `yq` |
+| `etcd` | `etcd-v<v>-windows-amd64.zip` | `v` | 24,508,798 B / 48 条 | 1 个目录，`etcd.exe` 在根 ⇒ `""` |
+| `nats-server` | `nats-server-v<v>-windows-amd64.zip` | `v` | 7,484,670 B / 3 条 | 1 个目录 ⇒ `""` |
+| `caddy` | `caddy_<v>_windows_amd64.zip` | `v` | 18,479,498 B / 3 条 | **0 个目录**但有 `LICENSE` / `README.md` ⇒ `""` |
+| `traefik` | `traefik_v<v>_windows_amd64.zip` | `v` | 51,581,650 B / 3 条 | 同 caddy ⇒ `""` |
+
+> **tag 前缀必须逐个钉**：ripgrep 的 tag 是 `15.2.0`（不带 v），其余 14 个都带。拼错就是 404，而用户看到的是"下载失败"而不是"清单写错了"——护栏 `test_tag_template_matches_the_measured_upstream_convention` 就是为这条加的（变异自检逼出来的）。
+>
+> **两个同批组件刻意不进这张表**：① `pnpm` 的 zip 顶层是 `dist/` 目录 + `pnpm.exe` 两个并列项，`extract_archive` 底部"顶层恰好一个目录就返回它"会把 `pnpm.exe` 丢掉（只剩 dist/）—— 2026-10-12 真机装机演练果然在这上面翻过车（同根因还带走了 trivy），规则已按 R3.22 第 5 条改成"根上有散文件就不算单顶层"；现在 pnpm 由 `_CLI_TOOLS` 单独登记（npmmirror **没有** pnpm 目录，实测 404，所以走三个加速器）；② `helm` 的 GitHub release 里只有 `.asc` / `.sha256sum` 签名，真正的二进制在 `get.helm.sh`，要用另一套源（同样由 `_CLI_TOOLS` 登记）。
+
+> **为什么这两个值得单独记账**：现有走 `path_subdir=""` 的组件（kubectl / jenkins）都是**单文件拷贝早退分支**，压根没走到 `extract_archive` 底部那个"单顶层即根"判定；protoc / uv 是 zip，会走到底，而它们恰好是这条路径的两个相反变体 —— **≥2 个顶层目录**（protoc，`path_subdir="bin"`）与 **0 个顶层目录**（uv，`path_subdir=""`）。以后照抄这两个之前，先确认你的包属于哪一种。
+>
+> **一处真空护栏的教训**（变异自检抓出来的）：最初只为 protoc / uv 写了"内置清单的 URL 长什么样"，把 fetcher 的资产名匹配从 `protoc-<v>-win64.zip` 改成 `protobuf-<v>.zip` 之后测试**依然是绿的** —— 内置清单是手写的，fetcher 压根没跑到。真正能咬住的是打桩 `_github_release_assets` 直接测筛选行为：**只发源码包的 tag 不许被收进版本清单**。护栏绿了要问它"真走了那条路"，这句不是口号。
+
+> **同批探过、没进代码的三个**（2026-10-12 实测，判据同上：状态码 + 魔数 + 字节数 + 吞吐）：
+>
+> - **`minio` 已实测可用（2026-10-12 修正早先结论）**：早先这里写过"`dl.min.io` 全线 410、最新 release assets 数为 0，所以"拿不到直链"。**实测修正**：官方收掉的是分发口，最后一个有产物的 release（`RELEASE.2025-09-07T16-13-09Z`，48 个资产）里 Windows exe 仍在，`github.com/minio/minio/releases/download/…/minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe` 实测 206 + `MZ`、113,115,136 字节，完整下载一次与 API 声明逐字节一致。**`dl.min.io` 全线 410 是事实，但"产品没有可用产物"是误判** —— 登记的是 release 资产上的直链，不是 `dl.min.io`。启停实测：两口齐听 1.6–2.9s、terminate 0.07s 退出、端口立即释放、无残留监听。⚠ 开源版已归档、不会再有更新；许可 GNU AGPLv3。
+> - **`vmware-workstation` 确实拿不到直链**：`softwareupdate.vmware.com/cds/vmw-desktop/ws/`
+>   回 404 `Object Not Found`（**绕开系统代理用 `Session(trust_env=False)` 复测过**，
+>   第一轮那个 ProxyError 是本机代理拒的，不是它死了）、老构建路径 404、
+>   `vmware.com/go/get-workstation` 404、brew cask `vmware-workstation` 也已下架。
+>   ⇒ 现在只能从 Broadcom 支持门户登录后下，不符合"给官方直链"的模型。
+> - **`parallels` 拿得到直链，本批没进是**产品定位**决定，不是源的问题**：
+>   Homebrew cask 给的 `download.parallels.com/desktop/v27/27.0.3-58680/ParallelsDesktop-27.0.3-58680.dmg`
+>   实测 **206 + 2.4 Mbps**（同格式的老版本 v26 那条我按规律拼的 → 404，
+>   再次印证"版本号必须取接口，不能拼名"）。
+>   没登记的理由是：macOS 专属 `.dmg`、商业授权、且版本清单只能依赖第三方 cask 接口。
+>   ⚠ 早先这里写过"Parallels 拿不到直链"是**误判**（只试了猜测的 URL 形态就收工），
+>   订正于当天第二轮实测 —— 记在这里防的就是后人把这句当事实、从此不再试。
+>
+> **一处已知偏差**：上面 Kotlin/GraalVM/Redis 三个的实测吞吐都是 `gh-proxy.com` 最快（18.4 / 14.7 / 17.9 Mbps），但 URL 顺序仍是 `_gh_accelerated` 的固定次序 `ghfast.top → gh-proxy.com → ghproxy.net`。改 `GH_ACCELERATORS` 的全局顺序会影响**所有**走加速器的组件，所以本批不改，只在此记账——真要按实测排序，得先对全部既用组件复测一遍再动。
+
+#### 2026-10-12 B2/B4 服务批：ZooKeeper / Consul（etcd 在上表）
+
+| key | 组件 | 国内镜像（按优先级） | 末位官网 | 默认清单实测 |
+|------|------|-----------------------|---------|--------------|
+| `zookeeper` | Apache ZooKeeper | 七家 Apache 分发 `…/apache/zookeeper/zookeeper-<v>/apache-zookeeper-<v>-bin.tar.gz`：`mirrors.huaweicloud.com` → 南大 → 清华 → 中科大 → 北外 → 腾讯云 → 阿里 | `dlcdn.apache.org/…` | 首源实装 200 + `gzip` 魔数，整包 **22,901,907 B / 26.2 Mbps**。目录段与文件名都带版本号，且文件名多一个 `-bin` 中缀（少写一处就 404）。⚠ 官方包**只有 `zoo_sample.cfg`，没有 `zoo.cfg`**，所以 `port_writeback="conf_copy"` 那条路是"整份 conf 拷进 `<key>-data/conf`，副本里没有 zoo.cfg 就按 sample 原文生成一份再改 `clientPort` / `dataDir`"，官方目录一个字都不动 |
+| `consul` | HashiCorp Consul | **无**（`releases.hashicorp.com` 不是 GitHub，没有加速器可用；清华 `hashicorp/consul/` 404，华为 `repo.huaweicloud.com/hashicorp/consul/` 回 200 但只有 12,299 B HTML 门户壳 = 假源） | `releases.hashicorp.com/consul/<v>/consul_<v>_windows_amd64.zip` | 0/1 大陆源，已进 `OFFICIAL_ONLY_EXCEPTION`；206 + `PK`，整包 72,737,934 B，直连 **2.9 Mbps**（慢，但产品路径没有第二个源可换）。`-dev` 模式起，端口用 `-http-port` 直给，控制台 `/ui`、探活 `/v1/health` 两条路径**刻意不同**（R10） |
+
+> **ZooKeeper 是第一个"绕开厂商包装器直接 spawn java"的 `needs=("jdk",)` 组件**，三条都是
+> 真进程实测出来的（不是从文档推的）：① 官方包里只有 `zoo_sample.cfg`；② `zkServer.cmd`
+> 不认 `ZOOCFGDIR`，还会把 `<home>\conf\zoo.cfg` 塞成第一个参数（我们再传一个就变成第二个
+> 参数 → `NumberFormatException`），而且 `terminate()` 只杀掉 cmd 包装器、**留下监听端口的
+> 孤儿 java**；③ sample 里 `dataDir=/tmp/zookeeper` 在 Windows 解析到盘符根，卸载删不掉、
+> 多版本还会抢同一个目录。改成直接 `java -cp {home}/lib/* … {conf}` 之后实测
+> `Popen.pid` 就是监听者（两边 PID 一致）、停止后端口立即释放。**门禁照旧：没有真机演练
+> 输出不许扩 `LAUNCH_KEYS`** —— 本批三个的演练记录在下面"联调"一节。
+
+#### 2026-10-12 B3/B5 我方那半批：8 个 CLI / 运行时（`_CLI_TOOLS` 表驱动）
+
+| key | 组件 | 国内镜像（按优先级） | 末位官网 | 默认清单实测 |
+|------|------|-----------------------|---------|--------------|
+| `jq` | jq | 三个 GitHub 加速器 | `github.com/jqlang/jq/…/jq-windows-amd64.exe` | 206 + `MZ`，整包 1,035,264 B / 9.5 Mbps。**裸 exe**（走单文件拷贝分支），zip 变体不要：那个包里的 `jq.exe` 在 `jq-<v>/` 一层下 |
+| `trivy` | Trivy | 三个加速器 | `github.com/aquasecurity/trivy/…/trivy_<v>_windows-64bit.zip` | 206 + `PK`，整包 52,927,180 B / 17.8 Mbps。⚠ 选 **64bit**（`windows-amd64` 是 Go 写法，trivy 用 `windows-64bit`），拼成 amd64 直接 404 |
+| `k9s` | k9s | 三个加速器 | `github.com/derailed/k9s/…/k9s_Windows_amd64.zip` | 206 + `PK`，42,330,705 B / 13.9 Mbps；Windows 资产名 `k9s_Windows_amd64.zip`（大写 W，且**没有** v 前缀） |
+| `docker-compose` | Docker Compose v2 | D1 `files.m.daocloud.io/github.com/docker/compose/releases/download/<tag>/…`（**GitHub 产物也能走 DaoCloud 的代理树**：实测 200 + `MZ` + `Content-Length 33,352,192` 与官方逐位一致，老版本 v2.29.7 同样在树里，3.5–7.0 Mbps），再三个加速器 | `github.com/docker/compose/…/docker-compose-windows-x86_64.exe` | 206 + `MZ`，33,352,192 B / 16.7 Mbps（加速器档）；⚠ 同一个手法在 npmmirror 上 404，所以这个开关是**逐组件实测**才登记的（`_CLI_TOOLS` 里的 `"dao": True`），没有实测证据的组件由护栏 `DaoCloudGithubProxyIsFirstForMeasuredComponents` 挡住不许沾 |
+| `pnpm` | pnpm | 三个加速器 | `github.com/pnpm/pnpm/…/pnpm-win32-x64.zip` | 206 + `PK`，22,582,408 B / 17.6 Mbps。资产名是 `pnpm-win32-x64.zip`（win32 指的是 64 位 Windows 的 Node 惯例命名，别按字面改成 x64 以外的大小写） |
+| `helm` | Helm | **无**（GitHub release 里只有 `.asc` / `.sha256sum` 签名，二进制不在那；清华 `helm/` 404、阿里 404） | `get.helm.sh/helm-v<v>-windows-amd64.zip` | 0/1，进 `OFFICIAL_ONLY_EXCEPTION`。版本入口用 `get.helm.sh/helm-latest-version`（纯文本），整包 404→改 `get.helm.sh` 后 206 + `PK` |
+| `sqlite` | SQLite | **无**（清华 `sqlite/` 404；华为 `mirrors.huaweicloud.com/sqlite/` 回 200 但只有 12,299 B HTML 门户壳 —— 正是本文件反复防的那种假源） | `sqlite.org/<年>/sqlite-tools-win-x64-<六位版本>.zip` | 0/1，进 `OFFICIAL_ONLY_EXCEPTION`。⚠ 版本号是**六位无点**形式（3.54.0 → `3540000`）且路径带年份目录。sqlite.org **支持 Range 但对 `bytes=0-0` 回 200**（对 `bytes=0-15` 才回 206），审计脚本原来只按 0-0 探，于是把它误判成"不支持随机读"——改成探 16 字节后 sqlite 从 SKIP 变成真读清单：`sqlite3.exe` 在归档根 ⇒ `path_subdir=""` OK |
+| `dotnet-sdk` | .NET SDK | **无**（`dotnetcli.azureedge.net` 本身是 CDN，但清华 / 阿里都没有同步它的制品树，实测 404） | `dotnetcli.azureedge.net/dotnet/Sdk/<sdk 版>/dotnet-sdk-<sdk 版>-win-x64.zip` | 0/1，进 `OFFICIAL_ONLY_EXCEPTION`。版本清单读 `release-metadata` JSON，登记的是 **sdk 版本号**（10.0.401）而不是 release 号（10.0.401 属于 release 10.0.12）；zip 顶层没有目录 ⇒ `path_subdir=""` |
 
 > 注：部分镜像只同步最新版本，故障转移时若镜像返回 404，直接切到下一个，**不要**对该 URL 内部反复重试。
 
@@ -378,7 +478,7 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 43 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 49 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
 
 | 分类 | 判定标准 | 组件（10 / 6 / 17 / 10） |
 |------|----------|--------------------|
@@ -419,7 +519,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 （上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（43 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（49 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -458,7 +558,7 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 
 ### R2.5 组件搜索框
 
-组件数上到 26 个后逐页翻不现实，Tab 上方有一条搜索框做名称模糊过滤。约束：
+组件数上到 32 个后逐页翻不现实，Tab 上方有一条搜索框做名称模糊过滤。约束：
 
 - **位置在标题栏之外**、Tab 之上（`#searchBar` 内的 `QLineEdit#compSearch`）。标题栏整条是窗口拖拽区
   （`mousePressEvent` 里判 `title_bar.underMouse()` 就开始拖动），输入框塞进标题栏会点不动、一按就拖窗
@@ -478,7 +578,7 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 - **全组件搜索的呈现方式**：搜索时收起四个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
   把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
   清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
-  右侧 `#searchHint` 仍显示"匹配 N / 26 个组件"（0 命中转警示红）。数字一律现算
+  右侧 `#searchHint` 仍显示"匹配 N / 49 个组件"（0 命中转警示红）。数字一律现算
 - 这正是"全组件搜索、而不是只搜某个 table 内"的要求：结果跨三个分类，统一归并展示
 - 新增组件**不需要**为搜索做任何登记：卡片建好就自动可搜。改匹配规则要同步 `bt_search_and_newcmp_tests.py`
 - 外观约定：输入框不直接描边，而是套一层胶囊外壳 `#searchShell`（放大镜 + 输入框同属一块白底圆角），
@@ -585,8 +685,8 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 当时只改 7 个（jdk/python/node/go/maven/gradle/bun），担心一次改 26 个会连带出事。
 典型陷阱曾写死为"非多版本组件卸载时选中未装版本必须罢工"。
 
-**现在作废**：26 个组件**全部**支持多版本（用户 2026-06-06 要求）。理由与前提：
-- 26 个组件本来就有 2-4 个版本的候选清单，能装多个版本不需要额外能力；
+**现在作废**：32 个组件**全部**支持多版本（用户 2026-06-06 要求）。理由与前提：
+- 32 个组件本来就有 2-4 个版本的候选清单，能装多个版本不需要额外能力；
 - 切换语义统一为"改 XXX_HOME + 收敛 PATH"，**不动已装目录**，随时能切回去；
 - 带数据的中间件（mysql/kafka/postgresql/elasticsearch/tomcat…）在 `Component.data_note`
   里写清了数据在哪、删目录会不会丢，卸载确认框里逐字展示。
@@ -610,7 +710,7 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 或反过来误以为会丢而不敢删。护栏：`test_data_bearing_components_all_have_a_data_note`、
 `test_uninstall_confirm_text_shows_the_data_note`。
 
-**一条仍然有效的豁免**：「安装」的"选中版本已装则置灰"对全部 26 个组件生效，
+**一条仍然有效的豁免**：「安装」的"选中版本已装则置灰"对全部 32 个组件生效，
 ### R3.10 下拉框清单必须包含"已装但清单里没有"的版本
 
 在线版本清单只保留近期版本（实测：bun 清单里已无 1.4.1，磁盘上却装着 `bun-1.4.1`）。
@@ -625,7 +725,7 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 
 ### R3.11 选中版本已装则置灰「安装」
 
-面向**全部 26 个组件**：`_installed_here(version)` 判"目录存在 **且** 里面找得见该组件可执行文件"
+面向**全部 32 个组件**：`_installed_here(version)` 判"目录存在 **且** 里面找得见该组件可执行文件"
 （半截安装不算，否则按钮灰掉、卸载又无事可做，用户会被困死），已装时禁用安装按钮，
 tooltip 写清装在哪、并指路「要重新安装请先点卸载」。
 状态由 `_sync_action_buttons()` 统一计算，三个触发点：`_detect_status` 之后、
@@ -960,6 +1060,19 @@ HKLM 的，主进程拿到回报后只做了复验和登记，**一声没出**�
    连入口都找不到（卡片状态与版本探测全落空）。现在 POSIX 的候选是 `[裸名, 裸名 + ".sh"]`，
    **裸名仍排第一**（`python3` / `gradle` 这类有裸名的别被挤到后面）。
    用例：`PosixExecNamesCoverTheShellScript`（3 条，含"Windows 那套 PATHEXT 展开不许被带偏"）。
+5. **"解压后只有一个顶层目录 ⇒ 那个目录就是根"这条判定，必须再加一个条件：根上没有散文件。**
+   2026-10-12 真机装机演练抓出来的两条同根因：
+   `pnpm` 的 zip 是 `dist/` + 根上的 `pnpm.exe`，`trivy` 是 `contrib/` + 根上的
+   `trivy.exe` + 一堆 `.tpl`。旧判定只数目录，于是 home 返回 `dist/` / `contrib/`，
+   **把根上的可执行文件整个留在 install_dir 之外** —— 装完 PATH 指着一个只有
+   node_modules 的目录，命令永远找不到，界面上只表现为"装了但用不了"。
+   更值得记的是**审计脚本当时报的是 OK**：`tools/bt_archive_layout_audit.py` 的
+   `_root_prefix()` 早就按"根上有散文件就不算单顶层"建模了，它建模的是**应有行为**，
+   而代码是另一回事。所以这条规则的另一半是：**审计脚本与产品判定必须逐字同构**，
+   改一边就同步改另一边（本轮已把 `extract_archive` 收成
+   `len(dirs) == 1 and not loose`）。
+   用例：`bt_protoc_uv_tests.SingleTopDirRule`（三条边界：1 目录+散文件⇒根 /
+   只有 1 目录⇒那层 / ≥2 目录⇒根，后两条是既有组件的保护栏，防止把改动波及 jdk/maven）。
 
 ### R3.23 自动装的前置运行时，装完必须**当场能用**（HOME + PATH 都要写，失败不许说"不影响启动"）
 
@@ -1107,6 +1220,14 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
     且**必须排在自动装前置依赖（JDK / Erlang）之前**，否则一个没装的组件会先白装一个 JDK。
     用例：`CardLaunchUi.test_start_is_disabled_when_nothing_is_installed`、
     `test_clicking_start_never_auto_installs_a_prereq_for_an_uninstalled_component`。
+11. **占位符替换表只许有一份**（`_launch_mapping()`）。2026-10-12 真机第一次起 etcd，
+    点「启动」当场 `KeyError: 'peer'` —— 那天早些时候为修 `{peer}` 只补了
+    `_plan_mapping`（pre_start 走的重建表），而拼 argv 的 `build_launch_plan` 里
+    还留着自己手写的第二份。两处各抄一遍，改一处必然漏另一处，而且**漏的那一处
+    只在真点启动时才炸**，离线用例全绿。现在 `build_launch_plan` 与 `_plan_mapping`
+    都调 `_launch_mapping()`；护栏 `LaunchMappingCoversEveryPlaceholder` 两头都过：
+    走真实 `build_launch_plan` 断言 argv 里不许残留花括号，再走 `_plan_mapping`
+    断言 spec 里出现过的每个 `{token}` 都取得到值。
 
 ### R5.4 失败处理
 
@@ -1596,7 +1717,7 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R1
    | `_combo_version_list` 只返回官方清单 | 合成"磁盘已装"的伪条目 |
    | `_refresh_installed_marks` 首行 return | 下拉框挂绿勾，用户以为已安装 |
    | 槽位用 `on_download_clicked` 而不是 `on_install_clicked` | 下游 `install_downloaded → _configure_after_extract → apply_active_version → _configure_env` 每步都写环境（`_configure_env` 连 `env_var=None` 都会 append PATH） |
-3. **下载要校验文件头魔数**。`DownloadWorker` 的 `expect_magic` 默认空（26 个老组件行为逐字不变），
+3. **下载要校验文件头魔数**。`DownloadWorker` 的 `expect_magic` 默认空（32 个老组件行为逐字不变），
    只下载型必须传 `PK` / `MZ`。理由不是洁癖：实测 `mirrors.huaweicloud.com/jetbrains/…` 回
    **200 + 12 KB HTML**，这个体量轻松越过 `DOWNLOAD_MIN_VALID_BYTES`(4096) 那道字节数下限，
    只比字节数会判它成功，用户拿到的是后缀写着 `.exe`、内容是网页的文件。
@@ -1655,6 +1776,24 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R1
 以后有人挂镜像会红，逼他带实测来改表。**注意该表的口径是"有没有第三方镜像站"**：
 dcloud / apipost / apifox 本身就是大陆 CDN（7.4–8.6 MB/s），但不是镜像，`is_mainland()` 按镜像域名认，
 所以它们仍记 0 个大陆源。
+
+#### R13.3b 2026-10-12 B6a：「开发工具」第三批 9 个只下载 GUI 的实测矩阵
+
+| 端点 | 实测结论（状态码 + 魔数 + 字节数 + 吞吐） |
+|---|---|
+| `ghfast.top / gh-proxy.com / ghproxy.net` + `github.com/{dbeaver/dbeaver,HeidiSQL/HeidiSQL,usebruno/bruno,redis/RedisInsight,qishibo/AnotherRedisDesktopManager}` | 三个加速器全部 206 + `MZ`；**gh-proxy.com 最快（12.8–18.1 Mbps）、ghfast.top 4.4–7.4、ghproxy.net 0.2–3.0**。裸 `github.com` 本机 SSLError / 连不上。字节数：DBeaver 113,470,696 / HeidiSQL exe 17,813,608 + zip 29,789,003 / Bruno exe 121,897,928 + msi 133,836,800 / RedisInsight 115,599,376 / ARDM exe 61,935,432 + zip 83,654,756 |
+| `dbeaver.io/…` | **只是 302 跳板**，最终 host 就是 `github.com` ⇒ 按 R1 走加速器，不能把 `dbeaver.io` 当"官方直链"登记。资产名 26.x 起是 `dbeaver-ce-<v>-windows-x86_64.exe`（25.3.0 及更早是 `…-x86_64-setup.exe`，跨代两种都验过）；`/releases/latest/<文件名>` 那种类别名 404 |
+| `HeidiSQL_12.21.0.7344_Setup.exe` | ⚠ **Setup.exe 里那个 `.7344` build 号从版本号推不出来**，便携包名字又是第三种形态（`HeidiSQL_12.21_64_Portable.zip`）⇒ 文件名只能从 release 接口读，两处都按规律拼就都 404 |
+| `redis/RedisInsight` | 仓库**已从 RedisInsight/RedisInsight 迁到 redis/RedisInsight**，且资产名不带版本号（`Redis-Insight-win-installer.exe`）⇒ 版本必须取自 tag，URL 只能拼 tag 目录 |
+| `bruno` 与 `ARDM` 的 `latest.yml` | 200 + `version: 4.2.1` / `version: 1.7.4`（Squirrel 的机读清单，`/releases/download/latest/latest.yml` 会自动 302 到当前版）—— 这是这两件唯一"版本无关"的入口 |
+| `downloads.mongodb.com/compass/…` | msi 203,259,904 / exe 196,987,944 / zip 226,785,146，全部 206 + 正确魔数。⚠ **这个桶对不存在的对象回 403 而不是 404**（`9.99.99` 与 `latest` 都 403 + 111 B XML），照状态码判"源挂了"会误判；也没有版本无关别名 |
+| `mirror.nju.edu.cn/postgresql/pgadmin/pgadmin4/v<v>/windows/pgadmin4-<v>-x64.exe` | 206 + `MZ`，240,588,864 B，**29.1 Mbps**，同路径的官方 `ftp.postgresql.org` 25.9 Mbps ⇒ 南大是这批里少见"镜像比官方还快"的一家。清华 `postgresql/pgadmin/` 404。⚠ **`www.postgresql.org/ftp/...` 是软 404 陷阱**：404 + 4,223 B HTML 并 302 到一个尾部带斜杠的目录式 URL，绝不能登记它 |
+| `cdn.mysql.com/Downloads/MySQLGUITools/mysql-workbench-26.7.0-winx64.{msi,zip}` | 206 + 正确魔数，273,879,040 / 333,111,094。⚠ Workbench 已切 **CalVer**：26.x 起文件名**去掉 `-community` 中缀**（8.0.47 及更早仍带，两种都实测过）；路径段必须是 `MySQLGUITools`（写成 `Workbench` 直接 404 + `Not found`）。`dev.mysql.com/get/...` 对非浏览器 UA 一律 403；清华 / 华为 / 阿里都**没有** MySQLGUITools 这棵树（404 或门户壳） |
+| `dl.pstmn.io/download/version/<v>/win64` | 206 + `MZ`，212,922,848。**⚠ 不能用 `/download/latest/win64`**：它 200 但**没有 `Content-Length`**，本工具的字节数校验会判"拿不到长度"。版本号从 Squirrel 的 `RELEASES` 增量链读：那条链是**差量清单**，不是"给我最新版"的 oracle —— 从 12.31.7 请求返回 12.32.0，从 12.32.0 请求返回空，所以抓取要能容错地走若干跳（当前实现最多 8 跳）后取最高版本 |
+
+> 这九件的分类登记在 `_DEVTOOLS` 那张表里（`download_only=True`）。它们**没有**任何可用大陆镜像（pgadmin4 的南大除外），
+> 所以逐个进了 `bt_mirror_spec_tests.OFFICIAL_HOST` / `OFFICIAL_ONLY_EXCEPTION`；新增域名同时进了
+> `bt_download_only_tests` 的"实测过的域名白名单"。**没有实测证据的域名不许进那张白名单**（R13.6）。
 
 ### R13.4 点名要过但没进表的（别当成漏加）
 
@@ -1767,7 +1906,7 @@ worker 连了 `finished → deleteLater`（探测线程、检查更新线程都�
 
 ## 规则 R15：GitHub 匿名额度是硬预算，抓到的清单必须落盘（2026-10-12）
 
-`api.github.com` 未鉴权限额是 **60 次/小时/IP**，而本工具一次启动要替 26 个组件各打一次。
+`api.github.com` 未鉴权限额是 **60 次/小时/IP**，而本工具一次启动要替 59 个组件各打一次。
 现场：用户日志里 11 个组件集体「官网版本获取失败」，同一时刻实测
 `https://api.github.com/rate_limit` 回 `remaining=0/60` —— **一小时内第二次开工具、或者多点几次
 「⟳ 刷新版本」，额度必然见底**。这不是源坏了，也不是软件坏了，是预算超了。
@@ -1880,3 +2019,92 @@ offscreen 没有系统中文字体的回退链，Qt 换了一个宽得多的替�
 最容易踩的一条：厂商启动脚本几乎都是**包装器**（`cmd.exe` / `bat`），
 登记的 PID 是包装器，真正在监听端口的是它拉起的 java.exe →
 `pid_role` 必须是 `launcher`，停止只能靠端口反查 + 三重闸。
+
+---
+
+## 规则 R17：组件详情弹窗（2026-10-12）
+
+### R17.1 规则描述
+
+每张卡片名称右侧有一枚 `ℹ` 图标按钮，点开弹窗，回答用户两个问题：**这个组件是干嘛的、怎么用**。
+弹窗内容为固定四段式：
+
+1. **它是什么** —— 来自 `COMPONENT_SUMMARY`（一句话定位 + 解决什么问题）
+2. **怎么用** —— 来自 `COMPONENT_USAGE`（可直接执行的命令 / 点击路径）
+3. **本工具会替你做什么** —— 由能力位现场派生，**不新写文案**（避免第二份真相）
+4. **平台说明** —— 登记了 `unsupported_platform_hint` 才显示
+
+另有"官方地址"一行：从已登记 URL 取**末位官网**（不是首位镜像），用户可据此去官网核对。
+
+### R17.2 硬约束
+
+1. **点击弹窗外自动关闭**：`ComponentDetailDialog` 挂应用级事件过滤器，鼠标按下位置在
+   `frameGeometry` 之外即 `accept()`。禁止改成 `setModal(True)` 死锁用户 —— 详情是
+   "看一眼就走"的东西，不是向导。
+2. **详情正文不进 data_note / 版本清单**：数据去处归卸载确认框，可选版本归下拉框。
+   详情重复它们就是噪音（用户已能在那两处看到）。
+3. **两张文案表必须与组件清单 key 严格一致**：`COMPONENT_SUMMARY` / `COMPONENT_USAGE`
+   漏一条 → `build_components()` 末尾赋值 KeyError、主窗口构造不出来（与 category 同一套
+   「漏登记即 KeyError」的做法）；护栏套件 `bt_component_detail_tests.py` 逐一钉住。
+4. **端口显示必须是展开后的真实端口**：`port_offsets` 是「主口 + 偏移」不是绝对端口。
+   详情里把偏移当端口拼，etcd 会显示成「端口 2379、1」（真机踩过，被护栏钉死）。
+5. **只下载类不许承诺解压 / 写环境变量**：R13 的行为边界在详情里同样生效，
+   `bt_component_detail_tests.DownloadOnlyWording` 逐条核对。
+6. **文案长度有上限**（SUMMARY ≤110 / USAGE ≤160）："简洁且专业"必须能被机器判。
+
+### R17.3 新增组件 checklist
+
+- `build_components()` 加 `Component(...)` 的同时，必须在 `COMPONENT_SUMMARY` 与
+  `COMPONENT_USAGE` 各加一条（漏了直接 KeyError）。
+- 「它是什么」写定位 + 场景；「怎么用」给命令或点击路径；**拿不准的细节（版本号、
+  端口、厂商行为）不编造** —— 详情里有"官方地址"行可以去官网核对。
+
+---
+
+## 规则 R18：冷启动预算——建卡不许逐个扫 PATH（2026-10-13）
+
+### R18.1 背景与数字
+
+`build_components()` 87 张卡建一次，`cProfile` 实测烧掉 **1.2 秒**在
+`shutil.which`（105 次调用 × 整条 PATH × PATHEXT 逐个 `os.path.exists`，
+约 4.2 万次系统调用）。这条成本随组件数**线性**恶化，2026-09 接 26 个组件时
+没人察觉（30 毫秒），接满 87 个就变成了"双击图标后窗口 1 秒才出来"。
+
+修复后的实测：建窗 1.12s → **0.64s**，首帧 1.4s → **0.7s**。
+
+### R18.2 做法（`_path_index` / `_which_fast`）
+
+1. **一次批扫**：建卡前对 PATH 的每个目录 `os.scandir` 一遍，建
+   `(大写候选名 → 最左目录序)` 索引。目录条目自带类型信息，Windows 下判
+   文件不再逐个 stat。
+2. **语义逐条对齐 `shutil.which`**：候选名与顺序同 CPython 3.12（名字自带
+   PATHEXT 扩展时先原名再补全，否则只查补全）；最左目录优先；返回值拼**候选名**
+   而不是磁盘名（`which("python")` 回 `…python.EXE`，大小写都是接口的一部分，
+   测试断言与路径比较都锚在这上面）。
+3. **未命中就是未命中**：索引扫过全表后判负**不许**回退真实 `shutil.which` ——
+   那等于把 4 万次 exists 重扫第二遍，而"没装"恰是建卡时的多数情况
+   （首版就栽在这里：改了 `_which_fast` 建窗时间纹丝不动）。唯一要补的是
+   Windows 的当前目录特例（`NeedCurrentDirectoryForExePath`），只对当前目录
+   做那几次检查。
+4. **失效策略**：索引以 `os.environ["PATH"]` 原文为键。本工具运行期会改写
+   进程内 PATH（安装/切换生效），PATH 一变整表重扫——读到过期条目比慢更糟。
+5. **测试桩兼容**：`_which_fast` 第一行比对 `shutil.which` 的函数身份，被测试
+   换掉实现时直接走桩实现（`bt_launch_tests` 有四处打桩点，桩语义逐字保持）。
+   带目录成分的名字（`a/b`、`.\x`）不属于纯 PATH 查找，同样直接交真实实现。
+
+### R18.3 showEvent 的列数守卫（同轮修复）
+
+构造期 `relayout_cards` 跑在窗口 show 之前，viewport 宽度未就绪时
+`grid_columns_for` 算出的列数**已经记进 `_last_columns`**；show 期 showEvent
+强制重排一次、resizeEvent 再补一次，等于把同一个行结构拆建三遍
+（87 次 `setParent` ≈ 0.4s/遍）。现在：构造期记录真实列数，showEvent 仅在
+**列数与构造期不同**时才重排（真机 2026-10-08 踩中的"构造期 1 列、show 后 3 列"
+照旧被纠正），相同就跳过——拆建结果必然一模一样，白烧。
+`bt_grid_layout_tests` 36 条全绿钉住行结构契约。
+
+### R18.4 红线
+
+- **新增建卡路径上的逐组件磁盘/系统调用前先数一遍 N**：单件 10ms 的探测在
+  N=87 时就是 0.9s。要扫就批量化（一次 scandir 建索引，查表 O(1)）。
+- 冷启动回归门槛：`python -X importtime` 之外，建窗（`MainWindow()` 构造）
+  超过 **1.5s** 必须先 profile 再合并，不许"再等等优化"。

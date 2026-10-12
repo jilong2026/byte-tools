@@ -68,7 +68,10 @@ def all_urls(key):
 FULL_HISTORY_HOSTS = ("repo.huaweicloud.com",)          # 华为云 repo 保留全量历史
 MAINLAND_MARKERS = ("huaweicloud", "aliyun", "tuna", "bfsu", "nju", "ustc",
                     "sjtu", "npmmirror", "cloud.tencent", "daocloud",
-                    "ghproxy.net", "ghfast.top", "gh-proxy.com")
+                    "ghproxy.net", "ghfast.top", "gh-proxy.com",
+                    # 2026-10-12：Rust 中文社区维护的 dist 镜像。实测与官方同字节数、
+                    # 206 + `\xd0\xcf`，16.9 MB/s（官方 15.5）
+                    "rsproxy.cn")
 
 
 def is_mainland(u: str) -> bool:
@@ -119,7 +122,21 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
     #     改法：镜像目录结构是固定的（/<major>/jdk/<arch>/<os>/），
     #     把实测采集到的确切文件名写进离线清单（_JDK_OFFLINE_FILES），
     #     官方 API 退到末位兜底。现在南大 + 清华都可用，14.6 / 13.5 MB/s。
-    SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2}
+    #   2026-10-12 补 rust=1：Rust 的 Windows MSI 只有 rsproxy 一个大陆镜像肯放 ——
+    #     实测清华 `rustup/dist/<日期>/…msi` 404（它只镜像 tar.xz）、中科大整个
+    #     rustup 目录 404、腾讯云回 ChunkedEncodingError。所以它是"1 镜像 + 官方末位"，
+    #     不是漏配源。
+    SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2,
+                               "rust": 1,
+                               # 2026-10-12 B6a：pgAdmin 只有南大一家镜像肯放 pgadmin4
+                               # （实测清华 `postgresql/pgadmin/` 404），
+                               # 且南大与官方同字节数、同 Last-Modified、还更快（29.1 vs 25.9）
+                               "pgadmin4": 1,
+                               # 2026-10-12 B7：Ant / JMeter 只有华为云 repo 一家镜像肯放
+                               # （清华/阿里/南大/北外/腾讯/中科大的 apache 目录对这两个
+                               #  都是 404 —— 它们只同步最新版，而 1.10.18 / 5.6.3 已不是），
+                               # 末位 archive.apache.org 属官方。
+                               "ant": 1, "jmeter": 1}
 
     # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具，
     # 以及 2026-10-10 第二批的 apipost / apifox / hbuilderx / android-studio / visual-studio / navicat。
@@ -135,7 +152,20 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
     OFFICIAL_ONLY_EXCEPTION = {"idea", "pycharm", "clion", "webstorm", "goland",
                                "datagrip", "vscode", "wechat-devtools",
                                "apipost", "apifox", "hbuilderx", "android-studio",
-                               "visual-studio", "navicat"}
+                               "visual-studio", "navicat",
+                               # 2026-10-12：这四个实测大陆源为 0（官方域不在
+                               # MAINLAND_MARKERS 里）。以后谁真找到可用镜像，
+                               # 这条断言会红，逼他带实测数字来改表。
+                               "consul", "helm", "dotnet-sdk", "sqlite",
+                               # 2026-10-12 B6a：这几个的 GitHub 产物走加速器
+                               # （加速器算大陆源，所以不是 0 源，不该进这张豁免表）。
+                               # ⚠ pgadmin4 **不在这里** —— 它有南大镜像（实测与官方
+                               # 同字节数、同 Last-Modified，29.1 Mbps 还快过官方 25.9），
+                               # 属"恰好 1 个大陆源"，登记在 SINGLE_SOURCE_EXCEPTION。
+                               # ——只有 mongodb-compass / mysql-workbench / postman
+                               # 这三个纯官方直链的是 0 源。
+                               "mongodb-compass",
+                               "mysql-workbench", "postman"}
 
     def test_counts(self):
         for key, comp in COMPS.items():
@@ -179,6 +209,49 @@ class OfficialIsLast(unittest.TestCase):
         # Eclipse 不在"只有官方直链"的豁免里：清华/阿里/华为四个源实测都回同一个
         # 377,592,420 字节的 PK 包（官方 CDN 本机只有 25 KB/s，镜像 2.7–3.9 MB/s）。
         "eclipse": "download.eclipse.org",
+        # 2026-10-12 新增四件。kotlin / graalvm / redis 都是 GitHub 产物，
+        # 末位天然是裸 github.com（前面三个加速器算大陆源，所以不进 0 源豁免）；
+        # rust 的官方站是 static.rust-lang.org（MSI 在带日期目录的路径下）。
+        "kotlin": "github.com", "graalvm": "github.com", "redis": "github.com",
+        "rust": "static.rust-lang.org",
+        # 2026-10-12 B1：protoc / uv 都是 GitHub 产物，末位裸 github.com。
+        # 两者都另有真大陆镜像（protoc 走 npmmirror、uv 走中科大 github-release 代理），
+        # 所以不进 0 源豁免。
+        "protoc": "github.com", "uv": "github.com",
+        # 2026-10-12 B3/B5：GitHub Releases 单二进制批，末位天然是裸 github.com；
+        # 前面三个加速器都在 MAINLAND_MARKERS 里，所以大陆源 ≥3，不进 0 源豁免。
+        # ripgrep 的 tag 实测**不带 v**（"15.2.0" 不是 "v15.2.0"），tag 模板已经钉住。
+        "deno": "github.com", "ninja": "github.com", "duckdb": "github.com",
+        "cmake": "github.com", "ripgrep": "github.com", "fd": "github.com",
+        "bat": "github.com", "eza": "github.com", "zoxide": "github.com",
+        "fzf": "github.com", "yq": "github.com", "etcd": "github.com",
+        "nats-server": "github.com", "caddy": "github.com",
+        "traefik": "github.com",
+        # 2026-10-12 另一路并发登记的：jq/k9s/trivy/docker-compose 是 GitHub 产物；
+        # consul / helm / dotnet-sdk / sqlite 的官方域各自不同，且**大陆源为 0**，
+        # 因此进 OFFICIAL_ONLY_EXCEPTION（见该类下方）。zookeeper 走 Apache 分发目录，
+        # 大陆源充足（8 家镜像）但不登记在这 —— 它在 HAS_USTC 那组。
+        "jq": "github.com", "k9s": "github.com", "trivy": "github.com",
+        "docker-compose": "github.com", "consul": "releases.hashicorp.com",
+        "helm": "get.helm.sh", "dotnet-sdk": "dotnetcli.azureedge.net",
+        "sqlite": "sqlite.org",
+        # 2026-10-12 B6a + 并发那批：只下载的九个客户端与 pnpm / zookeeper。
+        # 只下载的 GUI 基本都是官方直链，大陆源为 0 ⇒ 已在 OFFICIAL_ONLY_EXCEPTION 里。
+        "dbeaver": "github.com", "heidisql": "github.com", "bruno": "github.com",
+        "ardm": "github.com", "redisinsight": "github.com",
+        "mongodb-compass": "downloads.mongodb.com",
+        "pgadmin4": "ftp.postgresql.org", "mysql-workbench": "cdn.mysql.com",
+        "postman": "dl.pstmn.io", "pnpm": "github.com",
+        "zookeeper": "dlcdn.apache.org",
+        # 2026-10-12 B7：Ant / JMeter 走 Apache 归档（华为云 repo + archive 末位）
+        "ant": "archive.apache.org", "jmeter": "archive.apache.org",
+        # 2026-10-12 B4 补：minio 是 GitHub 产物（三个加速器在前、裸地址末位），
+        # 所以不进 0 源豁免。⚠ 它的官方域 dl.min.io 已全线 410（开源版归档），
+        # 登记的产物只挂在 release 资产上 —— 别照着别家的样子去拼 dl.min.io。
+        "minio": "github.com",
+        # Dart：官方 storage.googleapis.com 末位，南大 / 腾讯云镜像在前
+        #（镜像路径必须带 /flutter/ 一层，不带实测 404）。
+        "dart": "storage.googleapis.com",
     }
 
     def test_official_last(self):
@@ -520,6 +593,40 @@ class MirrorSpeedOrder(unittest.TestCase):
                 self.assertTrue(mainland, key)
                 self.assertNotEqual(self._host(mainland[0]), "mirrors.aliyun.com",
                                     f"{key} 把最慢的阿里云放在了首位")
+
+
+class DaoCloudGithubProxyIsFirstForMeasuredComponents(unittest.TestCase):
+    """`files.m.daocloud.io` 对**个别** GitHub 产物是真镜像，不是加速器。
+
+    2026-10-12 实测：`files.m.daocloud.io/github.com/docker/compose/releases/download/
+    v5.6.0/docker-compose-windows-x86_64.exe` 回 **200 + `MZ` + Content-Length
+    33,352,192**（与 GitHub 上报的字节数逐位相同），老版本 v2.29.7 同样在树里
+    （3.5–7.0 Mbps）。同一条手法套到 npmmirror 上就是 404 —— 所以这张表
+    **逐个组件登记**，不并进 `_gh_accelerated` 的全局顺序里（那会影响所有走
+    加速器的组件，见 R1.5 末尾"一处已知偏差"）。
+    """
+
+    DAO_MEASURED = {"docker-compose"}
+
+    def test_measured_components_lead_with_daocloud(self):
+        comps = {c.key: c for c in main.build_components()}
+        for key in sorted(self.DAO_MEASURED):
+            with self.subTest(key):
+                urls = comps[key].versions[0].urls_for_current()
+                self.assertTrue(urls, f"{key} 没有可用源")
+                self.assertTrue(urls[0].startswith("https://files.m.daocloud.io/github.com/"),
+                                f"{key} 首位应是 DaoCloud 的 github 代理树，实测是 {urls[0]}")
+                self.assertIn("github.com/", urls[-1], f"{key} 末位必须是裸 GitHub")
+                self.assertNotIn("daocloud", urls[-1], f"{key} 末位必须是裸 GitHub")
+
+    def test_unmeasured_components_are_not_swept_in(self):
+        """没实测过的组件不许顺手沾这条源 —— 沾上就是"没有证据的配置"（R1.6）。"""
+        comps = {c.key: c for c in main.build_components()}
+        for key in ("helm", "sqlite", "jq", "trivy"):
+            with self.subTest(key):
+                urls = comps[key].versions[0].urls_for_current()
+                self.assertFalse(any("daocloud" in u for u in urls),
+                                 f"{key} 的源里出现了没实测过的 DaoCloud 地址")
 
 
 if __name__ == "__main__":

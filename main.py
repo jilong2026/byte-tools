@@ -763,6 +763,138 @@ class ComponentVersion:
         return "zip"
 
 
+
+# ---------------------------------------------------------------------------
+# 2026-10-13 冷启动修复（规则 R18）：建 87 张卡要跑 100+ 次 shutil.which，
+# 每次都是"整条 PATH × PATHEXT 逐个 os.path.exists"（cProfile 实测 42k 次
+# 系统调用、合计 1.2s）。这里把建卡期间所有 PATH 查找合并成**一次 os.scandir
+# 批扫**：目录条目自带类型信息（Windows 用 FindFirstFile 缓存的属性判文件，
+# 不再逐个 stat），结果按「大写候选名 → (PATH 目录序号, 实际文件名)」建索引。
+#
+# 与 shutil.which(cmd, F_OK|X_OK) 的语义对齐：
+#   - 候选名与顺序同 CPython 3.12：名字自带 PATHEXT 扩展时先原名、再补全；
+#     否则只查补全名；
+#   - 目录优先级：PATH 从左到右，normcase 相同的目录只认最左一次；
+#     同一目录内按候选名顺序取第一命中；
+#   - 命中后仍做一次 os.path.exists 复核：批扫后目录内容变了宁可漏判，
+#     绝不报不存在的路径。
+# 失效策略：索引以 os.environ["PATH"] 原文为键，本工具运行期会改写进程内
+# PATH（安装/切换生效），PATH 一变就整表重扫——不会读到过期条目。
+# 测试桩兼容：_which_fast 先比对 shutil.which 的身份，被测试换掉实现时
+# 直接调用换掉的实现，桩语义逐字保持（bt_launch_tests 有四处打桩点）。
+_PATH_INDEX: dict = {"key": None, "dirs": [], "map": {}}
+_REAL_SHUTIL_WHICH = shutil.which
+
+
+def _which_candidate_names(cmd: str) -> list:
+    """shutil.which 在同一个目录里会尝试的候选文件名（顺序一致）。"""
+    if sys.platform != "win32":
+        return [cmd]
+    pathext_source = os.getenv("PATHEXT") or ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC"
+    pathext = [ext.rstrip(".") for ext in pathext_source.split(os.pathsep) if ext]
+    files = [cmd + ext for ext in pathext]
+    if any(cmd.upper().endswith(ext.upper()) for ext in pathext):
+        files.insert(0, cmd)
+    return files
+
+
+def _path_index() -> dict:
+    """返回与当前 PATH 匹配的批扫索引（PATH 变了就重建）。"""
+    raw = os.environ.get("PATH", "")
+    if _PATH_INDEX["key"] == raw and _PATH_INDEX["dirs"] is not None:
+        return _PATH_INDEX
+    dirs, seen = [], set()
+    for d in raw.split(os.pathsep) if raw else []:
+        norm = os.path.normcase(d or os.curdir)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        dirs.append(d or os.curdir)
+    idx = {}
+    for di, d in enumerate(dirs):
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue                      # 不存在 / 无权限 / 网络盘掉线
+        with it:
+            for ent in it:
+                try:
+                    if not ent.is_file():  # 条目自带属性，不额外 stat
+                        continue
+                except OSError:
+                    continue
+                key = ent.name.upper() if sys.platform == "win32" else ent.name
+                if key not in idx:
+                    idx[key] = (di, ent.name)
+    _PATH_INDEX["key"] = raw
+    _PATH_INDEX["dirs"] = dirs
+    _PATH_INDEX["map"] = idx
+    return _PATH_INDEX
+
+
+def _which_fast(name: str) -> str:
+    """Component.detect 用的 PATH 查找：批扫索引版。
+
+    索引已经扫过整条 PATH，**未命中就是未命中**，绝不能再回退 shutil.which ——
+    那等于把 42k 次 os.path.exists 重扫第二遍，而"没装"恰是建卡时的多数情况
+    （首版实测就是栽在这里：改了 _which_fast 建窗时间纹丝不动）。
+    唯一要补的是 which 的 Windows 当前目录特例：NeedCurrentDirectoryForExePath
+    为真时 which 会把 cwd 排在 PATH 之前查一次，这里对等地补这几次检查。
+    """
+    if shutil.which is not _REAL_SHUTIL_WHICH:
+        return shutil.which(name)          # 实现被测试桩换掉：走桩
+    d_part, n_part = os.path.split(name)
+    if d_part or not n_part or n_part[:1] == ".":
+        # 带目录成分（含裸 ".." / ".\x"）或空名/相对名：不属于纯 PATH 查找，
+        # 交给真实实现（它会按 which 的语义处理 cwd 特例）。
+        return shutil.which(name)
+    ix = _path_index()
+    files = _which_candidate_names(name)
+
+    def _ok(cand: str) -> bool:
+        # 与 shutil 的 _access_check 同判据：存在、可访问、不是目录
+        return bool(cand) and os.path.exists(cand) and not os.path.isdir(cand)
+
+    best = None                            # PATH 目录序号 —— 取最左命中目录
+    best_f = ""
+    for f in files:
+        key = f.upper() if sys.platform == "win32" else f
+        got = ix["map"].get(key)
+        if got is None:
+            continue
+        if best is None or got[0] < best:
+            best, best_f = got[0], f
+    # Windows 特例：which 在 X_OK 且 NeedCurrentDirectoryForExePath 为真时，
+    # 把当前目录排在 PATH 之前查。候选名在 cwd 里逐个别名试（顺序与 which 一致）。
+    if sys.platform == "win32":
+        try:
+            import _winapi
+            cwd_first = _winapi.NeedCurrentDirectoryForExePath(n_part)
+        except Exception:
+            cwd_first = True               # 判不了就按 which 的默认行为查一遍
+        if cwd_first:
+            for f in files:
+                cand = os.path.join(os.curdir, f)
+                if _ok(cand):
+                    return cand
+    if best is not None:
+        # 拼**候选名**而不是磁盘名：本机实测 which("python") 返回的是
+        # "…\python.EXE"（PATHEXT 的原样大小写），取磁盘名会变成 "python.exe"，
+        # 与权威实现逐字节不一致，路径比较与测试断言都可能因此错位。
+        cand = os.path.join(ix["dirs"][best], best_f)
+        if _ok(cand):
+            return cand
+        # 批扫之后文件恰好被删/改名：索引里换下一条候选，全落空就回权威实现。
+        for f in files:
+            key = f.upper() if sys.platform == "win32" else f
+            got = ix["map"].get(key)
+            if got is None:
+                continue
+            cand2 = os.path.join(ix["dirs"][got[0]], f)
+            if _ok(cand2):
+                return cand2
+    return None
+
 @dataclass
 class Component:
     """一个开发环境组件的抽象。"""
@@ -818,6 +950,13 @@ class Component:
     # 置上这个位之后，build_components() 末尾会连带把 multi_version 置 False，
     # 于是角标（条件就是 multi_version）自动不创建；其余短路点见 ComponentCard 各方法开头。
     download_only: bool = False
+    # 一句话说清"这个组件是干嘛的"（2026-10-12 用户要求：详情功能）。
+    # 由 build_components() 末尾按 COMPONENT_SUMMARY 统一赋值，不在构造处手写
+    # —— 与 category / launch 同一套"单一真源"做法。
+    #
+    # 与 data_note 的分工：这条回答"它是什么、我要不要装"，data_note 回答
+    # "它的数据落在哪、删版本会不会丢数据"。两者读者时机不同，不合并。
+    summary: str = ""
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -887,7 +1026,7 @@ class Component:
         # exec_name 自带扩展名时（Nacos 的 startup.cmd / startup.sh）不再补 .exe
         need_exe = CURRENT_OS == "Windows" and not os.path.splitext(self.exec_name)[1]
         exe_name_final = self.exec_name + (".exe" if need_exe else "")
-        which = shutil.which(exe_name_final) or shutil.which(self.exec_name)
+        which = _which_fast(exe_name_final) or _which_fast(self.exec_name)
         if which:
             return DetectResult(
                 installed=True,
@@ -4028,6 +4167,1014 @@ def fetch_android_studio_versions() -> List[ComponentVersion]:
     return [cv]
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-12 新增四件：Kotlin / GraalVM / Rust / Redis
+# 每一条 URL 与取值都是当天按 R1 实测过的（状态码 + 魔数 + 字节数 + Range 吞吐），
+# 台账见 DEVELOPMENT.md R1.5。先记"为什么是这个形态"，因为反直觉的地方不止一处：
+#
+#   Kotlin   zip 顶层只有一个 `kotlinc/`，`bin/kotlinc.bat` 在里面 ⇒ path_subdir="bin"。
+#            三平台同一个 zip（编译器是 JVM 产物）。github.com 裸地址本机 SSLError，
+#            加速器实测 gh-proxy.com 206/`PK`/18.4Mbps、ghfast.top 7.2、gh-proxy.org 6.5。
+#   GraalVM  env_var 必须是 GRAALVM_HOME —— 写 JAVA_HOME 会和 jdk(Temurin) 抢同一个变量，
+#            两个组件互相覆盖对方的生效版本。资产按平台分档，版本号在**资产名**里
+#            （tag 是 `graal-25.4.4.1.1`，和版本 `25.0.4.1.1` 不是一回事，别从 tag 切）。
+#   Rust     官方 .exe(NSIS) **已停发**（日期目录与非日期目录都 404）；合并 tar.xz 里
+#            **没有统一 bin/**（rustc/ + cargo/ + … 组件目录，要靠 installer 合并 sysroot），
+#            所以"解压即用"不成立。改用 `msiexec /a` 管理性提取：实测免提权、不写注册表，
+#            产出 `Rust/{bin,lib,share}`，且提取出来的 rustc/cargo/rustfmt 真能报版本。
+#            MSI 的 URL 清单里不给（`msi_url=None`），只能把官方 xz_url 的后缀换成 .msi ——
+#            1.99.0 / 1.98.0 / 1.97.1 三个版本换完都是 206 + `\xd0\xcf\x11\xe0`(OLE)。
+#            ⚠ 它仍需要一个链接器：本机没装 VS Build Tools 时 rustc 能编译、链接不过，
+#            而且 Git for Windows 自带的 coreutils `link.exe` 会冒充 MSVC 链接器，
+#            报的是莫名其妙的 "link: extra operand"。这句必须出现在卡片说明里。
+#   Redis    官方只发源码（`download.redis.io` 的 tar.gz 装不出解释器型可执行文件），
+#            Windows 二进制只有社区 redis-windows 构建 ⇒ 卡片要明写"非官方构建"。
+#            真机 drill（%TEMP% 里跑完删）：exe 在包根目录（path_subdir=""）、
+#            `--port` 能改口、`--dir`+SAVE 把 dump.rdb 落到指定目录、
+#            按登记 PID `terminate()` 立即退出并释放端口 ⇒ stop_kind="pid"。
+#            不选 with-Service 变体：那个 14.7MB 的 RedisService.exe 会把自己注册成
+#            Windows 服务，进程就不归本工具管了，停止也停不干净。
+# ---------------------------------------------------------------------------
+
+def _github_release_assets(repo: str, key: str):
+    """取 repo 最近 30 个正式 release：[(tag, {资产名: (直链, 字节数)})]。
+
+    抽出来是因为 kotlin / graalvm / redis 三个都要同一件事 —— 而**版本号必须从资产名
+    或 tag 里读出来再核验**，不能按命名规律拼：拼错一个字符就是 404，且用户看到的是
+    "下载失败"而不是"清单写错了"。抓不到时抛 RuntimeError，由 worker 降级到内置清单。
+    """
+    try:
+        data = _github_api_json(f"https://api.github.com/repos/{repo}/releases?per_page=30")
+    except Exception as exc:
+        raise RuntimeError(f"{key} 版本列表抓取失败：GitHub API 不可用：{exc}") from exc
+    out = []
+    for rel in (data if isinstance(data, list) else []):
+        if not rel or rel.get("prerelease") or rel.get("draft"):
+            continue
+        assets = {}
+        for a in (rel.get("assets") or []):
+            name = str((a or {}).get("name") or "")
+            url = str((a or {}).get("browser_download_url") or "")
+            if not name or not url.startswith("https://github.com/"):
+                continue
+            try:
+                size = int((a or {}).get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            assets[name] = (url, size)
+        out.append((str(rel.get("tag_name") or ""), assets))
+    return out
+
+
+def _flatten_newest(found: Dict[str, List[ComponentVersion]]) -> List[ComponentVersion]:
+    """把"版本号 → 该版本的 ComponentVersion"按版本倒序摊平，最多 20 个。"""
+    ordered = _sort_semver_desc(found.keys())
+    if not ordered:
+        raise RuntimeError("版本列表为空（官方 release 里没有认得出的产物名）")
+    out: List[ComponentVersion] = []
+    for ver in ordered[:20]:
+        out.extend(found[ver])
+    return out
+
+
+def _kotlin_urls(v: str) -> Dict[str, List[str]]:
+    """Kotlin 编译器：三平台同一个 `kotlin-compiler-<v>.zip`，GitHub 产物一律过加速器。"""
+    official = (f"https://github.com/JetBrains/kotlin/releases/download/"
+                f"v{v}/kotlin-compiler-{v}.zip")
+    urls = _gh_accelerated(official)
+    return {"Windows": urls, "Darwin": urls, "Linux": urls}
+
+
+def _kotlin_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_kotlin_urls(v),
+                            archive_map={"Windows": "zip", "Darwin": "zip",
+                                         "Linux": "zip"})
+
+
+def fetch_kotlin_versions() -> List[ComponentVersion]:
+    """Kotlin：GitHub releases 里挑 `kotlin-compiler-<v>.zip`（旁证文件按结尾严格匹配挡掉）。"""
+    found: Dict[str, List[ComponentVersion]] = {}
+    for tag, assets in _github_release_assets("JetBrains/kotlin", "Kotlin"):
+        ver = tag.lstrip("vV")
+        if _version_parts(ver) is None or f"kotlin-compiler-{ver}.zip" not in assets:
+            continue
+        found.setdefault(ver, []).append(_kotlin_cv(ver))
+    return _flatten_newest(found)
+
+
+def _graalvm_asset_suffix(os_key: str) -> str:
+    """GraalVM CE 各平台的资产后缀（实测命名，别拼：mac/linux 是 tar.gz，win 是 zip）。"""
+    if os_key == "Windows":
+        return "windows-x64_bin.zip"
+    arch = "aarch64" if IS_ARM else "x64"
+    return (f"macos-{arch}_bin.tar.gz" if os_key == "Darwin"
+            else f"linux-{arch}_bin.tar.gz")
+
+
+def _graalvm_cv(version: str, per_os_url: Dict[str, str]) -> ComponentVersion:
+    """GraalVM CE 的一个版本。URL 直接取 release 里的 browser_download_url，不重构。"""
+    lst = {k: _gh_accelerated(u) for k, u in per_os_url.items() if u}
+    arch = {k: ("zip" if u.endswith(".zip") else "tar.gz")
+            for k, u in per_os_url.items() if u}
+    return ComponentVersion(version=version, url_map={}, url_list_map=lst,
+                            archive_map=arch)
+
+
+def _graalvm_default_cv(version: str, tag: str, stem: str) -> ComponentVersion:
+    """内置默认清单用的 GraalVM CE 版本（资产名实测自 GitHub release，不是拼出来的）。
+
+    抓取器走的是 release 里的 browser_download_url，所以清单腐烂只会让默认项变旧，
+    不会让刷新结果出错 —— 这两处是同一套命名，改一处要想起另一处。
+    """
+    base = f"https://github.com/graalvm/graalvm-ce-builds/releases/download/{tag}/"
+    arch = "aarch64" if IS_ARM else "x64"
+    per_os = {
+        "Windows": f"{base}{stem}_windows-x64_bin.zip",
+        "Darwin": f"{base}{stem}_macos-{arch}_bin.tar.gz",
+        "Linux": f"{base}{stem}_linux-{arch}_bin.tar.gz",
+    }
+    return _graalvm_cv(version, per_os)
+
+
+def fetch_graalvm_versions() -> List[ComponentVersion]:
+    """GraalVM CE：版本号从**资产名**里读，不是从 tag 里切（tag 与版本不同形）。"""
+    pat = _re.compile(r"-(\d+(?:\.\d+)+)_(?:windows|macos|linux)-")
+    found: Dict[str, List[ComponentVersion]] = {}
+    for _tag, assets in _github_release_assets("graalvm/graalvm-ce-builds", "GraalVM"):
+        per_os: Dict[str, str] = {}
+        version = ""
+        for os_key in ("Windows", "Darwin", "Linux"):
+            want = _graalvm_asset_suffix(os_key)
+            for name, (url, _size) in assets.items():
+                if name.endswith(want):
+                    per_os[os_key] = url
+                    hit = pat.search(name)
+                    if hit:
+                        version = hit.group(1)
+                    break
+        if version and len(per_os) >= 1 and _version_parts(version) is not None:
+            found.setdefault(version, []).append(_graalvm_cv(version, per_os))
+    return _flatten_newest(found)
+
+
+_RUST_DIST_MIRRORS = ("https://rsproxy.cn/dist",
+                      "https://static.rust-lang.org/dist")
+
+
+def _rust_msi_urls(v: str, date: str) -> Dict[str, List[str]]:
+    """Rust 的 Windows MSI 源：镜像在前、官网末位（R1）。
+
+    date 是该版本 dist 的日期目录 —— Rust 的包全在 `/dist/<日期>/` 下面，
+    不写日期目录的 URL 实测 404，所以它必须从官方清单里读而不是猜。
+    """
+    name = f"rust-{v}-x86_64-pc-windows-msvc.msi"
+    return {"Windows": [f"{base}/{date}/{name}" for base in _RUST_DIST_MIRRORS]}
+
+
+def _rust_cv(v: str, date: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_rust_msi_urls(v, date),
+                            archive_map={"Windows": "msi"})
+
+
+def _rust_channel_info(channel: str) -> Tuple[str, str]:
+    """读 Rust 官方清单，返回 (版本号, 日期目录)。
+
+    为什么不 `import tomllib`：那是 3.11+ 的标准库，而本项目声明支持 3.10
+    （README 的 python-3.10~3.14 徽章 / PySide6 的 requires_python）。为一个
+    两行的取值引入条件依赖不值当，所以按"顶层 date"与"[pkg.rustc] 之后第一个
+    version"两条精确规则读，读不出就抛错降级到内置清单 —— 宁缺不猜。
+
+    版本号也不按 `channel-rust-stable` 的字面量猜：清单里写的是
+    `1.99.0 (b940084d7 2026-09-28)` 这种带 commit 与日期的整串，要取第一段。
+    """
+    text = _get(f"https://static.rust-lang.org/dist/channel-rust-{channel}.toml",
+                timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
+    date = ""
+    hit = _re.search(r'^date\s*=\s*"(\d{4}-\d{2}-\d{2})"', text, _re.M)
+    if hit:
+        date = hit.group(1)
+    if not date:
+        # 顶层 date 缺失时退回 URL 里的日期目录 —— 两者本来就应当一致
+        hit = _re.search(r"/dist/(\d{4}-\d{2}-\d{2})/", text)
+        date = hit.group(1) if hit else ""
+    ver = ""
+    sect = text.split("[pkg.rustc]", 1)
+    if len(sect) > 1:
+        hit = _re.search(r'^version\s*=\s*"([^"]+)"', sect[1], _re.M)
+        if hit:
+            ver = hit.group(1).split()[0]
+    if _version_parts(ver) is None or not date:
+        raise RuntimeError(f"Rust 清单读不出版本号或日期目录：{ver!r} / {date!r}")
+    return ver, date
+
+
+def fetch_rust_versions() -> List[ComponentVersion]:
+    """Rust：只登记 Windows（MSI 提取）。macOS/Linux 官方同样是"组件目录 + installer"
+    的形态，本工具没有实测过它们的免提权装法，宁可不给也不猜。
+
+    上一版按 `1.<minor-1>.0` 去问它自己的清单：问到就用、404 就少一个候选 ——
+    这是"探测后核验"而不是"按命名规律拼 URL"（Rust 的补丁版会打断这个规律，
+    比如 1.97.1 就没有 1.97.0 的 channel 文件）。
+    """
+    out: List[ComponentVersion] = []
+    try:
+        ver, date = _rust_channel_info("stable")
+        out.append(_rust_cv(ver, date))
+    except Exception as exc:
+        raise RuntimeError(f"Rust 版本列表抓取失败：官方清单不可用：{exc}") from exc
+    parts = _version_parts(ver) or ()
+    if parts and len(parts) >= 2 and parts[1] > 0:
+        try:
+            p_ver, p_date = _rust_channel_info(f"1.{parts[1] - 1}.0")
+            out.append(_rust_cv(p_ver, p_date))
+        except Exception:
+            pass      # 上一版拿不到不算失败：下拉框少一项而已
+    return out[:20]
+
+
+def _redis_urls(v: str) -> Dict[str, List[str]]:
+    """Redis 社区构建（redis-windows）：Windows 专用 zip，走 GitHub 加速器。"""
+    official = ("https://github.com/redis-windows/redis-windows/releases/download/"
+                f"{v}/Redis-{v}-Windows-x64-msys2.zip")
+    return {"Windows": _gh_accelerated(official)}
+
+
+def _redis_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_redis_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_redis_versions() -> List[ComponentVersion]:
+    """Redis：redis-windows 的 release tag 就是版本号（形如 8.10.2，不带 v 前缀）。"""
+    found: Dict[str, List[ComponentVersion]] = {}
+    for tag, assets in _github_release_assets("redis-windows/redis-windows", "Redis"):
+        ver = tag.lstrip("vV")
+        if _version_parts(ver) is None:
+            continue
+        want = f"Redis-{ver}-Windows-x64-msys2.zip"
+        if want not in assets:
+            continue
+        found.setdefault(ver, []).append(_redis_cv(ver))
+    return _flatten_newest(found)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 B4 补：MinIO（对象存储，单 exe + 自带 Web 控制台）
+#
+# 为什么这一条推翻了我自己上一轮的结论：报告里写"MinIO 拿不到直链"，依据是
+# `dl.min.io` 一律 410 Gone **且 `/releases/latest` 那个 tag 的 assets 数为 0**。
+# 两个都对，但结论下错了：官方只是把**分发口**收了，最后一个有产物的 release
+# （`RELEASE.2025-09-07T16-13-09Z`）里 48 个资产都还挂着，Windows 的
+# `minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe` 实测 206 + `MZ`、
+# 113,115,136 字节，与 release API 声明的 size 逐字节一致（完整下载一次核对过）。
+# ⇒ "latest 没有资产"不等于"这个产品没有可用产物"，判据要落到**资产名级别**。
+#
+# ⚠ 两条登记时必须记住的形态：
+#   ① 版本号**不能**按 tag 直接用：`RELEASE.2025-09-07T16-13-09Z` 过不了
+#      `_version_parts`（首段以字母开头返回 None），而下拉框与目录名都靠它排序，
+#      所以转成日期点分形式 `2025.9.7`；tag 原文只留在 URL 里。
+#   ② 资产名里的 tag 带**时分秒**，光看日期推不出来 ⇒ URL 一律取 API 给的
+#      `browser_download_url`，不拼。0 资产的 tag（如 2025-10-15）自然被"资产名
+#      在不在"这一步筛掉。
+# ---------------------------------------------------------------------------
+
+
+def _minio_version_of(tag: str) -> str:
+    """`RELEASE.2025-09-07T16-13-09Z` → `2025.9.7`；不是这个形态就返回空串。
+
+    月/日去掉前导零，是为了让 `_version_parts` 逐段转 int 时不会踩 "09" 的歧义，
+    也让下拉框里 `2025.9.7` 与别的组件的版本号长得一样（读得出、排得动）。
+    """
+    m = _re.match(r"RELEASE\.(\d{4})-(\d{2})-(\d{2})T", str(tag or ""))
+    if not m:
+        return ""
+    return f"{int(m.group(1))}.{int(m.group(2))}.{int(m.group(3))}"
+
+
+def _minio_urls(url: str) -> Dict[str, List[str]]:
+    """MinIO 的 Windows 产物过 GitHub 加速器（实测裸 github.com 连不上）。"""
+    return {"Windows": _gh_accelerated(url)}
+
+
+def _minio_cv(version: str, url: str) -> ComponentVersion:
+    return ComponentVersion(version=version, url_map={},
+                            url_list_map=_minio_urls(url),
+                            archive_map={"Windows": "exe"})
+
+
+def fetch_minio_versions() -> List[ComponentVersion]:
+    """MinIO：只收**真的挂着 Windows exe 资产**的 release（0 资产的 tag 一律跳过）。"""
+    found: Dict[str, List[ComponentVersion]] = {}
+    for tag, assets in _github_release_assets("minio/minio", "minio"):
+        ver = _minio_version_of(tag)
+        if not ver or _version_parts(ver) is None:
+            continue
+        want = f"minio.windows-amd64.{tag}.exe"
+        hit = assets.get(want)
+        if not hit:
+            continue
+        found.setdefault(ver, []).append(_minio_cv(ver, hit[0]))
+    return _flatten_newest(found)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Dart SDK（语言运行时，zip 形态；只登记 Windows，实测结论全部来自
+# 探源子代理的整包下载 + 解压 + sha256 比对，见 R1.5 台账 Dart 一节）
+#
+# 归档形态：`dartsdk-windows-x64-release.zip` 顶层**只有一个目录 `dart-sdk`、
+# 根上 0 个散文件** ⇒ `extract_archive` 走"单顶层即根"的 collapse 分支，
+# install_dir 里直接就是 bin/ include/ lib/ …… ⇒ `path_subdir="bin"`。
+# 实测 219,877,920 B / `PK\x03\x04`，整包 sha256 `aed8e4a8…` 与官方 .sha256sum 一致；
+# `dart --version` rc=0、秒回、不写盘（包里没有运行时生成的 cache），
+# 输出 `Dart SDK version: 3.13.5 (stable) …`。
+#
+# 源序（探源整包口径实测）：南大 10.91 MB/s > flutter-io.cn 10.02 > 腾讯 2.69 >
+# 官方 0.68。`storage.flutter-io.cn` 不在 MIRROR_BASES 11 项里 —— 按 R1.3
+# 「镜像基址只能经 _mb() 取」的纪律不新增基址表项（要加得先过 bt_mirror_spec_tests
+# 那张"基址即表"的用例与 R1.3 文档，本轮留给文档待决策），所以登记 nju + tencent
+# 两家，已满足 R1.1「≥2 个大陆镜像」。
+#
+# ⚠ 抓取器三个坑（探源实测，写错就白抓）：
+#   ① GCS 列目录是**字典序**：`3.10.0` 排在 `3.9.4` 前，`max(列表)` 会拿到旧版；
+#      必须 `_version_parts` 逐段转 int 排序。
+#   ② 同一前缀下混着 28 个纯数字垃圾目录（`29803`/`30036`/…）与 `latest`，
+#      必须用 `^\d+\.\d+\.\d+$` 过滤，否则 `_sort_semver_desc` 会把它们当版本。
+#   ③ 下载 URL 只用版本号，**没有 revision 段**（revision 只在 VERSION 文件内容里），
+#      任务描述里那句"路径里有 revision"是错的，实测 404。
+# ---------------------------------------------------------------------------
+
+_DART_ARCHIVE = ("https://storage.googleapis.com/dart-archive/channels/stable/"
+                 "release/{v}/sdk/dartsdk-windows-x64-release.zip")
+
+
+def _dart_urls(v: str) -> Dict[str, List[str]]:
+    """南大 / 腾讯云镜像在前（路径里带 /flutter/ 那一层，不带实测 404），官方末位。"""
+    cn = []
+    for base in _mb("nju", "tencent"):
+        cn.append(base + f"/flutter/dart-archive/channels/stable/release/"
+                         f"{v}/sdk/dartsdk-windows-x64-release.zip")
+    return {"Windows": cn + [_DART_ARCHIVE.format(v=v)]}
+
+
+def _dart_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_dart_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_dart_versions() -> List[ComponentVersion]:
+    """Dart：官方 VERSION JSON 给最新版；GCS 列目录给全量清单。
+
+    最新版用 `channels/stable/release/latest/VERSION`（`{"version":"3.13.5",…}`），
+    历史清单用 GCS JSON API 列 `channels/stable/release/` 前缀（208 个目录项，
+    180 个干净 semver；**字典序** + **数字垃圾目录**两个坑见上方注释块）。
+    """
+    try:
+        latest = _get(_DART_ARCHIVE.replace("{v}", "latest")
+                      .replace("/sdk/dartsdk-windows-x64-release.zip",
+                               "/VERSION"),
+                      timeout=DEVTOOL_FETCH_TIMEOUT).json()
+        latest_v = str((latest or {}).get("version") or "").strip()
+    except Exception as exc:
+        raise RuntimeError(f"Dart 版本列表抓取失败：官方 VERSION 不可用：{exc}") from exc
+    if not latest_v or _version_parts(latest_v) is None:
+        raise RuntimeError("Dart 官方 VERSION 里读不出可用版本号")
+    found: Dict[str, List[ComponentVersion]] = {
+        latest_v: [_dart_cv(latest_v)]}
+    try:
+        listing = _get(
+            "https://storage.googleapis.com/storage/v1/b/dart-archive/o?"
+            "prefix=channels/stable/release/&delimiter=/&maxResults=1000",
+            timeout=DEVTOOL_FETCH_TIMEOUT).json()
+    except Exception:
+        return _flatten_newest(found)     # 列目录失败就只给最新版，不把清单砍空
+    prefixes = (listing or {}).get("prefixes") or []
+    for p in prefixes:
+        name = str(p).rstrip("/").rsplit("/", 1)[-1]
+        if name == "latest" or _re.fullmatch(r"\d+\.\d+\.\d+", name) is None:
+            continue
+        if name != latest_v and _version_parts(name) is not None:
+            found.setdefault(name, []).append(_dart_cv(name))
+    return _flatten_newest(found)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 B1：protoc / uv —— 打通「zip 形态的单二进制 / 无 XXX_HOME」这条路径。
+#
+# 为什么这两个要单独记一笔：现有走 path_subdir="" 的组件（kubectl / jenkins）都是
+# **单文件拷贝早退分支**，压根没走到 extract_archive 底部那个"单顶层即根"判定。
+# protoc 与 uv 是 zip，会走到底 —— 而它们恰好是这条路径的两个不同变体：
+#
+#   protoc  zip 顶层是 `bin/` + `include/` 两个并列目录 + readme.txt
+#           ⇒ 顶层目录数 ≥2 ⇒ 返回 install_dir 本身 ⇒ path_subdir="bin"
+#           （实测 36.2 win64：3,565,086 B / 27 条 / bin/protoc.exe / `--version` → `libprotoc 36.2`）
+#   uv      zip 顶层 0 个目录，直接 uv.exe + uvw.exe + uvx.exe
+#           ⇒ 返回 install_dir 本身 ⇒ path_subdir=""
+#           （实测 0.13.0：15,722,003 B / 3 条 / uv.exe / `--version` → `uv 0.13.0 (…msvc)`）
+#
+# 源序是 2026-10-12 Range 取样两轮的结论（两轮一致）：
+#   protoc  npmmirror 真镜像 `/protobuf/v<v>/…` 3.5 / 2.7 Mbps。⚠ 目录名**必须带 v 前缀**，
+#           不带 v 实测 404。中科大的 github-release 代理对 protobuf 恒 404（清华同）。
+#   uv      中科大 github-release 代理 2.0 / 1.9 Mbps —— 但**只同步最新版**：
+#           0.12.24 实测 404，旧版本靠故障转移兜到加速器。npmmirror 没有 uv 目录。
+#   两者本机裸 github.com 都连不上（ConnectionError），仍按 R1 放末位兜底。
+# ---------------------------------------------------------------------------
+
+def _protoc_urls(v: str) -> Dict[str, List[str]]:
+    """protoc：npmmirror 真镜像在前，GitHub 产物过加速器，裸地址末位。
+
+    只给 Windows —— Linux/macOS 官方也有 `protoc-<v>-{linux-x86_64,osx-*}.zip`，
+    但没按 R1 实测过，按"不冒充能"的纪律不给 URL，改用 unsupported_platform_hint 引导。
+    """
+    cn = f"https://registry.npmmirror.com/-/binary/protobuf/v{v}/protoc-{v}-win64.zip"
+    official = ("https://github.com/protocolbuffers/protobuf/releases/download/"
+                f"v{v}/protoc-{v}-win64.zip")
+    return {"Windows": [cn] + _gh_accelerated(official)}
+
+
+def _protoc_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_protoc_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_protoc_versions() -> List[ComponentVersion]:
+    """protoc：tag 形如 `v36.2`；只认 `protoc-<ver>-win64.zip`（`protobuf-<ver>.zip` 是源码包）。"""
+    found: Dict[str, List[ComponentVersion]] = {}
+    for tag, assets in _github_release_assets("protocolbuffers/protobuf", "protoc"):
+        ver = tag.lstrip("vV")
+        if _version_parts(ver) is None:
+            continue
+        if f"protoc-{ver}-win64.zip" not in assets:
+            continue
+        found.setdefault(ver, []).append(_protoc_cv(ver))
+    return _flatten_newest(found)
+
+
+def _uv_urls(v: str) -> Dict[str, List[str]]:
+    """uv：中科大 github-release 代理在前（只同步最新版，旧版 404 由故障转移兜）。"""
+    cn = (f"https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/{v}/"
+          f"uv-x86_64-pc-windows-msvc.zip")
+    official = ("https://github.com/astral-sh/uv/releases/download/"
+                f"{v}/uv-x86_64-pc-windows-msvc.zip")
+    return {"Windows": [cn] + _gh_accelerated(official)}
+
+
+def _uv_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_uv_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_uv_versions() -> List[ComponentVersion]:
+    """uv：tag 是裸版本号（0.13.0）；资产名里的 `.sha256` 同名项要挡掉。"""
+    found: Dict[str, List[ComponentVersion]] = {}
+    for tag, assets in _github_release_assets("astral-sh/uv", "uv"):
+        ver = tag.lstrip("vV")
+        if _version_parts(ver) is None:
+            continue
+        if f"uv-x86_64-pc-windows-msvc.zip" not in assets:
+            continue
+        found.setdefault(ver, []).append(_uv_cv(ver))
+    return _flatten_newest(found)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 B3/B5：GitHub Releases 单二进制批（CLI 全家桶 + 几个运行时）。
+#
+# 这一批形态高度一致：**Windows 一个 zip（或裸 exe）+ 官方只在 GitHub 发版 + 没有
+# XXX_HOME 概念**，所以用一个工厂 + 一张表生成，不再每个组件抄一遍同样的四十行。
+# 但**每个包的解压布局都是真下载下来列过条目的**（R3.22），表里的 path_subdir
+# 一列就是实测结论，不许照抄相邻组件：
+#
+#   顶层 0 个目录（exe 直接躺根目录）      ⇒ path_subdir=""   deno/ninja/duckdb/
+#                                                             eza/fzf/caddy/traefik
+#   顶层恰好 1 个目录（包被包了一层）      ⇒ 解出来那层就是根；
+#                                            exe 在根 ⇒ ""    ripgrep/fd/bat/etcd/nats
+#                                            exe 在 bin ⇒ "bin" cmake
+#   顶层 ≥2 个目录                        ⇒ 返回解压根        zoxide(completions/+man/)
+#
+# ⚠ **pnpm 不在这一批**：它的 zip 顶层是 `dist/` 目录 + `pnpm.exe` 文件两个并列项，
+#   旧 `extract_archive` 那条"顶层恰好一个目录就返回它"会把 `pnpm.exe` 丢掉（只剩 dist/）。
+#   2026-10-12 真机装机演练在这上面翻过车（同根因还带走了 trivy），规则已改成
+#   "根上有散文件就不算单顶层"（DEVELOPMENT.md R3.22 第 5 条）；pnpm 由 `_CLI_TOOLS`
+#   那张表登记，不要在这里重复加 —— 两处各加一遍 = 同一个 key 出两张卡片。
+# ⚠ **helm 也不在**：GitHub release 里只有 `.asc`/`.sha256sum` 签名，真正的二进制在
+#   `get.helm.sh`，要用另一套源，同样单独处理。
+# ---------------------------------------------------------------------------
+
+def _gh_bin_urls(repo: str, tag: str, asset: str) -> Dict[str, List[str]]:
+    """GitHub release 单资产：走加速器，裸地址末位（R1）。"""
+    official = f"https://github.com/{repo}/releases/download/{tag}/{asset}"
+    return {"Windows": _gh_accelerated(official)}
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 B7：Ant / JMeter —— 走 Apache 归档目录的遗留构建/压测工具。
+#
+# 这两个不在上面的表驱动批里，因为源不是 GitHub：Apache 分发的二进制只有
+# `repo.huaweicloud.com/apache/...` 与 `archive.apache.org/dist/...` 肯放
+# （实测清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大的 apache 目录对这两个都是
+#  404 —— 它们只同步"最新版"，而 1.10.18 / 5.6.3 已经不是最新）。
+# 所以这两个是"1 家大陆镜像 + 官网末位"的形态，登记在 SINGLE_SOURCE_EXCEPTION。
+#
+# 布局实测（下载整包列条目）：
+#   Ant     apache-ant-1.10.18-bin.zip  10,413,759 B / 1826 条，顶层 1 个目录，
+#          `bin/ant.bat` ⇒ path_subdir="bin"（exec_name 用 ant，Windows 下会补 .bat）
+#   JMeter  apache-jmeter-5.6.3.zip     90,631,635 B / 3163 条，顶层 1 个目录，
+#          `bin/jmeter.bat` ⇒ path_subdir="bin"；它还需要 JDK（见 needs）
+# ---------------------------------------------------------------------------
+
+def _apache_bin_urls(subpath: str) -> Dict[str, List[str]]:
+    """Apache 归档：华为云 repo 在前，archive.apache.org 末位。"""
+    return {"Windows": [
+        f"https://repo.huaweicloud.com/apache/{subpath}",
+        f"https://archive.apache.org/dist/{subpath}",
+    ]}
+
+
+def _ant_urls(v: str) -> Dict[str, List[str]]:
+    return _apache_bin_urls(f"ant/binaries/apache-ant-{v}-bin.zip")
+
+
+def _ant_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_ant_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_ant_versions() -> List[ComponentVersion]:
+    """Ant：扫华为云的 ant/binaries 目录页拿最新版本（archive 只留历史版）。"""
+    html = _get("https://repo.huaweicloud.com/apache/ant/binaries/").text
+    vs = _re.findall(r'apache-ant-(\d+\.\d+\.\d+)-bin\.zip', html)
+    return [_ant_cv(v) for v in _sort_semver_desc(vs)]
+
+
+def _jmeter_urls(v: str) -> Dict[str, List[str]]:
+    return _apache_bin_urls(f"jmeter/binaries/apache-jmeter-{v}.zip")
+
+
+def _jmeter_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_jmeter_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_jmeter_versions() -> List[ComponentVersion]:
+    """JMeter：同样扫华为云目录页（archive 的 jmeter 目录实测 404，不留历史版）。"""
+    html = _get("https://repo.huaweicloud.com/apache/jmeter/binaries/").text
+    vs = _re.findall(r'apache-jmeter-(\d+\.\d+(?:\.\d+)?)\.zip', html)
+    return [_jmeter_cv(v) for v in _sort_semver_desc(vs)]
+
+
+def _gh_bin_cv(version: str, repo: str, tag: str, asset: str,
+               archive: str = "zip") -> ComponentVersion:
+    return ComponentVersion(version=version, url_map={},
+                            url_list_map=_gh_bin_urls(repo, tag, asset),
+                            archive_map={"Windows": archive})
+
+
+def make_gh_bin_fetcher(key: str, repo: str, asset_tmpl: str,
+                        tag_tmpl: str = "v{v}", archive: str = "zip"):
+    """生成一个 fetcher：只收"资产名严格匹配"的 tag。
+
+    `asset_tmpl` 用 `{v}` 占位版本号。严格匹配是硬要求 —— 同一个 release 里往往同时
+    躺着 `.sha256` / `.asc` / `.sbom` / `.deb` 等几十个同名干扰项，靠后缀猜会装错东西。
+    tag 用 release 里返回的**原始 tag** 拼 URL（不按规律补 v）：ripgrep 的 tag 就不带 v。
+    """
+    def _fetch() -> List[ComponentVersion]:
+        found: Dict[str, List[ComponentVersion]] = {}
+        for tag, assets in _github_release_assets(repo, key):
+            ver = tag.lstrip("vV")
+            if _version_parts(ver) is None:
+                continue
+            if asset_tmpl.format(v=ver) not in assets:
+                continue
+            found.setdefault(ver, []).append(
+                _gh_bin_cv(ver, repo, tag, asset_tmpl.format(v=ver), archive))
+        return _flatten_newest(found)
+
+    _fetch.__name__ = f"fetch_{key}_versions"
+    return _fetch
+
+
+# key, 显示名, repo, tag 模板, 资产名模板, 可执行文件, path_subdir, 检测参数, 内置默认版本
+# 可执行文件一列**全部实测过**（下包解压列条目 + 真跑 --version 确认 rc=0）。
+GH_BIN_COMPONENTS: tuple = (
+    ("deno", "Deno", "denoland/deno", "v{v}", "deno-x86_64-pc-windows-msvc.zip",
+     "deno", "", ["--version"], "2.9.7"),
+    ("ninja", "Ninja", "ninja-build/ninja", "v{v}", "ninja-win.zip",
+     "ninja", "", ["--version"], "1.13.2"),
+    ("duckdb", "DuckDB CLI", "duckdb/duckdb", "v{v}", "duckdb_cli-windows-amd64.zip",
+     "duckdb", "", ["--version"], "1.5.6"),
+    ("cmake", "CMake", "Kitware/CMake", "v{v}", "cmake-{v}-windows-x86_64.zip",
+     "cmake", "bin", ["--version"], "4.4.4"),
+    ("ripgrep", "ripgrep (rg)", "BurntSushi/ripgrep", "{v}",
+     "ripgrep-{v}-x86_64-pc-windows-msvc.zip", "rg", "", ["--version"], "15.2.0"),
+    ("fd", "fd", "sharkdp/fd", "v{v}", "fd-v{v}-x86_64-pc-windows-msvc.zip",
+     "fd", "", ["--version"], "10.5.0"),
+    ("bat", "bat", "sharkdp/bat", "v{v}", "bat-v{v}-x86_64-pc-windows-msvc.zip",
+     "bat", "", ["--version"], "0.26.1"),
+    ("eza", "eza", "eza-community/eza", "v{v}", "eza.exe_x86_64-pc-windows-gnu.zip",
+     "eza", "", ["--version"], "0.23.5"),
+    ("zoxide", "zoxide", "ajeetdsouza/zoxide", "v{v}",
+     "zoxide-{v}-x86_64-pc-windows-msvc.zip", "zoxide", "", ["--version"], "0.10.0"),
+    ("fzf", "fzf", "junegunn/fzf", "v{v}", "fzf-{v}-windows_amd64.zip",
+     "fzf", "", ["--version"], "0.74.5"),
+    # 裸 exe 单文件：走"单文件拷贝 + 改名"分支，所以 exec_name 才能是干净的 yq
+    ("yq", "yq", "mikefarah/yq", "v{v}", "yq_windows_amd64.exe",
+     "yq", "", ["--version"], "4.54.1"),
+    ("etcd", "etcd", "etcd-io/etcd", "v{v}", "etcd-v{v}-windows-amd64.zip",
+     "etcd", "", ["--version"], "3.7.2"),
+    ("nats-server", "NATS Server", "nats-io/nats-server", "v{v}",
+     "nats-server-v{v}-windows-amd64.zip", "nats-server", "", ["--version"], "2.15.1"),
+    ("caddy", "Caddy", "caddyserver/caddy", "v{v}", "caddy_{v}_windows_amd64.zip",
+     "caddy", "", ["--version"], "2.11.7"),
+    ("traefik", "Traefik", "traefik/traefik", "v{v}",
+     "traefik_v{v}_windows_amd64.zip", "traefik", "", ["version"], "3.7.14"),
+)
+
+# yq 下的是裸 exe（不是 zip），归档类型要单独给，否则会被当 zip 解压。
+GH_BIN_ARCHIVE: Dict[str, str] = {"yq": "exe"}
+
+# 由表生成 fetcher：key -> callable
+GH_BIN_FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
+    row[0]: make_gh_bin_fetcher(row[0], row[2], row[4], row[3],
+                                GH_BIN_ARCHIVE.get(row[0], "zip"))
+    for row in GH_BIN_COMPONENTS
+}
+
+# 只登记实测过的 Windows：其它平台官方也有包，但没按 R1 探过源，不冒充能。
+GH_BIN_NO_WIN_HINT = (
+    "本工具只按 R1 实测过这个组件的 Windows 包，Linux / macOS 未实测，故不提供自动下载。"
+    "那两个平台请用它自己的包管理器或官方安装方式（brew / apt / dnf / 官方脚本）。"
+)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 B4 / B2：etcd、consul、ZooKeeper 的源与版本入口
+# ---------------------------------------------------------------------------
+# 三家的大陆源情况完全不同，都是当天逐个 Range 实测（状态码 + 魔数 + 吞吐）：
+#   · ZooKeeper：Apache dist 有 **8 家镜像全部可用**（华为云 18.0 / 南大 17.6 / 清华 16.5 /
+#     中科大 16.0 / 北外 9.9 / 腾讯 9.1 / 阿里 6.9 Mbps，全 206 + `\x1f\x8b`），
+#     官方 dlcdn 15.7 Mbps 放末位。archive.apache.org 只有 0.4 Mbps，不进源序
+#     （它保留全量历史，将来要装旧版本时再单独说）。
+#     ⚠ 中科大回 200 而不是 206（它忽略 Range）—— 下载没问题，但"按 206 取样算吞吐"的
+#     脚本对它算出来的是全文件时间，排序时要留意这条偏差。
+#   · consul：**只有官方一家**（releases.hashicorp.com，2.1 Mbps），清华与 npmmirror 都 404。
+#     所以它进 bt_mirror_spec 的"零大陆源"豁免表，卡片写明国内可能慢。
+#   · etcd：GitHub 产物，裸地址本机 SSLError；加速器 gh-proxy.com 9.8 / ghfast 3.1 /
+#     ghproxy.net 1.1 Mbps。它的组件登记在 GH_BIN_COMPONENTS 那张表里，这里只给启停描述符。
+
+def _zookeeper_urls(v: str) -> Dict[str, List[str]]:
+    """ZooKeeper：`zookeeper/zookeeper-<v>/apache-zookeeper-<v>-bin.tar.gz`。
+
+    目录段与文件名都带版本号，且文件名多一个 `-bin` 中缀 —— 少写一处就是 404。
+    """
+    rel = f"zookeeper/zookeeper-{v}/apache-zookeeper-{v}-bin.tar.gz"
+    bases = _mb("huaweicloud-py", "nju", "tuna", "ustc", "bfsu", "tencent", "aliyun")
+    return {"Windows": [f"{b}/apache/{rel}" for b in bases]
+                        + [f"https://dlcdn.apache.org/{rel}"]}
+
+
+def _zookeeper_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_zookeeper_urls(v),
+                            archive_map={"Windows": "tar.gz"})
+
+
+def fetch_zookeeper_versions() -> List[ComponentVersion]:
+    """ZooKeeper：Apache 目录索引里列着全部 `zookeeper-<v>/`，取版本号即可。"""
+    try:
+        text = _get("https://dlcdn.apache.org/zookeeper/",
+                    timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
+    except Exception as exc:
+        raise RuntimeError(f"ZooKeeper 版本列表抓取失败：Apache 目录不可用：{exc}") from exc
+    vers = sorted({m for m in _re.findall(r'href="zookeeper-(\d+\.\d+\.\d+)/"', text)
+                   if _version_parts(m)}, key=_semver_key, reverse=True)
+    if not vers:
+        raise RuntimeError("ZooKeeper 版本列表为空（Apache 目录里读不出 zookeeper-<v>/ 条目）")
+    return [_zookeeper_cv(v) for v in vers[:20]]
+
+
+_CONSUL_BASE = "https://releases.hashicorp.com/consul"
+
+
+def _consul_urls(v: str) -> Dict[str, List[str]]:
+    return {"Windows": [f"{_CONSUL_BASE}/{v}/consul_{v}_windows_amd64.zip"]}
+
+
+def _consul_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_consul_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_consul_versions() -> List[ComponentVersion]:
+    """consul：GitHub release 是 **0 资产**（实测），产物只在官方 releases 站上。
+
+    那站的索引页是 HTML，但版本条目形态稳定（`/consul/<v>/`），正则读即可。
+    """
+    try:
+        text = _get(_CONSUL_BASE + "/", timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
+    except Exception as exc:
+        raise RuntimeError(f"consul 版本列表抓取失败：官方 releases 站不可用：{exc}") from exc
+    vers = sorted({m for m in _re.findall(r'href="/consul/(\d+\.\d+\.\d+)/"', text)
+                   if _version_parts(m)}, key=_semver_key, reverse=True)
+    if not vers:
+        raise RuntimeError("consul 版本列表为空（官方索引里读不出版本目录）")
+    return [_consul_cv(v) for v in vers[:20]]
+
+
+# ---------------------------------------------------------------------------
+# B6a 里两个"不在 GitHub、但版本仍可机读"的刷新器
+# ---------------------------------------------------------------------------
+
+_PGADMIN_DIR_INDEX = "https://ftp.postgresql.org/pub/pgadmin/pgadmin4/"
+
+
+def fetch_pgadmin4_versions() -> List[ComponentVersion]:
+    """pgAdmin 4：官方 FTP 的 Apache 目录索引里列着全部 `v<大>.<小>/`。
+
+    没有 JSON 接口，但目录页是机器可读的 HTML，且**版本号只到 大.小**（没有 patch 段）——
+    这点必须照它，别自己补成 9.18.0。URL 只能走 ftp.postgresql.org：
+    官网正文给的 www.postgresql.org/ftp/… 形式实测 301 补尾斜杠后回 4 KB 的 404 HTML。
+    """
+    try:
+        text = _get(_PGADMIN_DIR_INDEX, timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
+    except Exception as exc:
+        raise RuntimeError(f"pgAdmin 4 版本列表抓取失败：官方 FTP 目录不可用：{exc}") from exc
+    vers = sorted({m for m in _re.findall(r'href="v(\d+\.\d+)/"', text)
+                   if _version_parts(m)}, key=_semver_key, reverse=True)
+    if not vers:
+        raise RuntimeError("pgAdmin 4 版本列表为空（FTP 目录页里读不出 v<大>.<小>/ 目录项）")
+    out: List[ComponentVersion] = []
+    for v in vers[:20]:
+        name = f"pgadmin4-{v}-x64.exe"
+        out.append(_cv(v, {"Windows": [f"https://mirror.nju.edu.cn/postgresql/pgadmin/"
+                                       f"pgadmin4/v{v}/windows/{name}",
+                                       f"https://ftp.postgresql.org/pub/pgadmin/"
+                                       f"pgadmin4/v{v}/windows/{name}"]},
+                       {"Windows": "exe"}))
+    return out
+
+
+_POSTMAN_RELEASES = "https://dl.pstmn.io/update/win64/{start}/RELEASES"
+
+
+def fetch_postman_versions() -> List[ComponentVersion]:
+    """Postman：Squirrel 的 RELEASES 是**增量链**，一次只回"下一步该装哪个"。
+
+    实测（2026-10-12）：起点 11.0.0 → 回 11.99.0；起点 11.99.0 → 回 12.32.0；
+    起点 12.32.0 → 回空。所以它**不等于"任一版本都收敛到最新"** ——
+    从很旧的版本出发只会拿到链上的下一站，必须一路走到空为止。
+    跳数封顶 8 次：拿不到最新宁可退回内置清单，也不要在这里打转。
+
+    版本 URL 一律用 `download/version/<v>/win64`，不用 `download/latest/win64`：
+    后者实测回 200 但**不给 Content-Length**，下载完的字节核对就没数了。
+    """
+    found: List[str] = []
+    cur = "12.0.0"
+    for _hop in range(8):
+        try:
+            text = _get(_POSTMAN_RELEASES.format(start=cur),
+                        timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text.strip()
+        except Exception as exc:
+            if not found:
+                raise RuntimeError(
+                    f"Postman 版本列表抓取失败：RELEASES 不可用：{exc}") from exc
+            break
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if not lines:
+            break
+        hit = _re.search(r"/download/([0-9][0-9.]*)/Postman-x64-", lines[-1])
+        nxt = hit.group(1) if hit else ""
+        if _version_parts(nxt) is None or nxt in found or nxt == cur:
+            break
+        found.append(nxt)
+        cur = nxt
+    if not found:
+        raise RuntimeError("Postman 版本列表为空（RELEASES 链一步都没走出来）")
+    return [_cv(v, {"Windows": [f"https://dl.pstmn.io/download/version/{v}/win64"]},
+                {"Windows": "exe"}) for v in found]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 B5 / B3：单二进制与 CLI 全家桶（19 件），表驱动登记
+# ---------------------------------------------------------------------------
+# 为什么做成一张表而不是 19 个 Component(...)：这批的字段除了 URL 与产物名之外
+# 全都一样（无 XXX_HOME、env_var=None、非只下载、多版本自动开）。抄 19 遍的代价是
+# 以后漏改一处 —— 而漏改的后果是某个组件的绿勾/卸载/PATH 定位悄悄错位。
+#
+# 每一行的 tag / 资产名 / 字节数都是 2026-10-12 从**官方 release 接口**读出来并
+# 用 Range 实测过（状态码 + 魔数 + 总字节 + 吞吐）的，台账进 DEVELOPMENT.md R1.5。
+# 三处反直觉、专门记下来防重复踩：
+#   · `helm` 的 GitHub release 里**只有 .asc / .sha256，没有 zip 本体** —— 产物在
+#     `get.helm.sh`，版本入口是 `get.helm.sh/helm-latest-version`（纯文本 `v4.3.0`）。
+#   · `ninja` / `duckdb` 的资产名**不含版本号**（`ninja-win.zip` /
+#     `duckdb_cli-windows-amd64.zip`），版本只在 tag 段。
+#   · `dotnet-sdk` 的 `builds.dotnet.microsoft.com` 本机连不上，
+#     `dotnetcli.azureedge.net` 通（206 + `PK`，300,608,304 B）；
+#     走 zip 便携包就避开了 installer_mode（计划把这条列为本批最高风险，实测确认不必装）。
+#   · `eza` 看着像 Unix-only，实际**有官方 Windows 包**（`eza.exe_x86_64-pc-windows-gnu.zip`）
+#     —— 差点凭印象跳过它，这就是"资产名必须从接口读"的理由。
+#
+# 字段：key / name 显示名 / arch 归档类型 / exe 探测用可执行文件名（不含扩展名）
+#       args 版本参数 / v 内置版本 / tag 与 asset 的 {v} 模板 / size 官方字节数
+#       cat 分类 / note 卡片说明（含"为什么不是另一种形态"）
+_CLI_TOOLS: tuple = (
+    # 2026-10-12 B5/B3。⚠ 这批里 jq / trivy / k9s / docker-compose / pnpm / helm /
+    # sqlite / dotnet-sdk 之外的单二进制 CLI（yq ripgrep fd fzf bat eza zoxide ninja
+    # cmake deno duckdb）**由 GH_BIN_COMPONENTS 那张表登记**，不要在这里重复加 ——
+    # 两处各加一遍的结果是同一个 key 出现两张卡片（建窗口时不报错，界面上多一格）。
+    {"key": "jq", "name": "jq", "arch": "exe", "exe": "jq", "args": ["--version"],
+     "v": "1.8.2", "repo": "jqlang/jq", "tag": "jq-{v}", "asset": "jq-windows-amd64.exe",
+     "size": 1035264, "cat": "开发环境",
+     "note": "JSON 处理器。官方产物就是裸 .exe（不是压缩包），下载后改名成 jq.exe 放进 PATH。"
+             "tag 形如 `jq-1.8.2`，与版本号不同形，所以版本号要从 tag 里剥前缀。"},
+    {"key": "trivy", "name": "Trivy", "arch": "zip", "exe": "trivy",
+     "args": ["--version"], "v": "0.75.0", "repo": "aquasecurity/trivy", "tag": "v{v}",
+     "asset": "trivy_{v}_windows-64bit.zip", "size": 52927180, "cat": "开发软件",
+     "note": "容器/依赖漏洞扫描。首次 `trivy image` 要下漏洞库（几百 MB），"
+             "那一步由 trivy 自己做，本工具不预取。"},
+    {"key": "k9s", "name": "k9s", "arch": "zip", "exe": "k9s", "args": ["version"],
+     "v": "0.51.0", "repo": "derailed/k9s", "tag": "v{v}",
+     "asset": "k9s_Windows_amd64.zip", "size": 42330705, "cat": "开发软件",
+     "note": "Kubernetes 终端界面。要能连上一个已配置的集群才有画面。"},
+    {"key": "docker-compose", "name": "Docker Compose v2", "arch": "exe",
+     "exe": "docker-compose", "args": ["version"], "v": "5.6.0", "repo": "docker/compose",
+     "tag": "v{v}", "asset": "docker-compose-windows-x86_64.exe", "size": 33352192,
+     "dao": True,      # files.m.daocloud.io 的 github 代理树实测有它（200 + MZ + 整包字节数一致）
+     "cat": "开发软件",
+     "note": "独立二进制版 Compose。**它能装能进 PATH，但要真的跑起来仍然需要一个能用的 "
+             "Docker 引擎** —— 而 Docker Desktop 在 Windows 上没有免安装形态（见 Docker 卡片"
+             "的引导）。登记它是因为 `docker-compose version` 这类自检不需要引擎。"},
+    {"key": "pnpm", "name": "pnpm", "arch": "zip", "exe": "pnpm", "args": ["--version"],
+     "v": "12.11.2", "repo": "pnpm/pnpm", "tag": "v{v}", "asset": "pnpm-win32-x64.zip",
+     "size": 22582408, "cat": "开发环境",
+     "note": "Node 包管理器。zip 顶层直接是 pnpm.exe。"
+             "⚠ 本工具只放二进制，**不改 corepack、不动全局 node_modules** —— "
+             "要用它接管 `npm` 得你自己 `corepack enable`。"},
+    {"key": "helm", "name": "Helm", "arch": "zip", "exe": "helm", "args": ["version"],
+     "v": "4.3.0", "repo": None, "tag": None, "asset": None, "size": 20832154,
+     "cat": "开发软件",
+     "note": "Kubernetes 包管理器。**产物不在 GitHub release 上**（那里只挂 .asc/.sha256 "
+             "旁证），本体在官方 CDN `get.helm.sh`；zip 顶层是 `windows-amd64/` 一个目录。",
+     "url_tmpl": "https://get.helm.sh/helm-v{v}-windows-amd64.zip"},
+    {"key": "sqlite", "name": "SQLite", "arch": "zip", "exe": "sqlite3",
+     "args": ["--version"], "v": "3.54.0", "repo": None, "tag": None, "asset": None,
+     "size": 6982216, "cat": "开发环境",
+     "note": "官方 `sqlite-tools-win-x64` 包，里面是 sqlite3.exe / sqldiff.exe / "
+             "sqlite3_analyzer.exe / sqlite3_rsync.exe 四个裸文件（实测整包下载列过：0 个顶层目录）。"
+             "⚠ 官网把版本号写成**六位无点**形式（3.54.0 → `3540000`），且 URL 里带"
+             "**年份目录**，两者都不能省。",
+     "url_tmpl": "https://sqlite.org/2026/sqlite-tools-win-x64-3540000.zip"},
+    {"key": "dotnet-sdk", "name": ".NET SDK", "arch": "zip", "exe": "dotnet",
+     "args": ["--version"], "v": "10.0.401", "repo": None, "tag": None, "asset": None,
+     "size": 300608304, "cat": "开发环境",
+     "note": "微软官方 zip 便携包（300 MB），解压即用 —— 所以**不需要 installer_mode**，"
+             "这是计划里点名的本批最高风险项，实测确认可以避开。"
+             "⚠ `builds.dotnet.microsoft.com` 本机连不上，`dotnetcli.azureedge.net` 通。",
+     "url_tmpl": "https://dotnetcli.azureedge.net/dotnet/Sdk/{v}/dotnet-sdk-{v}-win-x64.zip"},
+)
+
+
+def _cli_url(spec: dict, v: str) -> str:
+    """某个版本的官方产物地址。"""
+    tmpl = spec.get("url_tmpl")
+    if tmpl:
+        return tmpl.format(v=v)
+    return (f"https://github.com/{spec['repo']}/releases/download/"
+            f"{spec['tag'].format(v=v)}/{spec['asset'].format(v=v)}")
+
+
+def _cli_urls(spec: dict, v: str) -> List[str]:
+    u = _cli_url(spec, v)
+    if "github.com/" not in u:
+        return [u]
+    # 少数 GitHub 产物在 DaoCloud 的 github 代理树上有**真镜像**（实测 200 + 魔数 +
+    # 整包字节数与官方一致），按 R1 排在三个加速器之前。这个开关是逐个组件实测出来
+    # 才登记的（目前是 docker-compose），没有实测的组件不许沾：见
+    # `bt_mirror_spec_tests.DaoCloudGithubProxyIsFirstForMeasuredComponents`。
+    head = ([f"https://files.m.daocloud.io/{u.split('://', 1)[1]}"] if spec.get("dao") else [])
+    return head + _gh_accelerated(u)
+
+
+def _cli_cv(spec: dict, v: str) -> ComponentVersion:
+    urls = _cli_urls(spec, v)
+    return ComponentVersion(version=v, url_map={},
+                            url_list_map={"Windows": urls},
+                            archive_map={"Windows": spec["arch"]})
+
+
+def _cli_components() -> List["Component"]:
+    """把 _CLI_TOOLS 变成组件（同 _devtool_components 的理由：抄 19 遍必漏一处）。"""
+    out: List[Component] = []
+    for spec in _CLI_TOOLS:
+        out.append(Component(
+            key=spec["key"], display_name=spec["name"],
+            env_var=None,            # 这批全部无 XXX_HOME，只进 PATH
+            # 归档实测过才敢写：绝大多数是"解压根即 bin"（""），
+            # 唯一例外是 cmake（bin/ 在包内一层），由 bt_archive_layout_audit 逐个验。
+            path_subdir=spec.get("subdir", ""),
+            exec_name=spec["exe"], version_args=spec["args"],
+            versions=[_cli_cv(spec, spec["v"])],
+            data_note=spec["note"],
+            unsupported_platform_hint="本批只登记了 Windows 产物（macOS / Linux 的资产名与"
+                                      "布局未按 R1 实测，宁可不给也不猜）",
+        ))
+    return out
+
+
+def _cli_fetcher(spec: dict):
+    """给一个 CLI 组件生成刷新器。
+
+    GitHub 托管的走通用资产抓取器；helm / sqlite / dotnet 三家的版本入口各不相同，
+    各配一个小的 —— 共同点是**都从官方机读入口读版本号**，不按规律猜下一个版本是什么。
+    """
+    if spec.get("repo"):
+        # 资产名里带版本号的用 {v} 模板精确匹配，不带的用固定名
+        return make_github_asset_fetcher(
+            spec["key"], spec["repo"], ((spec["arch"], _cli_asset_suffix(spec)),))
+    return _CLI_CUSTOM_FETCHERS[spec["key"]]
+
+
+def _cli_asset_suffix(spec: dict) -> str:
+    """通用资产抓取器要的"结尾字样" = 模板里 **{v} 之后**的那一段。
+
+    带版本的（`ripgrep-{v}-x86_64-pc-windows-msvc.zip`）拿到 `-x86_64-…zip`，
+    不带版本的（`ninja-win.zip`）拿到整个名字。取"之后"而不是"去掉 {v}"：
+    后者会留下 `ripgrep--x86_64…` 这种双横线，一条都匹配不上 —— 而匹配不上的表现是
+    "刷新后清单没变"，不会报错，最难查。
+    """
+    return spec["asset"].split("{v}")[-1]
+
+
+def fetch_helm_versions() -> List[ComponentVersion]:
+    """Helm：官方 CDN 的 `helm-latest-version` 是一个纯文本版本号，最省事的一个。"""
+    try:
+        text = _get("https://get.helm.sh/helm-latest-version",
+                    timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text.strip()
+    except Exception as exc:
+        raise RuntimeError(f"Helm 版本列表抓取失败：get.helm.sh 不可用：{exc}") from exc
+    ver = text.lstrip("vV")
+    if _version_parts(ver) is None:
+        raise RuntimeError(f"Helm 版本入口读不出版本号：{text!r}")
+    return [_cv(ver, {"Windows": [f"https://get.helm.sh/helm-{ver}-windows-amd64.zip"]},
+                {"Windows": "zip"})]
+
+
+def fetch_sqlite_versions() -> List[ComponentVersion]:
+    """SQLite：官方 download 页列着当年全部产物，正则取 win-x64 那一条。
+
+    版本号在页面上是 `3540000` 这种**六位无点**形式（3.54.0），要还原成点分形式
+    才能进版本列表；年份目录从页面链接里读，不自己算（跨年时算错就 404）。
+    """
+    text = _get("https://sqlite.org/download.html",
+                timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
+    hits = _re.findall(r'(https://[^"\']*?/(20\d\d)/sqlite-tools-win-x64-(\d{7})\.zip)', text)
+    if not hits:
+        raise RuntimeError("SQLite 下载页里读不出 sqlite-tools-win-x64 产物链接")
+    url, year, digits = max(hits, key=lambda h: h[2])
+    ver = f"{int(digits[:1])}.{int(digits[1:3])}.{int(digits[3:5])}"
+    if _version_parts(ver) is None:
+        raise RuntimeError(f"SQLite 版本号解析失败：{digits!r} -> {ver!r}")
+    return [_cv(ver, {"Windows": [url]}, {"Windows": "zip"})]
+
+
+def fetch_dotnet_sdk_versions() -> List[ComponentVersion]:
+    """.NET SDK：官方 release-metadata JSON 里直接给 sdk 版本与 win-x64 zip 的 URL。
+
+    注意**发布版本与 SDK 版本不是一回事**（release 10.0.12 对应 sdk 10.0.401），
+    版本列表要用 sdk 号 —— 因为下载路径与 `dotnet --version` 输出都是它。
+    """
+    major = "10.0"
+    try:
+        data = _get("https://dotnetcli.azureedge.net/dotnet/release-metadata/"
+                    f"{major}/releases.json",
+                    timeout=DOWNLOAD_PROBE_TIMEOUT * 4).json()
+    except Exception as exc:
+        raise RuntimeError(f".NET SDK 版本列表抓取失败：官方 release-metadata 不可用："
+                           f"{exc}") from exc
+    out: List[ComponentVersion] = []
+    seen: set = set()
+    for rel in (data.get("releases") or []):
+        for sdk in (rel.get("sdks") or []):
+            v = str(sdk.get("version") or "")
+            if _version_parts(v) is None or v in seen:
+                continue
+            zip_url = next((str(f.get("url")) for f in (sdk.get("files") or [])
+                            if str(f.get("name") or "").endswith("-win-x64.zip")), "")
+            if not zip_url:
+                continue
+            seen.add(v)
+            out.append(_cv(v, {"Windows": [zip_url]}, {"Windows": "zip"}))
+    if not out:
+        raise RuntimeError(".NET SDK 清单里没有 win-x64 zip 产物")
+    order = {v: i for i, v in enumerate(_sort_semver_desc([cv.version for cv in out]))}
+    return sorted(out, key=lambda cv: order[cv.version])[:20]
+
+
+_CLI_CUSTOM_FETCHERS = {
+    "helm": fetch_helm_versions,
+    "sqlite": fetch_sqlite_versions,
+    "dotnet-sdk": fetch_dotnet_sdk_versions,
+}
+
+
 FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "jdk": fetch_jdk_versions,
     "maven": fetch_maven_versions,
@@ -4056,6 +5203,23 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "powershell": fetch_powershell_versions,
     "nginx": fetch_nginx_versions,
     "erlang": fetch_erlang_versions,
+    # 2026-10-12 新增四件（实测台账见各自函数上方的注释块与 DEVELOPMENT.md R1.5）
+    "kotlin": fetch_kotlin_versions,
+    "graalvm": fetch_graalvm_versions,
+    "rust": fetch_rust_versions,
+    "redis": fetch_redis_versions,
+    # 2026-10-12 B1：protoc / uv
+    "protoc": fetch_protoc_versions,
+    "uv": fetch_uv_versions,
+    # 2026-10-12 B7：Ant / JMeter（Apache 归档源，不在表驱动批里）
+    "ant": fetch_ant_versions,
+    "jmeter": fetch_jmeter_versions,
+    # 2026-10-12 B4 补：MinIO（GitHub 产物，但只收真有 Windows exe 资产的 release）
+    "minio": fetch_minio_versions,
+    # 2026-10-12 Dart（官方 VERSION JSON + GCS 列目录，南大/腾讯镜像）
+    "dart": fetch_dart_versions,
+    # 2026-10-12 B3/B5：GitHub Releases 单二进制批（表驱动，见 GH_BIN_COMPONENTS）
+    **GH_BIN_FETCHERS,
     # 「开发工具」：只下载型组件。**没注册 fetcher 的那几个是故意的** ——
     # 微信开发者工具 / Eclipse / Visual Studio / Navicat 官方都没有可机读的版本号
     # （下载端点只回文件，版本要登录后台或看人工页面才拿得到），
@@ -4076,7 +5240,36 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "apipost": fetch_apipost_versions,
     "apifox": fetch_apifox_versions,
     "android-studio": fetch_android_studio_versions,
+    # 2026-10-12 B6a。五个 GitHub 产物用同一个工厂；pgadmin4 / postman 各走自己的机读入口。
+    # **mongodb-compass 与 mysql-workbench 故意不登记**：前者官方只有 HTML 下载页
+    # （auto-update 的 JSON 端点实测 403），后者整域对本工具 UA 回 403 ——
+    # 硬编一个"最新版"比没有更糟，同 微信开发者工具 / Eclipse / Navicat 的处理。
+    "dbeaver": make_github_asset_fetcher(
+        "dbeaver", "dbeaver/dbeaver", (("exe", "-windows-x86_64.exe"),)),
+    "heidisql": make_github_asset_fetcher(
+        "heidisql", "HeidiSQL/HeidiSQL",
+        (("exe", "_Setup.exe"), ("zip", "_64_Portable.zip"))),
+    "bruno": make_github_asset_fetcher(
+        "bruno", "usebruno/bruno", (("exe", "_x64_win.exe"), ("msi", "_x64_win.msi"))),
+    "redisinsight": make_github_asset_fetcher(
+        "redisinsight", "redis/RedisInsight",
+        (("exe", "Redis-Insight-win-installer.exe"),)),
+    "ardm": make_github_asset_fetcher(
+        "ardm", "qishibo/AnotherRedisDesktopManager",
+        (("exe", "-x64.exe"), ("zip", "-x64.zip"))),
+    "pgadmin4": fetch_pgadmin4_versions,
+    "postman": fetch_postman_versions,
+    # 2026-10-12 B4 / B2：这两家的产物不在 GitHub release 上（consul 的 release 是 0 资产），
+    # 版本入口分别是官方 releases 索引页与 Apache 目录页。
+    "consul": fetch_consul_versions,
+    "zookeeper": fetch_zookeeper_versions,
 }
+
+# B5/B3 那 19 件的刷新器**由表派生**，不再手写第二份清单：漏登记的唯一症状是
+# "这个组件的版本永远不会更新"，界面上完全看不出来，只能靠这张表与 FETCHERS 同源。
+for _cli_spec in _CLI_TOOLS:
+    FETCHERS[_cli_spec["key"]] = _cli_fetcher(_cli_spec)
+del _cli_spec
 
 
 class VersionFetchWorker(QThread):
@@ -4124,11 +5317,25 @@ COMPONENT_CATEGORY_OF = {
     "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
     "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
     "maven": "开发环境", "gradle": "开发环境", "powershell": "开发环境",
+    # 2026-10-12 新增：语言/编译器工具链一档（rust 的 MSI、kotlin 的 zip 都是解压/提取即用）
+    "kotlin": "开发环境", "graalvm": "开发环境", "rust": "开发环境",
+    # 2026-10-12 B1：protoc / uv（单二进制、没有 XXX_HOME，只把目录放进 PATH）
+    "protoc": "开发环境", "uv": "开发环境",
+    # 2026-10-12 B3/B5：CLI 与构建工具归「开发环境」；etcd / nats / caddy / traefik
+    # 是服务型组件，先落在「开发软件」，哪天接进 LAUNCH_OF 会自动挪到「一键启停」。
+    "deno": "开发环境", "ninja": "开发环境", "duckdb": "开发环境",
+    "cmake": "开发环境", "ripgrep": "开发环境", "fd": "开发环境",
+    "bat": "开发环境", "eza": "开发环境", "zoxide": "开发环境",
+    "fzf": "开发环境", "yq": "开发环境",
+    # 2026-10-12 B7：Ant 归构建工具；JMeter 是压测服务型，先落「开发软件」
+    "ant": "开发环境", "jmeter": "开发软件",
+    "etcd": "开发软件", "nats-server": "开发软件", "caddy": "开发软件",
+    "traefik": "开发软件",
     "tomcat": "开发软件", "mysql": "开发软件", "mongodb": "开发软件",
     "postgresql": "开发软件", "elasticsearch": "开发软件", "nacos": "开发软件",
     "seata": "开发软件", "kafka": "开发软件", "rocketmq": "开发软件",
     "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
-    "nginx": "开发软件",
+    "nginx": "开发软件", "redis": "开发软件",
     "docker": "开发软件", "kubectl": "开发软件", "jenkins": "开发软件",
     "idea": "开发工具", "pycharm": "开发工具", "clion": "开发工具",
     "webstorm": "开发工具", "goland": "开发工具", "datagrip": "开发工具",
@@ -4136,10 +5343,308 @@ COMPONENT_CATEGORY_OF = {
     "wechat-devtools": "开发工具", "eclipse": "开发工具",
     "apipost": "开发工具", "apifox": "开发工具", "hbuilderx": "开发工具",
     "android-studio": "开发工具", "visual-studio": "开发工具", "navicat": "开发工具",
+    # 2026-10-12 B6a：九件数据库 / API 客户端与工具（全部 download_only，只给官方直链）
+    "dbeaver": "开发工具", "heidisql": "开发工具", "bruno": "开发工具",
+    "redisinsight": "开发工具", "ardm": "开发工具", "mongodb-compass": "开发工具",
+    "pgadmin4": "开发工具", "mysql-workbench": "开发工具", "postman": "开发工具",
+    # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
+    # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
+    "consul": "开发软件", "zookeeper": "开发软件",
+    # 2026-10-12 B4：MinIO / Dart —— 前者进 LAUNCH_OF 自动去「一键启停」，
+    # 这行是它退下来时的落点；后者是纯装配组件，直接归「开发环境」。
+    "minio": "开发软件",
+    "dart": "开发环境",
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
     "erlang": "开发环境",
 }
+
+# 2026-10-12 B5/B3 那 19 件的分类**由 _CLI_TOOLS 喂进这张表**，不在这里再抄一遍
+# key→分类：两处各写一份迟早会漂，而漂了的症状是"组件出现在错的 Tab"，
+# 界面测试比的是集合、看不出归属错了还是漏登记了。
+COMPONENT_CATEGORY_OF.update({s["key"]: s["cat"] for s in _CLI_TOOLS})
+
+# ---------------------------------------------------------------------------
+# 组件「它是干嘛的」一句话说明（详情对话框的唯一内容真源）
+# ---------------------------------------------------------------------------
+# 为什么单独一张表而不是塞进 `Component(...)` 构造处：与 `COMPONENT_CATEGORY_OF`
+# / `LAUNCH_OF` 同一套做法 —— 构造处有八十多处，手写就会漏，而漏的那张卡片详情是空的，
+# 界面看不出"是没写还是写错了"。这里漏登记会 KeyError（`build_components()` 末尾赋值）。
+# 写法纪律：**只说它是干嘛的、给谁用**，不重复环境变量 / 平台例外 / 数据去处 ——
+# 那些详情对话框从既有字段自动组装，抄一遍就会有两处会漂的真相。
+# 长度纪律：一行的中文控制在 40 字内，卡片标题栏只放得下一行。
+
+COMPONENT_SUMMARY: Dict[str, str] = {
+    # ---- 开发环境：语言运行时与编译器 ----
+    "jdk": "Java 运行与编译环境（Adoptium Temurin 发行版）。后端服务、Android、Spring 生态的开发与运行都依赖它；Maven/Gradle/Tomcat 也需要它来跑。",
+    "python": "Python 解释器与 pip 包管理。数据脚本、Web 开发（Django/FastAPI）、自动化与 AI/ML 生态的最通用语言；本工具装的是官方 embeddable 便携包，独立于系统 Python。",
+    "node": "JavaScript/TypeScript 运行时。前端工程（Vite/Webpack/Next.js）构建、Node 后端、npm 生态的地基。",
+    "go": "Go 语言工具链：编译器 + 依赖管理 + 构建一体。云原生（K8s 生态大量 Go 编写）、CLI 工具、高并发网络服务的主力语言。",
+    "bun": "新一代 JS 运行时 + 包管理器 + 打包器三合一。兼容 npm 生态，启动与装包比 Node 快一个量级；适合新项目直接选用。",
+    "deno": "TypeScript 优先的 JS 运行时，单二进制、默认安全沙箱。免去 package.json 与打包步骤，适合脚本与服务端 TS。",
+    "graalvm": "多语言高性能 JVM：Java + JavaScript + Python + Ruby 等。可编译成原生镜像（native-image），启动快、内存省；与 JDK (Temurin) 互不干扰地并存。",
+    "dart": "Dart 语言工具链：编译器 + dart pub 包管理。Flutter 跨端开发的必配，也可单独写命令行与服务端程序（官方 zip 解压即用）。",
+    "kotlin": "Kotlin 编译器。JVM/Android 生态的主流语言，Android 官方推荐；后端也可用它写 Spring Boot。",
+    "rust": "Rust 编译器与 cargo 包管理。以内存安全著称的系统级语言，WebAssembly、CLI 工具、性能敏感组件的热门选择。",
+    "dotnet-sdk": ".NET 开发套件：C#/F# 编译器 + CLI + 运行时。Windows 桌面、ASP.NET 后端、云函数与微服务的统一平台。",
+    "conda": "Miniconda：Python 发行版 + 虚拟环境 + 包管理。数据科学（NumPy/pandas/Notebook）场景最常用；自带一个基础 Python 环境。",
+    "powershell": "PowerShell 7 跨平台 shell（Core）。比 cmd 脚本能力强，Windows/macOS/Linux 统一；与系统自带 Windows PowerShell 5.x 可并存。",
+    # ---- 开发环境：构建与包管理 ----
+    "maven": "Java 项目构建与依赖管理工具。读 pom.xml；Java 项目的事实标准，企业后端项目几乎都在用。",
+    "gradle": "JVM 构建工具（Android 官方默认）。Groovy/Kotlin DSL 写构建脚本；大型多模块项目比 Maven 更灵活。",
+    "ant": "老牌 Java 构建工具。读 build.xml；新项目少用，但大量遗留系统仍在用它维护。",
+    "cmake": "C/C++ 跨平台构建配置生成器。读 CMakeLists.txt；生成 Makefile/Ninja/IDE 工程，是 C++ 生态事实标准。",
+    "ninja": "轻量高速构建执行器。配合 CMake（-G Ninja）增量编译特别快，大型 C++ 项目的提速利器。",
+    "protoc": "Protocol Buffers 编译器。把 .proto 定义生成 Java/C++/Go/Python 等各语言代码；gRPC 服务端与客户端都从它开始。",
+    "uv": "Python 包与环境管理器（Rust 编写）。pip + venv 的加速替代，装包与创建环境快一个量级；新一代 Python 项目推荐。",
+    "pnpm": "Node 包管理器。用硬链接共享依赖，省磁盘、装 monorepo 与大型前端项目更快；npm/yarn 的可迁移替代。",
+    "git": "版本控制系统客户端。Windows 用官方 MinGit 免安装版；克隆、提交、分支、协作都靠它。",
+    # ---- 开发环境：命令行小工具 ----
+    "jq": "命令行 JSON 处理器：提取字段、过滤、改写。处理 API 响应、配置 JSON 的日常瑞士军刀。",
+    "yq": "命令行 YAML/XML/TOML 处理器，语法与 jq 一致。Kubernetes 配置、CI 文件常是 YAML，用它改字段比手改可靠。",
+    "ripgrep": "递归全文搜索（rg）。大代码库搜关键词比 grep 快很多，默认尊重 .gitignore；编辑器的全局搜索也常内置它。",
+    "fd": "命令行文件查找（find 的现代替代）。按名字/扩展名快速找文件，输出带颜色，日常定位文件比 find 顺手。",
+    "fzf": "命令行模糊选择器。把任意输出列表变成可过滤的交互选择；配合 shell 历史/文件跳转是终端效率利器（键位绑定需自行配置）。",
+    "bat": "带语法高亮与分页的 cat。看代码/日志更舒服，还带行号与 git 改动标记。",
+    "eza": "ls 的现代替代：颜色、图标、文件类型、git 状态一目了然。",
+    "zoxide": "智能 cd：按使用频率记忆目录，跳转常用路径只敲几个字母（shell 集成需自行配置）。",
+    "sqlite": "SQLite 命令行工具。单文件数据库，无需服务端；学习 SQL、调试、小型应用存数据都很方便。",
+    "duckdb": "进程内分析型数据库 CLI。直接查询 Parquet/CSV/JSON 等文件，OLAP 聚合比 Pandas 快；数据分析师的轻量工具。",
+    # ---- 开发软件：数据库与基础服务 ----
+    "mysql": "MySQL 关系数据库服务端。Web 后端最常用数据库；本工具负责下载解压与配环境，初始化与运维由官方命令完成。",
+    "postgresql": "PostgreSQL 关系数据库服务端。功能最全的开源数据库（JSON/窗口函数/扩展丰富）；本工具仅提供 Windows 免安装包。",
+    "mongodb": "MongoDB 文档数据库服务端。JSON 式文档模型，适合结构多变、快速迭代的项目。",
+    "elasticsearch": "Elasticsearch 全文检索与分析引擎。日志检索、站内搜索、数据分析；Kibana 生态的底座。",
+    "pulsar": "云原生消息与流平台：发布订阅 + 队列 + 流处理。多租户、多集群；Windows 无免安装形态。",
+    "docker": "容器引擎：打包应用与其依赖，环境一致地运行。开发/测试/生产同一套镜像；Windows 需官方安装器（见平台说明）。",
+    "docker-compose": "Compose v2 独立二进制：用 YAML 一次拉起多个容器。本地开发环境（DB + 缓存 + 服务）编排最常用。",
+    "kubectl": "Kubernetes 命令行客户端。查看/操作集群资源；本机不装集群，配好 kubeconfig 即连远端。",
+    "helm": "Kubernetes 包管理器：用 chart 一键安装/升级/回滚应用。K8s 应用分发的行业标准。",
+    "k9s": "Kubernetes 终端图形界面：Pod/日志/进容器/端口转发全在一个 TUI。排查集群问题时效率远高于纯 kubectl。",
+    "trivy": "容器与文件系统漏洞扫描器。CI 里扫描镜像，找出 CVE 并给出修复版本；供应链安全入门工具。",
+    "jmeter": "Apache JMeter 压测与接口测试工具。录制/构造 HTTP、数据库、MQ 负载；需 JDK。",
+    "caddy": "自动 HTTPS 的 Web 服务器/反向代理。配置极简（Caddyfile），证书自动申请续期；本地站点与小型服务首选。",
+    "traefik": "云原生反向代理与负载均衡。从 Docker/K8s 服务发现自动生成路由，微服务网关标配之一。",
+    "nats-server": "轻量消息/事件总线服务器。云原生环境内的高吞吐主题收发；单二进制，部署极简。",
+    # ---- 一键启停：中间件与基础设施 ----
+    "tomcat": "Apache Tomcat：Java Web 应用服务器（Servlet 容器）。打包成 .war 的应用扔进 webapps 即可运行，老牌 Java Web 部署目标。",
+    "nginx": "Nginx：高性能 Web 服务器与反向代理。静态站点、负载均衡、反向代理、TLS 终结；本工具提供 Windows 预编译 zip。",
+    "redis": "Redis：内存键值数据库。缓存、会话、排行榜、消息（Pub/Sub）；读写都在内存所以极快，Windows 用社区构建（见平台说明）。",
+    "rabbitmq": "RabbitMQ：AMQP 消息队列。可靠投递、多协议（AMQP/MQTT/STOMP）；需要 Erlang 运行环境（本工具会自动配好）。",
+    "kafka": "Apache Kafka：分布式事件流平台。高吞吐日志/事件管道、流处理（KRaft 模式不再依赖 ZooKeeper）。",
+    "rocketmq": "Apache RocketMQ：阿里开源分布式消息队列。Java 生态常用；namesrv + broker 双进程，本工具一键起两个。",
+    "activemq": "ActiveMQ：老牌 Java 消息中间件。支持 AMQP/STOMP/OpenWire 多协议，遗留系统常见。",
+    "nacos": "Nacos：服务注册与配置中心。Spring Cloud Alibaba 生态的核心组件：服务发现、配置管理、动态路由。",
+    "seata": "Seata：分布式事务解决方案（AT/TCC/SAGA/XA）。微服务跨库事务一致性，Java 生态常用。",
+    "jenkins": "Jenkins：CI/CD 自动化服务器。流水线构建、测试、部署；本工具以 war 单文件 + JDK 运行。",
+    "zookeeper": "Apache ZooKeeper：分布式协调服务。配置管理、选主、分布式锁；Kafka 老版本与 Hadoop 生态依赖它。",
+    "consul": "HashiCorp Consul：服务发现 + 健康检查 + KV 存储 + DNS。微服务注册发现的事实标准之一；-dev 模式适合本地。",
+    "etcd": "etcd：分布式 KV 存储。Kubernetes 的默认数据后端；服务发现、分布式锁、配置存储。",
+    "minio": "MinIO：S3 兼容对象存储。本地搭建对象存储/测试 S3 API；注意是 AGPL 开源版，官方已归档不再更新。",
+    # ---- 开发工具：IDE 与编辑器 ----
+    "idea": "IntelliJ IDEA：JetBrains 的 Java/Kotlin 旗舰 IDE。智能补全、重构、调试与 Spring/Android 支持都属顶配；商业授权，本工具只提供官方安装包。",
+    "pycharm": "PyCharm：JetBrains 的 Python IDE。虚拟环境、调试、数据科学插件完善；商业授权，只提供官方安装包。",
+    "clion": "CLion：JetBrains 的 C/C++ IDE。CMake 集成、调试器、静态分析一流；商业授权。",
+    "webstorm": "WebStorm：JetBrains 的前端 IDE。JS/TS/框架全支持；商业授权。",
+    "goland": "GoLand：JetBrains 的 Go IDE。go 工具链集成、调试、重构；商业授权。",
+    "datagrip": "DataGrip：JetBrains 的多数据库 IDE。SQL 编辑器、表结构可视化、导入导出；商业授权。",
+    "eclipse": "Eclipse IDE（Java 版）：老牌开源 Java IDE。扩展体系庞大，遗留项目与某些厂商工具链还在用；便携 zip 解压即用。",
+    "vscode": "Visual Studio Code：微软开源代码编辑器。插件生态海量，几乎所有语言/框架都有扩展；此处给官方便携 zip。",
+    "android-studio": "Android Studio：Google 官方 Android IDE。模拟器、布局预览、Gradle 构建集成；开发 Android 应用的标准入口。",
+    "visual-studio": "Visual Studio 2022 Community：微软完整 IDE。C#/.NET、C++、网页开发；注意这里下的是**在线引导器**，运行后才按需装组件。",
+    "hbuilderx": "HBuilderX：DCloud 的前端 IDE。uni-app 跨端开发（一套代码出 App/小程序/H5）的主力工具。",
+    "wechat-devtools": "微信开发者工具：微信官方小程序/小游戏开发调试 IDE。预览、真机调试、上传发布都从这里走。",
+    # ---- 开发工具：数据库与 API 客户端 ----
+    "dbeaver": "DBeaver Community：开源多数据库客户端。支持 MySQL/PG/Oracle/SQLite 等几十种；社区版免费（不含 PRO 高级功能）。",
+    "navicat": "Navicat Premium：商业多数据库管理工具。界面精致、功能全面；本工具只给官方直链，装完是试用期。",
+    "heidisql": "HeidiSQL：轻量开源 MySQL/MariaDB 客户端。单窗口管库/表/数据/用户，快速便携。",
+    "pgadmin4": "pgAdmin 4：PostgreSQL 官方管理端。浏览器式界面，建库建表、执行 SQL、监控都在一处。",
+    "mysql-workbench": "MySQL Workbench：MySQL 官方 GUI。数据建模、SQL 开发、服务器管理一体化。",
+    "mongodb-compass": "MongoDB Compass：MongoDB 官方图形客户端。可视化浏览集合/文档、查询构建、聚合管道。",
+    "redisinsight": "RedisInsight：Redis 官方图形客户端。键值浏览、内存分析、发布订阅、慢日志。",
+    "ardm": "Another Redis Desktop Manager：开源 Redis 管理器。轻量、免费，连接管理/键树浏览；与 RedisInsight 二选一即可。",
+    "dbx": "DBX：开源数据库客户端（Tauri）。支持 70+ 数据库的统一连接入口。",
+    "apipost": "Apipost：国产接口调试与文档工具。接口测试 + 文档 + 团队协作一站；Postman 的国内常用替代。",
+    "apifox": "Apifox：接口调试 + Mock + 自动化测试 + 文档一体化。支持 OpenAPI 导入；注意本工具下的是官方停更版（见卡片）。",
+    "postman": "Postman：全球主流 API 调试工具。Collection 管理、环境变量、自动化测试；核心功能免费。",
+    "bruno": "Bruno：开源 API 客户端。集合就是普通文件夹，可直接进 Git 版本管理，适合团队协作且不锁数据。",
+    "windterm": "WindTerm：开源高性能 SSH/终端工具。多标签、分屏、图形化 SFTP；官方只发便携 zip。",
+    "erlang": "Erlang/OTP 运行时。RabbitMQ 的必需前置（本工具按需自动安装）；不单独出现在界面上。",
+}
+
+
+# ---------------------------------------------------------------------------
+# 「怎么用」：详情对话框第二段的文案真源（2026-10-12 用户要求详情"简洁且专业"）
+# ---------------------------------------------------------------------------
+# 写法纪律：20–45 字；动词开头，给能直接敲的命令或能直接点的按钮；
+# 可启停组件写「点启动」而不是教用户敲厂商脚本 —— 替用户管脚本正是本工具的卖点；
+# 只写**本工具实际做到的**：fzf / zoxide 不做 shell 集成（README 明写），
+# 文案就不许出现"装好就能 Ctrl+R"这种我们没替用户配的话。
+# key 必须与 COMPONENT_SUMMARY 一致；漏一条护栏套件会变红。
+
+COMPONENT_USAGE: Dict[str, str] = {
+    # ---- 开发环境：语言运行时 ----
+    "jdk": "新开终端跑 java -version 验证。写代码时 IDE 的 SDK 指向装好的目录；"
+           "多版本可并存，下拉框选中后点「切换」即换生效版本。",
+    "python": "新开终端跑 python --version 验证。装包用 pip install 或更快的 uv；"
+              "建虚拟环境用 python -m venv 或 uv venv，别把包装进系统目录。",
+    "node": "新开终端跑 node -v 验证。npm/pnpm 装依赖会自动进 PATH；"
+            "配了 NODE_HOME 时 node 的全局目录也随环境变量可用。",
+    "go": "go build 编译、go run . 直接跑；go mod init 建新模块。"
+          "GOROOT/GOPATH 已由本工具设好，写代码前先 go version 确认。",
+    "bun": "bun run 脚本、bun install 装依赖，一条命令替代 node+npm。"
+           "bunx 当 npx 用；新项目建议直接 bun init。",
+    "deno": "deno run file.ts 直接跑 TS；deno install 把脚本装成命令。"
+            "不需要 package.json 和打包器，写小工具最顺手。",
+    "graalvm": "当高级 JDK 用：java 即 GraalVM。native-image 编译原生二进制："
+               "native-image -jar app.jar（需先配好 PATH）。",
+    "dart": "dart pub get 拉依赖、dart run 跑脚本、dart compile exe 打独立可执行。写 Flutter 前先配好它。",
+    "kotlin": "kotlinc Hello.kt -include-runtime -d h.jar 编译，java -jar h.jar 运行。"
+              "IDE 里写 Kotlin 用 JDK 那份即可。",
+    "rust": "cargo new 项目名 建项目，cargo build 编译，cargo run 直接跑。"
+            "还需链接器：Windows 建议装 VS Build Tools，或用 Git 附带的 link.exe（见平台说明）。",
+    "dotnet-sdk": "dotnet new console 建项目，dotnet run 直接跑，dotnet build 编译。"
+                  "dotnet --info 可查安装的 SDK 版本。",
+    "conda": "conda create -n 名 python=3.12 建环境，conda activate 名 进入。"
+             "装包用 conda install 或 pip；科学计算环境首选。",
+    "powershell": "终端敲 pwsh 进入 7.x。写 .ps1 脚本、查系统状态、批量操作比 cmd 顺手；"
+                  "与系统自带 powershell 并存不冲突。",
+    # ---- 开发环境：构建与包管理 ----
+    "maven": "项目根目录跑 mvn package 出 jar，mvn test 跑测试。"
+             "mvn -v 验证安装；IDE 里导入 Maven 项目即可。",
+    "gradle": "项目里跑 gradle build 构建、gradle test 测试。"
+              "Android 项目用 ./gradlew 脚本更标准（gradle 本体的命令一致）。",
+    "ant": "项目根目录跑 ant 构建（读 build.xml）。ant -version 验证；遗留项目开箱即用。",
+    "cmake": "cmake -B build 生成工程，再 cmake --build build 编译。"
+             "想用 Ninja 加速就 cmake -B build -G Ninja。",
+    "ninja": "配合 CMake：cmake -G Ninja 生成后，ninja 直接增量构建。"
+             "ninja -C build 指定构建目录；比 make 快不少。",
+    "protoc": "protoc --java_out=. x.proto 生成 Java 代码（其它语言改 --go_out/--python_out）。"
+              "gRPC 用 protoc --grpc_out 与对应插件。",
+    "uv": "uv venv 建环境，uv pip install 装包，uv run 脚本。"
+          "比 pip 快一个量级；uvx 直接跑未安装的命令行工具。",
+    "pnpm": "项目里 pnpm install 装依赖，pnpm dev 跑起来。"
+            "硬链接省磁盘；monorepo 用 pnpm -w 在各子包统一装。",
+    "git": "git clone 拉代码，git add/commit/push 提交推送，git checkout -b 建分支。"
+           "首次使用先 git config --global user.name/user.email。",
+    # ---- 开发环境：命令行小工具 ----
+    "jq": "jq '.name' x.json 取字段，jq '.a[] | select(.b>1)' 过滤数组。"
+          "管道接 curl 看接口返回值最顺手。",
+    "yq": "yq '.metadata.name' x.yaml 读字段，yq -i '.x=1' 直接改文件。"
+          "kubectl get -o yaml 的输出常靠它截字段。",
+    "ripgrep": "rg 关键词 src/ 全仓搜索；-i 忽略大小写，-l 只列文件名。"
+               "默认尊重 .gitignore，大仓库搜索首选。",
+    "fd": "fd 名 找文件，fd -e py 按扩展名找，fd --type d 只找目录。"
+          "比 find 快且输出更清晰。",
+    "fzf": "echo 列表 | fzf 即时模糊选；配合 history | fzf 回查历史命令。"
+           "shell 键位绑定（Ctrl+R 等）需自己配置，本工具不写 rc 文件。",
+    "bat": "bat 文件 代替 cat，带语法高亮与分页；bat -p 无分页纯高亮。",
+    "eza": "eza -l 带 git 状态，eza -T 树形，eza --icons 图标。日常代替 ls。",
+    "zoxide": "z 关键词 按历史跳转；zoxide 需要在自己 shell 的 rc 里 eval "
+              "zoxide init bash（或 zsh/fish），本工具只保证 z 命令本身可用。",
+    "sqlite": "sqlite3 库.db 'select 1;' 直接查；建表/插入/查询都在命令行完成。"
+              "临时数据用内存库 sqlite3 :memory:。",
+    "duckdb": "duckdb -c 查询语句直接写：select count(*) from 'x.parquet'；交互模式更顺手。"
+              "进入交互后同一条 SQL 可反复执行。",
+    # ---- 开发软件：数据库与基础服务 ----
+    "mysql": "解压后先 mysqld --initialize 初始化数据目录，再启动服务。"
+             "客户端用 mysql -u root -p 连接；本工具不做初始化与密码设置。",
+    "postgresql": "Windows 免安装包解压即用：initdb 初始化，pg_ctl start 启动。"
+                  "psql 连接后即可建库建表。",
+    "mongodb": "mongod --dbpath 数据目录 起服务，mongosh 连上即可用。"
+               "默认无认证监听本机，生产前务必配访问控制。",
+    "elasticsearch": "点「启动」拉起；curl 127.0.0.1:9200 看到集群 JSON 即正常。"
+                     "索引/查询用 REST API 或 Kibana。",
+    "pulsar": "Windows 不支持（主命令是 POSIX 脚本）；Linux/macOS 请走官方 Docker 形态。",
+    "docker": "Linux/macOS 解压即用 dockerd + docker；Windows 需官方安装器（见平台说明）。"
+              "docker run hello-world 验证安装。",
+    "docker-compose": "项目里 docker-compose up -d 起多容器，docker-compose down 停。"
+                      "仍需可用的 Docker 引擎（Windows 见 Docker 卡片说明）。",
+    "kubectl": "配好 kubeconfig（找运维要或云控制台下载）后 kubectl get nodes 连远端集群。"
+               "本机不需要装 k8s；kubectl config view 查当前上下文。",
+    "helm": "helm install 名 仓库/chart 部署应用，helm upgrade 更新，helm uninstall 卸载。"
+            "与 kubectl 用同一份 kubeconfig。",
+    "k9s": "终端敲 k9s 进图形界面：方向键切资源，回车进详情，l 看日志，s 进容器 shell。"
+           "同样需要先有能连的 kubeconfig。",
+    "trivy": "trivy image nginx:latest 扫镜像；trivy fs ./ 扫目录。"
+             "输出 CVE 与修复版本，CI 里加 --exit-code 1 --severity HIGH 做门禁。",
+    "jmeter": "jmeter -n -t 计划.jmx -l 结果.jtl 命令行跑压测；GUI 模式启动 jmeter.bat。"
+              "先小并发试跑，再按需加压。",
+    "caddy": "写个 Caddyfile（一行:80 reverse_proxy 127.0.0.1:8080）后 caddy run。"
+             "自动申请 HTTPS 证书，本地站点一条命令起。",
+    "traefik": "起进程后从 Docker/K8s 标签自动发现路由；本机反代入口配 80/8080。"
+               "面板在 8080/dashboard。",
+    "nats-server": "直接跑 nats-server 即起；客户端连 4222。"
+                   "nats pub/sub 一条命令验证收发（与客户端同装时）。",
+    # ---- 一键启停：点按钮，不敲脚本 ----
+    "tomcat": "点「启动」即起；把 .war 放进 webapps 目录后访问 8081 端口。"
+              "停止也一键；端口被占时确认框会先说清楚。",
+    "nginx": "点「启动」即起；配置在数据目录副本里改（官方目录不动），改完点重启。"
+             "静态站点把文件放进 html 目录即可。",
+    "redis": "点「启动」即起；redis-cli ping 回 PONG 就可用。"
+             "默认只监听本机、无密码，适合本地开发。",
+    "rabbitmq": "点「启动」即起（Erlang 缺失会自动先装）。"
+                "客户端连 amqp://127.0.0.1:5672，默认账号 guest/guest。",
+    "kafka": "点「启动」即起（KRaft 格式化自动做）。9092 连 bootstrap 即可收发；"
+             "可用 kafka-topics 建主题验证。",
+    "rocketmq": "点「启动」自动起 namesrv+broker 两个进程；mqadmin clusterList 验活。"
+                "客户端接入 namesrv 端口即可。",
+    "activemq": "点「启动」即起；管理页在控制台按钮里直达（8161）。"
+                "客户端连 OpenWire 端口 61616。",
+    "nacos": "点「启动」即起；控制台 8848/nacos，默认账号 nacos/nacos。"
+             "客户端注册进 8848 即可服务发现。",
+    "seata": "点「启动」即起；事务协调端口 7091。"
+             "客户端配置指向 seata server 地址即可接入分布式事务。",
+    "jenkins": "点「启动」即起；初始管理员密码会打进日志，浏览器开 8080。"
+               "先解锁向导，再建 Job 跑流水线。",
+    "zookeeper": "点「启动」即起；zkCli 连 2181，或让 Kafka 老版本用它做协调。"
+                 "四字命令（stat/ruok）可查健康。",
+    "consul": "点「启动」进 -dev 模式；控制台 8500/ui，健康检查 /v1/health。"
+              "服务注册后 api 通过 8500 发现彼此。",
+    "etcd": "点「启动」即起；etcdctl --endpoints=127.0.0.1:2379 put k v 读写。"
+            "Kubernetes 用同一 2379 口。",
+    "minio": "点「启动」即起；浏览器开控制台（9001），出厂凭据 minioadmin/minioadmin。"
+             "S3 客户端指向 9000 即可上传下载。",
+    # ---- 开发工具：GUI（下载后自己装） ----
+    "idea": "下载后双击安装包按向导装；首次启动选主题与插件。"
+            "导入 Maven/Gradle 项目，SDK 指向 JDK 装好的目录即可。",
+    "pycharm": "下载后双击安装包按向导装；打开项目目录即开始写 Python。"
+               "解释器选本工具装的 Python。",
+    "clion": "下载后双击安装包按向导装；打开 CMake 项目目录即可。"
+             "工具链自动识别 CMake/Ninja。",
+    "webstorm": "下载后双击安装包按向导装；打开前端工程即用。",
+    "goland": "下载后双击安装包按向导装；打开 go.mod 所在目录即可。",
+    "datagrip": "下载后双击安装包按向导装；新建数据源连库，多库管理一站。",
+    "eclipse": "便携 zip 解压后双击 eclipse.exe 即用，不需要安装。"
+               "首次启动选工作目录。",
+    "vscode": "便携 zip 解压后双击 Code.exe 即用；或选 user 安装器走向导。"
+              "装好语言扩展（Python/Java/Go 等）即可。",
+    "android-studio": "双击安装器按向导装；SDK 组件首次启动时装齐。"
+                      "新建项目选模板即开始开发。",
+    "visual-studio": "双击 vs_community.exe：它是引导器，运行后再选工作负载（.NET/C++/Web）联网装。",
+    "hbuilderx": "解压后双击 HBuilderX.exe 即用；新建/导入 uni-app 项目。"
+                 "内置微信/App 预览插件。",
+    "wechat-devtools": "安装后用微信扫码登录即可开发小程序；预览/真机调试/上传都在工具栏。",
+    "dbeaver": "安装后新建连接，填主机端口账号即可管几十种数据库。"
+               "驱动首次连接自动下载。",
+    "navicat": "安装后是 14 天试用；买授权或换用免费的 DBeaver。",
+    "heidisql": "安装器或便携 zip 二选一；连 MySQL 填 host/账号即开管。"
+                "单窗口切库切表很快。",
+    "pgadmin4": "安装后浏览器式管理界面自动打开，连本机 PostgreSQL 即配即用。",
+    "mysql-workbench": "安装后建模、SQL 编辑器、服务器管理一站齐全。",
+    "mongodb-compass": "安装后粘连接串即可可视化浏览集合与文档。",
+    "redisinsight": "安装后添加 Redis 连接（127.0.0.1:6379）即可看键值与内存。",
+    "ardm": "安装后连本机 redis 即看键值树；轻量开源，与 RedisInsight 二选一。",
+    "dbx": "便携 zip 解压即用或跑安装器；支持 70+ 数据库的统一客户端。",
+    "apipost": "安装后新建项目导接口，调试与文档一站。",
+    "apifox": "安装后导入 OpenAPI 即可调试 + Mock + 自动化测试。",
+    "postman": "安装后登录（或跳过）建 Collection 调接口；环境变量与脚本让测试可复用。",
+    "bruno": "安装后把集合当普通文件夹管，git 里直接版本化接口。",
+    "windterm": "解压后双击 WindTerm.exe；建 SSH 会话输主机账号即连。"
+                "分屏、SFTP、多标签齐全。",
+    "erlang": "RabbitMQ 缺它时本工具自动装它，无需手动使用。",
+}
+
 
 # ---------------------------------------------------------------------------
 # 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only，规则 R13）
@@ -4296,6 +5801,98 @@ _DEVTOOLS: tuple = (
      "简体中文 x64 版；官方另有 en 包，字节数不同（152,687,592）。",
      (("17", "https://download.navicat.com/download/navicat17_premium_cs_x64.exe",
        153253568),)),
+    # ------------------ 2026-10-12 B6a：九件数据库/API 客户端与工具 ------------------
+    # 逐条实测（状态码 + 魔数 + 精确字节数 + Range 吞吐）见 DEVELOPMENT.md R1.5。
+    # 这九件共同的坑：**产物名不能按惯例推**，四家各有"看着能拼其实 404"的断代，
+    # 所以下面每一行都写清了是哪一种形态、以及为什么不是另一种。
+    ("dbeaver", "DBeaver Community", "exe",
+     "开源版（Apache-2.0），**不含 PRO 授权**。产物名在 25.3.0 / 25.3.5 之间断过代："
+     "更早是 `dbeaver-ce-<v>-x86_64-setup.exe`，之后才是这里这条 `-windows-x86_64.exe`。"
+     "官方 `dbeaver.io/files/…` 只是 302 跳板且会跳到 GitHub，本机直连不通，故不登记它。",
+     (("26.2.2",
+       "https://github.com/dbeaver/dbeaver/releases/download/"
+       "26.2.2/dbeaver-ce-26.2.2-windows-x86_64.exe", 113470696),)),
+    ("heidisql", "HeidiSQL", "exe",
+     "开源 MySQL/MariaDB 客户端。官方同时发**安装器**与**便携 zip**，选错一次要重下 30 MB，"
+     "所以做成菜单。安装器文件名里的 build 号（12.21 → `12.21.0.7344`）**推不出来**，"
+     "只能从 release 资产名读；便携包的名字倒是能按 `<大>.<小>_64_Portable.zip` 拼。",
+     (("12.21",
+       "https://github.com/HeidiSQL/HeidiSQL/releases/download/"
+       "v12.21/HeidiSQL_12.21.0.7344_Setup.exe", 17813608,
+       ("zip",
+        "https://github.com/HeidiSQL/HeidiSQL/releases/download/"
+        "v12.21/HeidiSQL_12.21_64_Portable.zip", 29789003)),)),
+    ("bruno", "Bruno", "exe",
+     "开源 API 客户端（Postman 的本地文件式替代品，集合存成普通文件夹）。"
+     "产物名是 electron-builder 的 `bruno_<v>_x64_win.exe` —— **不是** `bruno_<v>_windows_x64.exe`。"
+     "官方同时发 .msi。仓库在 `usebruno/bruno`，`bruno-apis/bruno` 那个名字不存在。",
+     (("4.2.1",
+       "https://github.com/usebruno/bruno/releases/download/v4.2.1/bruno_4.2.1_x64_win.exe",
+       121897928,
+       ("msi",
+        "https://github.com/usebruno/bruno/releases/download/v4.2.1/bruno_4.2.1_x64_win.msi",
+        133836800)),)),
+    ("redisinsight", "RedisInsight", "exe",
+     "Redis 官方图形客户端。**产物名里不含版本号**（永远是 "
+     "`Redis-Insight-win-installer.exe`，版本只在 tag 段），照别的组件拼会 404。"
+     "官网 `redis.io/downloads/` 对本工具 UA 回 403 且要填表单，官方 org 的 GitHub releases "
+     "才是不填表就能直连的那条。仓库已从 RedisInsight/RedisInsight 迁到 redis/RedisInsight。",
+     (("3.8.0",
+       "https://github.com/redis/RedisInsight/releases/download/"
+       "3.8.0/Redis-Insight-win-installer.exe", 115599376),)),
+    ("ardm", "Another Redis Desktop Manager", "exe",
+     "开源 Redis 桌面管理器和 RedisInsight 二选一即可。x64 安装器 61.9 MB，"
+     "便携 zip 83.7 MB。⚠ 同一 release 里还有一个不带 `-x64` 的 126 MB 包"
+     "（`latest.yml` 的默认 path），别误当 x64 首选。"
+     "仓库是 `qishibo/AnotherRedisDesktopManager`（`UgoCreator/*`、`qishun/*` 都已 404）。",
+     (("1.7.4",
+       "https://github.com/qishibo/AnotherRedisDesktopManager/releases/download/"
+       "v1.7.4/Another-Redis-Desktop-Manager-win-1.7.4-x64.exe", 61935432,
+       ("zip",
+        "https://github.com/qishibo/AnotherRedisDesktopManager/releases/download/"
+        "v1.7.4/Another-Redis-Desktop-Manager-win-1.7.4-x64.zip", 83654756)),)),
+    ("mongodb-compass", "MongoDB Compass", "msi",
+     "MongoDB 官方图形客户端。**官方不提供校验和**（Compass 条目没有 sha256，"
+     "带 sha 的只有 mongod/mongosh），所以只能按「版本号 + 字节数」核对。"
+     "三种产物都登记：msi 走安装器、exe 与 zip 免装。"
+     "⚠ 该 S3 桶对**不存在的对象回 403 而不是 404**，判「版本在不在」不能按 404 二分。",
+     (("1.52.0",
+       "https://downloads.mongodb.com/compass/mongodb-compass-1.52.0-win32-x64.msi",
+       203259904,
+       [("exe",
+         "https://downloads.mongodb.com/compass/mongodb-compass-1.52.0-win32-x64.exe",
+         196987944),
+        ("zip",
+         "https://downloads.mongodb.com/compass/mongodb-compass-1.52.0-win32-x64.zip",
+         226785146)]),)),
+    ("pgadmin4", "pgAdmin 4", "exe",
+     "PostgreSQL 官方管理端。Windows 侧**只发一个 `-x64.exe`**，没有 msi 也没有 32 位包"
+     "（实测都 404）。URL 必须走 `ftp.postgresql.org/pub/…`：官网正文给的"
+     "「`www.postgresql.org/ftp/…`」那条会 301 补尾斜杠再回一个 4 KB 的 404 HTML，"
+     "照抄就等于把网页当安装包下下来。南大镜像实测与官方同字节数、同 Last-Modified。",
+     (("9.18",
+       ["https://mirror.nju.edu.cn/postgresql/pgadmin/pgadmin4/v9.18/windows/"
+        "pgadmin4-9.18-x64.exe",
+        "https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v9.18/windows/"
+        "pgadmin4-9.18-x64.exe"], 240588864),)),
+    ("mysql-workbench", "MySQL Workbench", "msi",
+     "MySQL 官方图形工具。**版本已切到 CalVer**（8.0.47 之后是 26.x），"
+     "且 26.x 起文件名去掉了 `-community`、架构段是 `winx64` 不是 `win-x64`。"
+     "官方下载页要经过一个每次发版都变的 `?id=` 中间页，且 `dev.mysql.com` 整域对"
+     "非浏览器客户端回 403 —— 所以登记 `cdn.mysql.com` 的直链，它不需要登录、不填邮箱。"
+     "实测三家大陆镜像（清华 / 阿里 / 华为云）都不镜像 MySQLGUITools，国内速度偏慢属正常。",
+     (("26.7.0",
+       "https://cdn.mysql.com/Downloads/MySQLGUITools/mysql-workbench-26.7.0-winx64.msi",
+       273879040,
+       ("zip",
+        "https://cdn.mysql.com/Downloads/MySQLGUITools/mysql-workbench-26.7.0-winx64.zip",
+        333111094)),)),
+    ("postman", "Postman", "exe",
+     "API 调试工具（核心功能免费，部分协作功能要账号）。登记**按版本取**的那条地址："
+     "`latest/win64` 那个稳定别名实测回 200 但**不给 Content-Length**，"
+     "字节核对就没数了。旧版本会被官方清理（11.50.0 实测 404 且 `Content-Length: 0`），"
+     "所以下拉框里的版本数不会像别家那样攒很多。",
+     (("12.32.0", "https://dl.pstmn.io/download/version/12.32.0/win64", 212922848),)),
 )
 
 
@@ -4322,10 +5919,14 @@ def _devtool_components() -> List["Component"]:
             cv = _cv(ver, {"Windows": urls}, {"Windows": arch})
             arts = [DownloadArtifact(arch, ARTIFACT_LABELS.get(arch, arch), urls, size)]
             if len(row) > 3:            # 官方还发了另一种产物 → 菜单里多一行
-                alt_fmt, alt_src, alt_size = row[3]
-                arts.append(DownloadArtifact(alt_fmt,
-                                             ARTIFACT_LABELS.get(alt_fmt, alt_fmt),
-                                             _devtool_urls(alt_src), alt_size))
+                extra = row[3]
+                # 单个三元组 = 一种备选；二元组列表 = 多种（MongoDB Compass 同发
+                # msi / exe / zip 三种，只给两种等于替用户挑了一个）。
+                alts = extra if isinstance(extra[0], (tuple, list)) else (extra,)
+                for alt_fmt, alt_src, alt_size in alts:
+                    arts.append(DownloadArtifact(alt_fmt,
+                                                 ARTIFACT_LABELS.get(alt_fmt, alt_fmt),
+                                                 _devtool_urls(alt_src), alt_size))
             cv.artifacts = arts
             versions.append(cv)
         out.append(Component(
@@ -5181,6 +6782,217 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
                    "**卸载只删版本目录** —— 若你把 store 配到了安装目录内，"
                    "那份数据会跟着没；配在外面则不受影响。"),
     ),
+
+    # ---------------- 2026-10-12 B4：etcd 与 consul（单 exe + CLI flag 改端口） ----------------
+    # 两个都是当天在 %TEMP% 里跑真进程实测的：登记的 PID 就是监听者、terminate() 后端口
+    # 立即释放 ⇒ stop_kind="pid"，不需要端口反查那三重闸。
+    "etcd": LaunchSpec(
+        # 实测 etcd 3.7.2：`--listen-client-urls` / `--listen-peer-urls` / `--data-dir`
+        # 三个 flag 全部生效，0.5s 起、2379 与 2380 同时监听。
+        # **两个口都要显式指到 127.0.0.1**：不写 peer-urls 时它按 hostname 绑，
+        # 而只改主口不改 peer 口的话，端口簇判定会一直等不到第二个口。
+        commands={"Windows": ["{home}/etcd.exe", "--data-dir", "{data_dir}",
+                              "--listen-client-urls", "http://127.0.0.1:{port}",
+                              "--advertise-client-urls", "http://127.0.0.1:{port}",
+                              "--listen-peer-urls", "http://127.0.0.1:{peer}"],
+                  "Linux":   ["{home}/etcd", "--data-dir", "{data_dir}",
+                              "--listen-client-urls", "http://127.0.0.1:{port}",
+                              "--advertise-client-urls", "http://127.0.0.1:{port}",
+                              "--listen-peer-urls", "http://127.0.0.1:{peer}"],
+                  "Darwin":  ["{home}/etcd", "--data-dir", "{data_dir}",
+                              "--listen-client-urls", "http://127.0.0.1:{port}",
+                              "--advertise-client-urls", "http://127.0.0.1:{port}",
+                              "--listen-peer-urls", "http://127.0.0.1:{peer}"]},
+        stop_kind="pid",
+        main_port=2379,
+        # peer 口是**主口 + 1** 的派生口（实测 2379/2380 同时监听），
+        # 所以走 port_offsets 而不是 extra_ports —— 后者的语义是"与主口无固定偏移、
+        # 各自要能独立找空"，用它会让框架去另找一个口，而命令里的 {peer} 是主口+1，
+        # 两边一不一致就是"起来了但簇判不过"。
+        port_offsets=(1,),
+        port_search_span=99,
+        port_writeback="cli_flag",
+        # etcd 2379 上说 HTTP/JSON，但**没有可点的控制台页面**（/metrics 除外），
+        # 且探活路径与"用户能看的东西"是两件事 ⇒ 不给 console_path。
+        console_path=None,
+        health_path=None,
+        startup_timeout=30,
+        risk_note=("只监听 127.0.0.1（实测我们把 --listen-client-urls 与 "
+                   "--listen-peer-urls 都指到本机回环），**不对局域网开放**；"
+                   "etcd 默认无认证，本机任何进程都能连上它。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/etcd-data（实测 --data-dir 生效，"
+                   "member/ 落在里面）。切换生效版本与卸载都不碰它。"),
+        credentials_hint=(
+            "**etcd 没有网页控制台** —— 2379 说 gRPC/HTTP，浏览器打开看不到页面。"
+            "验证是否可用：同目录里的 etcdctl.exe 执行 "
+            "`etcdctl.exe --endpoints=http://127.0.0.1:<端口> put k v` 再 `get k`。"),
+    ),
+
+    "consul": LaunchSpec(
+        # 实测 consul 2.0.4：`-http-port` 改口生效、`-data-dir` 能外移、0.5s 起。
+        # `-dev` 是单机开发模式（不开持久化集群、不需要 bootstrap）。
+        # ⚠ `-client` 必须显式给 127.0.0.1：不给时 consul 默认绑 0.0.0.0，
+        #    那等于把 HTTP API 与控制台对局域网开放（无认证）。
+        commands={"Windows": ["{home}/consul.exe", "agent", "-dev",
+                              "-http-port", "{port}", "-client", "127.0.0.1",
+                              "-data-dir", "{data_dir}"],
+                  "Linux":   ["{home}/consul", "agent", "-dev",
+                              "-http-port", "{port}", "-client", "127.0.0.1",
+                              "-data-dir", "{data_dir}"],
+                  "Darwin":  ["{home}/consul", "agent", "-dev",
+                              "-http-port", "{port}", "-client", "127.0.0.1",
+                              "-data-dir", "{data_dir}"]},
+        stop_kind="pid",
+        main_port=8500,
+        port_search_span=99,
+        port_writeback="cli_flag",
+        console_path="/ui",
+        health_path="/v1/health",
+        startup_timeout=30,
+        risk_note=("-dev 模式：不落 WAL、不开 ACL，**数据只在内存里**（实测仍会在 "
+                   "-data-dir 下建 checkpoint 文件）。只适合本机开发用。"
+                   "本工具把 -client 锁在 127.0.0.1，不对局域网开放。"),
+        data_note="数据目录 = 本工具的 ~/.env-tools/consul-data（实测 -data-dir 生效）。",
+    ),
+
+    # ---------------- 2026-10-12 B2：ZooKeeper（首个"绕开 .cmd 直接 spawn java"的启停） ----------
+    "zookeeper": LaunchSpec(
+        # 不跑 zkServer.cmd 而直接起 java，理由全在 _write_zookeeper_props 的注释里
+        # （包装器会留孤儿 java、且会把包内 conf/zoo.cfg 塞成第一个参数）。
+        # 实测这条：0.5s 起、Popen.pid 就是监听者、terminate 后端口立即释放。
+        # 类路径实测只需 `{home}/lib/*` 一项（43 个 jar 全在 lib 里，包根没有 jar）。
+        commands={"Windows": ["{java}", "-cp", "{home}/lib/*",
+                              "org.apache.zookeeper.server.quorum.QuorumPeerMain",
+                              "{conf}"],
+                  "Linux":   ["{java}", "-cp", "{home}/lib/*",
+                              "org.apache.zookeeper.server.quorum.QuorumPeerMain",
+                              "{conf}"],
+                  "Darwin":  ["{java}", "-cp", "{home}/lib/*",
+                              "org.apache.zookeeper.server.quorum.QuorumPeerMain",
+                              "{conf}"]},
+        stop_kind="pid",
+        main_port=2181,
+        port_search_span=99,
+        port_writeback="conf_copy",       # 端口写进 data 目录里的 zoo.cfg 副本
+        needs=("jdk",),
+        # min_java_major 刻意留 None：本机只在 JDK 21 上实测跑通，
+        # 没从包里（MANIFEST / class major version）读出官方的最低要求 ——
+        # 按规则，没实测就不填数字，只查"有没有 JDK"。
+        min_java_major=None,
+        console_path=None,
+        health_path=None,
+        startup_timeout=30,
+        risk_note=("实测 zoo.cfg 不写 clientPortAddress 时，ZooKeeper 绑的是 "
+                   "**0.0.0.0:2181 = 对局域网开放，且默认无任何认证**。"
+                   "本工具不替你加白名单、也不替你开 SASL。"),
+        data_note=("事务日志与快照在 ~/.env-tools/zookeeper-data（实测 dataDir 改写进副本后 "
+                   "生效，里面生成 version-2/）。切换与卸载版本都不碰它。"
+                   "另：官方 zkServer.cmd 会把日志写进安装目录的 logs/，"
+                   "本工具走直接 spawn java，日志在 ~/.env-tools/zookeeper-data/logs。"),
+        credentials_hint=(
+            "**ZooKeeper 没有网页控制台** —— 2181 说的是它自己的二进制协议，"
+            "浏览器打开只会看到连接错误。验证方式：同目录的 zkCli.cmd 执行 "
+            "`zkCli.cmd -server 127.0.0.1:<端口>`，出现 `Welcome to ZooKeeper` 就是通了。"),
+    ),
+
+    "redis": LaunchSpec(
+        # 四条都是 2026-10-12 在 %TEMP% 里跑真进程实测出来的（社区构建 8.10.2 msys2）：
+        #   ① redis-server.exe 自己就是监听 6379 的进程，不是包装器 ⇒ 停止按登记 PID
+        #      走（terminate() 立即退出、端口随即释放），不需要端口反查三重闸；
+        #   ② `--port` 实测能改口 ⇒ port_writeback="cli_flag"，不碰任何配置文件；
+        #   ③ `--dir` + SAVE 实测把 dump.rdb 落到我们指定的目录 ⇒ 数据外移靠命令行，
+        #      它没有可注入的 *_HOME / *_DATA 环境变量，所以 data_dir_env 留 None；
+        #   ④ **不选 with-Service 变体**：那个包里多一个 14.7MB 的 RedisService.exe，
+        #      它会把自己注册成 Windows 服务 —— 进程就不归本工具管，停止也停不干净。
+        # Linux/Darwin 那两条是防 KeyErrors 的对称写法（`spec.commands[CURRENT_OS]`
+        # 是直接下标）：官方在 unix 只发源码包，本工具在 unix 装不出 redis，走不到这里。
+        commands={"Windows": ["{home}/redis-server.exe", "--port", "{port}",
+                              "--dir", "{data_dir}"],
+                  "Linux":   ["{home}/bin/redis-server", "--port", "{port}",
+                              "--dir", "{data_dir}"],
+                  "Darwin":  ["{home}/bin/redis-server", "--port", "{port}",
+                              "--dir", "{data_dir}"]},
+        stop_kind="pid",
+        main_port=6379,
+        port_search_span=99,
+        port_writeback="cli_flag",
+        # 6379 说的是 RESP，不是 HTTP（实测发 HTTP 请求只会拿到协议错误）
+        # ⇒ 没有控制台、也不能用 HTTP 探活，判活只看端口。
+        console_path=None,
+        health_path=None,
+        startup_timeout=30,
+        risk_note=("命令行启动用的是官方默认：**只监听 127.0.0.1、无密码**。"
+                   "本工具不替你改 bind、也不替你设 requirepass。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/redis-data（实测 --dir 生效，"
+                   "SAVE 之后 dump.rdb 落在里面）。切换生效版本与卸载都不碰它。"),
+        credentials_hint=(
+            "**Redis 没有网页控制台** —— 6379 说的是 RESP 协议，浏览器打开只会看到"
+            "协议错误，所以本工具不给它挂「访问页」按钮。"
+            "验证是否可用：在本工具装好的版本目录里有一个 redis-cli.exe，"
+            "执行 `redis-cli.exe -p <端口> ping`，回 `PONG` 就是通了"
+            "（实测社区构建的命令行启动默认只监听 127.0.0.1、无密码）。"
+        ),
+    ),
+
+    # ---------------- 2026-10-12 B4 补：MinIO（对象存储 + 自带 Web 控制台） ----------------
+    # 这一条推翻了我自己上一轮的结论。报告写"MinIO 拿不到直链"，依据是
+    # `dl.min.io` 一律 410 **且 `/releases/latest` 那个 tag 的 assets 数为 0** ——
+    # 两个观察都对，结论下错了：官方收掉的是分发口，最后一个有产物的 release
+    # （RELEASE.2025-09-07T16-13-09Z，48 个资产）里 Windows exe 仍在，实测
+    # 206 + `MZ`、113,115,136 字节，且完整下载一次与 release API 声明逐字节一致。
+    #
+    # 下面每一条参数都是 2026-10-12 在本机 %TEMP% 跑真进程量出来的，不是照文档抄的。
+    "minio": LaunchSpec(
+        # --address / --console-address 两个 flag 实测都生效（起进程后两口都在听）。
+        # 数据目录用 {data_dir}/storage 而不是 {data_dir} 本身：产品路径会先在
+        # {data_dir} 下建 logs/byte-tools.out，把日志和对象存储塞进同一个目录
+        # 等于让 logs/ 出现在桶根上。三种形态都实测起得来（直接用 {data_dir} 2.4s，
+        # storage 子目录 1.6s），选后者：更快且边界干净。MinIO 自己建那层子目录。
+        commands={"Windows": ["{home}/minio.exe", "server", "{data_dir}/storage",
+                              "--address", "127.0.0.1:{port}",
+                              "--console-address", "127.0.0.1:{peer}"],
+                  "Linux":   ["{home}/minio", "server", "{data_dir}/storage",
+                              "--address", "127.0.0.1:{port}",
+                              "--console-address", "127.0.0.1:{peer}"],
+                  "Darwin":  ["{home}/minio", "server", "{data_dir}/storage",
+                              "--address", "127.0.0.1:{port}",
+                              "--console-address", "127.0.0.1:{peer}"]},
+        # 实测 netstat 上那两个口的持有者就是 Popen 的 PID，terminate 后 0.07 秒退出、
+        # 端口立即释放、无残留监听 ⇒ 按登记 PID 停，不需要端口反查那三重闸。
+        stop_kind="pid",
+        main_port=9000,
+        # 控制台口 = API 口 + 1，属派生口（厂商规则），走 port_offsets 让整簇一起判活。
+        # 命令里的 {peer} 由映射表算成 port+1，两处必须一致
+        #（etcd 那次 {peer} 只补了一张表、另一处当场 KeyError 的教训）。
+        port_offsets=(1,),
+        port_search_span=99,
+        port_writeback="cli_flag",
+        # ⚠ console_path 留 None 不是"尚未实测"，是实测结论：API 口 9000 上
+        # `/`、`/login`、`/bucket/minio/browse` **一律 403**（它只讲 S3 协议），
+        # 控制台在 9001。而 console_url 恒按**主口**拼，填 "/" 就会给用户
+        # http://127.0.0.1:9000/ —— 点开一扇 403，正是当年 nginx/tomcat 那个坑。
+        # 留 None 后「访问页」走本工具自带的状态页，那里写明控制台地址与凭据。
+        console_path=None,
+        health_path=None,                  # 判活按整簇 TCP，不发 HTTP
+        # 实测两口齐听 1.6–2.9s ⇒ ×2 ≈ 6s，向上取整到 10s。
+        startup_timeout=10,
+        risk_note=("实测只在本机回环上监听（9000 绑 [::1]、9001 绑 127.0.0.1），"
+                   "但**不改凭据就是 minioadmin:minioadmin**（厂商启动时自己也 WARN），"
+                   "本机任何进程都能连上并拿到整个桶。要换凭据请自己设 "
+                   "MINIO_ROOT_USER / MINIO_ROOT_PASSWORD —— 本工具不替你设密码，"
+                   "也不替你建桶。"),
+        data_note=("对象数据 = 本工具的 ~/.env-tools/minio-data/storage（实测首次启动在"
+                   "其中生成 .minio.sys/，含 config/、buckets/、multipart/，桶与对象都在"
+                   "里面）。切换生效版本与卸载都**不碰它**。"
+                   "另：上游已归档开源版、`dl.min.io` 全线 410，这里下的是最后一个有 "
+                   "Windows 产物的 release（2025-09-07），**不会再有更新**；许可 GNU AGPLv3。"),
+        credentials_hint=(
+            "MinIO 的网页控制台在**另一个口**：http://127.0.0.1:9001/"
+            "（9000 只讲 S3 协议，浏览器打开是 403，属正常）。"
+            "出厂默认凭据 minioadmin / minioadmin（实测该组合登录返回 204，"
+            "admin/password 返回 401）。"
+        ),
+    ),
 }
 
 LAUNCH_KEYS = set(LAUNCH_OF)
@@ -5599,9 +7411,9 @@ def build_components() -> List[Component]:
             version_probe=False,
             # Windows 不支持自动下载（依赖 Erlang，且 RabbitMQ Windows 是安装器模式）
             unsupported_platform_hint=(
-                "RabbitMQ 在 Windows 上需先安装 Erlang/OTP 再用 RabbitMQ Windows 安装器，"
-                "本工具暂不提供自动下载。请前往官网下载安装："
-                "https://www.rabbitmq.com/install-windows.html"
+                "Windows 侧本工具能自动下载并配好 Erlang/OTP 前置再一键启停"
+                "（4.x 配 27.x、3.13 配 26.x，版本绑死）；官方 Windows 安装器"
+                "形态仍可用于需要服务注册的场景。请见：https://www.rabbitmq.com/install-windows.html"
             ),
             versions=[_rabbitmq_cv(v) for v in ("4.0.9", "3.13.7")],
             data_note=("队列数据在 RabbitMQ 自己的数据目录（由配置里的数据目录项决定，"
@@ -5815,6 +7627,321 @@ def build_components() -> List[Component]:
         )
     )
 
+    # ------------------ Kotlin ------------------
+    # 2026-10-12 新增。zip 顶层只有一个 `kotlinc/`，`bin/kotlinc.bat` 在里面
+    # （实测把 89.7MB 整包下下来列的目录）⇒ path_subdir="bin"、exec_name="kotlinc"。
+    # 编译器是 JVM 产物，三平台同一个 zip，所以 url_list_map 三档同值。
+    # env_var 刻意留空：Kotlin 没有 KWASM_HOME 这类官方变量，只管 PATH。
+    components.append(
+        Component(
+            key="kotlin",
+            display_name="Kotlin",
+            env_var=None,
+            path_subdir="bin",
+            exec_name="kotlinc",
+            version_args=["-version"],
+            versions=[_kotlin_cv(v) for v in ("2.4.21",)],
+            data_note="编译器只读自己的安装目录，不落任何用户数据；卸载就是删版本目录。",
+        )
+    )
+
+    # ------------------ GraalVM ------------------
+    # 2026-10-12 新增。**env_var 必须是 GRAALVM_HOME**：写成 JAVA_HOME 会和 jdk(Temurin)
+    # 抢同一个变量，两个组件互相覆盖对方的生效版本。它往 PATH 里放的第二个 java.exe
+    # 会被"被 PATH 抢先"检测如实报出来 —— 那是实况，不是故障。
+    # 版本号从**资产名**里读（tag 是 `graal-25.4.4.1.1`，与版本 `25.0.4.1.1` 不同形）。
+    components.append(
+        Component(
+            key="graalvm",
+            display_name="GraalVM",
+            env_var="GRAALVM_HOME",
+            path_subdir="bin",
+            exec_name="java",
+            version_args=["-version"],
+            versions=[_graalvm_default_cv(*row) for row in (
+                ("25.0.4.1.1", "graal-25.4.4.1.1", "graalvm-community-jdk-25i4-25.0.4.1.1"),
+                ("25.0.4.1", "graal-25.3.4.1", "graalvm-community-jdk-25i3-25.0.4.1"),
+            )],
+            data_note="自带 JDK 与 native-image 工具链，不落用户数据；卸载删版本目录。",
+        )
+    )
+
+    # ------------------ Rust ------------------
+    # 2026-10-12 新增。归档类型是 **msi**，走 `extract_archive` 里的 `msiexec /a`
+    # 管理性提取（免提权、不写注册表、卸载就是删目录），而不是 msiexec /i 真装机。
+    # 为什么不用 tar.xz：实测它内部是 rustc/ + cargo/ + … 组件目录，**没有统一 bin/**，
+    # 直接解压出来的 rustc 找不到标准库；官方 .exe(NSIS) 已停发（日期目录都 404）。
+    # URL 里的日期目录从官方清单读，不按命名规律拼。
+    components.append(
+        Component(
+            key="rust",
+            display_name="Rust",
+            env_var=None,
+            path_subdir="bin",
+            exec_name="rustc",
+            version_args=["--version"],
+            versions=[_rust_cv(v, d) for v, d in (
+                ("1.99.0", "2026-10-01"),
+                ("1.98.0", "2026-08-20"),
+                ("1.97.1", "2026-07-16"),
+            )],
+            unsupported_platform_hint=(
+                "Rust 目前只登记了 Windows 的官方 MSI（实测可用）。"
+                "macOS / Linux 官方也是「组件目录 + rust-installer」的形态，"
+                "本工具还没实测过它们的免提权装法，宁可不给也不猜 —— "
+                "那两侧请直接用官方 rustup：https://rustup.rs"
+            ),
+            data_note=(
+                "**装完还需要一个链接器才能编译**：MSVC 后端要 Visual Studio Build Tools "
+                "的 C++ 工作负载（本工具「开发工具」Tab 里有 Visual Studio 2022 的官方直链），"
+                "或另装 Rust 的 rust-mingw 组件走 GNU 后端。"
+                "本机实测：没装 Build Tools 时 `rustc` 能编译、链接不过，"
+                "而且 Git for Windows 自带的 coreutils `link.exe` 会冒充 MSVC 链接器，"
+                "报出莫名其妙的 \"link: extra operand\" —— 看到这句别以为是 Rust 坏了。"
+                "包缓存与注册表在 ~/.cargo（由 cargo 自己管），不在版本目录里。"
+            ),
+        )
+    )
+
+    # ------------------ Redis ------------------
+    # 2026-10-12 新增。**非官方构建**：Redis 官方只发源码包，Windows 上没有官方二进制，
+    # 这里用的是 redis-windows 社区的 msys2 构建（卡片说明必须讲清，见 data_note）。
+    # exe 直接在包根目录（实测列过包）⇒ path_subdir=""，与 docker 同一类。
+    # msys 构建自带 5 个 msys-*.dll（实测在包里，不需要另装 MSYS2）。
+    components.append(
+        Component(
+            key="redis",
+            display_name="Redis",
+            env_var=None,
+            path_subdir="",
+            exec_name="redis-server",
+            version_args=["--version"],
+            versions=[_redis_cv(v) for v in ("8.10.2",)],
+            unsupported_platform_hint=(
+                "Redis 官方在 macOS / Linux 只发源码包（实测 download.redis.io 只有 "
+                "tar.gz），本工具不做源码编译；Windows 侧用的是社区构建。"
+                "macOS 上请直接 brew install redis。"
+            ),
+            data_note=(
+                "**非官方构建**：Redis 官方不发 Windows 二进制，这里下的是开源社区 "
+                "redis-windows 的 msys2 构建（自带所需 DLL，无需另装 MSYS2）。"
+                "数据在 ~/.env-tools/redis-data（实测 --dir 生效、SAVE 落 dump.rdb），"
+                "切换与卸载版本都不碰它。"
+            ),
+        )
+    )
+
+    # ------------------ protoc（B1：zip 多顶层目录 ⇒ path_subdir="bin"） ------------------
+    components.append(
+        Component(
+            key="protoc",
+            display_name="protoc（Protobuf 编译器）",
+            env_var=None,          # 没有 PROTOC_HOME 概念，只把 bin 放进 PATH
+            path_subdir="bin",     # 实测：zip 顶层是 bin/ + include/ 两个并列目录
+            exec_name="protoc",
+            version_args=["--version"],
+            versions=[_protoc_cv(v) for v in ("36.2",)],
+            unsupported_platform_hint=(
+                "protoc 官方对 Linux / macOS 也发 `protoc-<v>-{linux-x86_64,osx-*}.zip`，"
+                "但本工具尚未按 R1 实测那两个平台的源，故不提供自动下载。"
+                "Debian/Ubuntu 用 sudo apt install protobuf-compiler，"
+                "macOS 用 brew install protobuf（版本可能落后官方）。"
+            ),
+            data_note=(
+                "纯编译器，本工具不落任何数据目录；卸载只删 ~/.env-tools/protoc/protoc-<版本>。"
+                "你自己的 .proto 与生成代码在别处，不受影响。"
+            ),
+        )
+    )
+
+    # ------------------ uv（B1：zip 顶层 0 目录 ⇒ path_subdir=""） ------------------
+    components.append(
+        Component(
+            key="uv",
+            display_name="uv（Python 包/环境管理）",
+            env_var=None,          # 没有 UV_HOME 概念，只把目录放进 PATH
+            path_subdir="",        # 实测：zip 顶层直接是 uv.exe / uvw.exe / uvx.exe
+            exec_name="uv",
+            version_args=["--version"],
+            versions=[_uv_cv(v) for v in ("0.13.0",)],
+            unsupported_platform_hint=(
+                "uv 官方对 Linux / macOS 也发 tar.gz，但本工具尚未按 R1 实测那两个平台的源，"
+                "故不提供自动下载。官方推荐的安装方式是"
+                "`curl -LsSf https://astral.sh/uv/install.sh | sh`，macOS 也可 brew install uv。"
+            ),
+            data_note=(
+                "本工具只保证 `uv` 这条命令在 PATH 里可用。"
+                "uv 自己下载的包缓存与它托管的 Python 版本**不在**本工具的工作目录里"
+                "（官方默认放在用户目录的缓存区，**未实测具体路径**），"
+                "所以卸载与切换版本都不会带走它们。"
+            ),
+        )
+    )
+
+    # 2026-10-12 B5/B3：19 件单二进制 / CLI 全家桶（表驱动，见 _CLI_TOOLS）。
+    # 放在「开发工具」之前，是为了保住那条既有约定：只下载的一批永远排在最后。
+    components.extend(_cli_components())
+
+    # ------------------ Ant / JMeter（B7：Apache 归档源） ------------------
+    components.append(
+        Component(
+            key="ant",
+            display_name="Apache Ant",
+            env_var="ANT_HOME",
+            path_subdir="bin",     # 实测：顶层 1 个目录，bin/ant.bat 在里面
+            exec_name="ant",
+            version_args=["-version"],
+            versions=[_ant_cv("1.10.18")],
+            data_note=(
+                "遗留项目构建工具，无数据目录；卸载只删 ~/.env-tools/ant/ant-<版本>。"
+            ),
+        )
+    )
+    components.append(
+        Component(
+            key="jmeter",
+            display_name="Apache JMeter",
+            env_var="JMETER_HOME",
+            path_subdir="bin",     # 实测：顶层 1 个目录，bin/jmeter.bat 在里面
+            exec_name="jmeter",
+            version_args=["--version"],
+            versions=[_jmeter_cv("5.6.3")],
+            unsupported_platform_hint=(
+                "JMeter 官方对 Linux / macOS 同样发 tar.gz，但本工具尚未按 R1 实测"
+                "那两个平台的源，故只提供 Windows。其它平台请用包管理器"
+                "（apt install jmeter / brew install jmeter）。"
+            ),
+            data_note=(
+                "压测工具，本身不常驻；本工具不落数据目录，卸载只删安装目录。"
+                "⚠ **需要 JDK 才能运行**：点「启动」前请先装好 JDK（本工具会自动装一个）。"
+            ),
+        )
+    )
+
+    # ------------------ GitHub Releases 单二进制批（表驱动） ------------------
+    # 只给 Windows：一个平台一个包、布局逐个实测过，其它平台按 R13 写清楚不代劳。
+    for (key, name, repo, tag_tmpl, asset_tmpl, exec_name, subdir, vargs,
+         default_v) in GH_BIN_COMPONENTS:
+        components.append(
+            Component(
+                key=key,
+                display_name=name,
+                env_var=None,          # 这一批都没有 XXX_HOME 概念，只把目录放进 PATH
+                path_subdir=subdir,    # 实测值，见表上方的布局说明
+                exec_name=exec_name,
+                version_args=list(vargs),
+                versions=[_gh_bin_cv(default_v, repo, tag_tmpl.format(v=default_v),
+                                     asset_tmpl.format(v=default_v),
+                                     GH_BIN_ARCHIVE.get(key, "zip"))],
+                unsupported_platform_hint=GH_BIN_NO_WIN_HINT,
+                data_note=(
+                    "命令行工具，本工具不落任何数据目录；卸载只删 "
+                    f"~/.env-tools/{key}/{key}-<版本>。"
+                ),
+            )
+        )
+
+    # ------------------ Consul ------------------
+    # 2026-10-12 B4。zip 顶层**直接就是 consul.exe**（实测列包：consul.exe + LICENSE.txt），
+    # 所以 path_subdir=""。源只有官方一家（清华 / npmmirror 实测 404），2.1 Mbps 属正常。
+    components.append(
+        Component(
+            key="consul",
+            display_name="Consul",
+            env_var=None,
+            path_subdir="",
+            exec_name="consul",
+            version_args=["version"],
+            versions=[_consul_cv("2.0.4")],
+            unsupported_platform_hint="只登记了实测过的 Windows 包；Linux / macOS 请用它"
+                                      "自己的包管理器或官方 releases 页",
+            data_note="官方源 releases.hashicorp.com，**实测没有任何大陆镜像**"
+                      "（清华、npmmirror 都 404），国内下载偏慢属正常。",
+        )
+    )
+
+    # ------------------ ZooKeeper ------------------
+    # 2026-10-12 B2：本工具第一个 `needs=("jdk",)` 且**绕开厂商 .cmd 包装器**的启停组件。
+    # 包结构实测：顶层 apache-zookeeper-3.9.6-bin/，jar 全在 lib/（包根 0 个 jar），
+    # conf/ 里只有 zoo_sample.cfg。⇒ path_subdir="bin"（zkCli.cmd 等在那），
+    # version_probe=False —— 它的"启动脚本"一执行就把服务拉起来，绝不能拿来探版本。
+    components.append(
+        Component(
+            key="zookeeper",
+            display_name="Apache ZooKeeper",
+            env_var=None,
+            path_subdir="bin",
+            exec_name="zkServer",
+            version_probe=False,
+            version_args=[],
+            versions=[_zookeeper_cv("3.9.6")],
+            unsupported_platform_hint="只登记了实测过的 Windows 包；Linux / macOS 请用"
+                                      "系统包管理器安装",
+            data_note="Apache dist，**实测 8 家大陆镜像全部可用**（华为云 / 南大 / 清华 / "
+                      "中科大 / 北外 / 腾讯 / 阿里），按速度排序，官方 dlcdn 末位。",
+        )
+    )
+
+    # ------------------ MinIO（B4 补：单 exe 对象存储，自带 Web 控制台） ------------------
+    # 归档形态实测：**单文件 .exe**（不是 zip），113,115,136 字节，头两字节 `MZ`。
+    # ⇒ archive_map="exe" 走 extract_archive 的单二进制早退分支，落位按 R7 改名成
+    #   minio.exe（exec_name 给全，目标名 = exec_name + ".exe"，不靠猜）；
+    #   顶层没有目录 ⇒ path_subdir=""。
+    # `minio.exe --version` 实测 rc=0 且只打印版本（不会把服务拉起来），所以允许探测。
+    components.append(
+        Component(
+            key="minio",
+            display_name="MinIO Object Storage",
+            env_var=None,
+            path_subdir="",
+            exec_name="minio",
+            version_args=["--version"],
+            versions=[_minio_cv("2025.9.7",
+                               "https://github.com/minio/minio/releases/download/"
+                               "RELEASE.2025-09-07T16-13-09Z/"
+                               "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe")],
+            unsupported_platform_hint=(
+                "只登记了实测过的 Windows 产物。上游在归档前也给 Linux / macOS 发包"
+                "（同一个 release 里有 `minio.linux-amd64…` 与 `minio.darwin-…`），"
+                "但本工具没按 R1 实测那两个平台的源，故不提供自动下载 —— "
+                "请用发行版自己的包管理器安装。"
+            ),
+            data_note=(
+                "**开源版已归档**：官方 `dl.min.io` 全线 410 Gone，这里下的是最后一个"
+                "有 Windows 产物的 release（RELEASE.2025-09-07T16-13-09Z），"
+                "不会再有更新；许可 GNU AGPLv3。对象数据在 "
+                "~/.env-tools/minio-data/storage（实测首次启动在其中生成 .minio.sys/），"
+                "卸载只删版本目录、**不碰它**。支持一键启停（API 9000 + 控制台 9001）。"
+            ),
+        )
+    )
+
+    # ------------------ Dart SDK（2026-10-12，纯装配组件） ------------------
+    # 归档实测：zip 顶层单目录 dart-sdk/、根上 0 散文件 ⇒ collapse 后
+    # install_dir 即 dart-sdk 内容，bin/dart.exe 在 bin/ ⇒ path_subdir="bin"。
+    components.append(
+        Component(
+            key="dart",
+            display_name="Dart SDK",
+            env_var=None,          # 官方没有 DART_HOME 约定，只把 bin 放进 PATH
+            path_subdir="bin",
+            exec_name="dart",
+            version_args=["--version"],
+            versions=[_dart_cv("3.13.5")],
+            unsupported_platform_hint=(
+                "官方对 Linux / macOS 也发解压即用的 zip"
+                "（dartsdk-{linux-x64,arm64,arm,riscv64,macos-*}-release.zip，"
+                "实测 200 + `PK`，与 Windows 同形态），但本工具没按 R1 实测那两个"
+                "平台的**解压布局与可执行性**，故本轮只登记 Windows。"
+                "Linux 用发行版包管理器或 apt 装 dart，macOS 用 brew install dart。"
+            ),
+            data_note=(
+                "纯语言运行时：本工具不落任何数据目录，卸载只删 "
+                "~/.env-tools/dart/dart-<版本>。你自己的 pub 包与项目在别处，不受影响。"
+            ),
+        )
+    )
+
     # 「开发工具」Tab：只下载、不配置的 GUI 软件（见 _DEVTOOLS 与 R13）。
     # 放在最后追加，是为了不打散上面按字母/依赖顺序排的旧组件 —— 卡片顺序会跟着变，
     # 而网格排布与"最后一个格子"的用例都依赖这个顺序稳定。
@@ -5835,6 +7962,9 @@ def build_components() -> List[Component]:
         # "并存多版本 + 切生效"对它没有对象；顺带让「可多版本」角标不创建（角标条件就是它）。
         comp.multi_version = not comp.download_only
         comp.launch = LAUNCH_OF.get(comp.key)                     # 新增：不在登记表就是 None
+        # 一句话说明（详情对话框用）。漏登记直接 KeyError —— 与 category 同一套
+        # 「少一套平行实现就少一处会坏的地方」的做法，逼每个组件都有一句话。
+        comp.summary = COMPONENT_SUMMARY[comp.key]
     return components
 
 
@@ -8319,12 +10449,59 @@ def _write_none(src: Path, data_dir: Path,
     return True, "", []
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-12 B4 / B2：ZooKeeper 的端口回写与配置生成
+# ---------------------------------------------------------------------------
+
+def _write_zookeeper_props(src: Path, data_dir: Path,
+                           plan: PortPlan) -> Tuple[bool, str, List[str]]:
+    """ZooKeeper：整份 conf 拷成副本，并在副本里**生成** `zoo.cfg`。
+
+    三条都是 2026-10-12 在 %TEMP% 里跑真进程实测出来的，不是从文档推的：
+      ① 官方包里**只有 `zoo_sample.cfg`，没有 `zoo.cfg`** —— 不生成就没有配置可读；
+      ② `zkServer.cmd` 不认 `ZOOCFGDIR`，而且会自己把 `<home>\\conf\\zoo.cfg` 塞成第一个
+         参数（我们再传一个就变成第二个参数 → `NumberFormatException`）。走 .cmd 的话
+         配置只能写进安装目录，且 terminate() 只杀掉 cmd 包装器、**留下监听端口的孤儿 java**。
+         所以本工具改成**直接 spawn java**（Kafka 是先例）：实测 Popen.pid 就是监听者
+         （两边 PID 一致）、terminate() 后端口立即释放、配置可以作为参数落在数据目录；
+      ③ sample 里写的是 `dataDir=/tmp/zookeeper` —— Windows 下解析到盘符根，
+         卸载删不掉、多版本还会抢同一个目录，所以 dataDir 必须改写进副本。
+    """
+    conf, _, _ = conf_targets(data_dir)
+    notes: List[str] = []
+    state, diff = prepare_conf_copy(src, conf)
+    if state == "created":
+        notes.append(f"已在 {conf} 建立 ZooKeeper 配置副本（官方只发 zoo_sample.cfg，"
+                     f"本工具在副本里生成 zoo.cfg，官方目录一个字都不改）。")
+    elif diff:
+        notes.append(f"官方 conf 里有 {len(diff)} 个文件是副本没有的（多半是升级带来的）："
+                     f"{', '.join(diff[:5])}。本工具不自动合并，需要时删掉副本目录让它重建。")
+    target = conf / "zoo.cfg"
+    sample = conf / "zoo_sample.cfg"
+    if not target.exists():
+        if not sample.is_file():
+            return False, (f"配置副本里既没有 zoo.cfg 也没有 zoo_sample.cfg（{conf}），"
+                           f"无法生成配置，已放弃启动。"), notes
+        body = sample.read_text(encoding="utf-8", errors="replace")
+        target.write_text(body, encoding="utf-8")
+        notes.append("zoo.cfg 不存在，已按官方 zoo_sample.cfg 原文生成一份再改。")
+    ok, why = set_property_line(target, "clientPort", str(plan.main))
+    if not ok:
+        return False, why, notes
+    ok, why = set_property_line(target, "dataDir",
+                                str(data_dir / "zookeeper-data").replace("\\", "/"))
+    if not ok:
+        return False, why, notes
+    return True, "", notes
+
+
 _CONF_WRITERS = {
     "activemq": _write_activemq_ports,
     "tomcat": _write_tomcat_ports,
     "nginx": _write_nginx_ports,
     "kafka": _write_kafka_props,
     "elasticsearch": _write_elasticsearch_props,
+    "zookeeper": _write_zookeeper_props,
 }
 
 
@@ -8812,20 +10989,18 @@ def run_pre_start(comp: Component, spec: LaunchSpec, plan: LaunchPlan,
     return True, "", notes
 
 
-def _plan_mapping(comp: Component, spec: LaunchSpec, plan: LaunchPlan) -> dict:
-    """重建 build_launch_plan 用的 mapping，让 pre_start 与命令共享同一份替换表。
+def _launch_mapping(comp: Component, java_home: str, port: int,
+                    log_file: Path) -> dict:
+    """启动命令与 pre_start 共用的那一张占位符替换表（唯一的一份）。
 
-    单独抽出来是因为两处必须给出一致的值 —— 尤其 {cluster_id}：
-    format 用了uuid A 而 kafka.Kafka 用 uuid B 的话，broker 认自己的 meta.properties，
-    format 白做（实测会 `Invalid cluster.id`）。
+    以前 `build_launch_plan` 和 `_plan_mapping` 各手写一遍这张表，2026-10-12
+    etcd 的 `{peer}` 就只补在了 `_plan_mapping` 那边 —— 真点「启动」走的是
+    `build_launch_plan`，当场 `KeyError: 'peer'`。合并成一处写，护栏在
+    `bt_launch_tests.LaunchMappingCoversEveryPlaceholder` 两头都过一遍。
     """
     version = resolve_launch_version(comp) or comp.versions[0].version
     home = comp.install_dir(version)
     data_dir = CONFIG_DIR / f"{comp.key}-data"
-    # java_home 必须复用 plan 上的（2026-10-06 护栏抓出来的）：start() 已经算好并
-    # 传给 build_launch_plan 了，我若再解析一次，① {java} 可能与实际 spawn 的
-    # java 不是同一个；② 每个组件每点一次启动就多构建一次全量组件表。
-    java_home = plan.java_home or resolve_java_home({c.key: c for c in build_components()}) or ""
     return {
         "java": str(Path(java_home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")),
         "war": str(home / "jenkins.war"),
@@ -8833,10 +11008,28 @@ def _plan_mapping(comp: Component, spec: LaunchSpec, plan: LaunchPlan) -> dict:
         "data_dir": str(data_dir),
         "conf_dir": str(data_dir / "conf"),
         "conf": str(config_file_for(comp, data_dir)),
-        "port": str(plan.port),
-        "log_file": str(plan.log_file),
+        "port": str(port),
+        # etcd 的 peer 口：与主口是"主口 + 1"的派生关系（spec 里用 port_offsets=(1,)
+        # 声明，端口簇判定会连它一起等）。LaunchPlan 只有 `port` 一个端口字段，
+        # 多口一律从主口现算，两处必须逐字一致，否则 etcd "起来了但簇判不通过"。
+        "peer": str((port or 0) + 1),
+        "log_file": str(log_file),
+        # kafka 的 KRaft format 需要一个**持久化**的 cluster.id：换 uuid 会被拒
+        # （Invalid cluster.id）。所以它进 mapping 而不是每次现生成。
         "cluster_id": read_or_create_cluster_id(data_dir),
     }
+
+
+def _plan_mapping(comp: Component, spec: LaunchSpec, plan: LaunchPlan) -> dict:
+    """重建 build_launch_plan 用的 mapping，让 pre_start 与命令共享同一份替换表。
+
+    java_home 必须复用 plan 上的（2026-10-06 护栏抓出来的）：start() 已经算好并
+    传给 build_launch_plan 了，这里若再解析一次，① {java} 可能与实际 spawn 的
+    java 不是同一个；② 每个组件每点一次启动就多构建一次全量组件表。
+    """
+    java_home = (plan.java_home
+                 or resolve_java_home({c.key: c for c in build_components()}) or "")
+    return _launch_mapping(comp, java_home, plan.port, plan.log_file)
 
 
 def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
@@ -8847,7 +11040,6 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
     不重定向就等于把启动报错扔掉，事后只能猜（设计 §4）。"""
     version = resolve_launch_version(comp) or comp.versions[0].version
     home = comp.install_dir(version)
-    war = home / "jenkins.war"
     # 数据与版本目录分离（spec §0 决策 3）：JENKINS_HOME 指向 CONFIG_DIR/<key>-data，
     # 这样换版本、重装、卸载都不碰任务与插件。
     data_dir = CONFIG_DIR / f"{comp.key}-data"
@@ -8856,19 +11048,7 @@ def build_launch_plan(comp: Component, spec: LaunchSpec, java_home: str,
     if spec.data_dir_env:
         env[spec.data_dir_env] = str(data_dir)
     ensure_dir(data_dir)
-    mapping = {
-        "java": str(Path(java_home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")),
-        "war": str(war),
-        "home": str(home),
-        "data_dir": str(data_dir),
-        "conf_dir": str(data_dir / "conf"),
-        "conf": str(config_file_for(comp, data_dir)),
-        "port": str(port),
-        "log_file": str(log_file),
-        # kafka 的 KRaft format 需要一个**持久化**的 cluster.id：换 uuid 会被拒
-        # （Invalid cluster.id）。所以它进 mapping 而不是每次现生成。
-        "cluster_id": read_or_create_cluster_id(data_dir),
-    }
+    mapping = _launch_mapping(comp, java_home, port, log_file)
     # 计划二的额外 env（ActiveMQ 的 ACTIVEMQ_CONF/DATA 走这条路；
     # 它两个值都要等端口定了、副本建好了才写得出最终值，所以在计划阶段拼）。
     for name, template in (spec.extra_env or {}).items():
@@ -8903,7 +11083,10 @@ def config_file_for(comp: Component, data_dir: Path) -> Path:
     # 之前这个函数只认 kafka/es，其它组件一律返回 elasticsearch.yml）。
     names = {"kafka": "server.properties", "elasticsearch": "elasticsearch.yml",
              "nginx": "nginx.conf", "tomcat": "server.xml",
-             "activemq": "jetty-spring.properties"}
+             "activemq": "jetty-spring.properties",
+             # 2026-10-12：ZooKeeper 读的是 zoo.cfg（官方只发 zoo_sample.cfg，
+             # 副本里那份是 _write_zookeeper_props 生成的）
+             "zookeeper": "zoo.cfg"}
     return data_dir / "conf" / names.get(comp.key, "application.yml")
 
 
@@ -11443,6 +13626,7 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
       - .zip：标准 zip 归档（Python / Node / Bun / RocketMQ 等）
       - .tar.gz / .tgz：gzip 压缩 tar（JDK / Go / Docker / Kafka 等）
       - .tar.xz：xz 压缩 tar（Python 部分版本）
+      - .msi：Windows 安装包，用 `msiexec /a` 管理性提取成统一 prefix（Rust）
       - .exe / .war / 无扩展名：单二进制 / 单文件（kubectl.exe / kubectl / jenkins.war），
         直接拷贝到 extract_to 根目录；Linux/Mac 上无扩展名单二进制赋予 0o755 执行权限
     """
@@ -11457,6 +13641,19 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
     elif name.endswith(".tar.xz"):
         with tarfile.open(archive, "r:xz") as tf:
             tf.extractall(extract_to)
+    elif name.endswith(".msi"):
+        # Rust 的 MSI：走 msiexec 的**管理性提取**（/a）把文件铺出来，不是 /i 真装机。
+        # 实测 /a 免提权、不写注册表，产出统一 prefix（bin/ + lib/rustlib/…）；
+        # 而 /i 会留一个我们删不掉的注册表项，且大概率弹 UAC —— 那是"静默安装"的假象。
+        # /a 会在 TARGETDIR 下再建一层产品目录（Rust/），所以末尾"单顶层即根"那条
+        # 规则正好把它收上来，与 zip/tar 的行为一致。
+        # 副作用：msiexec 会把源 msi 也拷一份进 TARGETDIR（实测），它是文件不是目录，
+        # 不影响根判定，但会白占几百 MB —— 所以提取完主动删掉。
+        cmd = ["msiexec", "/a", str(archive), "/qn", f"TARGETDIR={extract_to}"]
+        if subprocess.run(cmd, check=False).returncode != 0:
+            raise RuntimeError(f"msiexec 提取 {archive.name} 失败（退出码非 0）")
+        for stray in extract_to.glob("*.msi"):
+            stray.unlink(missing_ok=True)
     elif name.endswith(".exe") or name.endswith(".war") or "." not in archive.name:
         # 单二进制 / 单文件（kubectl.exe / kubectl / jenkins.war 等），
         # 直接拷贝到目标目录根目录；这类文件没有"解压后根目录"概念，
@@ -11470,9 +13667,13 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
     else:
         raise RuntimeError(f"未知的归档类型：{archive.name}")
 
-    entries = [p for p in extract_to.iterdir() if p.is_dir()]
-    if len(entries) == 1:
-        return entries[0]
+    dirs = [p for p in extract_to.iterdir() if p.is_dir()]
+    loose = [p for p in extract_to.iterdir() if not p.is_dir()]
+    # 只有"根上除这一个目录之外什么都不剩"时，那个目录才是真正的安装根。
+    # pnpm（dist/ + pnpm.exe）与 trivy（contrib/ + trivy.exe + *.tpl）证明光数目录不行：
+    # 返回 dist/ 等于把根上的可执行文件丢在 install_dir 外面，装完命令找不到。
+    if len(dirs) == 1 and not loose:
+        return dirs[0]
     return extract_to
 
 
@@ -12013,6 +14214,17 @@ class ComponentCard(QFrame):
         title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         title.setToolTip(self.component.display_name)
         top.addWidget(title)
+        # 「它是干嘛的」入口（2026-10-12 用户要求）。做成名称后一枚 20px 图标按钮，
+        # 不是「详情」文字按钮：格子内部只有 271–309px，按钮行已有 2–5 颗，
+        # 再加一颗必然换行、卡片高度会从实测 153px 涨回 ~230px（见卡片瘦身一节）。
+        # 也不用悬停 tooltip：详情里有下载地址要能选中复制，tooltip 撑不住。
+        self.btn_detail = QPushButton("ℹ")
+        self.btn_detail.setObjectName("detailBtn")
+        self.btn_detail.setFixedSize(20, 20)
+        self.btn_detail.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_detail.setToolTip("看它是干嘛的、装完怎么用")
+        self.btn_detail.clicked.connect(self.on_detail_clicked)
+        top.addWidget(self.btn_detail)
 
         # 多版本能力角标：一个版本都没装时，这张卡片跟其它组件长得一样，
         # 用户看不出"它支持同时装几个版本"。做成独立 QLabel 而不是拼进标题文本——
@@ -13979,6 +16191,55 @@ class ComponentCard(QFrame):
                 return ("ok", None) if EnvManager._same_path(entry, expected) else ("shadowed", entry)
         return "unknown", None
 
+    def detail_lines(self) -> list:
+        """组装详情正文，返回 [(小标题, 段落), ...] —— 固定四段式。
+
+        「它是什么」与「怎么用」来自两张登记表；「本工具会替你做什么」由能力位
+        现场派生（不新写文案，避免第二份真相）；「平台说明」登记了才显示。
+        data_note（数据去处）与版本清单**不进详情**：前者归卸载确认框，
+        后者下拉框里就在 —— 详情只回答"这是什么、怎么用"两个问题。
+        """
+        comp = self.component
+        out: list = []
+        if getattr(comp, "summary", ""):
+            out.append(("它是什么", comp.summary))
+        usage = COMPONENT_USAGE.get(comp.key, "")
+        if usage:
+            out.append(("怎么用", usage))
+
+        # 本工具替你做的事：全部从既有登记派生，措辞统一用分号分隔的短句。
+        if comp.download_only:
+            todo = ["官方安装包下到你在弹窗里选的目录（记住上次位置）",
+                    "不解压、不写环境变量、不代跑安装程序：安装由你自己确认"]
+        else:
+            todo = ["镜像优先下载，失败自动换源",
+                    "解压到本工具目录并写好环境变量与 PATH",
+                    "装完后台自检版本号回填到卡片"]
+            spec = comp.launch
+            if spec is not None:
+                # 派生口是「主口 + 偏移」，不是绝对端口（真机 2026-10-12 我自己把
+                # etcd 显示成「端口 2379、1」过一次）。算法与 choose_ports() 一致。
+                ports = [spec.main_port] + [spec.main_port + int(o)
+                                            for o in spec.port_offsets]
+                ports += [int(p) for p in spec.extra_ports]
+                stop = "一键启停"
+                if spec.console_path:
+                    stop += f"，控制台在 {spec.main_port}{spec.console_path}"
+                todo.append(f"{stop}（端口 {'、'.join(str(p) for p in ports)}，"
+                            f"整簇都在听才算运行中）")
+            if supports_external_takeover(comp):
+                todo.append("可接管你本机已装的那一份，并可一键还原")
+        out.append(("本工具会替你做什么", "；".join(todo) + "。"))
+
+        if comp.unsupported_platform_hint:
+            out.append(("平台说明", comp.unsupported_platform_hint))
+        return out
+
+    def on_detail_clicked(self) -> None:
+        """打开详情对话框。无副作用：只读地展示登记表里已有的事实。"""
+        dlg = ComponentDetailDialog(self.component, self.detail_lines(), self)
+        dlg.exec()
+
     def active_version(self) -> Optional[str]:
         """当前生效版本：active 登记表 → 持久层 XXX_HOME 反推 → PATH 实际命中。
 
@@ -14228,6 +16489,154 @@ class ComponentCard(QFrame):
 # ---------------------------------------------------------------------------
 # 捐赠弹窗（不出现在文档中；仅代码内实现）
 # ---------------------------------------------------------------------------
+class ComponentDetailDialog(QDialog):
+    """组件详情：一屏说清"它是干嘛的、装完怎么用、数据在哪、平台有什么坑"。
+
+    **点击对话框之外的任何地方自动关闭**（2026-10-12 用户要求）：做法是给
+    QApplication 挂全局事件过滤器，鼠标按下位置落在对话框 frameGeometry 之外
+    就 accept()。这是详情弹窗该有的交互 —— 用户点开看一眼就继续点卡片，
+    不该被模态框"锁"住；保留「知道了」按钮给习惯用按钮的人。
+    正文用 QTextEdit 而不是 QLabel —— 用户要能**选中复制**里面的命令与变量名。
+    """
+
+    def __init__(self, comp, sections, parent=None):
+        super().__init__(parent)
+        self.comp = comp
+        self.setObjectName("componentDetailDialog")
+        self.setWindowTitle(f"{comp.display_name} · 详情")
+        self.resize(560, 520)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 16, 16, 12)
+        v.setSpacing(10)
+
+        head = QLabel(comp.display_name)
+        head.setObjectName("detailTitle")
+        head.setFont(QFont("", 14, QFont.Bold))
+        v.addWidget(head)
+
+        # 官方地址一行：从已登记的 URL 提取 host，不新写任何事实。
+        home = comp_download_host(comp)
+        if home:
+            addr = QLabel(f"官方下载 / 文档：{home}")
+            addr.setObjectName("detailHome")
+            addr.setStyleSheet("color:#7a8ea3;font-size:11px;")
+            addr.setToolTip("详情里的命令与地址均来自登记表；下载仍走卡片上的按钮。")
+            v.addWidget(addr)
+
+        body = QTextEdit(self)
+        body.setObjectName("detailBody")
+        body.setReadOnly(True)              # 只读但可选：用户要能复制里面的命令与变量名
+        body.setMinimumHeight(300)
+        body.setHtml(self._to_html(sections))
+        body.setStyleSheet(
+            "background:#fbfcfe;border:1px solid #e3e8ef;border-radius:8px;"
+            "padding:12px;color:#2b3640;font-size:13px;")
+        v.addWidget(body, stretch=1)
+
+        close = QPushButton("知道了")
+        close.setObjectName("secondaryBtn")
+        close.clicked.connect(self.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        v.addLayout(row)
+
+        # 点击外部关闭：挂到应用级过滤器，收到外部按下就收
+        self._app = QApplication.instance()
+        if self._app is not None:
+            self._app.installEventFilter(self)
+
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QEvent.MouseButtonPress:
+            # 模态下点击其它窗口，事件仍会过应用级过滤器；用全局坐标判位置。
+            pos = _event_global_pos(ev)
+            if pos is not None and not self.frameGeometry().contains(pos):
+                # **先摘过滤器再关窗**：QDialog.accept() 不走 closeEvent
+                # （hide 才走），只靠 closeEvent 摘除会在 QApplication 上泄漏一个
+                # 活跃过滤器，之后全程序所有"窗口外"的点击都被它吞掉
+                # （合跑时实测毒死了 bt_multiversion 的 combo 弹出用例）。
+                # closeEvent 里那次 removeEventFilter 幂等保留，双保险。
+                self._detach_app_filter()
+                self.accept()
+                return True                # 事件已消费，避免再触发别处
+        return super().eventFilter(obj, ev)
+
+    def _detach_app_filter(self) -> None:
+        if self._app is not None:
+            try:
+                self._app.removeEventFilter(self)
+            except RuntimeError:
+                pass                       # app 已析构（关窗收尾竞态），无事可做
+            self._app = None
+
+    def hideEvent(self, ev) -> None:       # noqa: N802
+        # accept()/reject() 关闭模态对话框走的是 hide，不是 close —— 泄漏的
+        # 真正出口在这里兜底（摘除是幂等的，_detach_app_filter 里置了 None）。
+        self._detach_app_filter()
+        super().hideEvent(ev)
+
+    def closeEvent(self, ev) -> None:       # noqa: N802
+        self._detach_app_filter()
+        super().closeEvent(ev)
+
+    @staticmethod
+    def _to_html(sections) -> str:
+        """[(小标题, 正文)] → HTML。正文里的 Markdown 星号在这里统一处理掉。
+
+        为什么在渲染层处理而不是逐条清洗文案表：表由多个会话共同维护，写法迟早
+        会带 `**强调**`；数据里保持作者的强调意图，界面按自己的媒介渲染 ——
+        QLabel 与 QTextEdit 都不认 Markdown，露出字面星号就是脏。
+        """
+        import html as _html
+        parts = []
+        for title, text in sections:
+            t = _html.escape(str(text or ""))
+            t = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=_re.S)
+            t = t.replace("`", "")            # 反引号在本项目正文里只是标记，去掉即可
+            parts.append(f"<div style='margin-bottom:12px'>"
+                         f"<div style='color:#4a7fd0;font-weight:600;"
+                         f"margin-bottom:3px'>{_html.escape(str(title))}</div>"
+                         f"<div style='line-height:150%'>{t}</div></div>")
+        return "".join(parts) or "<div>这个组件还没有写说明。</div>"
+
+
+def comp_download_host(comp) -> str:
+    """从组件第一个可下载 URL 提取“官方地址”域名。取不到返回空串。"""
+    try:
+        cv = comp.versions[0]
+        urls = cv.urls_for_current()
+        # 取**末位官网**而不是首位镜像：详情行叫“官方地址”，给用户看的就是
+        # 官方域名（api.adoptium.net / python.org 这类），首位是清华/南大镜像，
+        # 写上去会让用户误以为官网是镜像站。
+        first = urls[-1] if urls else None
+    except Exception:
+        return ""
+    if not first:
+        return ""
+    import urllib.parse as _up
+    try:
+        netloc = _up.urlsplit(first).netloc
+    except Exception:
+        return ""
+    # 加速器/镜像的 URL 剥掉代理前缀，露出真实官方域名（纯展示，不影响下载）
+    for prefix in ("gh-proxy.com/", "ghfast.top/", "ghproxy.net/"):
+        if first.startswith("https://" + prefix):
+            inner = first[len("https://" + prefix):]
+            inner = inner.split("/", 3)[2] if inner.count("/") >= 2 else inner
+            return inner
+    return netloc or ""
+
+
+def _event_global_pos(ev):
+    """取鼠标事件的全局坐标（PySide6 版本差异兜底）。"""
+    gp = getattr(ev, "globalPosition", None)
+    if gp is not None:
+        p = gp()
+        return p.toPoint() if hasattr(p, "toPoint") else p
+    g = getattr(ev, "globalPos", None)
+    return g() if g is not None else None
+
+
 class DonateDialog(QDialog):
     """支持作者：微信 / 支付宝 / QQ，各渠道展示对应二维码。"""
 
@@ -14623,6 +17032,10 @@ class MainWindow(QMainWindow):
         # Tab 标题的"干净"形态（分类名 + 组件数）。运行标记 `●` 是叠在它上面的，
         # 搜索/退出搜索会重设标题，所以必须留着底稿，不能靠 tabText() 反推。
         self._tab_base_titles: List[str] = []
+        try:
+            _path_index()      # 建卡前一次性批扫 PATH（R18）
+        except Exception:
+            pass
         self.tabs = QTabWidget()
         self.tabs.setObjectName("compTabs")
         self.tabs.setDocumentMode(True)
@@ -14742,8 +17155,11 @@ class MainWindow(QMainWindow):
         self._log_auto_hide.setInterval(LOG_AUTO_HIDE_MS)
         self._log_auto_hide.timeout.connect(self._on_log_auto_hide)
 
-        # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）
-        self._last_columns = 0
+        # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）。
+        # 2026-10-13：先记录**构造期实际排出的列数**再重排 —— 此前这里是 0 哨兵，
+        # showEvent 的"列数没变就不重排"守卫（见其注释）永远比不中，
+        # offscreen/窄窗口下白白多拆建一次 87 卡的行结构（实测 ~0.4s）。
+        self._last_columns = self._card_columns()
         for idx in range(len(self._tab_cards)):
             self.relayout_cards(idx)
         self._refresh_view_button()
@@ -14938,11 +17354,18 @@ class MainWindow(QMainWindow):
         # show() 不改变尺寸就**不会触发 resizeEvent**，这个错排没有任何机会被纠正，
         # 用户只有手动拖一下窗口大小才能看到网格（真机 2026-10-08 实测踩中）。
         # resizeEvent 那套"列数变了才重排"的防抖在这里反而是障碍，所以直接重排。
+        # 2026-10-13 补一条对等防抖：列数与构造期相同就跳过 —— 相等时重排的
+        # 结果必然与已排好的行一模一样（列数唯一决定行结构），拆掉重建纯属白烧
+        # 87 次 setParent（cProfile 实测一次全量重排 ~0.4s，offscreen 下 show 期
+        # 曾连排两次 1 列 + 一次 3 列）。列数不同（构造期错算 1 列、此刻 viewport
+        # 就绪算出 3 列）则照旧强制重排，2026-10-08 那条修复不受影响。
         if not getattr(self, "_first_show_done", False):
             self._first_show_done = True
-            self._last_columns = self._card_columns()
-            for idx in range(len(self._tab_cards)):
-                self.relayout_cards(idx)
+            columns = self._card_columns()
+            if columns != self._last_columns:
+                self._last_columns = columns
+                for idx in range(len(self._tab_cards)):
+                    self.relayout_cards(idx)
             self._position_log_overlay()
 
     # ------------------------------------------------------------------
@@ -15353,10 +17776,18 @@ class MainWindow(QMainWindow):
           刷新版本 / 存配置 / 关窗等探测逻辑都遍历那个列表，隐藏不能让它缺项。
         """
         q = query.strip()
-        # 先无条件复位到「浏览基线」，保证重复搜索、清空再搜都从干净状态出发
-        self._restore_browse()
 
+        # 「先无条件复位到浏览基线」这一步 2026-10-12 去掉了：它是卡顿的全部来源。
+        # 一次复位 = 把 85 张卡逐个 setVisible(True) + 四个 Tab 各销毁重建一遍行，
+        # 而连续输入时紧接着就要把它们再搬进结果面板，等于每敲一个字白做两遍搬家。
+        # 基线并不需要一个显式复位：`_build_unified` 开头就 `_clear_results_layout()`
+        # （命中的卡回到各自 Tab 容器），随后对**每一张**卡都重设可见性与归属，
+        # 所以"重复搜索、清空再搜"拿到的已经是干净状态。
+        # 清空输入要回到浏览态时才真复位，而且只在确实处于搜索态时复位一次：
+        # 浏览态下按退格把最后一个字符删掉，不该重排 85 张卡。
         if not q:
+            if self._in_search():
+                self._restore_browse()
             self.search_hint.setText("")
             self.search_hint.setProperty("empty", "false")
             self.search_hint.style().unpolish(self.search_hint)
@@ -15364,6 +17795,15 @@ class MainWindow(QMainWindow):
             return
 
         self._build_unified(q)
+
+    def _in_search(self) -> bool:
+        """结果面板是否正盖着四个 Tab（`top_stack` 第 1 页 = 统一搜索结果）。
+
+        半构造的窗口（测试里造的半成品 MainWindow）可能还没有 `top_stack`，
+        按"不在搜索态"处理 —— 调用方据此只会少走一次复位，不会漏做该做的重排。
+        """
+        stack = getattr(self, "top_stack", None)
+        return stack is not None and stack.currentIndex() == 1
 
     def _restore_browse(self) -> None:
         """把全部卡片放回各自 Tab 并恢复可见，切回浏览模式，然后按列数重排。"""
@@ -15497,10 +17937,14 @@ class MainWindow(QMainWindow):
         self._result_sections = sections
         self.top_stack.setCurrentIndex(1)
 
-        # 四个 Tab 也要跟着重排一次，把被搬走的命中卡片从旧行里摘掉
-        # （不然归属判断还认旧行）；结果面板的行在 relayout_cards 里造。
-        for idx in range(len(self._tab_cards)):
-            self.relayout_cards(idx)
+        # 四个 Tab 在搜索期间**不重排**（2026-10-12 性能修复，卡顿的另一半）。
+        # 原来这里要 relayout 四遍"把被搬走的命中卡片从旧行里摘掉"，但那四页此刻
+        # 正被 top_stack 的结果面板盖着，一个字都看不见；卡片 setParent 走时 Qt 已经
+        # 把它们从旧 QHBoxLayout 里摘了，留下的只是不可见页上的空位。退出搜索走
+        # `_restore_browse()`，它无条件把四个 Tab 各重排一遍 —— 该补的账在那儿补。
+        # 中间态的唯一读者是 resizeEvent（列数变了才重排），而 relayout_cards 自己按
+        # `root.isAncestorOf(c)` 判归属，搬走的卡片不会被它拽回 Tab，所以跳过是安全的。
+        # 省下的是**每次输入 4 次销毁重建**：连打五个字少 20 次整页重排。
         self.relayout_cards(RESULTS_KEY)
 
         self.search_hint.setText(f"匹配 {hits} / {len(self.cards)} 个组件")
@@ -15676,6 +18120,21 @@ class MainWindow(QMainWindow):
                 font-weight: 600;
             }
             #toolBtn:hover { border-color: #90caf9; color: #1976d2; }
+
+            /* 卡片名称后的详情入口：一枚 20px 圆点，视觉上必须"轻"，
+               不能与「可多版本」角标争注意力（同在一行）。 */
+            #detailBtn {
+                background: #eef2f6;
+                color: #5c6f82;
+                border: 1px solid #d5dfea;
+                border-radius: 10px;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            #detailBtn:hover { background: #e3f2fd; color: #1976d2;
+                               border-color: #90caf9; }
+            #detailTitle { color: #263238; }
 
             #compTabs { background: transparent; border: none; }
 
@@ -16022,7 +18481,7 @@ class MainWindow(QMainWindow):
         """从各官网并发拉取版本列表。可反复调用（刷新）。
 
         force=False（启动那一次）：24 小时内抓过的组件直接用磁盘缓存，不再打网络 ——
-        GitHub 匿名额度只有 60 次/小时/IP，一次启动 26 路，一小时内第二次开工具就会
+        GitHub 匿名额度只有 60 次/小时/IP，一次启动 77 路，一小时内第二次开工具就会
         集体失败（见 R15）。force=True（用户点「⟳ 刷新版本」）：绕过缓存全量重抓。
         """
         if self._closing:
@@ -16076,11 +18535,15 @@ class MainWindow(QMainWindow):
             w.done.connect(self._on_versions_fetched)
             self._fetch_workers.append(w)
             self._fetch_pending += 1
-            # 错峰启动：避免 26 路线程同时打 api.github.com 触发未认证限额（60 次/小时/IP）。
-            # 间隔 150ms，最晚一个约在 3.9s 后启动；命中限流由 _github_api_json 立旗快速失败。
+            # 错峰启动：避免 N 路线程同时打 api.github.com 触发未认证限额（60 次/小时/IP）。
+            # 2026-10-12 修复：间隔按 N 归一（min(150, 4000//N)）而不是写死 150ms ——
+            # 组件从 26 涨到 80+ 之后，固定 150ms 让末位一路要 12 秒才启动，
+            # 刷新按钮要等全部归零才恢复，观感就是"刷新卡 12 秒"。
+            # 命中限流由 _github_api_json 立旗快速失败。
             # 走 _launch_fetch_worker 而不是裸 w.start：关窗后残留的定时器不能再起新线程，
             # 否则线程会在窗口析构时还在跑，直接把进程 abort 掉。
-            QTimer.singleShot(i * 150, lambda w=w: self._launch_fetch_worker(w))
+            gap_ms = min(150, 4000 // max(len(todo), 1))
+            QTimer.singleShot(i * gap_ms, lambda w=w: self._launch_fetch_worker(w))
 
     def _fetch_finished(self) -> None:
         """一轮抓取的收尾：恢复按钮 + 一句完成日志（缓存全命中时也要走这里）。"""

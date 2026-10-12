@@ -6,8 +6,8 @@
 
 <p align="center">
   一台新 Windows / macOS / Linux 机器，<b>点几下鼠标就装好整套开发环境</b>。<br/>
-  <b>26 个</b>常用组件全流程自动（下载 → 解压 → 写环境变量 → 自检），<br/>
-  <b>17 个</b>常用开发工具给官方安装包直链（只下载），<b>10 个</b>服务另支持一键启停与访问页直达。
+  <b>61 个</b>常用组件全流程自动（下载 → 解压 → 写环境变量 → 自检），<br/>
+  <b>26 个</b>常用开发工具给官方安装包直链（只下载），<b>15 个</b>服务另支持一键启停与访问页直达。
 </p>
 
 <p align="center">
@@ -55,13 +55,11 @@
 
 ## 下载即用
 
-**不需要 Python 环境，不需要克隆源码，双击即可运行。**
-
-到 [Releases 页面](https://github.com/jilong2026/byte-tools/releases/latest) 下载对应系统的最新版本：
+到 [Releases 页面](https://github.com/jilong2026/byte-tools/releases/latest) 下载对应系统的最新版本并解压：
 
 | 系统 | 文件 | 怎么用 |
 |------|------|--------|
-| Windows 10 / 11 (x64) | [`ByteTools.exe`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools.exe) | 双击运行，无需安装 |
+| Windows 10 / 11 (x64) | [`ByteTools-windows-x64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-windows-x64.zip) | 解压后双击 `ByteTools\ByteTools.exe`（onedir 模式，启动零解压） |
 | macOS (Apple Silicon) | [`ByteTools-macos-arm64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-macos-arm64.zip) | 解压后双击 `ByteTools.app` |
 | Linux (x64) | [`ByteTools-linux-x64`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-linux-x64) | `chmod +x` 后直接运行 |
 
@@ -69,8 +67,8 @@
 
 第一次打开时系统可能拦一下——这不是恶意软件的信号，是"没有花钱买代码签名"的信号：
 
-- **macOS**：提示"无法验证开发者" → 「系统设置 → 隐私与安全性」下方点 **"仍要打开"**；或执行 `xattr -cr ByteTools.app` 去掉隔离属性。
 - **Windows**：Defender / SmartScreen 提示"未识别应用" → 点 **"更多信息 → 仍要运行"**。
+- **macOS**：提示"无法验证开发者" → 「系统设置 → 隐私与安全性」下方点 **"仍要打开"**；或执行 `xattr -cr ByteTools.app` 去掉隔离属性。
 - **Linux**：双击无响应 → 终端里 `chmod +x ByteTools-linux-x64 && ./ByteTools-linux-x64`。
 
 ---
@@ -78,18 +76,18 @@
 ## 亮点
 
 - **一份代码三平台**：自动判断系统与 CPU 架构（Apple Silicon 下 JDK 走 aarch64、Node 走 arm64）。
-- **26 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
-- **17 个开发工具只下载**：IDE / 数据库客户端 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
-- **10 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
+- **61 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
+- **26 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
+- **15 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、etcd、Consul、Apache ZooKeeper 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
 - **前置运行时自动就位**：需要 JDK 的组件（Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata）在本机没有 JDK 或版本太低时，点「启动」会先自动下载安装一个够用的 JDK 再继续；RabbitMQ 需要的 Erlang/OTP 同理（按 RabbitMQ 版本自动配 27.x / 26.x）。用户不需要自己准备任何前置依赖，也不用手改文件。
 - **国内镜像优先 + 多源故障转移**：内置 11 家大陆镜像基址与 3 个 GitHub 加速器，按"大陆源在前 → 逐个换源 → 末位回退官网"走，全程中文日志，**无需手动改 URL**（少数组件只有官网一个源，见[平台支持与例外](#平台支持与例外)）。
-- **多版本并存 + 生效版本切换**：26 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
+- **多版本并存 + 生效版本切换**：61 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
 - **接管你自己装的那一份 + 一键还原**：机器上原有、放在本工具目录之外的 JDK / Maven / Node 等也能被扫描出来设为生效版本（扫描只读，逐个真跑版本命令确认）。动你的系统设置之前先存原文快照，改动后可按原文逐字还原。五道硬规则（原文快照 / 最小编辑 / 关键条目校验 / 复验 / 可还原）缺一不执行。
 - **卸载只删你选中的那个版本**：同组件其它版本的目录、环境变量、`PATH` 条目一概不碰；删掉的正是生效版本时会自动重排。另有标题栏「🧹 清理残留 PATH」清掉指向本工具目录但已不存在的死条目。
 - **检查更新，但不替换自己**：标题栏那颗版本号兼任状态灯（六种状态见[界面导览](#界面导览)）。发现新版点一下就直接下到你选的目录，**不会改名或覆盖正在运行的程序**，也不上传任何用户信息。
 - **下载可靠性**：所有请求固定携带专用 User-Agent（部分高校镜像站会屏蔽默认 UA 返回 403）；下载完成后校验实际字节数，遇到"假 200 空文件"自动换下一个源，不会留下坏包。
 - **动态版本清单 + 24 小时缓存**：启动后从各家官方 API / 索引拉最新版本，拉到的清单落盘缓存一天（省 GitHub 的匿名额度），拉不到就安静回退内置清单，离线也能用。
-- **搜索与过滤**：43 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
+- **搜索与过滤**：87 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
 - **环境变量写入不用 `setx`**：Windows 用 `winreg` 直写注册表（`setx` 有 1024 字符截断），按单条目增删 `PATH`，写完点名通知资源管理器；macOS / Linux 写入带标记的 shell 配置块，幂等更新。
 - **界面**：无边框自定义窗口、卡片按窗口宽度自动分列（可切「▦ 网格 / ☰ 列表」）、渐变进度条、状态胶囊标签、彩色分级中文日志（浮层可收起，出 warn / error 自动弹开并挂未读条数）、窗口图标在任务栏与 Alt+Tab 可见、记住上次每个组件选中的版本。
 - **平台不支持时会说清楚**：有 2 个组件在 Windows 上没有可用的免安装形态（`Docker`、`Pulsar`），卡片上会写明原因并给替代做法，**不会**先装一个跑不起来的东西再让你自己猜。
@@ -104,7 +102,7 @@
    |---|---|
    | 🟢 `✓ 已配置（PATH）· openjdk version "17.0.10"` | 系统已能找到，无需再装（末尾的版本号是后台异步探测补上的） |
    | 🟠 `● 已下载，未配置` | 本地已有安装包，但环境变量还没设 |
-   | 🟢 `● 已装 2 个版本 · 生效 21（21、17）` | 26 个可装配组件都用这套标签：括号内是磁盘上已装的版本（新→旧），`生效 21` 是当前生效版本 |
+   | 🟢 `● 已装 2 个版本 · 生效 21（21、17）` | 61 个可装配组件都用这套标签：括号内是磁盘上已装的版本（新→旧），`生效 21` 是当前生效版本 |
    | 🟠 `● 已装 2 个版本 · 均未生效（21、17）` | 装了版本，但系统的 `XXX_HOME` / `PATH` 没指向其中任何一个 |
    | 🔴 `○ 未安装` | 一个版本都没装 |
 
@@ -114,7 +112,7 @@
 3. 点「安装」，工具依次做：流式下载到 `~/.env-tools/<组件>/downloads/`（镜像优先、失败自动换源、可随时取消）→ 解压到 `~/.env-tools/<组件>/<组件>-<版本>/`（Miniconda 走静默安装器）→ 写 `XXX_HOME` 并把 `bin` 加进 `PATH` → 刷新该卡片状态。同一组件的旧版本目录**不会被删**，装第二个版本就是多版本并存。
 4. 想看每一步细节，点搜索条上的「📋 日志」。
 
-按钮的两条可用性规则：**下拉框选中的版本磁盘上已经装着时，「安装」是灰的**（悬停提示"要重新安装请先点「卸载」"，避免覆盖已装好的目录；想重装就先卸载再装。「开发工具」那 17 个是「下载」按钮，不适用这条）；**选中的版本已经是生效版本时，「切换」是灰的**（悬停提示"要换版本先在下拉框里选中"）。
+按钮的两条可用性规则：**下拉框选中的版本磁盘上已经装着时，「安装」是灰的**（悬停提示"要重新安装请先点「卸载」"，避免覆盖已装好的目录；想重装就先卸载再装。「开发工具」那 26 个是「下载」按钮，不适用这条）；**选中的版本已经是生效版本时，「切换」是灰的**（悬停提示"要换版本先在下拉框里选中"）。
 
 装完之后**新开一个终端**验证：
 
@@ -129,14 +127,14 @@ node -v
 
 ## 支持的组件
 
-共 **43 个**：**26 个可一键装配** + **17 个只提供官方安装包下载**（那 17 个是 GUI 工具；26 个里有 10 个还额外支持一键启停）。界面按四个 Tab 分组，Tab 标题自带数量：
+共 **87 个**：**61 个可一键装配** + **26 个只提供官方安装包下载**（那 26 个是 GUI 工具；61 个里有 15 个还额外支持一键启停）。界面按四个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
-| 开发环境 | 10 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7 |
-| 开发软件 | 6 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl |
-| 开发工具 | 17 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat |
-| 一键启停 | 10 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins |
+| 开发环境 | 32 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant |
+| 开发软件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
+| 开发工具 | 26 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman |
+| 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
 
 > 想调整归类：普通组件改 `main.py` 里 `COMPONENT_CATEGORY_OF` 的一行即可；「一键启停」那一页不用登记——组件进了启动白名单 `LAUNCH_OF` 就自动出现在那里，退出来就自动回到原分类。
 
@@ -152,6 +150,11 @@ node -v
 | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | Bun | —（走 PATH） | `bun --version` | 1.x |
 | PowerShell 7 | —（走 PATH） | `pwsh --version` | 7.6.x / 7.5.x / 7.4.x。三平台都有官方便携包（Windows zip、Linux / macOS tar.gz）；上游只在 GitHub Releases 发版，实测无国内真镜像，走 GitHub 加速器 |
+| Kotlin 编译器 | —（走 PATH） | `kotlinc -version` | 2.4.x。三平台同一个 `kotlin-compiler-<v>.zip`（编译器是 JVM 产物），解压顶层是 `kotlinc/`；只在 GitHub Releases 发版，走 GitHub 加速器 |
+| GraalVM (CE) | `GRAALVM_HOME` | `java -version` | 25.x。**刻意不复用 `JAVA_HOME`** —— 写同一个变量会和 JDK (Temurin) 互相覆盖对方的生效版本。资产按平台分档，版本号在**资产名**里（tag 是 `graal-…`，与版本不是一回事） |
+| Rust | —（走 PATH） | `rustc --version` | 1.99.x / 1.98.x / 1.97.x。**仅 Windows**：官方 `.exe` 安装器已停发、合并 tar.xz 里没有统一 `bin/`，改用官方 MSI 做**管理性提取**（`msiexec /a`，免提权、不写注册表）。⚠ 还需要一个链接器：没装 VS Build Tools 时 `rustc` 能编译但链接不过（Git for Windows 自带的 `link.exe` 会冒充 MSVC 链接器，报的是莫名其妙的 `link: extra operand`）。只登记了 Windows，见[平台支持与例外](#平台支持与例外) |
+| .NET SDK | —（走 PATH） | `dotnet --version` | 10.0.x。走官方 **zip 便携包**（不是安装器），解压根就是 `dotnet.exe`；版本清单读微软 `release-metadata` JSON，登记的是 **SDK 版本号**（10.0.401）而不是它所属的 release 号。只有微软 CDN 一个源（清华 / 阿里都没有它的制品树） |
+| Deno | —（走 PATH） | `deno --version` | 2.x。单文件运行时，zip 顶层直接就是 `deno.exe`；只在 GitHub Releases 发版，走 GitHub 加速器 |
 
 ### 构建工具
 
@@ -159,6 +162,9 @@ node -v
 |------|----------|----------|--------------|
 | Apache Maven | `MAVEN_HOME` | `mvn -v` | 3.9.x / 3.8.x |
 | Gradle | `GRADLE_HOME` | `gradle -v` | 8.x / 7.x |
+| protoc（Protobuf 编译器） | —（走 PATH） | `protoc --version` | 36.x。zip 顶层是 `bin/` + `include/` 两个并列目录；只有 Windows 一档按 R1 实测过（npmmirror 有真镜像），Linux / macOS 官方也有包但未实测，见[平台支持与例外](#平台支持与例外) |
+| CMake | —（走 PATH） | `cmake --version` | 4.4.x。包外面套了一层 `cmake-<v>-windows-x86_64/`，而 `cmake.exe` 在那层的 **`bin/`** 里（不是根目录 —— 这一格是被归档布局审计抓出来的，抄相邻组件会抄错） |
+| Ninja | —（走 PATH） | `ninja --version` | 1.13.x。单文件 zip，解压根即 `ninja.exe` |
 
 ### 应用服务器与 Web 服务
 
@@ -166,6 +172,8 @@ node -v
 |------|----------|----------|--------------|
 | Apache Tomcat | `CATALINA_HOME` | `catalina version` | 10.1 / 9.0 / 8.5 |
 | Nginx | —（走 PATH） | `nginx -v` | 1.31.x / 1.30.x / 1.28.x。仅 Windows 有官方预编译 zip，见[平台支持与例外](#平台支持与例外) |
+| Caddy | —（走 PATH） | `caddy version`（本工具用 `--version`） | 2.11.x。单文件 Web 服务器，自动 HTTPS；`caddy` 只有 GitHub 一档，走加速器。**只提供下载与环境变量**，起服务请自己 `caddy run`（本工具没登记它的启停） |
+| Traefik | —（走 PATH） | `traefik version` | 3.7.x。云原生反向代理，同上只下载不启停。⚠ 它认的是子命令 `version`，`--version` 会打印帮助并回非 0 —— 版本探测命令按实测写 |
 
 ### 数据库
 
@@ -174,6 +182,14 @@ node -v
 | MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x（阿里 / 华为云镜像 + 官网）。**解压后还需自己执行 `mysqld --initialize`**，本工具不做数据库初始化 |
 | MongoDB | —（走 PATH） | `mongod --version` | 8.0.x / 8.0.0（Windows / Linux；macOS 无免安装二进制） |
 | PostgreSQL | `PG_HOME` | `psql --version` | 17.x / 16.x（仅 Windows 支持自动下载） |
+| SQLite（命令行） | —（走 PATH） | `sqlite3 --version` | 3.5x。官方 `sqlite-tools-win-x64-<六位版本>.zip`（3.54.0 → `3540000`，路径还带年份目录），解压根就是 `sqlite3.exe`。**只有 sqlite.org 一个源**（清华 404、华为那个 `sqlite/` 目录回 200 但只有 12 KB 门户壳，是假源） |
+| DuckDB CLI | —（走 PATH） | `duckdb --version` | 1.5.x。单文件分析型数据库，解压根即 `duckdb.exe`；只在 GitHub Releases 发版 |
+
+### 键值缓存
+
+| 组件 | 环境变量 | 检测命令 | 默认可用版本 |
+|------|----------|----------|--------------|
+| Redis | —（走 PATH） | `redis-server --version` | 8.10.x。**仅 Windows，且是社区构建**（`redis-windows`），不是官方出品 —— 官方只发源码，`download.redis.io` 上的 tar.gz 装不出 Windows 可执行文件，卡片上会写明这一点。支持一键启停：数据落在 `~/.env-tools/redis-data`，命令行启动用的是 Redis 默认（只监听 127.0.0.1、无密码），本工具不改 `bind`、也不设 `requirepass` |
 
 ### 容器与编排
 
@@ -181,6 +197,10 @@ node -v
 |------|----------|----------|--------------|
 | Docker Desktop | —（走 PATH） | `docker --version` | 27.x / 26.x（Windows 不支持自动下载，须用官方安装器） |
 | kubectl | —（走 PATH） | `kubectl version --client` | 1.31.x / 1.30.x（三平台均支持；优先 DaoCloud 代理源；Linux / macOS 下的是无扩展名单文件，需 `chmod +x`） |
+| Helm | —（走 PATH） | `helm version` | 4.3.x。Kubernetes 包管理器。⚠ 它的 GitHub release 里只有 `.asc` / `.sha256sum` 签名，真正的二进制在 `get.helm.sh`（版本入口也在那：`helm-latest-version` 纯文本） |
+| k9s | —（走 PATH） | `k9s version` | 0.51.x。Kubernetes 终端界面，单二进制；走 GitHub 加速器 |
+| Docker Compose v2 | —（走 PATH） | `docker-compose version` | 5.x。独立二进制版 Compose。**能装能进 PATH，但真跑起来仍需要一个能用的 Docker 引擎**（Docker Desktop 在 Windows 没有免安装形态，见 Docker 卡片的引导）；登记它是因为 `docker-compose version` 这类自检不需要引擎。首位走 DaoCloud 的 GitHub 代理树（实测与官方同字节数） |
+| Trivy | —（走 PATH） | `trivy --version` | 0.75.x。容器 / 文件系统漏洞扫描，单二进制；走 GitHub 加速器 |
 
 ### CI / CD
 
@@ -197,6 +217,7 @@ node -v
 | Apache RocketMQ | `ROCKETMQ_HOME` | `mqadmin version` | 5.x |
 | Apache Pulsar | `PULSAR_HOME` | `pulsar version` | 3.x（主命令只有 POSIX shell 脚本，Windows 不支持） |
 | ActiveMQ | `ACTIVEMQ_HOME` | `activemq --version` | 6.3.x / 5.18.x |
+| NATS Server | —（走 PATH） | `nats-server --version` | 2.15.x。轻量消息 / 主题服务器，单二进制；只在 GitHub Releases 发版。**只提供下载**，启停未登记 |
 
 ### 服务发现 / 分布式事务
 
@@ -204,6 +225,9 @@ node -v
 |------|----------|----------|--------------|
 | Nacos | `NACOS_HOME` | `startup.sh` / `startup.cmd` | 2.x（发布在 GitHub Releases，无真镜像，走 GitHub 加速器） |
 | Seata | `SEATA_HOME` | `seata-server.sh -h` | 2.x（走 Apache 分发目录，八家大陆镜像） |
+| Apache ZooKeeper | —（走 PATH） | 安装检测看 `bin/zkServer` | 3.9.x（七家 Apache 镜像 + 官方 CDN）。**支持一键启停**：官方包只有 `zoo_sample.cfg`，所以工具在 `~/.env-tools/zookeeper-data/conf` 里生成一份 `zoo.cfg` 副本再改 `clientPort` / `dataDir`（官方目录一个字都不改）；启动**绕开厂商的 `zkServer.cmd` 包装器直接拉 java**（那个 .cmd 会把安装目录里的 zoo.cfg 塞成第一个参数，而且停止时只杀包装器、留下监听端口的孤儿 java）。需要 JDK，缺了会自动先装 |
+| Consul | —（走 PATH） | `consul version` | 2.0.x。**支持一键启停**：`consul agent -dev` 形态，HTTP 口用 `-http-port` 命令行直给（不落配置文件），控制台在 `/ui`、健康检查在 `/v1/health`。只有 `releases.hashicorp.com` 一个源（不是 GitHub，没有加速器可用），国内直连实测偏慢 |
+| etcd | —（走 PATH） | `etcd --version` | 3.7.x。**支持一键启停**：单 exe + 命令行改口，客户端 2379 / peer 2380 两口一起判（整簇监听才算起来）；数据目录外移到 `~/.env-tools/etcd-data`，不落任何配置文件 |
 
 ### 搜索引擎
 
@@ -222,8 +246,28 @@ node -v
 | 组件 | 环境变量 | 检测命令 | 默认可用版本 |
 |------|----------|----------|--------------|
 | Miniconda | `CONDA_HOME` | `conda --version` | py312 / py311 / py310（走静默安装器） |
+| uv（Python 包/环境管理） | —（走 PATH） | `uv --version` | 0.13.x。zip 顶层直接就是 `uv.exe` / `uvw.exe` / `uvx.exe`，没有子目录；**只保证 `uv` 这条命令可用**，shell 集成与它自己托管的 Python 版本不在本工具目录里。同样只实测了 Windows |
 
-### 关于那 17 个「开发工具」
+
+### 命令行小工具（单二进制，解压即用）
+
+这一批都没有 `XXX_HOME` 概念 —— 工具只把它们解压到 `~/.env-tools/<组件>/<组件>-<版本>/` 并把那个目录加进 `PATH`，卸载也只删这一格。版本清单全部从 GitHub Releases 的**资产名严格匹配**读回来（同一个 release 里往往同时躺着 `.sha256` / `.sbom` / arm 包，靠后缀猜会装错东西）。
+
+| 组件 | 检测命令 | 默认可用版本 | 备注 |
+|------|----------|--------------|------|
+| jq | `jq --version` | 1.8.x | 裸 exe 单文件（不是 zip），JSON 处理 |
+| yq | `yq --version` | 4.5x | 同上裸 exe，YAML 版 jq |
+| ripgrep (`rg`) | `rg --version` | 15.x | 递归文本搜索；它的 release tag **不带 `v` 前缀**（这一条单独钉过，拼错就 404） |
+| fd | `fd --version` | 10.x | 文件名搜索 |
+| fzf | `fzf --version` | 0.74.x | 模糊查找器。**只做命令可用**，shell 键位绑定请自行配置 |
+| bat | `bat --version` | 0.26.x | 带语法高亮的 `cat` |
+| eza | `eza --version` | 0.23.x | `ls` 的替代品 |
+| zoxide | `zoxide --version` | 0.10.x | `cd` 的模糊跳转。同样不做 shell 集成（它的 `init` 需要写进你的 rc 文件） |
+| pnpm | `pnpm --version` | 12.x | Node 包管理器。**只放二进制**，不改 `corepack`、不动全局 `node_modules`；要用它接管 `npm` 得你自己 `corepack enable` |
+| uv | `uv --version` | 0.13.x | Python 包 / 环境管理器，见上面 [Python 发行版](#python-发行版) |
+| protoc | `protoc --version` | 36.x | 见上面 [构建工具](#构建工具) |
+
+### 关于那 26 个「开发工具」
 
 它们是 GUI 软件，本工具只负责"把官方安装包下到你选的目录"，所以卡片上**只有版本下拉框和下载按钮**——没有绿勾、不扫你的磁盘、没有切换与卸载按钮，也不会解压或写环境变量。
 
@@ -240,7 +284,7 @@ node -v
 |------|------|----------------|
 | Docker | Windows | 官方只发安装器（涉及 WSL2 / Hyper-V 集成与服务注册），请到 docker.com 手动下载 |
 | Apache Pulsar | Windows | 主命令 `pulsar` 是 POSIX shell 脚本，官方起步要求 Docker 或 WSL |
-| RabbitMQ | Windows | 属"安装器 + 服务注册"场景。工具能自动装它需要的 Erlang/OTP 前置，但服务端仍建议走官方安装器 |
+| RabbitMQ | Windows | 属"安装器 + 服务注册"场景。工具能自动下载它、并按版本自动配好配套的 Erlang/OTP 前置再一键启停（4.x 配 27.x、3.13 配 26.x）；Windows 安装器形态仍可用于其它场景 |
 | Nginx | Linux / macOS | 上游只发源码包，请用 `apt / dnf / yum install nginx` 或 `brew install nginx`。Windows zip 实测只有华为云两个子域同步（清华 / 北外 / 南大 / 阿里 / 腾讯均 404） |
 | Python | Linux / macOS | 官方只提供源码包，不是解压即用的解释器（未决事项，见 `DEVELOPMENT.md`） |
 | PostgreSQL | Linux / macOS | EnterpriseDB 只提供 Windows 二进制 zip；Linux 用发行版包管理器，macOS 用 `brew install postgresql` |
@@ -249,6 +293,10 @@ node -v
 | kubectl | Linux / macOS | 能下；下的是无扩展名单文件，需 `chmod +x` 后运行 |
 | JDK | 全平台 | 镜像上的确切文件名带 build 号，**必须先点「⟳ 刷新版本」**才解析得出来 |
 | MongoDB / PostgreSQL | 全平台 | 实测没有任何大陆镜像，只有官网单源，国内速度偏慢属正常 |
+| Rust | Linux / macOS | 上游只发 `rustup-init` 与源码包，没有"解压即用"的目录形态（合并 tar.xz 里是 `rustc/` + `cargo/` 等组件目录，要靠 installer 合并 sysroot）。请用官方 `rustup` 或系统包管理器安装 |
+| Redis | Linux / macOS | 官方只发源码包；本工具登记的 Windows 包是**社区构建**（非官方），不挪到 POSIX 平台。Linux 用 `apt / dnf install redis`，macOS 用 `brew install redis` |
+| protoc | Linux / macOS | 官方也有 `protoc-<v>-{linux-x86_64,osx-*}.zip`，但本工具尚未按 R1 实测那两个平台的源。用 `apt install protobuf-compiler` 或 `brew install protobuf`（版本可能落后官方） |
+| uv | Linux / macOS | 官方也发 tar.gz，同样未实测。用官方安装脚本 `curl -LsSf https://astral.sh/uv/install.sh | sh`，或 `brew install uv` |
 
 ---
 
@@ -256,7 +304,7 @@ node -v
 
 ### 同一组件装多个版本，切换「生效版本」
 
-26 个可装配组件全都支持多版本并存（只下载的 17 个磁盘上不落东西，不在这一类），每个版本一个目录：`~/.env-tools/<组件>/<组件>-<版本>/`（例如 `jdk-21` 与 `jdk-17` 并存）。界面上的「生效版本」指明"系统现在实际在用哪一个"。
+61 个可装配组件全都支持多版本并存（只下载的 26 个磁盘上不落东西，不在这一类），每个版本一个目录：`~/.env-tools/<组件>/<组件>-<版本>/`（例如 `jdk-21` 与 `jdk-17` 并存）。界面上的「生效版本」指明"系统现在实际在用哪一个"。
 
 - **绿色对勾 = 磁盘上已装**。带勾的版本可以直接点「卸载」；没勾的点了也没东西可删，所以「卸载」是灰的。
 - **已装版本一定会出现在下拉框里**。在线清单会更新，某个版本可能已被挪出清单但你磁盘上还装着——这时下拉框会按版本号大小把它补回原位并带上绿勾；否则这种版本既选不中、也切不了、还卸不掉，只能手工删目录。补录对所有可装配组件一视同仁（2026-10-06 起）——原先只给多版本组件补，jenkins / nacos 这类照样会遇到「清单里没有、磁盘上装着」。
@@ -337,9 +385,9 @@ where java
 
 | 位置 | 内容 |
 |---|---|
-| 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.0 检查中` = 正在查；`v1.2.0 最新` = 已是最新；`↓ v1.2.1 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.0 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
+| 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.1 检查中` = 正在查；`v1.2.1 最新` = 已是最新；`↓ v1.2.2 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.1 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
 | 标题栏（右） | 「★ GitHub」打开仓库 · 「⟳ 刷新版本」绕过缓存强制重抓在线清单 · 「🧹 清理残留 PATH」清死条目 · 「🖥 开验证终端」用系统为新进程合成的环境开一个命令行 · 「♥」支持作者 · 最小化 / 最大化 / 关闭 |
-| 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 43 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
+| 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 87 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
 | 卡片区 | 四个横向 Tab（标题带数量）。每张卡片：名称、状态标签（悬停看完整说明）、版本下拉（可搜索，磁盘已装的带绿勾）、操作按钮（安装 / 切换 / 卸载，可启停的还有启动 / 停止 / 控制台或访问页，只下载的只有下载）、渐变进度条。卡片按窗口宽度自动分列 |
 | 日志浮层 | 默认收起、浮在卡片区下方；点「📋 日志」展开，出现 warn / error 会自动弹开并在按钮上挂未读条数。四色分级（info 灰、ok 绿、warn 橙、error 红），全程中文（含镜像切换与故障转移过程） |
 | 底部状态栏 | 系统信息、**可点开的工作目录**（点一下在资源管理器里打开）、组件计数。版本号不在这里，在标题栏那颗 chip |
@@ -365,7 +413,7 @@ where java
 | 脚本 | 作用 |
 | --- | --- |
 | `一键启动项目.bat` | 准备环境后直接启动 GUI（源码方式，改完代码立刻生效） |
-| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/ByteTools.exe` |
+| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/ByteTools/ByteTools.exe`（onedir，启动零解压） |
 
 两者共用同一套自动装配流程：
 
@@ -455,7 +503,7 @@ components.append(
 
 ### 版本清单缓存与 GitHub 额度
 
-在线版本清单**抓成功会落盘**（`~/.env-tools/version_cache.json`，一天内不重抓）。原因很实际：GitHub 匿名 API 的额度是**每个 IP 每小时 60 次**，而本工具一次启动要替 26 个组件各打一次——一小时内第二次打开工具、或者连点几次刷新，额度就会见底，日志里就会出现成片的"获取失败"。
+在线版本清单**抓成功会落盘**（`~/.env-tools/version_cache.json`，一天内不重抓）。原因很实际：GitHub 匿名 API 的额度是**每个 IP 每小时 60 次**，而本工具一次启动要替 77 个组件各抓一次版本清单（其中一大批打的正是 GitHub API）——一小时内第二次打开工具、或者连点几次刷新，额度就会见底，日志里就会出现成片的"获取失败"。
 
 - 命中缓存时日志会写"沿用 24 小时内抓到的版本清单（N 个组件）"，这次不打网络。
 - 想要最新版本号，点 **「⟳ 刷新版本」**——它绕过缓存强制重抓。
@@ -469,7 +517,7 @@ components.append(
 CONFIG_DIR = Path.home() / ".env-tools"
 ```
 
-「开发工具」那 17 个的**下载目录**是另一件事：第一次下载时记住你选的目录（存在 `config.json`），之后默认落在同一个位置；没记录过、或那个目录后来被删了，就回落到系统「下载」文件夹。这个目录不属于工作目录。
+「开发工具」那 26 个的**下载目录**是另一件事：第一次下载时记住你选的目录（存在 `config.json`），之后默认落在同一个位置；没记录过、或那个目录后来被删了，就回落到系统「下载」文件夹。这个目录不属于工作目录。
 
 ---
 
@@ -488,7 +536,7 @@ pyinstaller byte-tools.spec --noconfirm --clean
 
 > 如果你这台机器上 PyInstaller 一启动就长时间没输出（WINMGMT 冷启动，`platform.win32_ver()` 卡住不返回），改用仓库里现成的入口，效果相同但全程不查 WMI：`python pyinstaller_no_wmi.py byte-tools.spec --noconfirm --clean`。双击那个 `.bat` 走的已经是这条路径。
 
-产物：Windows `dist/ByteTools.exe` · macOS `dist/ByteTools.app` · Linux `dist/ByteTools`。Windows 产物带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出 16~256 七档尺寸）；换 logo 后重新生成 ICO 的方法见 [`CODE_WIKI.md`](CODE_WIKI.md) 7.4。覆盖打包后资源管理器仍显示旧图标是 Windows 的图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
+产物：Windows `dist/ByteTools/ByteTools.exe`（onedir 目录） · macOS `dist/ByteTools.app` · Linux `dist/ByteTools`。Windows 产物带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出 16~256 七档尺寸）；换 logo 后重新生成 ICO 的方法见 [`CODE_WIKI.md`](CODE_WIKI.md) 7.4。覆盖打包后资源管理器仍显示旧图标是 Windows 的图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
 
 **打完一定要自己跑一次再关窗，确认退出码是 0**——"关窗闪退"的成因与取证脚本见 `DEVELOPMENT.md` 规则 R14。
 
@@ -536,7 +584,7 @@ GitHub 侧全自动，**Gitee 侧要你在本机补一步上传**（境外 runne
 
 ### `release-assets/` 每次先清空，是刻意的
 
-四个产物**跨 tag 同名**（v1.1.2 起都叫 `ByteTools.exe`），"文件已存在"根本说明不了它属于哪个版本。早先的写法是"存在且非 0 字节就跳过下载"，于是上个 tag 留下的包会被原样传进新 tag 的 Gitee Release，而末尾那道核对只看附件名，照样报 OK（2026-10-10 就是这么撞上"传上去的全是旧的"）。
+四个产物**跨 tag 同名**（Windows 主产物 v1.2.0 起叫 `ByteTools-windows-x64.zip`，`ByteTools.exe` 为旧 onefile 兼容名），"文件已存在"根本说明不了它属于哪个版本。早先的写法是"存在且非 0 字节就跳过下载"，于是上个 tag 留下的包会被原样传进新 tag 的 Gitee Release，而末尾那道核对只看附件名，照样报 OK（2026-10-10 就是这么撞上"传上去的全是旧的"）。
 
 现在 `:clear_stale` 会在下载前把暂存目录整个删掉重下；删不掉（文件被占用等）就**直接停下不再上传**，而不是悄悄传一份来历不明的包。代价是**中途失败后重跑要重新下约 218 MB**。
 
@@ -585,7 +633,7 @@ unset GITEE_TOKEN
 ## 常见问题
 
 **Q1. 一片组件报「官网版本获取失败，使用内置默认列表」？**
-两种原因，日志会分开写。① **GitHub 匿名额度用完了**（每个 IP 每小时 60 次，而一次启动要打 26 次）——等一小时，或者少连点几次「⟳ 刷新版本」；本机有 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量时会自动带上，额度提升到 5000 次/小时。② 网络或源的问题——日志会带上真实原因（超时 / 404 / DNS 解析）。**两种都不影响使用**：抓取失败自动回退内置清单，内置清单里的版本本来就能正常下载安装。工具还会把抓到的清单缓存一天，见[版本清单缓存与 GitHub 额度](#版本清单缓存与-github-额度)。
+两种原因，日志会分开写。① **GitHub 匿名额度用完了**（每个 IP 每小时 60 次，而一次启动要抓 77 份清单）——等一小时，或者少连点几次「⟳ 刷新版本」；本机有 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量时会自动带上，额度提升到 5000 次/小时。② 网络或源的问题——日志会带上真实原因（超时 / 404 / DNS 解析）。**两种都不影响使用**：抓取失败自动回退内置清单，内置清单里的版本本来就能正常下载安装。工具还会把抓到的清单缓存一天，见[版本清单缓存与 GitHub 额度](#版本清单缓存与-github-额度)。
 
 **Q2. 下载卡在某个百分比不动？**
 可能是网络或镜像限速。点「取消」后重试，工具会自动换下一个源；反复失败时展开「📋 日志」看是哪个源失败、切到了哪个源，也可以点「⟳ 刷新版本」重新解析镜像上的最新版本与文件名（JDK 尤其需要）后再试。

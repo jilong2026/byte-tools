@@ -172,3 +172,14 @@ bt_mv_results.txt
 # 真机演练的输出（bt_live_matrix.py 每次运行一份）：是证据不是源码，
 # 单次运行几百行 JSON，全部入库只会把仓库撑大。复查时按报告里写的命令重跑即可。
 live_*.json
+
+# 探源探针与一次性取证脚本（结论落 DEVELOPMENT.md R1.5 台账，脚本不入库）。
+# 变异自检 / 冷启动测量 / 防御性备份同源，2026-10-13 补齐。
+.probe*
+*.drill_*.py
+*.extract_*.ps1
+*.read_*.ps1
+*.mutation*.py
+.bench_*.py
+.*.bak_mutation
+.check_anchors.py

@@ -119,15 +119,18 @@ class TabStructure(unittest.TestCase):
         for key in DEFERRED_KEYS:
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
-    def test_visible_component_count_is_43(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（26 老 + 17 新）。
+    def test_visible_component_count_is_87(self):
+        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 26 只下载）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
+        2026-10-12 一路累加：47 → 49（protoc/uv）→ 58（B6a 九个只下载）→ 75（+pnpm/helm）
+        → 83（B3/B5 与并发那批）→ 85（B7 的 ant / jmeter）→ 86（B4 补的 minio）
+        → 87（Dart）。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 43)
-        self.assertEqual(len(self.components), 44, "43 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 87)
+        self.assertEqual(len(self.components), 88, "87 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -1073,7 +1076,13 @@ class ArtifactMenu(_EnvSandbox):
                    "cdn.apifox.com",
                    "dl.google.com", "edgedl.me.gvt1.com",             # 同一文件，6.15 MB/s 排前
                    "aka.ms",                      # 微软给的稳定别名，跟到 download.visualstudio…
-                   "download.navicat.com")
+                   "download.navicat.com",
+                   # 2026-10-12 B6a：九个客户端，域名逐个实测过（含 alt 产物）
+                   "github.com",                 # dbeaver / heidisql / bruno / ardm
+                   "downloads.mongodb.com",      # compass：msi / exe / zip 三形态
+                   "mirror.nju.edu.cn", "ftp.postgresql.org",   # pgadmin4：南大 + 官方
+                   "cdn.mysql.com",              # workbench：msi / zip
+                   "dl.pstmn.io")                # postman：按版本取的那条地址
         for comp in main.build_components():
             if not comp.download_only:
                 continue

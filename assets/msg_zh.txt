@@ -45,7 +45,7 @@ pyi_done=      PyInstaller 安装完成
 pack_ok_1=  打包成功: {0}
 pack_ok_2=  文件大小: {0} 字节
 pack_ok_3=  生成时间: {0}
-pack_ok_4=  双击 dist 里的 ByteTools.exe 即可运行，也可拷到其他 Win10/11 64 位电脑
+pack_ok_4=  双击 dist\ByteTools\ByteTools.exe 即可运行；换电脑要拷整个 dist\ByteTools 文件夹
 
 boot_winget=      没找到可用 Python，正在用 winget 静默安装 3.12（用户级，无需管理员）...
 boot_winget_fail=      winget 没能装出可用的 Python，改用官方安装包直接下载...
@@ -74,4 +74,4 @@ err_main_1=[错误] 启动失败，退出码: {0}
 err_main_2=       请把上面的报错信息一起反馈，方便定位。
 err_pack_1=[错误] 打包失败，退出码: {0}
 err_pack_2=       请把上面的报错信息一起反馈，方便定位。
-err_no_dist=[错误] 打包流程结束，但没有找到 dist\ByteTools.exe
+err_no_dist=[错误] 打包流程结束，但没有找到 dist\ByteTools\ByteTools.exe

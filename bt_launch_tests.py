@@ -34,13 +34,22 @@ class LaunchSpecTable(unittest.TestCase):
         # （每一个都有当天的真机实测报告，见 .workbuddy/verify_*.md）。
         # 同日再扩到 10 个：新增 seata（双进程，实测报告见
         # docs/LAUNCH_CANDIDATES.md 的 seata 一节）。
+        # 2026-10-12 扩到 11 个：新增 redis —— 当天在 %TEMP% 里跑真进程实测
+        # （--port 改口生效、--dir+SAVE 落 dump.rdb、按登记 PID terminate 即端口释放）。
         # 这条断言的作用是"多一个组件就要多一份实测事实"，所以**不能放宽成
         # 「只要在 LAUNCH_OF 里就行」** —— 那等于取消约束。
         self.assertEqual(
             main.LAUNCH_KEYS,
             {"jenkins", "nacos", "activemq",
              "rocketmq", "nginx", "kafka", "tomcat", "elasticsearch", "rabbitmq",
-             "seata"},
+             "seata", "redis",
+             # 2026-10-12 B4/B2：etcd / consul 是"单 exe + CLI flag 改口 + 登记 PID 即
+             # 监听者"（%TEMP% 真机跑过）；zookeeper 是首个 needs=("jdk",) 且
+             # **绕开厂商 .cmd 包装器直接 spawn java** 的（实测 Popen.pid 就是监听者）。
+             "etcd", "consul", "zookeeper",
+             # 2026-10-12 B4 补：minio 同为"单 exe + CLI flag 改口 + Popen.pid 就是
+             # 监听者"（真机实测：两口齐听 1.6–2.9s、terminate 0.07s 退出、端口即释放）。
+             "minio"},
             "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
         self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
@@ -3014,11 +3023,20 @@ class RunningTabMarker(unittest.TestCase):
     def setUp(self):
         self.app = QApplication.instance() or QApplication([])
         self._orig_file, self._orig_dir = main.RUNNING_FILE, main.CONFIG_DIR
+        self._orig_cfg, main.CONFIG_FILE = main.CONFIG_FILE, None
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         main.RUNNING_FILE = Path(self.dir.name) / "running.json"
         main.CONFIG_DIR = Path(self.dir.name)
+        # `CONFIG_FILE` 是 import 期从 `CONFIG_DIR` 拼出来的常量，**只挪 CONFIG_DIR 不生效**：
+        # 本类的用例 `addCleanup(win.close)` 会走 closeEvent → `_save_settings()`，
+        # 而它写的是 CONFIG_FILE。2026-10-12 新增四个组件后这件事露了馅 ——
+        # 用户真实的 ~/.env-tools/config.json 里凭空多出 kotlin/graalvm/rust/redis 四条
+        # 下拉框选中项。`_save_settings` 是幂等合并写，所以之后每次跑哈希都不变，
+        # 光比哈希查不出来（要先摘掉那几个 key 再看谁写回来）。
+        main.CONFIG_FILE = Path(self.dir.name) / "config.json"
         self.addCleanup(setattr, main, "RUNNING_FILE", self._orig_file)
+        self.addCleanup(setattr, main, "CONFIG_FILE", self._orig_cfg)
         self.addCleanup(setattr, main, "CONFIG_DIR", self._orig_dir)
         # 端口探测桩成"全在听"，让 status() 判成 running（不真起进程）
         self._orig_listen = main.SERVICE_MANAGER._is_listening
@@ -3592,6 +3610,210 @@ class PreStartAndPrereqWiring(unittest.TestCase):
                       "nacos 走完整 start() 应该能登记成功（这条钉的是零回归）")
 
 
+class MinioSpec(unittest.TestCase):
+    """2026-10-12 B4 补：MinIO 接进一键启停的规格护栏。
+
+    这一批要钉住的不是"字段填了没"，而是三个**只有真机才看得见**的形态：
+
+      ① 控制台口与 API 口是两个口，而且 **API 口上没有任何网页**（实测 `/`、
+         `/login`、`/bucket/minio/browse` 一律 403）。`console_url` 恒按主口拼，
+         所以 `console_path` 必须留 None —— 填 "/" 就等于给用户一扇 403
+         （nginx/tomcat 当年那个坑的翻版，见 on_console_clicked 的注释）。
+      ② 版本号不能直接用 tag：`RELEASE.2025-09-07T16-13-09Z` 过不了
+         `_version_parts`（首段以字母开头返回 None），下拉框与目录名都靠它排序。
+      ③ 官方分发口 `dl.min.io` 已全线 410，登记的产物只挂在 release 资产上 ⇒
+         配置里一个 `dl.min.io` 都不许出现（出现就等于挂了一个必 410 的假源）。
+
+    启动耗时、PID 归属、停止与端口释放都是本机 %TEMP% 真进程量出来的
+    （两口齐听 1.6–2.9s、terminate 0.07s 退出、端口立即释放、无残留监听），
+    台账见 DEVELOPMENT.md R1.5 的 MinIO 一节。本类全部离线，不起真实进程。
+    """
+
+    def setUp(self):
+        self.comp = next(c for c in main.build_components() if c.key == "minio")
+        self.spec = self.comp.launch
+
+    def test_minio_is_registered_for_launch_and_shows_in_the_launch_tab(self):
+        self.assertIn("minio", main.LAUNCH_KEYS)
+        self.assertIsNotNone(self.spec)
+        self.assertEqual(self.comp.category, "一键启停")
+        # 不是只下载那一批：它要真装到 ~/.env-tools/minio/ 并能起停
+        self.assertFalse(self.comp.download_only)
+        self.assertTrue(self.comp.multi_version)
+
+    def test_console_path_stays_none_because_the_api_port_serves_no_web_page(self):
+        """实测判据：9000 上发什么都拿不到网页 ⇒ 控制台 URL 不许按主口拼。"""
+        self.assertIsNone(
+            self.spec.console_path,
+            "console_url 按主口(9000)拼，而 9000 只讲 S3 协议、`/` 实测 403；"
+            "填任何路径都会让用户点开一扇 403，以为没启动成功")
+        self.assertIsNone(self.spec.health_path,
+                          "判活走整簇 TCP，不发 HTTP ⇒ 没有探活路径可填")
+
+    def test_console_port_is_the_derived_sibling_of_the_api_port(self):
+        """控制台 = API + 1 ⇒ 必须走 port_offsets（派生口），不是 extra_ports。
+
+        用 extra_ports 会让框架给控制台另找一个空口，而命令里的 {peer} 恒等于
+        port+1 —— 两边不一致就是"起来了但整簇判不过"（etcd 的 peer 口同理）。
+        """
+        self.assertEqual(self.spec.main_port, 9000)
+        self.assertEqual(self.spec.port_offsets, (1,))
+        self.assertEqual(tuple(self.spec.extra_ports), ())
+        plan, why = main.choose_ports(self.spec, is_free=lambda p: True,
+                                      evict=False)
+        self.assertEqual(plan.all_ports, (9000, 9001), why)
+
+    def test_argv_puts_loopback_on_both_ports_and_data_under_storage(self):
+        """命令里的两个口都写死 127.0.0.1，数据落 {data_dir}/storage。"""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            orig, main.CONFIG_DIR = main.CONFIG_DIR, root
+            self.addCleanup(setattr, main, "CONFIG_DIR", orig)
+            plan = main.build_launch_plan(self.comp, self.spec, str(root / "jdk"),
+                                          self.spec.main_port, root / "minio.log")
+            argv = plan.argv
+        joined = " ".join(argv)
+        self.assertIn("server", argv, "MinIO 的服务形态是 `minio server <目录>`")
+        self.assertIn("127.0.0.1:9000", joined)
+        self.assertIn("127.0.0.1:9001", joined,
+                      "{peer} 必须解成主口+1，与控制台口的派生关系一致")
+        # argv 里是模板原样的正斜杠（`{data_dir}/storage`），不能拿 Path 的反斜杠去比
+        self.assertIn("minio-data/storage", joined.replace("\\", "/"),
+                      "对象数据要在 storage 子目录里：logs/ 是它的兄弟，不能同层")
+        # 实测 Popen 的 PID 就是那两个口的持有者 ⇒ 按登记 PID 停
+        self.assertEqual(self.spec.stop_kind, "pid")
+        self.assertEqual(self.spec.port_writeback, "cli_flag")
+        self.assertEqual(self.spec.needs, (), "MinIO 是 Go 静态包，不需要 JDK")
+
+    def test_the_measured_startup_timeout_is_not_a_guess(self):
+        """`startup_timeout = 实测 × 2 向上取整到 10s`（规则 R5）。
+
+        实测两口齐听 1.6–2.9s（含"数据目录里已有 logs/ 兄弟"那种现场），
+        ×2 ≈ 6s ⇒ 取 10s。写 120s 会让"根本没起来"也要等两分钟才报失败。
+        """
+        self.assertEqual(self.spec.startup_timeout, 10)
+
+    def test_version_is_the_dotted_form_not_the_release_tag(self):
+        """`RELEASE.2025-09-07T16-13-09Z` → `2025.9.7`，原样用 tag 会毁掉排序。"""
+        self.assertEqual(self.comp.versions[0].version, "2025.9.7")
+        self.assertIsNotNone(main._version_parts(self.comp.versions[0].version))
+        self.assertIsNone(main._version_parts("RELEASE.2025-09-07T16-13-09Z"),
+                          "这条用例的前提：直接用 tag 是排不动的")
+
+    def test_minio_version_of_maps_the_tag(self):
+        cases = {
+            "RELEASE.2025-09-07T16-13-09Z": "2025.9.7",
+            "RELEASE.2025-07-23T15-54-02Z": "2025.7.23",
+            "RELEASE.2025-04-03T14-56-28Z": "2025.4.3",
+            "v1.2.3": "",                 # 不是这个形态就不硬转
+            "": "",
+            None: "",
+        }
+        for tag, want in cases.items():
+            with self.subTest(tag=tag):
+                self.assertEqual(main._minio_version_of(tag), want)
+
+    def test_urls_are_the_github_asset_through_accelerators_with_bare_last(self):
+        urls = list((self.comp.versions[0].url_list_map or {}).get("Windows") or [])
+        self.assertGreaterEqual(len(urls), 4, f"源不够：{urls}")
+        mainland = [u for u in urls
+                    if any(a in u for a in main.GH_ACCELERATORS)]
+        self.assertGreaterEqual(len(mainland), 3,
+                                f"GitHub 产物必须三个加速器在前：{urls}")
+        self.assertEqual(urls[-1],
+                         "https://github.com/minio/minio/releases/download/"
+                         "RELEASE.2025-09-07T16-13-09Z/"
+                         "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe")
+        self.assertEqual(self.comp.versions[0].archive_for_current(), "exe",
+                         "单文件 .exe ⇒ 走单二进制早退分支并按 R7 改名 minio.exe")
+
+    def test_dead_official_host_dl_minio_appears_nowhere(self):
+        """`dl.min.io` 实测 410 Gone（开源版归档）—— 出现即假源。"""
+        for cv in self.comp.versions:
+            for os_key, lst in (cv.url_list_map or {}).items():
+                for u in lst:
+                    self.assertNotIn("dl.min.io", u,
+                                     f"{os_key}/{cv.version} 挂了已 410 的官方域：{u}")
+
+    def test_the_zero_asset_release_is_not_promoted_by_the_fetcher(self):
+        """抓取器只收**真有 Windows exe 资产**的 release。
+
+        这就是我这轮推翻自己结论的地方：`/releases/latest`（RELEASE.2025-10-15）
+        的 assets 数是 0，而**上一版**有 48 个。所以"latest 没有资产"绝不能
+        等于"这个产品没有可用产物"，判据必须落到资产名。
+        """
+        fake = [
+            {"tag_name": "RELEASE.2025-10-15T17-29-55Z", "draft": False,
+             "prerelease": False, "assets": []},
+            {"tag_name": "RELEASE.2025-09-07T16-13-09Z", "draft": False,
+             "prerelease": False,
+             "assets": [{"name": "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe",
+                         "size": 113115136,
+                         "browser_download_url":
+                             "https://github.com/minio/minio/releases/download/"
+                             "RELEASE.2025-09-07T16-13-09Z/"
+                             "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe"},
+                        {"name": "minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z",
+                         "size": 120000000,
+                         "browser_download_url":
+                             "https://github.com/minio/minio/releases/download/"
+                             "RELEASE.2025-09-07T16-13-09Z/"
+                             "minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z"},
+                        {"name": "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z"
+                                 ".exe.sha256", "size": 100,
+                         "browser_download_url":
+                             "https://github.com/minio/minio/releases/download/"
+                             "RELEASE.2025-09-07T16-13-09Z/"
+                             "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z"
+                             ".exe.sha256"}]},
+        ]
+        orig = main._github_api_json
+        main._github_api_json = lambda url, timeout=None: fake
+        self.addCleanup(setattr, main, "_github_api_json", orig)
+        out = main.fetch_minio_versions()
+        self.assertEqual([v.version for v in out], ["2025.9.7"])
+        url = out[0].url_list_map["Windows"][-1]
+        self.assertTrue(url.endswith(
+            "minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe"),
+            f"要的是 Windows exe，实际 {url}")
+        self.assertNotIn(".sha256", url, "旁证校验文件不能当安装包")
+        self.assertNotIn("linux", url, "同一 release 里的 linux 包不能混进来")
+
+    def test_single_binary_form_is_the_measured_one(self):
+        """归档形态实测值：`path_subdir=""` + `exec_name="minio"`，两个都不能抄别家。
+
+        这两条是变异自检（2026-10-12）抓出来的**真空**：当时 11 条用例一条都没断它们，
+        于是把 `path_subdir` 从 `""` 抄成 `"bin"`、把 `exec_name` 留空，四套定向全绿。
+
+        · `path_subdir=""`：实测包**顶层就是一个 exe 文件**（不是目录），
+          `extract_archive` 走单二进制早退分支，install_dir 根就是 exe 所在处。
+          抄成 `"bin"` 之后 PATH 指的目录根本不存在，`minio` 这条命令永远不可用，
+          而卡片照样显示"已配置"。
+        · `exec_name="minio"`：R7 的落位改名靠它算出目标名
+          （`archive_ext=="exe"` ⇒ `exec_name + ".exe"` = `minio.exe`），
+          留空就不改名，落位文件叫
+          `minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe`，
+          而启动命令找的是 `{home}/minio.exe` ⇒ 点启动 `[WinError 2]`。
+        """
+        self.assertEqual(self.comp.path_subdir, "")
+        self.assertEqual(self.comp.exec_name, "minio")
+        self.assertEqual(self.comp.version_args, ["--version"])
+        self.assertFalse(self.comp.installer_mode)
+        self.assertIsNone(self.comp.env_var, "没有 MINIO_HOME 这回事")
+
+    def test_risk_note_and_data_note_tell_the_truth(self):
+        """开源版已归档 + 出厂凭据没改 + 数据落 storage：三句都必须写在卡片上。"""
+        self.assertIn("minioadmin", self.spec.credentials_hint)
+        self.assertIn("9001", self.spec.credentials_hint,
+                      "控制台在另一个口，凭据那条必须把地址说全")
+        self.assertIn("410", self.spec.data_note, "要写明官方分发口已停")
+        self.assertIn("storage", self.spec.data_note)
+        self.assertTrue(self.spec.risk_note, "risk_note 是确认框里唯一的告知")
+        self.assertIn("回环", self.spec.risk_note,
+                      "实测两口都只绑本机，这句是给用户的安全结论")
+        self.assertIn("minio-data", self.comp.data_note)
+
+
 class NewSixComponents(unittest.TestCase):
     """2026-10-06 新接入六个组件（rocketmq/nginx/kafka/tomcat/es/rabbitmq）的坑。
 
@@ -3803,18 +4025,22 @@ class NewSixComponents(unittest.TestCase):
     # ================= 共用（3 条） =================
 
     def test_launch_keys_is_exactly_the_ten_registered_components(self):
-        """`LAUNCH_KEYS` 恰好 10 个，且就是登记表里的那 10 个。
+        """`LAUNCH_KEYS` 恰好 15 个，且就是登记表里的那 15 个。
 
         断言**集合相等**而不是断言长度：只钉长度的话，
         有人把 rocketmq 换成别的 key 数量不变、护栏照样绿。
         2026-10-06 由 9 个扩到 10 个（新增 seata）。
+        2026-10-12 由 10 个扩到 11 个（新增 redis，当天真机实测）。
+        同日 B4/B2 再扩到 14 个（etcd / consul / zookeeper，三个都在 %TEMP% 跑过真进程）。
+        同日 B4 补扩到 15 个（minio：真机量过启动耗时、PID 归属、停止与端口释放）。
         """
         self.assertEqual(
             main.LAUNCH_KEYS,
             {"jenkins", "nacos", "activemq",
              "rocketmq", "nginx", "kafka", "tomcat",
-             "elasticsearch", "rabbitmq", "seata"})
-        self.assertEqual(len(main.LAUNCH_KEYS), 10)
+             "elasticsearch", "rabbitmq", "seata", "redis",
+             "etcd", "consul", "zookeeper", "minio"})
+        self.assertEqual(len(main.LAUNCH_KEYS), 15)
         # 登记表与 key 集合不许脱节（多一个 key 却没有 spec 就查不到）。
         self.assertEqual(set(main.LAUNCH_OF), main.LAUNCH_KEYS)
 
@@ -4997,6 +5223,70 @@ class AccessPageStopsAnsweringAfterStop(unittest.TestCase):
         main.save_running_map({})
         self.assertNotIn("/page/rocketmq", self._get(root)[1],
                          "首页还挂着已停止的组件 = 点进去是一张假告示")
+
+
+class LaunchMappingCoversEveryPlaceholder(unittest.TestCase):
+    """启动命令里每一个 `{占位符}`，都必须在**两处**替换表里都取得到值。
+
+    2026-10-12 真机演练第一次去起 etcd，点「启动」当场 `KeyError: 'peer'` ——
+    上一轮为了修 `{peer}` 只补了 `_plan_mapping`（pre_start 走的那张重建表），
+    而真正拼 argv 的 `build_launch_plan` 里还留着自己手写的第二份 mapping。
+    两处各抄一遍，就必然出现"改了一处、另一处静默漏"，所以这条护栏两头都过：
+
+      1. 走真实 `build_launch_plan`：不许抛 KeyError，argv 里不许残留花括号；
+      2. 走 `_plan_mapping`：spec 里出现过的每个占位符都必须在这张表里取得到值。
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.orig_cfg = main.CONFIG_DIR
+        main.CONFIG_DIR = Path(self.dir.name)
+        self.addCleanup(setattr, main, "CONFIG_DIR", self.orig_cfg)
+        self.comps = {c.key: c for c in main.build_components()}
+
+    def _tokens(self, spec):
+        import re
+        bags = []
+        for cmds in (spec.commands or {}).values():
+            bags += list(cmds)
+        bags += list((spec.extra_env or {}).values())
+        bags += list(spec.pre_start or [])
+        for per_os in (spec.shutdown_commands or {}).values():
+            bags += list(per_os)
+        bags += list(spec.service_probe or [])
+        out = set()
+        for b in bags:
+            out |= set(re.findall(r"\{([a-z_]+)\}", str(b)))
+        return out
+
+    def test_build_launch_plan_expands_every_placeholder(self):
+        for key in sorted(main.LAUNCH_KEYS):
+            spec = main.LAUNCH_OF[key]
+            comp = self.comps[key]
+            with self.subTest(key=key):
+                plan = main.build_launch_plan(
+                    comp, spec, str(Path(self.dir.name) / "jdk"),
+                    spec.main_port,
+                    Path(self.dir.name) / f"{key}-out.log")
+                leftover = [t for t in plan.argv if "{" in t or "}" in t]
+                self.assertEqual(leftover, [],
+                                 f"{key} 的 argv 里有占位符没被替换：{leftover}")
+
+    def test_plan_mapping_has_every_key_the_spec_uses(self):
+        for key in sorted(main.LAUNCH_KEYS):
+            spec = main.LAUNCH_OF[key]
+            comp = self.comps[key]
+            with self.subTest(key=key):
+                plan = main.build_launch_plan(
+                    comp, spec, str(Path(self.dir.name) / "jdk"),
+                    spec.main_port,
+                    Path(self.dir.name) / f"{key}-out.log")
+                mapping = main._plan_mapping(comp, spec, plan)
+                missing = self._tokens(spec) - set(mapping)
+                self.assertEqual(missing, set(),
+                                 f"{key} 用了 {sorted(missing)}，但 _plan_mapping 里没有这一项"
+                                 f"（pre_start / 端口回写会拿到 KeyError 或字面量）")
 
 
 if __name__ == "__main__":

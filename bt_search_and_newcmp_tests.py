@@ -243,12 +243,15 @@ class MainWindowSearchBox(unittest.TestCase):
         return out
 
     def test_search_switches_to_unified_results_panel(self):
-        # sql 命中 mysql + postgresql，二者都在「开发软件」分类
+        # sql 命中 mysql + postgresql（都在「开发软件」），外加 2026-10-12 之后
+        # 进来的三张卡：sqlite / heidisql / mysql-workbench —— 后两张是「开发工具」，
+        # 正好用来证明结果面板会跨分类出小标题。
         self.win.search_box.setText("sql")
         self.assertEqual(self.win.top_stack.currentIndex(), 1, "应切到统一结果面板")
         self.assertIs(self.win.top_stack.currentWidget(), self.win.results_area)
         visible = {c.component.key for c in self.win.cards if not c.isHidden()}
-        self.assertEqual(visible, {"mysql", "postgresql"})
+        self.assertEqual(visible, {"mysql", "postgresql", "sqlite",
+                                   "heidisql", "mysql-workbench"})
         # 结果面板里应出现「开发软件」分类小标题
         headers = [w.text() for w in self._result_widgets()
                    if w.objectName() == "resultCatHeader"]

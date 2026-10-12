@@ -6,8 +6,8 @@
 
 <p align="center">
   Set up a complete development environment on a fresh Windows / macOS / Linux machine<br/>
-  <b>with a few clicks</b>. <b>26 components</b> are handled end to end (download → unpack → set environment variables),<br/>
-  <b>17 dev tools</b> get official installer direct links (download only), and <b>10 services</b> can be started and stopped in one click.
+  <b>with a few clicks</b>.   <b>61 components</b> are handled end to end (download → unpack → set environment variables),<br/>
+  <b>26 dev tools</b> get official installer direct links (download only), and <b>15 services</b> can be started and stopped in one click.
 </p>
 
 <p align="center">
@@ -63,7 +63,7 @@ Grab the build for your system from the [Releases page](https://github.com/jilon
 
 | System | File | How to run |
 |--------|------|------------|
-| Windows 10 / 11 (x64) | [`ByteTools.exe`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools.exe) | Double-click; no installation needed |
+| Windows 10 / 11 (x64) | [`ByteTools-windows-x64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-windows-x64.zip) | Unzip, then double-click `ByteTools\ByteTools.exe` (onedir mode, zero-extraction startup) |
 | macOS (Apple Silicon) | [`ByteTools-macos-arm64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-macos-arm64.zip) | Unzip, then double-click `ByteTools.app` |
 | Linux (x64) | [`ByteTools-linux-x64`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-linux-x64) | `chmod +x` and run it |
 
@@ -80,18 +80,18 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
 ## Highlights
 
 - **One codebase, three platforms**: detects OS and CPU architecture (on Apple Silicon JDK resolves to aarch64, Node to arm64).
-- **26 components installed end to end**: download → unpack → `XXX_HOME` + `PATH`, ready to use immediately.
-- **17 dev tools, download only**: IDEs / database clients / terminals get official installer direct links, with a live version list, downloaded to a directory of your choosing (remembered between runs; you can open the folder afterwards). **This tool does not unpack them, does not set environment variables for them, and does not run installers on your behalf** — licence acceptance and install steps are yours. Where upstream ships both an installer and a portable archive (IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX), the button reads **"Download ▾"** so you can pick which one, sizes shown.
-- **10 services start and stop in one click**: Tomcat, Nginx, ActiveMQ, RocketMQ, Kafka, Elasticsearch, Seata, Nacos, RabbitMQ, Jenkins. Port conflicts are handled by a documented policy and explained in a confirmation dialog (ports are never silently shifted — shifting them breaks external clients). If "Stop" cannot stop cleanly, the tool only asks whether to force-kill; it never kills behind your back. Liveness is judged by **the whole port cluster listening** (Nacos main port + gRPC, Kafka 9092+9093, RocketMQ namesrv+broker). Running services are still recognised after you close and reopen the tool, and status detection **never executes a start script**. Protocol-port components that cannot be viewed in a browser (Kafka / RocketMQ / RabbitMQ) get a status page served by the tool itself: state, ports, how to connect, credentials and log paths — and it **flips to "stopped" on refresh once the service is gone**, instead of a notice that forever claims success. All ten were verified one by one on a real Windows machine through the full cycle (download/install → start → cluster ports listening → protocol probe, e.g. `rabbitmqctl status`, Kafka `BrokerApiVersions` → stop → ports released). **macOS and Linux are not yet verified on real hardware** (see rule R5 in `DEVELOPMENT.md`).
+- **61 components installed end to end**: download → unpack → `XXX_HOME` + `PATH`, ready to use immediately.
+- **26 dev tools, download only**: IDEs / database clients / terminals get official installer direct links, with a live version list, downloaded to a directory of your choosing (remembered between runs; you can open the folder afterwards). **This tool does not unpack them, does not set environment variables for them, and does not run installers on your behalf** — licence acceptance and install steps are yours. Where upstream ships both an installer and a portable archive (IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX), the button reads **"Download ▾"** so you can pick which one, sizes shown.
+- **15 services start and stop in one click**: Tomcat, Nginx, ActiveMQ, RocketMQ, Kafka, Elasticsearch, Seata, Nacos, RabbitMQ, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO. Port conflicts are handled by a documented policy and explained in a confirmation dialog (ports are never silently shifted — shifting them breaks external clients). If "Stop" cannot stop cleanly, the tool only asks whether to force-kill; it never kills behind your back. Liveness is judged by **the whole port cluster listening** (Nacos main port + gRPC, Kafka 9092+9093, RocketMQ namesrv+broker). Running services are still recognised after you close and reopen the tool, and status detection **never executes a start script**. Protocol-port components that cannot be viewed in a browser (Kafka / RocketMQ / RabbitMQ) get a status page served by the tool itself: state, ports, how to connect, credentials and log paths — and it **flips to "stopped" on refresh once the service is gone**, instead of a notice that forever claims success. All of them were verified one by one on a real Windows machine through the full cycle (download/install → start → cluster ports listening → protocol probe, e.g. `rabbitmqctl status`, Kafka `BrokerApiVersions` → stop → ports released). **macOS and Linux are not yet verified on real hardware** (see rule R5 in `DEVELOPMENT.md`).
 - **Prerequisite runtimes installed automatically**: components that need a JDK (Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata) will download a suitable JDK first, then continue starting; same for the Erlang/OTP that RabbitMQ needs (27.x / 26.x matched to the RabbitMQ version). You never have to prepare dependencies yourself.
 - **China-first mirrors with multi-source failover**: 11 mainland mirror bases and 3 GitHub accelerators, tried mainland-first, falling back to the official origin last, all narrated in the log. **No URL editing needed** (a few components genuinely have no mainland mirror — see [Platform support and exceptions](#platform-support-and-exceptions)).
-- **Multiple coexisting versions + an explicit "active version"**: all 26 installable components can keep several versions side by side (opened to everything on 2026-06-06), and you name which one is active. A failed switch rolls back automatically, so you never end up with "variable points to A, `PATH` points to B". A **green tick** in the version dropdown means that version is already installed on disk.
+- **Multiple coexisting versions + an explicit "active version"**: all 59 installable components can keep several versions side by side (opened to everything on 2026-06-06), and you name which one is active. A failed switch rolls back automatically, so you never end up with "variable points to A, `PATH` points to B". A **green tick** in the version dropdown means that version is already installed on disk.
 - **Take over installations you put there yourself — and revert with one click**: JDK / Maven / Node etc. already on the machine, outside this tool's directory, can be discovered and made active (the scan is read-only and each candidate is confirmed by actually running its version command). Before touching your system settings the original text is snapshotted, and it can be written back verbatim. Five hard gates (original snapshot / minimal edit / critical-entry validation / re-verification / revertibility) must all pass or the operation is rolled back.
 - **Uninstall removes only the version you selected**: other versions' directories, variables and `PATH` entries are untouched; deleting the active version triggers an automatic re-pick. The title bar's **"🧹 Clean PATH"（清理残留 PATH）** button clears dead entries that point into this tool's directory but no longer exist.
 - **Update check that never replaces itself**: the version chip in the title bar doubles as a status light (six states, see [UI tour](#ui-tour)). When a newer release exists, one click downloads it to your chosen directory — **it never renames or overwrites the running program**, and it uploads nothing about you.
 - **Download reliability**: every request carries a dedicated `byte-tools` User-Agent (several university mirrors 403 the default UA), and the byte count is verified after the download, so a "fake 200 empty file" from a mirror triggers a source switch rather than leaving you a broken archive.
 - **Live version lists + a 24-hour cache**: version lists are fetched from official APIs/indexes at startup and cached on disk for a day (this saves GitHub's anonymous rate budget); when a fetch fails the tool quietly falls back to its built-in list, so it stays usable offline.
-- **Search and filtering**: 43 components do not need page-by-page browsing — the search box above the tabs fuzzy-matches names and keys across all of them and groups hits by category; version dropdowns accept typing (`21`, `3.12`, `LTS`).
+- **Search and filtering**: 87 components do not need page-by-page browsing — the search box above the tabs fuzzy-matches names and keys across all of them and groups hits by category; version dropdowns accept typing (`21`, `3.12`, `LTS`).
 - **Environment variables without `setx`**: Windows writes the registry directly via `winreg` (`setx` truncates at 1024 characters), edits `PATH` entry by entry, and notifies Explorer by name after every write; macOS / Linux write a marked, idempotent block into your shell rc files.
 - **UI**: frameless custom window, cards that re-flow into columns based on window width (toggle "▦ Grid / ☰ List"), gradient progress bars, status capsules, colour-coded Chinese log overlay (collapsed by default, auto-opens on warn/error with an unread counter), window icon visible in the taskbar and Alt+Tab, and remembered per-component version choices.
 - **It says so when a platform is unsupported**: two components have no portable form on Windows (`Docker`, `Pulsar`). The card states why and what to do instead — it will not install something that cannot run and leave you guessing.
@@ -106,7 +106,7 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
    |---|---|
    | 🟢 `✓ Configured (PATH) · openjdk version "17.0.10"` | Already findable by the system; nothing to install (the exact version is filled in asynchronously) |
    | 🟠 `● Downloaded, not configured` | Archive is local, environment variables are not set yet |
-   | 🟢 `● 2 versions installed · active 21 (21, 17)` | All 26 installable components use this form: parenthesised list = what is on disk (newest first); `active 21` = the one in use |
+   | 🟢 `● 2 versions installed · active 21 (21, 17)` | All 59 installable components use this form: parenthesised list = what is on disk (newest first); `active 21` = the one in use |
    | 🟠 `● 2 versions installed · none active (21, 17)` | Versions installed, but the system's `XXX_HOME` / `PATH` points to none of them |
    | 🔴 `○ Not installed` | Nothing installed |
 
@@ -131,14 +131,14 @@ node -v
 
 ## Supported components
 
-**43 in total**: **26 installable end to end** + **17 download-only** (those 17 are GUI tools; 10 of the 26 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**87 in total**: **61 installable end to end** + **26 download-only** (those 26 are GUI tools; 16 of the 63 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
-| Dev environment | 10 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7 |
-| Dev software | 6 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl |
-| Dev tools | 17 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat |
-| Start-stop | 10 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins |
+| Dev environment | 32 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq |
+| Dev software | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
+| Dev tools | 26 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman |
+| Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
 
 > To regroup: edit the one line per component in `COMPONENT_CATEGORY_OF` in `main.py`. The Start-stop tab needs no registration — membership is derived from the launch whitelist `LAUNCH_OF`.
 
@@ -154,6 +154,11 @@ Details by technical category below (environment variable, detection command, de
 | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | Bun | — (PATH) | `bun --version` | 1.x |
 | PowerShell 7 | — (PATH) | `pwsh --version` | 7.6.x / 7.5.x / 7.4.x. Portable packages exist for all three platforms; upstream ships only via GitHub Releases and has no real mainland mirror, so the GitHub accelerators are used |
+| Kotlin compiler | — (PATH) | `kotlinc -version` | 2.4.x. One `kotlin-compiler-<v>.zip` for all three platforms (the compiler is a JVM artifact), unpacking to `kotlinc/`; GitHub Releases only, via the accelerators |
+| GraalVM (CE) | `GRAALVM_HOME` | `java -version` | 25.x. **Deliberately not `JAVA_HOME`** — sharing it with JDK (Temurin) would make each component overwrite the other's active version. Assets are per-platform and the version number lives in the **asset name** (the tag `graal-…` is not the version) |
+| Rust | — (PATH) | `rustc --version` | 1.99.x / 1.98.x / 1.97.x. **Windows only**: upstream stopped shipping the `.exe` installer and the combined tar.xz has no unified `bin/`, so the official MSI is **administratively extracted** (`msiexec /a`, no elevation, no registry writes). ⚠ A linker is still required: without VS Build Tools `rustc` compiles but cannot link (and Git for Windows' `link.exe` impersonates the MSVC linker, producing a baffling `link: extra operand`). See [exceptions](#platform-support-and-exceptions) |
+| .NET SDK | — (PATH) | `dotnet --version` | 10.0.x. The official **zip portable package** (not the installer) — `dotnet.exe` sits right at the unpack root; the version list is read from Microsoft's `release-metadata` JSON and registers the **SDK version** (10.0.401), not the release it belongs to. Microsoft CDN is the only source (no mainland mirror carries its tree). |
+| Deno | — (PATH) | `deno --version` | 2.x. Single-file runtime, `deno.exe` at the zip root; released only on GitHub Releases, so it goes through the GitHub accelerators. |
 
 ### Build tools
 
@@ -161,6 +166,9 @@ Details by technical category below (environment variable, detection command, de
 |---|---|---|---|
 | Apache Maven | `MAVEN_HOME` | `mvn -v` | 3.9.x / 3.8.x |
 | Gradle | `GRADLE_HOME` | `gradle -v` | 8.x / 7.x |
+| protoc (Protobuf compiler) | — (PATH) | `protoc --version` | 36.x. The zip holds two side-by-side directories, `bin/` + `include/`; only the Windows channel has been measured per R1 (npmmirror carries a real mirror) — Linux / macOS packages exist upstream but are unmeasured, see [exceptions](#platform-support-and-exceptions) |
+| CMake | — (PATH) | `cmake --version` | 4.4.x. The package wraps everything in `cmake-<v>-windows-x86_64/`, and `cmake.exe` lives in **`bin/`** one level further in — not at that root. The archive-layout audit caught this; copying the neighbouring row would get it wrong. |
+| Ninja | — (PATH) | `ninja --version` | 1.13.x. Single-file zip, `ninja.exe` at the root. |
 
 ### Application servers and web services
 
@@ -168,6 +176,8 @@ Details by technical category below (environment variable, detection command, de
 |---|---|---|---|
 | Apache Tomcat | `CATALINA_HOME` | `catalina version` | 10.1 / 9.0 / 8.5 |
 | Nginx | — (PATH) | `nginx -v` | 1.31.x / 1.30.x / 1.28.x. Only Windows has official prebuilt zips — see [exceptions](#platform-support-and-exceptions) |
+| Caddy | — (PATH) | `caddy --version` | 2.11.x. Single-file web server with automatic HTTPS; GitHub-only, via the accelerators. **Download and PATH only** — start it yourself with `caddy run`; this tool does not register start/stop for it. |
+| Traefik | — (PATH) | `traefik version` | 3.7.x. Cloud-native reverse proxy, same: download only. ⚠ It accepts the `version` **subcommand**; `--version` prints the help and exits non-zero, so the probe command is written as measured. |
 
 ### Databases
 
@@ -176,6 +186,14 @@ Details by technical category below (environment variable, detection command, de
 | MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x (Aliyun / Huawei Cloud mirrors + official). **After unpacking you still must run `mysqld --initialize`** — this tool does not initialise databases |
 | MongoDB | — (PATH) | `mongod --version` | 8.0.x / 8.0.0 (Windows / Linux; macOS has no portable binary) |
 | PostgreSQL | `PG_HOME` | `psql --version` | 17.x / 16.x (auto-download on Windows only) |
+| SQLite (CLI) | — (PATH) | `sqlite3 --version` | 3.5x. Official `sqlite-tools-win-x64-<six-digit>.zip` (3.54.0 → `3540000`, with the year in the path); `sqlite3.exe` at the unpack root. **sqlite.org is the only source** (TUNA 404; the Huawei `sqlite/` page answers 200 but serves a 12 KB portal shell — a fake source). |
+| DuckDB CLI | — (PATH) | `duckdb --version` | 1.5.x. Single-file analytical database, `duckdb.exe` at the root; GitHub Releases only. |
+
+### Key-value cache
+
+| Component | Env var | Detection | Default versions |
+|---|---|---|---|
+| Redis | — (PATH) | `redis-server --version` | 8.10.x. **Windows only, and a community build** (`redis-windows`), not official — upstream ships source only and `download.redis.io`'s tar.gz yields no Windows executable; the card says so explicitly. Supports one-click start/stop: data lands in `~/.env-tools/redis-data`, and the command line uses Redis defaults (listens on 127.0.0.1 only, no password). This tool does not change `bind` and does not set `requirepass` |
 
 ### Containers and orchestration
 
@@ -183,6 +201,10 @@ Details by technical category below (environment variable, detection command, de
 |---|---|---|---|
 | Docker Desktop | — (PATH) | `docker --version` | 27.x / 26.x (no auto-download on Windows; the official installer is required) |
 | kubectl | — (PATH) | `kubectl version --client` | 1.31.x / 1.30.x (all three platforms; DaoCloud proxy preferred; on Linux / macOS the file is extensionless — `chmod +x` it) |
+| Helm | — (PATH) | `helm version` | 4.3.x. Kubernetes package manager. ⚠ Its GitHub release holds only `.asc` / `.sha256sum` sidecars — the real binary lives on `get.helm.sh` (which is also where the version pointer `helm-latest-version` comes from). |
+| k9s | — (PATH) | `k9s version` | 0.51.x. Kubernetes terminal UI, single binary, via the accelerators. |
+| Docker Compose v2 | — (PATH) | `docker-compose version` | 5.x. Standalone compose binary. **It installs and lands on PATH, but actually running it still needs a working Docker engine** (Docker Desktop has no portable form on Windows — see the Docker card). It is registered because `docker-compose version`-style self-checks need no engine. First source is DaoCloud's GitHub proxy tree (measured byte-identical to upstream). |
+| Trivy | — (PATH) | `trivy --version` | 0.75.x. Container / filesystem vulnerability scanner, single binary, via the accelerators. |
 
 ### CI / CD
 
@@ -199,6 +221,7 @@ Details by technical category below (environment variable, detection command, de
 | Apache RocketMQ | `ROCKETMQ_HOME` | `mqadmin version` | 5.x |
 | Apache Pulsar | `PULSAR_HOME` | `pulsar version` | 3.x (the main command is a POSIX shell script; not supported on Windows) |
 | ActiveMQ | `ACTIVEMQ_HOME` | `activemq --version` | 6.3.x / 5.18.x |
+| NATS Server | — (PATH) | `nats-server --version` | 2.15.x. Lightweight messaging server, single binary; GitHub Releases only. **Download only** — start/stop is not registered. |
 
 ### Service discovery / distributed transactions
 
@@ -206,6 +229,9 @@ Details by technical category below (environment variable, detection command, de
 |---|---|---|---|
 | Nacos | `NACOS_HOME` | `startup.sh` / `startup.cmd` | 2.x (published on GitHub Releases, no real mirror → GitHub accelerators) |
 | Seata | `SEATA_HOME` | `seata-server.sh -h` | 2.x (Apache distribution directory, eight mainland mirrors) |
+| Apache ZooKeeper | — (PATH) | detection looks at `bin/zkServer` | 3.9.x (seven Apache mirrors + the official CDN). **Supports one-click start/stop**: the official package ships only `zoo_sample.cfg`, so the tool generates a `zoo.cfg` copy under `~/.env-tools/zookeeper-data/conf` and edits `clientPort` / `dataDir` there (the install directory is never touched); it **spawns java directly instead of the vendor `zkServer.cmd` wrapper** (that wrapper forces `<home>\conf\zoo.cfg` as the first argument, and terminating it leaves an orphan java holding the port). Needs a JDK and installs one automatically if absent. |
+| Consul | — (PATH) | `consul version` | 2.0.x. **Supports one-click start/stop**: `consul agent -dev` form, HTTP port handed over on the command line (`-http-port`, no config file), console at `/ui`, health check at `/v1/health`. Only `releases.hashicorp.com` (not GitHub, so no accelerator applies); direct connections from the mainland measured slow. |
+| etcd | — (PATH) | `etcd --version` | 3.7.x. **Supports one-click start/stop**: single exe with the port on the command line, client 2379 and peer 2380 are judged as one cluster; data lives in `~/.env-tools/etcd-data`, no config file written. |
 
 ### Search engine
 
@@ -224,8 +250,27 @@ Details by technical category below (environment variable, detection command, de
 | Component | Env var | Detection | Default versions |
 |---|---|---|---|
 | Miniconda | `CONDA_HOME` | `conda --version` | py312 / py311 / py310 (silent installer) |
+| uv (Python package/env manager) | — (PATH) | `uv --version` | 0.13.x. The zip has no directory at all — `uv.exe` / `uvw.exe` / `uvx.exe` sit at the root. **This tool only guarantees the `uv` command is on PATH**; shell integration and the Python versions uv manages live outside its directory. Windows-only for the same reason |
 
-### About those 17 "Dev tools"
+
+### Command-line utilities (single binary, unpack and go)
+
+None of these has an `XXX_HOME` concept — the tool unpacks them into `~/.env-tools/<component>/<component>-<version>/` and puts that directory on `PATH`; uninstall removes exactly that entry. Every version list is matched **strictly against the release asset name** (a single release usually also holds `.sha256`, `.sbom` and arm builds, so guessing by suffix installs the wrong thing).
+
+| Component | Detection | Default version | Notes |
+|---|---|---|---|
+| jq | `jq --version` | 1.8.x | Bare exe (not a zip). JSON processor. |
+| yq | `yq --version` | 4.5x | Also a bare exe — the jq of YAML. |
+| ripgrep (`rg`) | `rg --version` | 15.x | Recursive search; its release tag has **no `v` prefix** (pinned separately — guessing it yields 404). |
+| fd | `fd --version` | 10.x | Filename search. |
+| fzf | `fzf --version` | 0.74.x | Fuzzy finder. **Only the command is guaranteed** — configure the shell key bindings yourself. |
+| bat | `bat --version` | 0.26.x | `cat` with syntax highlighting. |
+| eza | `eza --version` | 0.23.x | A modern `ls`. |
+| zoxide | `zoxide --version` | 0.10.x | Fuzzy `cd`. Also no shell integration (its `init` belongs in your rc file). |
+| pnpm | `pnpm --version` | 12.x | Node package manager. **Binary only** — it does not touch `corepack` or global `node_modules`; run `corepack enable` yourself if you want it to take over `npm`. |
+| uv | `uv --version` | 0.13.x | Python package / environment manager, see [Python distributions](#python-distributions). |
+| protoc | `protoc --version` | 36.x | See [Build tools](#build-tools). |
+### About those 26 "Dev tools"
 
 They are GUI applications; this tool's only job is to fetch the official installer into the directory you choose. Their cards therefore have **only a version dropdown and a download button** — no green tick, no disk scan, no switch or uninstall buttons, no unpacking, no environment variables.
 
@@ -242,7 +287,7 @@ Auto-download requires that upstream publishes something you can unpack and use.
 |---|---|---|
 | Docker | Windows | Installer only (WSL2 / Hyper-V integration, service registration). Download it manually from docker.com |
 | Apache Pulsar | Windows | The `pulsar` command is a POSIX shell script; upstream expects Docker or WSL |
-| RabbitMQ | Windows | An "installer + service registration" case. The tool can install the Erlang/OTP prerequisite, but the server itself is best installed with the official installer |
+| RabbitMQ | Windows | An "installer + service registration" case. The tool downloads RabbitMQ itself, auto-installs the matching Erlang/OTP prerequisite (4.x -> 27.x, 3.13 -> 26.x) and offers one-click start/stop; the official Windows installer remains an option where service registration is needed |
 | Nginx | Linux / macOS | Source only upstream — use `apt / dnf / yum install nginx` or `brew install nginx`. The Windows zip is mirrored (measured) only on two Huawei Cloud subdomains; TUNA / BFSU / NJU / Aliyun / Tencent all 404 |
 | Python | Linux / macOS | Upstream ships source tarballs only, not a ready interpreter (open item, see `DEVELOPMENT.md`) |
 | PostgreSQL | Linux / macOS | EnterpriseDB provides Windows binary zips only; use your distro's package manager or `brew install postgresql` |
@@ -251,6 +296,10 @@ Auto-download requires that upstream publishes something you can unpack and use.
 | kubectl | Linux / macOS | Downloads fine; the artifact is an extensionless single file — `chmod +x` |
 | JDK | all | Mirror filenames carry build numbers that only resolve after a refresh — **click "⟳ Refresh versions" first** |
 | MongoDB / PostgreSQL | all | Measured: no mainland mirror at all; official single source, so downloads are slower in-country |
+| Rust | Linux / macOS | Upstream ships `rustup-init` and source only; there is no "unpack and run" layout (the combined tar.xz holds `rustc/` + `cargo/` component directories that need the installer to merge a sysroot). Use official `rustup` or your package manager |
+| Redis | Linux / macOS | Upstream ships source only; the Windows package registered here is a **community build** (not official) and is not carried over to POSIX platforms. `apt / dnf install redis`, or `brew install redis` |
+| protoc | Linux / macOS | Upstream also ships `protoc-<v>-{linux-x86_64,osx-*}.zip`, but those sources are not measured per R1 yet. `apt install protobuf-compiler`, or `brew install protobuf` (may lag upstream) |
+| uv | Linux / macOS | Upstream ships tar.gz too, likewise unmeasured. Use the official installer `curl -LsSf https://astral.sh/uv/install.sh | sh`, or `brew install uv` |
 
 ---
 
@@ -258,7 +307,7 @@ Auto-download requires that upstream publishes something you can unpack and use.
 
 ### Multiple versions and the active version
 
-All 26 installable components keep one directory per version (the 17 download-only tools put nothing on disk, so they are outside this category): `~/.env-tools/<component>/<component>-<version>/` (e.g. `jdk-21` and `jdk-17` side by side). "Active version" in the UI means "the one the system is currently using".
+All 59 installable components keep one directory per version (the 26 download-only tools put nothing on disk, so they are outside this category): `~/.env-tools/<component>/<component>-<version>/` (e.g. `jdk-21` and `jdk-17` side by side). "Active version" in the UI means "the one the system is currently using".
 
 - **Green tick = installed on disk.** Ticked versions can be uninstalled; unticked ones keep the button disabled (there would be nothing to remove).
 - **Installed versions always reappear in the dropdown.** Live lists change; a version may be dropped upstream while it is still on your disk. The dropdown re-inserts it, sorted by version, with its tick — otherwise that version could not be selected, switched to, or uninstalled except by deleting the directory by hand. The back-fill applies to every installable component alike (since 2026-10-06); before that only multi-version components got it, so jenkins / nacos still hit the case of something installed that the live list no longer carries.
@@ -339,9 +388,9 @@ Delete an install directory by hand, or interrupt an uninstall, and `PATH` can k
 
 | Area | What is there |
 |---|---|
-| Title bar (left) | Icon + app name + **version chip**. The chip is also a status light: plain = not checked yet; `⟳ v1.2.0 checking` = check in flight; `v1.2.0 up to date` = latest; `↓ v1.2.1 update available` (amber) = newer release exists, **one click downloads it**; `↓ 37%` = downloading; `? v1.2.0 unknown` (grey, dashed) = the check failed and the tooltip says why. **The version number is always visible** — that is the first thing needed when reporting a problem |
+| Title bar (left) | Icon + app name + **version chip**. The chip is also a status light: plain = not checked yet; `⟳ v1.2.1 checking` = check in flight; `v1.2.1 up to date` = latest; `↓ v1.2.2 update available` (amber) = newer release exists, **one click downloads it**; `↓ 37%` = downloading; `? v1.2.1 unknown` (grey, dashed) = the check failed and the tooltip says why. **The version number is always visible** — that is the first thing needed when reporting a problem |
 | Title bar (right) | "★ GitHub" opens the repository · "⟳ Refresh versions" bypasses the cache and re-fetches live lists · "🧹 Clean PATH"（清理残留 PATH） clears dead entries · "🖥 Terminal"（开验证终端） opens a window with the environment the system computes for new processes · "♥" supports the author · minimise / maximise / close |
-| Search bar | Component search (fuzzy over names and keys, showing "matched N / 43"); while searching, the tabs collapse and hits are grouped by category with small headings; clearing restores everything. Next to it: "▦ Grid / ☰ List" and "📋 Log" |
+| Search bar | Component search (fuzzy over names and keys, showing "matched N / 85"); while searching, the tabs collapse and hits are grouped by category with small headings; clearing restores everything. Next to it: "▦ Grid / ☰ List" and "📋 Log" |
 | Cards | Four tabs (counts in titles). Each card: name, status capsule (hover for the full text), searchable version dropdown (green tick = installed), action buttons (Install / Switch / Uninstall; plus Start / Stop and Console or Page for services; download-only tools show just Download), gradient progress bar. Cards re-flow into columns with window width |
 | Log overlay | Collapsed by default over the card area; "📋 Log" expands it, warn/error auto-opens it and puts an unread counter on the button. Four levels (info grey, ok green, warn orange, error red), Chinese throughout, including mirror switching and failover narration |
 | Status bar | System info, the **clickable working directory**, component count. The version is not here — it is the chip |
@@ -367,7 +416,7 @@ Only needed if a packaged build will not start on your machine, or you want to c
 | Script | Does |
 | --- | --- |
 | `一键启动项目.bat` | Prepares the environment, then starts the GUI from source (code changes take effect immediately) |
-| `一键打包exe.bat` | Prepares the environment, then runs PyInstaller to produce `dist/ByteTools.exe` |
+| `一键打包exe.bat` | Prepares the environment, then runs PyInstaller to produce `dist/ByteTools/ByteTools.exe` (onedir, starts with no unpacking) |
 
 Both share the same bootstrap:
 
@@ -452,7 +501,7 @@ components.append(
 
 ### Version cache and GitHub's quota
 
-Fetched version lists are **cached on disk** (`~/.env-tools/version_cache.json`, not re-fetched within a day). The reason is concrete: GitHub's anonymous API allows **60 requests/hour per IP**, while one startup would otherwise make 26 — a second launch inside the same hour, or a few refresh clicks, exhausts the budget and produces a wall of "fetch failed" lines.
+Fetched version lists are **cached on disk** (`~/.env-tools/version_cache.json`, not re-fetched within a day). The reason is concrete: GitHub's anonymous API allows **60 requests/hour per IP**, while one startup would otherwise fetch lists for 77 components (many of them against GitHub) — a second launch inside the same hour, or a few refresh clicks, exhausts the budget and produces a wall of "fetch failed" lines.
 
 - On a cache hit the log says "reusing version lists fetched within 24 hours (N components)" and makes no requests.
 - For genuinely newest numbers, press **"⟳ Refresh versions"** — it bypasses the cache.
@@ -466,7 +515,7 @@ The component working directory defaults to `~/.env-tools/`; change it at the to
 CONFIG_DIR = Path.home() / ".env-tools"
 ```
 
-The **download directory** for the 17 dev tools is a separate preference: remembered from the first download (stored in `config.json`), falling back to the system Downloads folder when unset or deleted. It is not part of the working directory.
+The **download directory** for the 26 dev tools is a separate preference: remembered from the first download (stored in `config.json`), falling back to the system Downloads folder when unset or deleted. It is not part of the working directory.
 
 ---
 
@@ -485,7 +534,7 @@ pyinstaller byte-tools.spec --noconfirm --clean
 
 > If PyInstaller on this machine prints nothing for a long time at startup (WINMGMT cold start blocks `platform.win32_ver()`), use the ready entry point in the repo — same result, no WMI: `python pyinstaller_no_wmi.py byte-tools.spec --noconfirm --clean`. The `.bat` already uses it.
 
-Artifacts: `dist/ByteTools.exe` (Windows) · `dist/ByteTools.app` (macOS) · `dist/ByteTools` (Linux). The Windows build carries the project icon (`assets/byte-tools.ico`, generated from `assets/byte-tools.png` at 16–256 px); how to regenerate the ICO after a logo change is in [`CODE_WIKI.md`](CODE_WIKI.md) §7.4. If Explorer still shows the old icon after an overwrite build, that is the Windows icon cache — rename the file or run `ie4uinit.exe -show`.
+Artifacts: `dist/ByteTools/ByteTools.exe` (Windows, onedir folder) · `dist/ByteTools.app` (macOS) · `dist/ByteTools` (Linux). The Windows build carries the project icon (`assets/byte-tools.ico`, generated from `assets/byte-tools.png` at 16–256 px); how to regenerate the ICO after a logo change is in [`CODE_WIKI.md`](CODE_WIKI.md) §7.4. If Explorer still shows the old icon after an overwrite build, that is the Windows icon cache — rename the file or run `ie4uinit.exe -show`.
 
 **Always run the built exe once and close it yourself, and confirm the exit code is 0** — the close-crash class and its forensic script are documented in rule R14 of `DEVELOPMENT.md`.
 
@@ -533,7 +582,7 @@ Logic lives in `同步Gitee产物.sh` / `同步Gitee产物.bat`; offline end-to-
 
 ### `release-assets/` is cleared every run, on purpose
 
-The four artifacts have **the same names across tags** (since v1.1.2 all Windows builds are `ByteTools.exe`), so "file already exists" says nothing about which version it belongs to. The old logic skipped download when a non-empty file existed, which uploaded the previous tag's binaries into the new tag's Gitee Release while the final check — comparing attachment names only — still reported OK (this is exactly how "everything uploaded was stale" happened on 2026-10-10).
+The four artifacts have **the same names across tags** (since v1.2.0 the main Windows build is `ByteTools-windows-x64.zip`; `ByteTools.exe` is the legacy onefile compat name), so "file already exists" says nothing about which version it belongs to. The old logic skipped download when a non-empty file existed, which uploaded the previous tag's binaries into the new tag's Gitee Release while the final check — comparing attachment names only — still reported OK (this is exactly how "everything uploaded was stale" happened on 2026-10-10).
 
 Now `:clear_stale` deletes the staging directory before downloading; if it cannot delete (files locked), it **stops without uploading** rather than shipping an archive of unknown provenance. The price: re-running after a mid-way failure re-downloads about 218 MB.
 
@@ -582,7 +631,7 @@ Both scripts need `curl`; the `.sh` also needs `awk`, and uses `python3` / `pyth
 ## FAQ
 
 **Q1. A whole group of components reports "failed to fetch versions from the official site, using the built-in default list"?**
-Two causes, and the log distinguishes them. ① **GitHub's anonymous quota is exhausted** (60/hour per IP while one startup makes 26 calls) — wait an hour, or stop hammering "⟳ Refresh versions"; if `GITHUB_TOKEN` / `GH_TOKEN` is set the limit becomes 5000/hour. ② Network or source trouble — the log carries the real reason (timeout / 404 / DNS). **Neither affects usability**: a failed fetch falls back to the built-in list, and those versions download and install normally. Lists are also cached for a day — see [Version cache](#version-cache-and-githubs-quota).
+Two causes, and the log distinguishes them. ① **GitHub's anonymous quota is exhausted** (60/hour per IP while one startup fetches 77 component lists) — wait an hour, or stop hammering "⟳ Refresh versions"; if `GITHUB_TOKEN` / `GH_TOKEN` is set the limit becomes 5000/hour. ② Network or source trouble — the log carries the real reason (timeout / 404 / DNS). **Neither affects usability**: a failed fetch falls back to the built-in list, and those versions download and install normally. Lists are also cached for a day — see [Version cache](#version-cache-and-githubs-quota).
 
 **Q2. A download sits at one percentage?**
 Likely the network or a throttled mirror. Press **Cancel** and retry — the tool switches source. If it keeps failing, open "📋 Log" to see which source failed and where it switched, and press "⟳ Refresh versions" to re-resolve the mirror's current versions and exact filenames (JDK especially needs this) before retrying.
