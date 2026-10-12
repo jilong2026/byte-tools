@@ -51,8 +51,15 @@ def _fetch(sess: requests.Session, url: str, start: int, end: int) -> Optional[b
 
 
 def _total_size(sess: requests.Session, url: str) -> Optional[int]:
-    """Range 探第一字节，从 Content-Range 拿总长；顺带确认服务器支持 Range。"""
-    r = sess.get(url, headers={"Range": "bytes=0-0"}, timeout=45, stream=True)
+    """Range 探头 16 字节，从 Content-Range 拿总长；顺带确认服务器支持 Range。
+
+    ⚠ 探针宽度是实测出来的：sqlite.org 对 `bytes=0-0` 回 **200 + 整个文件**，
+    对 `bytes=0-15` 才回 206。按 0-0 探会把一个完全支持 Range 的服务器误判成
+    "不支持"，那格就只能停在 SKIP（2026-10-12 实测踩到，改成 16 字节后 sqlite
+    从 SKIP 变成能真读清单）。读到 200 仍然按"不支持随机读"处理，绝不退回
+    全量下载。
+    """
+    r = sess.get(url, headers={"Range": "bytes=0-15"}, timeout=45, stream=True)
     try:
         if r.status_code == 206:
             cr = r.headers.get("Content-Range", "")

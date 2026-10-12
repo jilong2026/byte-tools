@@ -177,7 +177,7 @@ byte-tools/
 ├── requirements.txt         # Python 依赖清单（PySide6、requests）
 ├── byte-tools.spec      # PyInstaller 打包配置
 ├── 一键启动项目.bat     # 自举脚本：定位 Python → 建/复用 .venv → 装依赖 → 启动 GUI
-├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/ByteTools.exe
+├── 一键打包exe.bat      # 自举脚本：同上 + 装 PyInstaller → 产出 dist/ByteTools/ByteTools.exe（onedir）
 ├── 同步Gitee产物.sh     # Gitee Release 同步（Linux/macOS/CI；默认只在正文写 GitHub 直链，可观测快速失败 + 幂等 + 收尾校验），由 release.yml 调用
 ├── 同步Gitee产物.bat    # 本机 Windows 版（双击可运行；它会真的把产物传上 Gitee，国内链路快，与 CI 策略有意不同；内容为纯 ASCII，避免 cmd 按 GBK 解析 UTF-8 出错）
 ├── README.md                # 中文说明（面向最终用户）
@@ -317,7 +317,7 @@ byte-tools/
 | `version_probe` | bool | 是否允许在探测阶段真的执行该组件命令取版本。启动脚本型组件（Nacos / Seata / Kafka / RocketMQ / RabbitMQ）必须置 `False`：它们的脚本不认版本参数，一执行就把中间件服务拉起来并弹出控制台窗口 |
 | `versions` | List[ComponentVersion] | 该组件的所有可用版本 |
 | `installer_mode` | bool | 是否安装器模式（如 Miniconda 走 `.exe` / `.sh` 静默安装） |
-| `multi_version` | bool | 是否允许并存多个版本并切换「生效版本」。**只有 7 个组件为 True**：jdk / python / node / go / maven / gradle / bun（真源 `MULTI_VERSION_KEYS`，`main.py:2916`）。**不在 `Component(...)` 构造处手写**：`build_components()` 末尾统一执行 `comp.multi_version = comp.key in MULTI_VERSION_KEYS`（`main.py:3409`），不在白名单就是 False。它是所有多版本分支的唯一门控（状态胶囊、绿勾、按钮启用、卸载范围），非多版本组件的行为与文案必须与改造前逐字一致（见 DEVELOPMENT.md R3.9） |
+| `multi_version` | bool | 是否允许并存多个版本并切换「生效版本」。**全组件为 True**（2026-06-06 起 `MULTI_VERSION_KEYS` 是空集=全部多版本；真源 `MULTI_VERSION_KEYS`，`main.py:2916`）。**不在 `Component(...)` 构造处手写**：`build_components()` 末尾统一执行 `comp.multi_version = comp.key in MULTI_VERSION_KEYS`（`main.py:3409`），不在白名单就是 False。它是所有多版本分支的唯一门控（状态胶囊、绿勾、按钮启用、卸载范围），非多版本组件的行为与文案必须与改造前逐字一致（见 DEVELOPMENT.md R3.9） |
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
 | `artifacts` | list[DownloadArtifact] | 仅「开发工具」用：同一个版本的多种产物（exe 安装器 / zip 便携包），各自带 URL 列表与官方声明字节数。**不要把它和 `url_list_map` 混用** —— 后者是同一个文件的多镜像，前者是两个不同的文件 |
@@ -564,7 +564,7 @@ R1 多源故障转移下载线程（详见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1
 
 | 名称 | 位置 | 职责 |
 |------|------|------|
-| `MULTI_VERSION_KEYS` | `main.py:2916` | 允许并存多版本的 7 个组件白名单（唯一真源，`build_components()` 末尾据此写 `comp.multi_version`） |
+| `MULTI_VERSION_KEYS` | `main.py`（`build_components` 末尾附近） | 允许并存多版本的组件集合；2026-06-06 起为**空集=全部组件多版本**（唯一真源，末尾据此写 `comp.multi_version`） |
 | `SwitchError` | `EnvManager` 之后 | 切换失败的异常（`RuntimeError` 子类），抛出前已尽量回滚，文本里带"已回滚"或"回滚未完全成功"的明细 |
 | `apply_active_version(comp, version)` | `SwitchError` 之后 | **生效版本切换的唯一入口**，见下方时序 |
 | `load_active_map()` | `apply_active_version` 之后 | 读 `config.json` 的 `active` 段（`{组件 key: 生效版本号}`）；文件缺失 / JSON 损坏 / 结构不对一律当空表，绝不抛错 |
@@ -682,7 +682,7 @@ UI 组成（自上而下，四行 + 进度条；这么切是为了塞进 300px �
   - 🟢 `✓ 已配置（CATALINA_HOME / PATH）· <version>` — 系统已能找到，禁用「切换」按钮、启用"卸载"；版本号先显示 `版本检测中…`，由 `VersionProbeWorker` 异步回填，`version_probe=False` 的组件不显示版本
   - 🟠 `● 已下载，未配置` — 本地已解压但环境变量未设
   - 🔴 `○ 未安装` — 完全没有
-- 多版本组件（`component.multi_version`，7 个）：**不**套用上面的 `✓ 已配置（…）`，而是"装了哪几个 + 哪个生效"（`_detect_status` 开头分支，正文存进 `self._mv_capsule`，`_render_status_label()` 只在末尾追加异步探测到的版本号）：
+- 多版本组件（`component.multi_version`，全组件）：**不**套用上面的 `✓ 已配置（…）`，而是"装了哪几个 + 哪个生效"（`_detect_status` 开头分支，正文存进 `self._mv_capsule`，`_render_status_label()` 只在末尾追加异步探测到的版本号）：
   - 🟢 `● 已装 2 个版本 · 生效 21（21、17）` — 清单分隔符是中文顿号 `、`，版本清单来自 `installed_versions()`（语义降序），生效来自 `active_version()`
   - 🟠 `● 已装 2 个版本 · 均未生效（21、17）` — 一个生效版本都没有
   - 🔴 `○ 未安装` — 磁盘上一个版本都没有
@@ -789,7 +789,7 @@ UI 组成：
 
 关键方法：
 - `_on_cleanup_path_clicked()` — "清理残留 PATH"入口：先用 `find_dead_tool_path_entries()` 只读预览并弹确认框，确认后 `cleanup_dead_tool_path_entries()` 删除死条目、写日志并逐卡片 `_detect_status()` 刷新
-- `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（并发，150ms 错峰），计数器 `_fetch_pending` 等所有完成后再恢复按钮
+- `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（并发，按 N 归一的错峰间隔，见 R18），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
 - `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`；**只有 `warn`/`error` 会顺带自动弹开日志浮层并累加未读条数**
 - `_card_columns()` — 当前该排几列（列表模式恒 1 列，网格模式按 `QScrollArea` **视口**净宽算，不是窗口宽度）
@@ -837,7 +837,7 @@ def main() -> int:
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
-| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 `{jenkins, activemq, nacos}`、三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（133 个用例，见 R5.6）。全量回归 9 套件之一 |
+| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 15 个：tomcat / nginx / rabbitmq / kafka / rocketmq / activemq / nacos / seata / elasticsearch / jenkins / redis / etcd / consul / zookeeper / minio，三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（133 个用例，见 R5.6）。全量回归 9 套件之一 |
 | `bt_grid_layout_tests.py` | 卡片网格与日志浮层：`grid_columns_for` 表驱动（含非法入参兜底 1 列）、`chunk_visible` 保序且不含隐藏卡片（= 空洞回归护栏）、`relayout_cards` 行数 == `ceil(N/C)` 且拼接顺序 == `self.cards`、视图模式默认 `grid` 与 `config.json` 缺键取 `grid`、**浮层展开/收起前后行数与每行卡片数完全不变**（浮层方案的核心承诺）、`warn`/`error` 自动弹开与未读条数、搜索命中数 < 列数时只有一行且无空位 |
 
 #### `bt_multiversion_tests.py` 覆盖面
@@ -854,7 +854,7 @@ Windows 分支打桩持久层读写（`_read_windows_user_env` / `_read_windows_
 按能力划分的覆盖点（括号内是用例类）：
 
 1. **沙箱自身**（`SandboxSelfCheck`）：`CONFIG_DIR` 确实被换到临时目录、`make_component` 真建目录、Windows 读写与删除接缝都已打桩——防止"用例在真删用户注册表"这类事故
-2. **组件能力位**（`MultiVersionFlag`）：白名单恰为 7 个（与 `EXPECTED_MULTI_VERSION` 对齐）、服务型与 `installer_mode` 组件必须为 False、每个组件都有该属性
+2. **组件能力位**（`MultiVersionFlag`）：白名单为空集（=全组件多版本，与 `EXPECTED_MULTI_VERSION` 对齐）、服务型与 `installer_mode` 组件必须为 False、每个组件都有该属性
 3. **版本目录名 ⇄ 版本号**（`InstalledVersions`）：从 `<key>-<version>` 反解、忽略 `downloads` 与外来目录、按语义版本降序而非字典序、返回的目录对象就是 `install_dir()`
 4. **`EnvManager` 平台无关门面**（`EnvFacade`）：UNIX 写读删闭环、PATH 条目增删与列举、Windows 写与列举、读不存在的变量返回 None、`remove_*_under` 只动指定根之下的条目
 5. **切换与回滚**（`SwitchActive`）：Windows 切换写 HOME 并把 PATH 收敛成一条、Linux 写 rc、env 先写成功后失败的回滚、切换前没有该变量时回滚要"删掉"而不是写空值、目标目录不存在时抛错且什么都不改、Linux 失败按 rc 真值回滚、回滚本身失败要如实上报、各步失败的分支各自覆盖、"已落盘再抛错"的新条目也必须被撤掉
@@ -970,7 +970,7 @@ main()
        ├─ _build_ui()                 # 构造标题栏 + 搜索条(含视图切换/日志开关) + 卡片网格 + 日志浮层 + 状态栏(组件总数=26)
        ├─ _apply_qss()                # 应用样式表
        ├─ _load_settings()             # 从 config.json 恢复上次选中版本
-       └─ _start_fetch_versions()      # 为 26 张卡片各起一个 VersionFetchWorker 并发抓取
+       └─ _start_fetch_versions()      # 为每张有 fetcher 的卡片各起一个 VersionFetchWorker 并发抓取
             └─ 每个 worker 完成时发射 done → _on_versions_fetched → card.set_versions
 ```
 
@@ -1340,7 +1340,7 @@ pyinstaller byte-tools.spec --noconfirm --clean
 ```
 
 产物：
-- Windows：`dist/ByteTools.exe`
+- Windows：`dist/ByteTools/ByteTools.exe`（onedir 目录，打成 `ByteTools-windows-x64.zip` 发布）
 - macOS：`dist/ByteTools.app`
 - Linux：`dist/byte-tools`
 

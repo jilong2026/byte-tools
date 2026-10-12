@@ -1039,6 +1039,45 @@ class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
         "rabbitmq": "sbin", "conda": "Scripts",
         "nginx": "", "python": "", "node": "", "powershell": "", "bun": "",
         "kubectl": "", "jenkins": "",
+        # 2026-10-12 新增四件。kotlin / graalvm / redis 由本工具实测过归档清单：
+        #   kotlinc/bin、graalvm-community-25.4.4.1.1+1.1/bin(java.exe)、
+        #   Redis-8.10.2-Windows-x64-msys2 根目录(redis-server.exe)。
+        # rust 的 Windows 包是 msi，中央目录那套读法不适用（审计脚本报 SKIP）——
+        # 但它的布局不是推断：`msiexec /a` 真提取出 Rust/{bin,lib}，
+        # 且提取出来的 rustc.exe / cargo.exe 实测能报版本号，比读清单更强。
+        "kotlin": "bin", "graalvm": "bin", "redis": "", "rust": "bin",
+        # 2026-10-12 B1：protoc 的 zip 顶层是 bin/ + include/ 两个并列目录（≥2 顶层目录
+        # ⇒ 解压根就是 install_dir），所以 path_subdir 要指到 "bin"；
+        # uv 的 zip 顶层一个目录都没有（直接 uv.exe/uvw.exe/uvx.exe）⇒ path_subdir=""。
+        "protoc": "bin", "uv": "",
+        # 2026-10-12 B3/B5：GitHub Releases 单二进制批。**每个都是下载整包列过条目的**：
+        #   顶层 0 目录（exe 躺根目录）          ⇒ ""   deno/ninja/duckdb/eza/fzf/caddy/traefik
+        #   顶层恰好 1 个目录（exe 在根）        ⇒ ""   ripgrep/fd/bat/etcd/nats/zoxide
+        #   yq 是裸 exe 单文件（走改名分支）      ⇒ ""
+        #   ⚠ cmake 不在这一档：它顶层也是 1 个目录，但 cmake.exe 在那层的 **bin/** 里
+        #     （审计原文：PATH 指的 cmake-4.4.4-windows-x86_64 里没有可执行文件，实际在
+        #     cmake-4.4.4-windows-x86_64/bin）。上一轮把它按"exe 在根"抄进相邻一行，
+        #     后果是装完 `cmake --version` 找不到命令、切生效版本全程是假话。
+        "deno": "", "ninja": "", "duckdb": "", "ripgrep": "",
+        "fd": "", "bat": "", "eza": "", "zoxide": "", "fzf": "", "yq": "",
+        "cmake": "bin",
+        "etcd": "", "nats-server": "", "caddy": "", "traefik": "", "pnpm": "",
+        "helm": "",
+        # 2026-10-12 另一路并发登记的服务与 CLI（consul/zookeeper/dotnet-sdk/
+        # sqlite/jq/k9s/trivy/docker-compose）。path_subdir 与源数都按登记值抄录，
+        # 全部下载整包实测过才准进来 —— 谁要改先过这张表。
+        "consul": "", "zookeeper": "bin", "dotnet-sdk": "", "sqlite": "",
+        "jq": "", "k9s": "", "trivy": "", "docker-compose": "",
+        # 2026-10-12 B7：Ant / JMeter 都是顶层 1 个目录、启动脚本在 bin/ 里
+        # （ant.bat / jmeter.bat，实测下载整包列条目确认）
+        "ant": "bin", "jmeter": "bin",
+        # 2026-10-12 B4 补：minio 是**单文件 .exe**（113,115,136 B，头 4 字节 MZ），
+        # 走 extract_archive 的单二进制早退分支并按 R7 改名 minio.exe，
+        # 解压根就是 install_dir ⇒ path_subdir=""。
+        "minio": "",
+        # 2026-10-12 Dart：zip 顶层单目录 dart-sdk/、根上 0 散文件 ⇒ collapse 后
+        # install_dir 即 dart-sdk 内容，dart.exe 在 bin/ ⇒ path_subdir="bin"。
+        "dart": "bin",
     }
     NOT_AUDITABLE = {"kafka", "pulsar", "seata", "docker"}
 

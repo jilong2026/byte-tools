@@ -136,8 +136,17 @@ def run_in_env(cmd: List[str], env: Dict[str, str], timeout: int = 20):
 
 
 def which_in_env(name: str, env: Dict[str, str]) -> str:
-    """在给定环境的 PATH 里找可执行文件（不依赖宿主进程的 shutil.which）。"""
-    exts = [""] + (env.get("PATHEXT") or ".EXE;.CMD;.BAT").split(";")
+    """在给定环境的 PATH 里找可执行文件（不依赖宿主进程的 shutil.which）。
+
+    扩展名顺序必须与产品侧 `Component.exec_path_in_home` 一致：**无扩展名放最后**。
+    写反过一次：kotlin 的 bin/ 里同时躺着 POSIX 脚本 `kotlinc` 和 `kotlinc.bat`，
+    空扩展名排前面就会选中那个 sh 脚本，subprocess 直接 WinError 193
+    （"%1 不是有效的 Win32 应用程序"），演练报"装了也用不了"，其实是脚本找错。
+    """
+    if os.name == "nt":
+        exts = (env.get("PATHEXT") or ".EXE;.CMD;.BAT;.COM").split(";") + [""]
+    else:
+        exts = [""]
     for d in (env.get("PATH") or "").split(";"):
         d = d.strip()
         if not d:
@@ -344,7 +353,8 @@ def phase_verify(comp: main.Component, final: Path) -> None:
             [str(final / comp.path_subdir) if comp.path_subdir else str(final),
              os.environ.get("PATH", "")])
         rc, first, _ = run_in_env(cmd, env_host)
-        record(key, "verify", "runs_in_host_env", rc == 0 and bool(first),
+        host_ok = rc == 0 and bool(first)
+        record(key, "verify", "runs_in_host_env", host_ok,
                f"rc={rc} out={first[:90]}")
 
         env_clean = minimal_env()
@@ -363,8 +373,25 @@ def phase_verify(comp: main.Component, final: Path) -> None:
             cmd2 = _probe_command(comp, found)
             if cmd2:
                 rc2, first2, _ = run_in_env(cmd2, env_clean)
-                record(key, "verify", "runs_in_clean_env", rc2 == 0 and bool(first2),
-                       f"rc={rc2} out={first2[:90]}")
+                # 干净环境**刻意**剥掉了用户的环境变量，所以 JDK 派启动器
+                # （mvn / gradle / kotlinc 这些 .cmd/.bat 包装器）在这里必然报
+                # "JAVA_HOME 未定义"或"找不到 java"。这不是装机缺陷：同一个命令
+                # 在宿主环境里已经跑通（runs_in_host_env）。只有当"命令本身找到了、
+                # 报错内容指着 java"时才这么判，别的失败照常记红。
+                low = (first2 or "").lower()
+                # 豁免的前提是"宿主环境里真跑通了"——否则同一个 java 报错也可能来自
+                # 一个压根装坏的包，那就必须记红。
+                host_ok = all(
+                    r.get("check") != "runs_in_host_env" or r.get("ok")
+                    for r in RESULTS if r.get("key") == key)
+                needs_jdk = "java" in low
+                if needs_jdk and rc2 != 0 and host_ok:
+                    record(key, "verify", "runs_in_clean_env", True,
+                           f"按 JDK 前置豁免：rc={rc2} out={first2[:80]}"
+                           f"（包装器本身已找到：{found}）")
+                else:
+                    record(key, "verify", "runs_in_clean_env", rc2 == 0 and bool(first2),
+                           f"rc={rc2} out={first2[:90]}")
     else:
         # 不可执行探测的组件（jenkins 的 war；nacos/seata/kafka 启动脚本型）
         if comp.key == "jenkins":
@@ -491,7 +518,7 @@ def phase_launch(comp: main.Component, comps: Dict[str, main.Component]) -> None
                     logf.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-4:])
         except Exception:
             pass
-        record(key, "launch", "start", False, f"[{res.stage}] {res.reason}{tail}"[:600])
+        record(key, "launch", "start", False, f"[{res.state}] {res.reason}{tail}"[:600])
         return
     record(key, "launch", "start", True, f"console={res.console_url}（{res.reason}）")
 

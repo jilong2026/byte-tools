@@ -35,12 +35,36 @@ import main  # noqa: E402
 
 EXPECTED_MEMBERSHIP = {
     "开发环境": {"jdk", "python", "node", "go", "bun", "conda", "git", "maven",
-               "gradle", "powershell"},
+               "gradle", "powershell",
+               # 2026-10-12 新增：语言/编译器工具链（kotlin 的 zip、rust 的 MSI 提取、
+               # graalvm 自带 JDK，三者都是解压/提取进 PATH 即用）
+               "kotlin", "graalvm", "rust",
+               # 2026-10-12 B1：单二进制、无 XXX_HOME（protoc 的 zip 顶层是 bin/+include/，
+               # uv 的 zip 顶层 0 个目录 —— 这条路径的两个变体）
+               "protoc", "uv",
+               # 2026-10-12 B3/B5：GitHub Releases 单二进制批（CLI 全家桶 + 构建工具）
+               "deno", "ninja", "duckdb", "cmake", "ripgrep", "fd", "bat",
+               "eza", "zoxide", "fzf", "yq", "pnpm",
+               # 2026-10-12 并发那批补的运行时与 CLI
+               "dotnet-sdk", "sqlite", "jq",
+               # 2026-10-12 B7：Ant（构建工具）
+               "ant",
+               # 2026-10-12 Dart（语言运行时；zip 顶层单目录 dart-sdk/ ⇒ bin）
+               "dart"},
     # 剩下的服务型组件还不能一键启停（数据目录/端口/前置运行时的收尾还没做），
     # 留在「开发软件」里 —— 它们接进框架后会自动挪到「一键启停」。
     # docker / kubectl 是 2026-10-10 从「其它软件」并进来的：那个 Tab 只剩 2 张卡，
     # 用户要求取消它，于是"容器与编排外围"归到同为大件服务的这一组。
-    "开发软件": {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl"},
+    "开发软件": {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl",
+               # 2026-10-12 B3/B5：nats-server / caddy / traefik 是服务型，
+               # 先落这里，接进 LAUNCH_OF 后会自动挪到「一键启停」。
+               # （etcd 已经接进去了，所以它不在这张表里 —— 它和 consul / zookeeper
+               #   一起出现在「一键启停」，两边同时登记会让本表比出差异。）
+               "nats-server", "caddy", "traefik", "helm",
+               # 2026-10-12 并发那批补的服务型 CLI
+               "k9s", "trivy", "docker-compose",
+               # 2026-10-12 B7：JMeter（压测服务型，需 JDK 前置）
+               "jmeter"},
     # 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only）。
     # 这 17 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
     # 磁盘上不落 ~/.env-tools/<key>/ 目录**，所以遍历全组件的老断言都要按能力位豁免。
@@ -52,13 +76,22 @@ EXPECTED_MEMBERSHIP = {
     "开发工具": {"idea", "pycharm", "clion", "webstorm", "goland", "datagrip",
                "vscode", "dbx", "windterm", "wechat-devtools", "eclipse",
                "apipost", "apifox", "hbuilderx", "android-studio",
-               "visual-studio", "navicat"},
+               "visual-studio", "navicat",
+               # 2026-10-12 B6a：与 MySQL / Mongo / PG / Redis 一一配套的客户端
+               # （成本最低的一批：只加 URL，不碰解压/环境变量任何一条逻辑）
+               "dbeaver", "heidisql", "bruno", "redisinsight", "ardm",
+               "mongodb-compass", "pgadmin4", "mysql-workbench", "postman"},
     # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS），
     # 固定排在最后。这里手写一份清单是为了让
     # "扩白名单 = 必须同时改这张表"变成一次可见的改动：
     # 下面 test_launch_tab_membership_is_derived_from_the_whitelist 会把两边钉在一起。
     "一键启停": {"jenkins", "nacos", "activemq", "rocketmq", "nginx", "kafka",
-               "tomcat", "elasticsearch", "rabbitmq", "seata"},
+               "tomcat", "elasticsearch", "rabbitmq", "seata", "redis",
+               # 2026-10-12 并发那批接进启停白名单的服务
+               "etcd", "consul", "zookeeper",
+               # 2026-10-12 B4 补：minio（对象存储，API 9000 + 控制台 9001，
+               # 真机实测过起停与端口释放）
+               "minio"},
 }
 
 ALL_KEYS = {k for group in EXPECTED_MEMBERSHIP.values() for k in group}
