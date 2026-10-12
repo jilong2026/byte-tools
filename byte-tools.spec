@@ -6,9 +6,13 @@ PyInstaller spec file for ByteTools.
     pyinstaller byte-tools.spec
 
 产物路径：
-    dist/ByteTools            # Linux 单可执行文件
-    dist/ByteTools.exe       # Windows 单可执行文件
-    dist/ByteTools.app       # macOS .app bundle
+    dist/ByteTools/ByteTools.exe       # Windows 目录内可执行文件（onedir，启动零解压）
+    dist/ByteTools/ByteTools           # Linux 目录内可执行文件
+    dist/ByteTools.app                 # macOS .app bundle
+
+切 onefile（旧版，启动需解压 ~119MB 到 %TEMP%）：
+    EXE 的 exclude_binaries=True 改成 False，删掉 COLLECT 段，
+    macOS BUNDLE 入参从 coll 改回 exe。
 """
 import sys
 from pathlib import Path
@@ -88,13 +92,11 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data)
 
 # ---------------------------------------------------------------------------
-# EXE / 单文件产物
+# EXE（onedir 模式：exclude_binaries=True，二进制由 COLLECT 收集到同一目录）
 # ---------------------------------------------------------------------------
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name=APP_NAME,
     debug=False,
@@ -110,6 +112,24 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ICON_WIN) if sys.platform == "win32" and ICON_WIN.exists() else None,
+    exclude_binaries=True,   # 二进制不打包进 exe，由 COLLECT 收集到同目录
+)
+
+# ---------------------------------------------------------------------------
+# COLLECT（onedir 目录：exe + 所有二进制 + 静态资源）
+# ---------------------------------------------------------------------------
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    [],
+    name=APP_NAME,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    # 不指定 icon：COLLECT 不接受 icon 参数
 )
 
 # ---------------------------------------------------------------------------
@@ -117,7 +137,7 @@ exe = EXE(
 # ---------------------------------------------------------------------------
 if sys.platform == "darwin":
     app = BUNDLE(
-        exe,
+        coll,           # onedir 模式下 BUNDLE 入参从 exe 改成 coll
         name=f"{APP_NAME}.app",
         # icon=str(SPEC_DIR / "assets" / "icon.icns"),
         bundle_identifier="com.rgh.byte-tools",

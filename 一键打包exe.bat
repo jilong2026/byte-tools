@@ -5,7 +5,7 @@ REM --------------------------------------------------------------------------
 REM Double-click to run. Like the launcher it needs nothing from the user: it
 REM finds a usable Python, installs one when the machine has none, creates
 REM .venv, installs the dependencies and PyInstaller, then builds
-REM dist\ByteTools.exe. Pass "nopause" for scripted use.
+REM dist\ByteTools\ByteTools.exe (onedir). Pass "nopause" for scripted use.
 REM --------------------------------------------------------------------------
 REM KEEP THIS FILE PURE ASCII, for the same reason as the launcher: cmd.exe
 REM tracks its position in a .bat as a byte offset, and a multibyte file plus a
@@ -157,19 +157,19 @@ call "%RUN_PY%" pyinstaller_no_wmi.py --noconfirm byte-tools.spec
 set "RC=%errorlevel%"
 if %RC% neq 0 goto :err_main
 
-if not exist "dist\ByteTools.exe" goto :err_no_dist
-for %%F in ("dist\ByteTools.exe") do (
+if not exist "dist\ByteTools\ByteTools.exe" goto :err_no_dist
+for %%F in ("dist\ByteTools\ByteTools.exe") do (
     echo ================================================================
-    call :say pack_ok_1 "  Built: {0}" "%CD%\dist\ByteTools.exe"
+    call :say pack_ok_1 "  Built: {0}" "%CD%\dist\ByteTools\ByteTools.exe"
     call :say pack_ok_2 "  Size: {0} bytes" "%%~zF"
     call :say pack_ok_3 "  Built at: {0}" "%%~tF"
-    call :say pack_ok_4 "  Double-click dist\ByteTools.exe, or copy it to any Win10/11 64-bit machine"
+    call :say pack_ok_4 "  Double-click dist\ByteTools\ByteTools.exe, or copy the whole dist\ByteTools folder to any Win10/11 64-bit machine"
     echo ================================================================
 )
 if /i not "%~1"=="nopause" start "" explorer "%CD%\dist"
 goto :done
 :err_no_dist
-call :say err_no_dist "[error] Packaging finished but dist\ByteTools.exe was not found."
+call :say err_no_dist "[error] Packaging finished but dist\ByteTools\ByteTools.exe was not found."
 goto :finish_fail
 :done
 

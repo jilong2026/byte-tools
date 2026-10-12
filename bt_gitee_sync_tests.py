@@ -363,10 +363,16 @@ class SyncScriptTest(unittest.TestCase):
 class ArtifactNameConsistency(unittest.TestCase):
     """产物文件名在四个地方各写了一份，改一处忘改别处就是「静默少传」的老坑。
 
-    build matrix 的 artifact 名是真源；其余三处必须与它逐字一致。
+    2026-10-12 Windows 切 onedir 后矩阵与同步清单**有意**分叉（release.yml 头部
+    变更记录写明了）：build matrix 只构建 3 个新产物，而 RELEASE_ARTIFACTS /
+    .sh / .bat 三处多带旧版 onefile 的 ByteTools.exe 兼容老下载链接。
+    所以两组真源分开核对：矩阵对 BUILT，同步三件套对 BUILT ∪ LEGACY ——
+    任何一个方向被顺手删改都仍然全红。
     """
 
-    EXPECT = set(ARTIFACTS)
+    LEGACY = {"ByteTools.exe"}          # 旧 onefile：不再生成，只为老链接兜底
+    BUILT = set(ARTIFACTS) - LEGACY     # build matrix 的真源（3 个）
+    EXPECT = BUILT | LEGACY             # 同步三件套的真源（4 个）
 
     def _yml(self):
         return (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -377,7 +383,7 @@ class ArtifactNameConsistency(unittest.TestCase):
         extras = {x for x in re.findall(r"^\s{12}artifact_extra:\s*(\S+)\s*$", yml, re.M)
                   if x not in ("''", '""')}
         # 被注释掉的停用条目（Intel 通用包）不该混进来
-        self.assertEqual(names | extras, self.EXPECT,
+        self.assertEqual(names | extras, self.BUILT,
                          f"matrix 产物名与预期不一致：{sorted(names | extras)}")
 
     def test_workflow_release_artifacts_env_matches_matrix(self):
