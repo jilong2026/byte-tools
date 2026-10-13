@@ -14062,6 +14062,12 @@ RESULTS_KEY = "results"
 # 告警把日志浮层自动弹开后，静默多久自动收起（毫秒）。用户手动点开的不自动收。
 LOG_AUTO_HIDE_MS = 8000
 
+# 启动后多少毫秒内不自动弹开日志浮层（2026-10-13 用户要求"启动后默认不打开日志"）。
+# 启动那一段的 warn（GitHub 限流、个别组件版本抓取失败）不该抢走主界面 ——
+# 它们照旧累计未读数，按钮上显示「📋 日志 (N)」，想看点一下就行。
+# 只对"自动弹开"生效；用户手点「📋 日志」不受影响。
+LOG_AUTO_POP_DELAY_MS = 10000
+
 
 def grid_columns_for(available_px, min_card_px) -> int:
     """给定可用宽度与格子最小宽度，返回列数（恒 ≥ 1）。
@@ -16882,6 +16888,9 @@ class MainWindow(QMainWindow):
         # 里的占位 None 会被替换成真 ComponentCard。
         self._pending_cards: List[Tuple[str, "Component", QWidget]] = []
         self._splash: Optional["SplashScreen"] = splash
+        # 日志自动弹开的静默期起点（启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹）。
+        import time as _time
+        self._startup_mono: float = _time.monotonic()
 
         self._build_ui()
         self._apply_qss()
@@ -18733,13 +18742,29 @@ class MainWindow(QMainWindow):
         # 只有 warn/error 才自动弹开浮层：下载/安装这类常规进度在卡片上已有进度条，
         # 每来一条都弹会把用户正在操作的那张卡盖住。弹开同时在按钮上挂未读条数，
         # 点开一次即清零。
+        # 2026-10-13：启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹 —— 启动那一波的
+        # 限流/抓取失败告警不该盖住主界面；未读数照旧累计在「📋 日志 (N)」上。
         if level in ("warn", "error"):
             overlay = getattr(self, "log_overlay", None)
             if overlay is not None and overlay.isHidden():
                 self._log_unread += 1
-                self._set_log_open(True)
-                self._log_auto_hide.start()
+                if self._log_autopop_allowed():
+                    self._set_log_open(True)
+                    self._log_auto_hide.start()
             self._refresh_log_button()
+
+    def _log_autopop_allowed(self) -> bool:
+        """现在是否允许自动弹开日志浮层。
+
+        启动后 LOG_AUTO_POP_DELAY_MS 内为 False。时间基准用 monotonic
+        （不受用户改系统时间影响）；`_startup_mono` 在 __init__ 里取，
+        半初始化的测试窗口没有该属性时按"允许"处理（测试要看弹开行为）。
+        """
+        started = getattr(self, "_startup_mono", None)
+        if started is None:
+            return True
+        import time as _time
+        return (_time.monotonic() - started) * 1000 >= LOG_AUTO_POP_DELAY_MS
 
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:
