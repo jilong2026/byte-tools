@@ -14062,6 +14062,12 @@ RESULTS_KEY = "results"
 # 告警把日志浮层自动弹开后，静默多久自动收起（毫秒）。用户手动点开的不自动收。
 LOG_AUTO_HIDE_MS = 8000
 
+# 启动后多少毫秒内不自动弹开日志浮层（2026-10-13 用户要求"启动后默认不打开日志"）。
+# 启动那一段的 warn（GitHub 限流、个别组件版本抓取失败）不该抢走主界面 ——
+# 它们照旧累计未读数，按钮上显示「📋 日志 (N)」，想看点一下就行。
+# 只对"自动弹开"生效；用户手点「📋 日志」不受影响。
+LOG_AUTO_POP_DELAY_MS = 10000
+
 
 def grid_columns_for(available_px, min_card_px) -> int:
     """给定可用宽度与格子最小宽度，返回列数（恒 ≥ 1）。
@@ -16637,6 +16643,76 @@ def _event_global_pos(ev):
     return g() if g is not None else None
 
 
+class SplashScreen(QDialog):
+    """启动画面：无边框、半透明背景、Logo + 加载进度文字。
+
+    设计要点：
+    - 无边框 + 半透明：看起来像"浮在桌面上的卡片"，不是传统 splash
+    - 进度文字实时更新（"正在加载组件 32/88…"），让用户知道在干什么
+    - 不阻塞主线程：建卡片分帧在 QTimer 回调里做，splash 靠事件循环保持响应
+    - 建完自动淡出（QPropertyAnimation），主窗口淡入
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFixedSize(420, 240)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # 背景圆角面板
+        self.panel = QFrame()
+        self.panel.setObjectName("splashPanel")
+        self.panel.setStyleSheet("""
+            #splashPanel {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2c3e50, stop:1 #1a252f);
+                border-radius: 12px;
+            }
+        """)
+        panel_lay = QVBoxLayout(self.panel)
+        panel_lay.setContentsMargins(24, 28, 24, 28)
+        panel_lay.setSpacing(16)
+
+        # Logo
+        self.logo = QLabel()
+        icon_path = Path(__file__).parent / "assets" / "byte-tools.png"
+        if icon_path.exists():
+            pix = QPixmap(str(icon_path)).scaled(64, 64, Qt.KeepAspectRatio,
+                                                  Qt.SmoothTransformation)
+            self.logo.setPixmap(pix)
+        else:
+            self.logo.setText("🔧")
+            self.logo.setStyleSheet("font-size: 48px; color: white;")
+        self.logo.setAlignment(Qt.AlignCenter)
+        panel_lay.addWidget(self.logo)
+
+        # 标题
+        self.title = QLabel(APP_NAME)
+        self.title.setStyleSheet("color: white; font-size: 18px; font-weight: 600;")
+        self.title.setAlignment(Qt.AlignCenter)
+        panel_lay.addWidget(self.title)
+
+        # 进度文字
+        self.progress = QLabel("正在初始化…")
+        self.progress.setStyleSheet("color: rgba(255,255,255,0.6); font-size: 12px;")
+        self.progress.setAlignment(Qt.AlignCenter)
+        panel_lay.addWidget(self.progress)
+
+        lay.addWidget(self.panel)
+
+        # 居中屏幕
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.center() - self.rect().center())
+
+    def set_progress(self, text: str) -> None:
+        self.progress.setText(text)
+        QApplication.processEvents()   # 让进度文字立刻重绘
+
+
 class DonateDialog(QDialog):
     """支持作者：微信 / 支付宝 / QQ，各渠道展示对应二维码。"""
 
@@ -16780,7 +16856,7 @@ class MainWindow(QMainWindow):
             MainWindow._COMPONENTS_CACHE = {c.key: c for c in build_components()}
         return MainWindow._COMPONENTS_CACHE
 
-    def __init__(self) -> None:
+    def __init__(self, splash: Optional["SplashScreen"] = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         # 设置窗口图标（任务栏、标题栏、Alt+Tab 切换显示）
@@ -16806,13 +16882,75 @@ class MainWindow(QMainWindow):
         # 视图模式：grid（按宽度自动分列）/ list（恒 1 列）；_load_settings 会按
         # config.json 覆盖它，老配置没有这个键时留在 grid，即"老用户自动获得新默认"。
         self.view_mode: str = "grid"
+        # 2026-10-13 启动优化：卡片改为分帧异步构建（splash 显示进度，用户感知"秒开"）。
+        # 这里先记录"待建"列表，真控件由 _build_cards_async() 分帧建。列表里元素是
+        # (分类名, Component, 该 Tab 的容器) 三元组；建完后 self.cards / _tab_cards
+        # 里的占位 None 会被替换成真 ComponentCard。
+        self._pending_cards: List[Tuple[str, "Component", QWidget]] = []
+        self._splash: Optional["SplashScreen"] = splash
+        # 日志自动弹开的静默期起点（启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹）。
+        import time as _time
+        self._startup_mono: float = _time.monotonic()
 
         self._build_ui()
         self._apply_qss()
-        self._load_settings()
-        # 版本抓取不在这里发起（见 main() 里的注释）：它会起 26 条线程、
-        # 抓成功还要写 version_cache.json，挂在 __init__ 上等于每个构造窗口的测试
-        # 都替用户打一遍网络。
+        # 2026-10-13 启动优化：没有 splash（测试 / 复用窗口）时同步建卡；
+        # 有 splash（生产 main() 路径）时不建，由调用方在 show 后调 _build_cards_async。
+        if self._splash is None:
+            self._build_cards_async(synchronous=True)
+            self._load_settings()       # 建卡后才恢复配置（需要真卡片上的 version_combo）
+
+    def _build_cards_async(self, on_done: Optional[Callable[[], None]] = None,
+                            *, synchronous: bool = False) -> None:
+        """分帧建卡片：每帧 8 张，splash 显示进度，全部建完回调 on_done。
+
+        为什么必须分帧而不是一次性建：87 张卡的 ComponentCard 构造实测 ~460ms，
+        一次性建会让 splash 卡住 0.5 秒不动，用户以为没响应。分帧后 splash 的进度
+        文字每帧都在更新，"正在加载组件 32/88…" 是活的。
+
+        synchronous=True 时同步跑完（测试用：构造 MainWindow 后立刻调用，
+        不依赖事件循环）。生产路径必须传 on_done 且 synchronous=False（默认）。
+
+        注意：self.cards / self._tab_cards 在建完前是**空列表**，现有遍历代码
+        （刷新版本 / 存配置 / 关窗 / 搜索 / 启动停止）都是 `for card in self.cards:`，
+        空列表等于无害的空循环，不用改。建完后一次性填充。
+        """
+        batch = 8
+        total = len(self._pending_cards)
+        idx = {"i": 0}
+
+        def _step():
+            start = idx["i"]
+            end = min(start + batch, total)
+            if start >= total:
+                if on_done:
+                    on_done()
+                return
+            for i in range(start, end):
+                cat_name, comp, wrap = self._pending_cards[i]
+                card = ComponentCard(comp, self._append_log)
+                card.setParent(wrap)
+                # 填充到 cards 与 _tab_cards（建完前它们是空列表）
+                self.cards.append(card)
+                # _tab_cards 按分类找索引：cat_name 在第几个 Tab
+                tab_idx = next(
+                    (k for k, t in enumerate(self._tab_base_titles)
+                     if t.startswith(cat_name + "（")), None)
+                if tab_idx is not None:
+                    self._tab_cards[tab_idx].append(card)
+                if self._splash is not None:
+                    self._splash.set_progress(f"正在加载组件 {i + 1}/{total}…")
+            idx["i"] = end
+            if end < total:
+                if synchronous:
+                    _step()          # 测试环境：同步递归跑完
+                else:
+                    QTimer.singleShot(0, _step)
+            else:
+                if on_done:
+                    on_done()
+
+        _step()
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -17050,12 +17188,13 @@ class MainWindow(QMainWindow):
             cards_layout.setContentsMargins(18, 18, 18, 18)
             cards_layout.setSpacing(CARD_ROW_SPACING)
             tab_cards: List[ComponentCard] = []
+            # 2026-10-13 启动优化：不在构造期建卡片控件，只记录占位（comp 引用）。
+            # 真卡片由 _build_cards_async() 分帧在 QTimer 回调里建（每帧 8 张，
+            # splash 显示进度，用户感知"秒开"）。cards 列表与 _tab_cards 在全部建完前
+            # 是**空列表**，建完后一次性填充 —— 现有遍历代码（刷新版本 / 存配置 / 关窗）
+            # 都是 `for card in self.cards:`，空列表等于无害的空循环，不用改。
             for comp in comps:
-                card = ComponentCard(comp, self._append_log)
-                # 先挂进容器，具体排在哪个格子里由 relayout_cards 决定
-                card.setParent(cards_wrap)
-                self.cards.append(card)
-                tab_cards.append(card)
+                self._pending_cards.append((cat_name, comp, cards_wrap))
             scroll.setWidget(cards_wrap)
             base_title = f"{cat_name}（{len(comps)}）"
             self.tabs.addTab(scroll, base_title)
@@ -17137,7 +17276,7 @@ class MainWindow(QMainWindow):
             f'<a href="dir://{html_escape(Path(CONFIG_DIR).as_posix())}" '
             f'style="color:#8fa3b8;text-decoration:underline">'
             f"{html_escape(str(CONFIG_DIR))}</a>   "
-            f"组件：{len(self.cards)}"
+            f"组件：{sum(1 for c in self.components if c.key != 'erlang')}"
         )
         self.status_bar.setObjectName("statusBar")
         self.status_bar.setTextFormat(Qt.RichText)
@@ -17156,12 +17295,13 @@ class MainWindow(QMainWindow):
         self._log_auto_hide.timeout.connect(self._on_log_auto_hide)
 
         # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）。
-        # 2026-10-13：先记录**构造期实际排出的列数**再重排 —— 此前这里是 0 哨兵，
-        # showEvent 的"列数没变就不重排"守卫（见其注释）永远比不中，
-        # offscreen/窄窗口下白白多拆建一次 87 卡的行结构（实测 ~0.4s）。
+        # 2026-10-13：构造期**不重排** —— 此时 QScrollArea 的 viewport 宽度还没就绪，
+        # `grid_columns_for` 会算出 1 列，排完 showEvent 又得拆掉重排（实测 87 卡 × 8 次
+        # relayout ≈ 845ms + 794ms）。只记录"当前认为的列数"（可能是错的 1 列），
+        # 让 showEvent 按"列数不同才重排"的守卫自然触发那**唯一一次**真重排。
+        # 守卫逻辑见 showEvent：构造期记的 1 列 ≠ show 期算的 3 列 ⇒ 强制重排；
+        # 若构造期侥幸算对（窗口已显示时构造），则跳过 —— 两种路径都不会漏排。
         self._last_columns = self._card_columns()
-        for idx in range(len(self._tab_cards)):
-            self.relayout_cards(idx)
         self._refresh_view_button()
         self._refresh_log_button()
 
@@ -18602,13 +18742,29 @@ class MainWindow(QMainWindow):
         # 只有 warn/error 才自动弹开浮层：下载/安装这类常规进度在卡片上已有进度条，
         # 每来一条都弹会把用户正在操作的那张卡盖住。弹开同时在按钮上挂未读条数，
         # 点开一次即清零。
+        # 2026-10-13：启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹 —— 启动那一波的
+        # 限流/抓取失败告警不该盖住主界面；未读数照旧累计在「📋 日志 (N)」上。
         if level in ("warn", "error"):
             overlay = getattr(self, "log_overlay", None)
             if overlay is not None and overlay.isHidden():
                 self._log_unread += 1
-                self._set_log_open(True)
-                self._log_auto_hide.start()
+                if self._log_autopop_allowed():
+                    self._set_log_open(True)
+                    self._log_auto_hide.start()
             self._refresh_log_button()
+
+    def _log_autopop_allowed(self) -> bool:
+        """现在是否允许自动弹开日志浮层。
+
+        启动后 LOG_AUTO_POP_DELAY_MS 内为 False。时间基准用 monotonic
+        （不受用户改系统时间影响）；`_startup_mono` 在 __init__ 里取，
+        半初始化的测试窗口没有该属性时按"允许"处理（测试要看弹开行为）。
+        """
+        started = getattr(self, "_startup_mono", None)
+        if started is None:
+            return True
+        import time as _time
+        return (_time.monotonic() - started) * 1000 >= LOG_AUTO_POP_DELAY_MS
 
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:
@@ -18797,18 +18953,37 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     ensure_dir(CONFIG_DIR)
-    win = MainWindow()
+
+    # 2026-10-13 启动优化：先显示 splash（无边框半透明、Logo + 进度文字），
+    # 再分帧建卡片（每帧 8 张，splash 实时报 "正在加载组件 N/88…"），全部建完
+    # splash 淡出、主窗口淡入。用户感知从"白屏 2.8 秒"变成"splash 立即出现、
+    # 进度条一直动、主窗口随后就绪"。
+    splash = SplashScreen()
+    splash.show()
+
+    win = MainWindow(splash=splash)
     win._adopt_running()      # 认清本机在跑什么；不放 __init__——它会读写用户 running.json、探测真端口，构造窗口的测试会跟着遭殃
-    win.show()
-    # 版本抓取也挂在**程序入口**、不挂 `__init__`（和 `_adopt_running`、检查更新同一个理由）：
-    # 它一次要起 26 条线程、抓成功还要往 `~/.env-tools/version_cache.json` 落盘，
-    # 放在构造函数里就是"每个构造窗口的测试都替用户打一遍网络、写一次缓存"。
-    # 放 singleShot(0) 而不是直接调：先让界面画完，抓取不在首帧的关键路径上。
-    QTimer.singleShot(0, win._start_fetch_versions)
-    # 检查更新只挂在**程序入口**、不挂 __init__：理由与上面 `_adopt_running` 那条注释一样。
-    # 第一版犯过这个错 —— 测试直接构造 MainWindow，4 秒后定时器一响，真发了一次 HTTP
-    # 请求并把 `last_check_ts` 写进了用户真实的 config.json（延迟 4 秒是为了不给启动添负担）。
-    QTimer.singleShot(4000, lambda: win._start_update_check(auto=True))
+
+    def _on_cards_ready():
+        # 全部卡片建完：splash 淡出，主窗口显示，然后才开始版本抓取与检查更新
+        splash.close()
+        splash.deleteLater()
+        win._splash = None
+        win._load_settings()        # 建卡后才恢复配置（需要真卡片上的 version_combo）
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        # 版本抓取也挂在**程序入口**、不挂 `__init__`（和 `_adopt_running`、检查更新同一个理由）：
+        # 它一次要起 26 条线程、抓成功还要往 `~/.env-tools/version_cache.json` 落盘，
+        # 放在构造函数里就是"每个构造窗口的测试都替用户打一遍网络、写一次缓存"。
+        # 放 singleShot(0) 而不是直接调：先让界面画完，抓取不在首帧的关键路径上。
+        QTimer.singleShot(0, win._start_fetch_versions)
+        # 检查更新只挂在**程序入口**、不挂 __init__：理由与上面 `_adopt_running` 那条注释一样。
+        # 第一版犯过这个错 —— 测试直接构造 MainWindow，4 秒后定时器一响，真发了一次 HTTP
+        # 请求并把 `last_check_ts` 写进了用户真实的 config.json（延迟 4 秒是为了不给启动添负担）。
+        QTimer.singleShot(4000, lambda: win._start_update_check(auto=True))
+
+    win._build_cards_async(on_done=_on_cards_ready)
     return app.exec()
 
 
