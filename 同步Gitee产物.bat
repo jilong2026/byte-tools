@@ -144,15 +144,15 @@ echo   tag has no release assets yet - check TAG_NAME and the network.
 :no_art_manual
 echo.
 echo   This script wants the release files, named exactly:
-echo     ByteTools-windows-x64.zip
 echo     ByteTools.exe
+echo     ByteTools-windows-x64.zip
 echo     ByteTools-macos-arm64.zip
 echo     ByteTools-linux-x64
 echo   Note .\assets in this repo is the ICON folder, not the artifact folder.
 echo.
 echo   Last resort, fetch them by hand (no gh CLI needed):
 echo     mkdir "%ASSETS_DIR%"
-echo     curl -L -o "%ASSETS_DIR%\ByteTools-windows-x64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-windows-x64.zip"
+echo     curl -L -o "%ASSETS_DIR%\ByteTools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-windows-x64.zip"
 echo     curl -L -o "%ASSETS_DIR%\ByteTools.exe" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools.exe"
 echo     curl -L -o "%ASSETS_DIR%\ByteTools-macos-arm64.zip" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-macos-arm64.zip"
 echo     curl -L -o "%ASSETS_DIR%\ByteTools-linux-x64" "%GH_ACCEL%https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools-linux-x64"
