@@ -73,7 +73,7 @@ TARGET_COMMITISH="${TARGET_COMMITISH:-master}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 API_MAX_TIME="${API_MAX_TIME:-60}"
 UPLOAD_MAX_TIME="${UPLOAD_MAX_TIME:-300}"
-DEFAULT_ARTIFACTS="ByteTools-windows-x64.zip|ByteTools.exe|ByteTools-macos-arm64.zip|ByteTools-linux-x64"
+DEFAULT_ARTIFACTS="ByteTools.exe|ByteTools-windows-x64.zip|ByteTools-macos-arm64.zip|ByteTools-linux-x64"
 RELEASE_ARTIFACTS="${RELEASE_ARTIFACTS:-${DEFAULT_ARTIFACTS}}"
 UPLOAD_ARTIFACTS="${UPLOAD_ARTIFACTS:-}"
 

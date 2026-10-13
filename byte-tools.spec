@@ -6,19 +6,20 @@ PyInstaller spec file for ByteTools.
     pyinstaller byte-tools.spec
 
 产物路径：
-    dist/ByteTools/ByteTools.exe       # Windows 目录内可执行文件（onedir，启动零解压）
-    dist/ByteTools/ByteTools           # Linux 目录内可执行文件
+    dist/ByteTools.exe                 # Windows 单可执行文件（onefile，双击即用）
+    dist/ByteTools                     # Linux 单可执行文件
     dist/ByteTools.app                 # macOS .app bundle
 
-切 onefile（旧版，启动需解压 ~119MB 到 %TEMP%）：
-    EXE 的 exclude_binaries=True 改成 False，删掉 COLLECT 段，
-    macOS BUNDLE 入参从 coll 改回 exe。
+启动画面分两段：
+  ① PyInstaller Splash（assets/splash.png）—— bootloader 解压阶段就显示，覆盖
+     onefile "解压 ~119MB" 的空白期（正是用户抱怨的"几十秒打不开"那一段）。
+  ② 应用内 SplashScreen —— 解压完成、Python 起来后分帧建卡时显示
+     "正在加载组件 N/87…" 动态进度。
 
-启动画面：应用内 SplashScreen（分帧建卡时显示"正在加载组件 N/87…"）。
-⚠ 2026-10-13 实测：PyInstaller 自带 Splash 在本项目**不可用** —— 它需要完整
-Tcl/Tk 运行时（_tk_data、tk86t.dll、tcl86t.dll、ttk/utils.tcl…），而我们为减
-体积排除了 tkinter；逐个补文件是无底洞（连修 4 轮仍报新缺文件），且与 Qt 主题
-冲突。启动画面由应用内 SplashScreen 承担，解压阶段的画面由 onedir 的零解压消除。
+⚠ 2026-10-13 二次攻坚（推翻上一轮"不可用"结论）：上一轮失败的原因是
+把 tkinter 放进了 excludes 再手工补文件 —— 钩子根本不触发，逐个补是无底洞。
+正确做法：**保留 tkinter（不进 excludes）**，让 PyInstaller 官方 tkinter 钩子
+一次性收齐 _tkinter + _tk_data + tcl86t.dll / tk86t.dll。代价是包体多 ~2MB。
 """
 import sys
 from pathlib import Path
@@ -63,11 +64,14 @@ hidden_imports = [
     "charset_normalizer",
     "certifi",
     "idna",
+    # 2026-10-13：splash 的 Tcl/Tk 运行时靠 _tkinter 的钩子收集，但 main.py
+    # 不 import tkinter，静态分析不会收 —— 必须 hiddenimports 显式点名。
+    "_tkinter",
 ]
 
-# 2026-10-13：PyInstaller splash 需要完整 Tcl/Tk 运行时（_tk_data、tk86t.dll、
-# tcl86t.dll、ttk/*.tcl…），与本项目排除 tkinter 冲突，实测连修 4 轮仍报新缺文件，
-# 放弃。保持 tkinter 排除。
+# 2026-10-13 二次攻坚：**保留 tkinter**（不进 excludes），让 PyInstaller 官方
+# tkinter 钩子自动收齐 splash 需要的 Tcl/Tk 运行时（_tkinter、_tk_data、
+# tcl86t.dll / tk86t.dll）。不再手工补文件。
 extra_binaries = []
 extra_datas = []
 
@@ -77,17 +81,16 @@ extra_datas = []
 a = Analysis(
     ['main.py'],
     pathex=[str(SPEC_DIR)],
-    binaries=extra_binaries,     # 2026-10-13：tkinter 的 tcl86t.dll / tk86t.dll（splash 需要）
-    datas=datas + extra_datas,   # tkinter 的 _tk_data（text.tcl 等，splash 需要）
+    binaries=extra_binaries,
+    datas=datas + extra_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 不需要的大模块
-        "tkinter",     # 2026-10-13 复盘：tkinter 必须排除（PyInstaller splash 不可用，
-                       # 见文件头注释）。当初为 splash 临时放行，实测连修 4 轮仍报
-                       # 缺 Tcl/Tk 文件，已回滚。
+        # 不需要的大模块。⚠ tkinter **不在排除列表**：PyInstaller splash 的引导
+        # 画面跑在 Tcl/Tk 里（见文件头注释），排除它 splash 就报
+        # "could not find requirement _tk_data\..."。
         "test",
         "unittest",
         "PySide6.QtNetwork",
@@ -106,11 +109,27 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data)
 
 # ---------------------------------------------------------------------------
-# EXE（onedir 模式：exclude_binaries=True，二进制由 COLLECT 收集到同一目录）
+# Splash：bootloader 解压阶段显示的启动画面（onefile 必备，见文件头注释）
+# ---------------------------------------------------------------------------
+splash = Splash(
+    str(SPEC_DIR / "assets" / "splash.png"),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=(10, 230),
+    text_size=10,
+    text_color="rgba(255,255,255,150)",
+    always_on_top=False,
+)
+
+# ---------------------------------------------------------------------------
+# EXE（onefile 模式：exclude_binaries=False，二进制打包进单个 exe）
 # ---------------------------------------------------------------------------
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
+    splash,
     [],
     name=APP_NAME,
     debug=False,
@@ -131,24 +150,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(ICON_WIN) if sys.platform == "win32" and ICON_WIN.exists() else None,
-    exclude_binaries=True,   # 二进制不打包进 exe，由 COLLECT 收集到同目录
-)
-
-# ---------------------------------------------------------------------------
-# COLLECT（onedir 目录：exe + 所有二进制 + 静态资源）
-# ---------------------------------------------------------------------------
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    [],
-    name=APP_NAME,
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    # 不指定 icon：COLLECT 不接受 icon 参数
+    exclude_binaries=False,   # onefile：二进制打包进单个 exe
 )
 
 # ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ coll = COLLECT(
 # ---------------------------------------------------------------------------
 if sys.platform == "darwin":
     app = BUNDLE(
-        coll,           # onedir 模式下 BUNDLE 入参从 exe 改成 coll
+        exe,
         name=f"{APP_NAME}.app",
         # icon=str(SPEC_DIR / "assets" / "icon.icns"),
         bundle_identifier="com.rgh.byte-tools",

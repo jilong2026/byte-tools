@@ -7,8 +7,7 @@
 #     git push origin v1.0.0
 #
 # 产物清单（与项目 README 文档一致，3 个平台共 4 个文件）：
-#     ByteTools-windows-x64.zip      Windows x64 onedir 目录压缩包（解压后双击 ByteTools\ByteTools.exe，启动零解压）
-#     ByteTools.exe                  Windows 单可执行文件（旧版 onefile，保留兼容老下载链接）
+#     ByteTools.exe                  Windows x64 单可执行文件（onefile，双击运行，内置 splash 启动图）
 #     ByteTools-macos-arm64.zip      macOS Apple Silicon 原生包
 #     ByteTools-linux-x64            Linux x64 单可执行文件
 #
@@ -28,10 +27,13 @@
 #                    原因：v1.1.0 发布时 macOS job 首次卡在「安装依赖」20+ 分钟不动
 #                    （此前 4 次发布该 job 均只用 1.5~2.0 分钟），卡的是 pip 拉 PySide6
 #                    大 wheel —— 境外 runner 去清华源要跨太平洋，方向是反的。
-# 变更记录（2026-10-12）：Windows 切 onedir 模式（ByteTools-windows-x64.zip），
-#                    启动零解压（旧版 onefile 每次启动要解压 ~119MB 到 %TEMP%，叠加杀软扫描
-#                    导致用户端几十秒打不开）。旧版 ByteTools.exe 仍保留在 RELEASE_ARTIFACTS
-#                    里作为兼容兜底。
+# 变更记录（2026-10-13）：Windows 回到单 exe（onefile）+ PyInstaller Splash ——
+#                    bootloader 解压阶段显示 assets/splash.png 启动图（覆盖"几十秒
+#                    白屏"那一段），解压完成后由应用内 SplashScreen 接力显示建卡进度。
+#                    splash 依赖 Tcl/Tk：必须保留 tkinter 不进 excludes，且
+#                    hiddenimports 显式点名 _tkinter（main.py 不 import 它，
+#                    静态分析不会收），官方 hook-_tkinter 才会收齐 tcl86t/tk86t.dll
+#                    与 _tk_data。代价：包体 +2MB。
 
 name: release
 
@@ -116,10 +118,10 @@ jobs:
             artifact_name: ByteTools-linux-x64
             artifact_extra: ''
             artifact_kind: linux
-          # Windows x64：主产物 ByteTools.exe（双击运行），额外打包 ByteTools-windows-x64.zip 作为分发备份
+          # Windows x64：单 exe（onefile + splash，双击运行）
           - platform_name: Windows (x64)
             runner: windows-latest
-            artifact_name: ByteTools-windows-x64.zip
+            artifact_name: ByteTools.exe
             artifact_extra: ''
             artifact_kind: windows
 
@@ -237,15 +239,14 @@ jobs:
           echo "产物大小: $(du -sh ${{ matrix.artifact_name }} | cut -f1)"
         shell: bash
 
-      # 9. Windows 产物：dist/ByteTools/ 是 onedir 目录，直接打成 zip
+      # 9. Windows 产物：onefile 单 exe，直接就是最终名
       #    $ErrorActionPreference='Stop' 让 PowerShell 命令出错时立即抛异常而非静默继续
-      - name: 准备 Windows 产物（onedir -> .zip）
+      - name: 校验 Windows 产物（单 exe）
         if: matrix.artifact_kind == 'windows'
         run: |
           $ErrorActionPreference = 'Stop'
-          Compress-Archive -Path dist/ByteTools/* -DestinationPath ${{ matrix.artifact_name }}
-          if (-not (Test-Path ${{ matrix.artifact_name }})) { throw "产物未生成: ${{ matrix.artifact_name }}" }
-          Write-Host "zip 大小: $((Get-Item ${{ matrix.artifact_name }}).Length) bytes"
+          if (-not (Test-Path 'dist/ByteTools.exe')) { throw '产物未生成: dist/ByteTools.exe' }
+          Write-Host "exe 大小: $((Get-Item dist/ByteTools.exe).Length) bytes"
         shell: pwsh
 
       # 10. 构造上传文件列表（Windows 平台同时上传 exe 和 zip，其他平台只上传主产物）
@@ -384,7 +385,7 @@ jobs:
           GITHUB_REPO_SLUG: ${{ github.repository }}
           # 产物清单：正文表格、上传资格、收尾校验都以这一处为准。
           # 与上面 build job 的 matrix 产物名同步维护 —— 这是唯一维护点
-          RELEASE_ARTIFACTS: 'ByteTools-windows-x64.zip|ByteTools.exe|ByteTools-macos-arm64.zip|ByteTools-linux-x64'
+          RELEASE_ARTIFACTS: 'ByteTools.exe|ByteTools-windows-x64.zip|ByteTools-macos-arm64.zip|ByteTools-linux-x64'
           # 要真正上传到 Gitee 的子集；留空 = 一个都不传（2026-09-29 起的默认策略）。
           # 确有「Gitee 站内直下」需求时，只把小包填进来（例如 windows zip），
           # 并把本 job 的 runs-on 换成国内 self-hosted runner，否则又是跨境硬推

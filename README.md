@@ -59,7 +59,7 @@
 
 | 系统 | 文件 | 怎么用 |
 |------|------|--------|
-| Windows 10 / 11 (x64) | [`ByteTools-windows-x64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-windows-x64.zip) | 解压后双击 `ByteTools\ByteTools.exe`（onedir 模式，启动零解压） |
+| Windows 10 / 11 (x64) | [`ByteTools.exe`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools.exe) | 双击运行，无需安装（内置启动画面） |
 | macOS (Apple Silicon) | [`ByteTools-macos-arm64.zip`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-macos-arm64.zip) | 解压后双击 `ByteTools.app` |
 | Linux (x64) | [`ByteTools-linux-x64`](https://github.com/jilong2026/byte-tools/releases/latest/download/ByteTools-linux-x64) | `chmod +x` 后直接运行 |
 
@@ -413,7 +413,7 @@ where java
 | 脚本 | 作用 |
 | --- | --- |
 | `一键启动项目.bat` | 准备环境后直接启动 GUI（源码方式，改完代码立刻生效） |
-| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/ByteTools/ByteTools.exe`（onedir，启动零解压） |
+| `一键打包exe.bat` | 准备环境后调用 PyInstaller，产出 `dist/ByteTools.exe`（单文件，内置启动画面） |
 
 两者共用同一套自动装配流程：
 
@@ -536,7 +536,7 @@ pyinstaller byte-tools.spec --noconfirm --clean
 
 > 如果你这台机器上 PyInstaller 一启动就长时间没输出（WINMGMT 冷启动，`platform.win32_ver()` 卡住不返回），改用仓库里现成的入口，效果相同但全程不查 WMI：`python pyinstaller_no_wmi.py byte-tools.spec --noconfirm --clean`。双击那个 `.bat` 走的已经是这条路径。
 
-产物：Windows `dist/ByteTools/ByteTools.exe`（onedir 目录） · macOS `dist/ByteTools.app` · Linux `dist/ByteTools`。Windows 产物带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出 16~256 七档尺寸）；换 logo 后重新生成 ICO 的方法见 [`CODE_WIKI.md`](CODE_WIKI.md) 7.4。覆盖打包后资源管理器仍显示旧图标是 Windows 的图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
+产物：Windows `dist/ByteTools.exe`（单文件） · macOS `dist/ByteTools.app` · Linux `dist/ByteTools`。Windows 产物带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出 16~256 七档尺寸）；换 logo 后重新生成 ICO 的方法见 [`CODE_WIKI.md`](CODE_WIKI.md) 7.4。覆盖打包后资源管理器仍显示旧图标是 Windows 的图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
 
 **打完一定要自己跑一次再关窗，确认退出码是 0**——"关窗闪退"的成因与取证脚本见 `DEVELOPMENT.md` 规则 R14。
 
