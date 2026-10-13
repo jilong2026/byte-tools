@@ -13,6 +13,12 @@ PyInstaller spec file for ByteTools.
 切 onefile（旧版，启动需解压 ~119MB 到 %TEMP%）：
     EXE 的 exclude_binaries=True 改成 False，删掉 COLLECT 段，
     macOS BUNDLE 入参从 coll 改回 exe。
+
+启动画面：应用内 SplashScreen（分帧建卡时显示"正在加载组件 N/87…"）。
+⚠ 2026-10-13 实测：PyInstaller 自带 Splash 在本项目**不可用** —— 它需要完整
+Tcl/Tk 运行时（_tk_data、tk86t.dll、tcl86t.dll、ttk/utils.tcl…），而我们为减
+体积排除了 tkinter；逐个补文件是无底洞（连修 4 轮仍报新缺文件），且与 Qt 主题
+冲突。启动画面由应用内 SplashScreen 承担，解压阶段的画面由 onedir 的零解压消除。
 """
 import sys
 from pathlib import Path
@@ -59,21 +65,29 @@ hidden_imports = [
     "idna",
 ]
 
+# 2026-10-13：PyInstaller splash 需要完整 Tcl/Tk 运行时（_tk_data、tk86t.dll、
+# tcl86t.dll、ttk/*.tcl…），与本项目排除 tkinter 冲突，实测连修 4 轮仍报新缺文件，
+# 放弃。保持 tkinter 排除。
+extra_binaries = []
+extra_datas = []
+
 # ---------------------------------------------------------------------------
 # 分析
 # ---------------------------------------------------------------------------
 a = Analysis(
     ['main.py'],
     pathex=[str(SPEC_DIR)],
-    binaries=[],
-    datas=datas,
+    binaries=extra_binaries,     # 2026-10-13：tkinter 的 tcl86t.dll / tk86t.dll（splash 需要）
+    datas=datas + extra_datas,   # tkinter 的 _tk_data（text.tcl 等，splash 需要）
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         # 不需要的大模块
-        "tkinter",
+        "tkinter",     # 2026-10-13 复盘：tkinter 必须排除（PyInstaller splash 不可用，
+                       # 见文件头注释）。当初为 splash 临时放行，实测连修 4 轮仍报
+                       # 缺 Tcl/Tk 文件，已回滚。
         "test",
         "unittest",
         "PySide6.QtNetwork",
@@ -102,8 +116,13 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,           # UPX 在 mac 上会导致启动崩溃，禁用
-    upx_exclude=[],
+    upx=True,            # UPX 压缩减小体积，减少杀软扫描与磁盘 IO 时间
+    upx_exclude=[        # 排除已知与 UPX 不兼容的 DLL（PySide6/Qt 官方建议）
+        "Qt6*.dll",
+        "Qt6*.pyd",
+        "PySide6",
+        "shiboken6",
+    ],
     runtime_tmpdir=None,
     console=False,       # GUI 应用，不显示黑色控制台窗口
     disable_windowed_traceback=False,
