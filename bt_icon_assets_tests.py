@@ -239,36 +239,32 @@ class IconCoverage(unittest.TestCase):
     #   · 项目官方 GitHub 仓库（API 检索全量图片清单）
     #   · 项目官网 HTML（提取 <img>/<link> 里的 logo/icon 资源）
     #   · 官方 README 的图片引用
+    # 2026-10-14 第二轮：Simple Icons 确认全部没有（全量索引 3307 条逐一查过），
+    # 改从**各项目官方仓库/官网**直取，又补上 6 个（来源如下，均已肉眼复核 32px 观感）：
+    #   · nacos           alibaba/nacos  develop  console-ui-next/public/img/nacos-icon.png
+    #   · seata           apache/incubator-seata  2.x  console-fe/public/img/seata_logo_small.jpeg
+    #                     （200×200 蓝底白 S，原为 JPEG，入库时转成真 PNG）
+    #   · k9s             derailed/k9s  master  assets/imhotep_logo.png（官网 k9scli.io 同款）
+    #   · docker-compose  docker/compose  main  logo.png
+    #                     （README 第 17 行自己标注 "Docker Compose Logo"，是官方章鱼标识）
+    #   · windterm        kingToolbox/WindTerm  master  images/WindTerm_icon_1024x1024.png
+    #   · visual-studio   visualstudio.microsoft.com 官方品牌资源
+    #                     wp-content/uploads/2019/02/BrandVisualStudioWin2019-2.svg（viewBox 70×70）
     PENDING_SOURCE = {
-        "nacos": "官网只有 features3.svg 这类功能示意图（宽高比 5.3，横幅）；"
-                 "官方仓库 alibaba/nacos 内未见独立标识。"
-                 "Simple Icons 的 nacos 已下架，alibabacloud 是阿里云标识、非 Nacos 自己的，已撤回。",
-        "seata": "官方仅有带文字的横幅 seata_logo.png（1497×401，宽高比 3.7），"
-                 "32px 方格里必然糊成一条线，已删除；"
-                 "仓库内 seata_logo_white.png 同样是 3.74 的横幅。"
-                 "Simple Icons 的 apache 是**基金会**标识、不是 Seata 自己的，已撤回。",
-        "k9s": "官网 k9scli.io 的 imhotep_logo.png 是 100×100 吉祥物画，"
-               "仓库内主标识为大幅插画（695KB、宽高比 2.0 以上），32px 下不可用，已删除。",
-        "docker-compose": "官方 logo.png 为 200×219 字标组合，缩到 32px 后文字糊成一团；"
-                          "Simple Icons 的 dockercompose 已下架，docker 是 Docker 而非 Compose，已撤回。",
         "protoc": "Simple Icons 的 protocolbuffers 已下架（探测 404）；"
-                  "protocolbuffers/protobuf 仓库仅 3 张文档配图，无标识文件；"
-                  "protobuf.dev 上未取到独立 logo 资源。",
+                  "protocolbuffers/protobuf 仓库全量树里只有 3 张文档配图"
+                  "（docs/design/editions/images/*），无标识文件；"
+                  "protobuf.dev 页面内 0 个图片引用；protocolbuffers/protobuf.dev 仓库不存在。",
         "ripgrep": "Simple Icons 的 ripgrep 已下架（探测 404）；"
-                   "BurntSushi/ripgrep 仓库无 logo 文件；"
+                   "BurntSushi/ripgrep 仓库内 **0 个图片文件**；"
                    "作者官网只有横幅 ripgrep1.png（769×295，宽高比 2.6 边缘、32px 下不可读）。",
         "fzf": "Simple Icons 的 fzf 已下架（探测 404）；junegunn/fzf 仓库内 **0 个图片文件**；"
                "README 引用的是功能截图（imgur）与徽章，不是标识。",
         "yq": "Simple Icons 的 mikefarahyq 已下架（探测 404）；mikefarah/yq 仓库内 **0 个图片文件**；"
               "README 引用全是 CI 徽章。",
-        "windterm": "kingToolbox/WindTerm 仓库内只有 libssh 文档里的控件图标"
-                    "（nav_edge_right.svg、splitbar_handle.svg 等），无标识文件；"
-                    "windterm.app 本机 DNS 不可达。",
-        "visual-studio": "Simple Icons 的 visualstudio / visualstudiocode 均已下架（探测 404）；"
-                         "microsoft/vscode-icons 仓库里与 visual_studio 同名的只有 16×16 的"
-                         " markdown.svg / bookmark.svg（文件类型小图标，不是品牌标识），太小不可用。",
         "navicat": "Simple Icons 的 navicat 已下架（探测 404）；"
-                   "官网自动提取到的是展开箭头等界面图标（00_expand_up_icon.svg），不是标识，已撤回；"
+                   "navicat.com 与 navicat.com.cn 本机均不可达（curl 连接超时，非 404）；"
+                   "en.wikipedia.org 与 upload.wikimedia.org 同样不通，取不到词条配图；"
                    "navicat 组织下未找到公开仓库。",
     }
 
@@ -340,6 +336,58 @@ class SimpleIconsConvention(unittest.TestCase):
             f"如果这不是预期的（大量资产改成了别的来源），请在这里登记来源，"
             f"否则说明采集过程出了偏差",
         )
+
+
+class NoDuplicatedAssets(unittest.TestCase):
+    """两个组件的图标不许是同一个文件 —— 除非那本来就是同一家的标识。
+
+    2026-10-14 实测：`apipost.svg` 里装的其实是 **Apifox 的图标**（当初从 Simple Icons
+    取了 apifox，之后被复制成了 apipost）。Apifox 与 Apipost 是两家不同公司的竞品，
+    标不可能相同。但这一类错标**躲得过上面所有护栏**：文件能正常渲染、尺寸合法、
+    宽高比正常、文件名也对应真实组件 key。只有内容哈希能把"复制粘贴装错了标"钉出来。
+
+    同理 `uv.svg` 曾是 Astral（母公司）的标识 —— Simple Icons 同时收录了两者，
+    取错了条目。那条靠 `<title>` 对账发现，本条哈希护栏是它的补充（同一文件复制两遍）。
+    """
+
+    # 母产品与它的 GUI 客户端共用同一个标识 —— 官方设计如此，不是错误
+    ALLOWED_SHARED = {
+        frozenset({"mysql", "mysql-workbench"}): "MySQL Workbench 的官方图标就是 MySQL 标识",
+        frozenset({"mongodb", "mongodb-compass"}): "MongoDB Compass 同上",
+        frozenset({"redis", "redisinsight"}): "RedisInsight 同上",
+    }
+
+    def test_no_two_components_share_the_same_icon_bytes(self):
+        import hashlib
+        by_hash = {}
+        for f in sorted(main.icon_asset_dir().iterdir()):
+            if f.suffix.lower() not in (".svg", ".png"):
+                continue
+            by_hash.setdefault(hashlib.sha256(f.read_bytes()).hexdigest(), []).append(f.stem)
+        offenders = [
+            keys for keys in by_hash.values()
+            if len(keys) > 1 and frozenset(keys) not in self.ALLOWED_SHARED
+        ]
+        self.assertEqual(
+            offenders, [],
+            f"这些组件的图标文件内容完全相同（多半是复制粘贴时装错了标）：{offenders}。"
+            f"若确属同一家的标识，请加进 ALLOWED_SHARED 并写明理由",
+        )
+
+    def test_the_allowed_shared_pairs_still_exist(self):
+        """白名单只许缩小不许悬空 —— 某对不再共用时要把它从名单里删掉。"""
+        import hashlib
+        by_hash = {}
+        for f in sorted(main.icon_asset_dir().iterdir()):
+            if f.suffix.lower() not in (".svg", ".png"):
+                continue
+            by_hash.setdefault(hashlib.sha256(f.read_bytes()).hexdigest(), []).append(f.stem)
+        shared = {frozenset(v) for v in by_hash.values() if len(v) > 1}
+        for pair in self.ALLOWED_SHARED:
+            self.assertIn(
+                pair, shared,
+                f"{sorted(pair)} 已经不再共用同一个图标了，请从 ALLOWED_SHARED 里移除它",
+            )
 
 
 if __name__ == "__main__":
