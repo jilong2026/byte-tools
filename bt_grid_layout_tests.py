@@ -640,18 +640,23 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
 
     def test_single_hit_row_holds_only_that_card(self):
         win = self.win
-        win.search_box.setText("kafka")
+        # 查询词用 "nodejs"（命中 node 一张）而不是 "kafka"：2026-10-14 搜索面
+        # 扩到 summary/usage 之后，"kafka" 会连 ZooKeeper 一起命中
+        # （它的说明原文就写着"…与 Kafka 老版本…依赖"），不再满足"单命中"这个前提。
+        # 这组用例测的是**网格排布**、不是搜索语义，用哪个词当样本都一样，
+        # 不该因为搜索面变宽而被判红。
+        win.search_box.setText("nodejs")
         self.addCleanup(win.search_box.setText, "")
         hits = [c for c in win.cards if not c.isHidden()]
-        self.assertEqual([c.component.key for c in hits], ["kafka"])
+        self.assertEqual([c.component.key for c in hits], ["node"])
 
-        key = self._container_holding("kafka")
+        key = self._container_holding("node")
         rows = [row for row in _rows_of(win, key) if row]
         self.assertEqual(len(rows), 1, f"命中 1 个却排出了 {len(rows)} 行")
         # 这里数的是**卡片**（_row_cards 只认 ComponentCard），透明占位格不算：
         # 一行里有 1 张卡 + 若干占位格才是网格；1 张卡独占整行是列表。
         self.assertEqual(len(rows[0]), 1, "这一行里混进了别的卡片")
-        self.assertEqual(rows[0][0].component.key, "kafka")
+        self.assertEqual(rows[0][0].component.key, "node")
 
     def test_single_hit_keeps_the_same_cell_count_as_browsing(self):
         """命中 1 个也必须按网格排：结果行的**格子数**要等于浏览行的格子数。
@@ -661,28 +666,30 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
         判据用格子数而不是卡片像素宽：少一个占位格，`addWidget(card, 1)` 就会把
         这张卡拉成整行宽 —— 占位格正是"等宽"的直接原因，而像素宽在 offscreen 下
         还受窗口是否真正 show 影响，不是干净的判据。
+
+        样本同样改用 node + "nodejs"（真·单命中），理由见上一个用例。
         """
         win = self.win
         _relayout_all(win)
         idx = next(i for i in range(win.tabs.count())
-                   if any(c.component.key == "kafka" for c in win._tab_cards[i]))
+                   if any(c.component.key == "node" for c in win._tab_cards[i]))
         browse_row = next(r for r in win._tab_rows[idx]
-                          if any(c.component.key == "kafka"
+                          if any(c.component.key == "node"
                                  for c in r.findChildren(main.ComponentCard)))
         cells = browse_row.layout().count()
-        self.assertGreaterEqual(cells, 2, "浏览时 kafka 所在行只有一格，这条用例钉不住东西")
+        self.assertGreaterEqual(cells, 2, "浏览时 node 所在行只有一格，这条用例钉不住东西")
 
-        win.search_box.setText("kafka")
+        win.search_box.setText("nodejs")
         self.addCleanup(win.search_box.setText, "")
         rows = win._tab_rows.get(main.RESULTS_KEY) or []
         hit_row = next((r for r in rows
-                        if any(c.component.key == "kafka"
+                        if any(c.component.key == "node"
                                for c in r.findChildren(main.ComponentCard))), None)
-        self.assertIsNotNone(hit_row, "搜索后 kafka 不在任何结果行里")
+        self.assertIsNotNone(hit_row, "搜索后 node 不在任何结果行里")
         self.assertEqual(hit_row.layout().count(), cells,
                          "命中 1 个时结果行的格子数与浏览时不等 —— 那张卡被拉成了整行宽")
         self.assertEqual([c.component.key for c in hit_row.findChildren(main.ComponentCard)],
-                         ["kafka"], "结果行里混进了别的卡片")
+                         ["node"], "结果行里混进了别的卡片")
 
     def test_clearing_search_puts_every_card_back_in_order(self):
         win = self.win

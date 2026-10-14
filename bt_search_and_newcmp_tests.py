@@ -207,9 +207,18 @@ class MainWindowSearchBox(unittest.TestCase):
             node = node.parent()
 
     def test_search_box_is_wired_to_the_filter(self):
+        # 2026-10-14 起搜索面扩到 summary/usage（见 component_matches 的说明：
+        # 修之前搜「java」「数据库」这类词一张卡都搜不出来，而它们就写在
+        # summary 里）。所以命中集不再等于"名字里带这个词的组件"。
+        # kafka 的对照组是 zookeeper —— 它的 COMPONENT_SUMMARY 原文就写着
+        # "Kafka 老版本与 Hadoop 生态依赖"，把它挡在结果外面等于让用户
+        # 搜 Kafka 时看不见一个它俩配套的组件。
         self.win.search_box.setText("kafka")
         visible = {c.component.key for c in self.win.cards if not c.isHidden()}
-        self.assertEqual(visible, {"kafka"}, "输入 kafka 后应该只剩 Kafka 一张卡片")
+        self.assertEqual(
+            visible, {"kafka", "zookeeper"},
+            "输入 kafka 后应命中 Kafka 本身，以及 summary 里点名 Kafka 的 ZooKeeper",
+        )
 
     def test_empty_query_shows_every_card_again(self):
         self.win.search_box.setText("zazaza")
@@ -246,12 +255,18 @@ class MainWindowSearchBox(unittest.TestCase):
         # sql 命中 mysql + postgresql（都在「开发软件」），外加 2026-10-12 之后
         # 进来的三张卡：sqlite / heidisql / mysql-workbench —— 后两张是「开发工具」，
         # 正好用来证明结果面板会跨分类出小标题。
+        #
+        # 2026-10-14 搜索面扩到 summary/usage 之后多出四张：duckdb（usage 里有 SQL）、
+        # datagrip / dbeaver / pgadmin4（summary 里点名 SQL 工具）。它们都是货真价实的
+        # SQL 工具，搜「sql」时不该被藏起来 —— 这里是**精确**记录扩充后的命中集，
+        # 将来若有人再改匹配面，这条会直接告诉他在哪些组件上动了口径。
         self.win.search_box.setText("sql")
         self.assertEqual(self.win.top_stack.currentIndex(), 1, "应切到统一结果面板")
         self.assertIs(self.win.top_stack.currentWidget(), self.win.results_area)
         visible = {c.component.key for c in self.win.cards if not c.isHidden()}
         self.assertEqual(visible, {"mysql", "postgresql", "sqlite",
-                                   "heidisql", "mysql-workbench"})
+                                   "heidisql", "mysql-workbench",
+                                   "duckdb", "datagrip", "dbeaver", "pgadmin4"})
         # 结果面板里应出现「开发软件」分类小标题
         headers = [w.text() for w in self._result_widgets()
                    if w.objectName() == "resultCatHeader"]
@@ -264,10 +279,16 @@ class MainWindowSearchBox(unittest.TestCase):
 
     def test_search_is_global_across_all_categories(self):
         # 搜 jdk（在「开发环境」分类）也能在统一面板里找到——不是只搜某个 Tab 内
+        #
+        # 2026-10-14 起另外五张卡也命中，且都是**该命中的**：Jenkins 以 JDK 运行、
+        # JMeter 需要 JDK、GraalVM 是 JVM、Kotlin 是 JVM 语言、IDEA 是 Java IDE。
+        # 用户搜「jdk」往往正是想知道"哪些东西要我先装 JDK"，把它们挡在外面
+        # 反而答非所问。
         self.win.search_box.setText("jdk")
         self.assertEqual(self.win.top_stack.currentIndex(), 1)
         visible = {c.component.key for c in self.win.cards if not c.isHidden()}
-        self.assertEqual(visible, {"jdk"})
+        self.assertEqual(visible, {"jdk", "jenkins", "jmeter",
+                                   "graalvm", "kotlin", "idea"})
         self.win.search_box.setText("")
 
     def test_clearing_search_restores_tabs(self):

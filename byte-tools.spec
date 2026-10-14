@@ -56,6 +56,11 @@ hidden_imports = [
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
+    # SVG 图标渲染（main.py 用 QSvgRenderer 画 assets/component-icons/*.svg）。
+    # 漏掉这一条的后果不是报错，是**静默退化**：PyInstaller 不收 Qt6Svg.dll，
+    # 打包后 `from PySide6.QtSvg import QSvgRenderer` 直接 ImportError，
+    # 图标全部退回分类色块，而源码运行一切正常 —— 只在发布后才暴露。
+    "PySide6.QtSvg",
     # requests 依赖
     "requests",
     "urllib3",

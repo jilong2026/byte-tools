@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import ntpath
 import os
 import shutil
 import socket
@@ -60,12 +61,19 @@ try:
         QCursor,
         QFont,
         QIcon,
+        QImage,
         QPainter,
         QPalette,
         QPen,
         QPixmap,
         QDesktopServices,
     )
+    # SVG 图标渲染。**不能用 QPixmap 读 SVG** —— QPixmap 只认栅格格式，
+    # 给它一个 .svg 会得到一张空图（isNull() 为真），于是全部图标静默退化
+    # 成分类色块。必须走 QtSvg 的 QSvgRenderer。
+    # 打包侧同步要求：byte-tools.spec 的 hidden_imports 要有 "PySide6.QtSvg"，
+    # 否则 PyInstaller 不会把 Qt6Svg.dll 收进去，打包后一样读不出 SVG。
+    from PySide6.QtSvg import QSvgRenderer
     from PySide6.QtCore import QUrl
     from PySide6.QtWidgets import (
         QApplication,
@@ -5474,59 +5482,104 @@ COMPONENT_SUMMARY: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# 组件官方图标映射表（2026-10-13 新增）
+# 组件官方图标（2026-10-13 新增，2026-10-14 改为按 key 直接探测资产目录）
 # ---------------------------------------------------------------------------
-# key: 组件标识符 → (icon_filename, default_width, default_height)
-# 所有图标最终统一缩放到 32×32 显示；width/height 仅用于原始尺寸记录。
-_COMPONENT_ICON_MAP: Dict[str, Tuple[str, int, int]] = {
-    # JetBrains 全家桶：统一的黄色 LOGO
-    "idea": ("jetbrains-intellij.svg", 48, 48),      # IntelliJ IDEA
-    "pycharm": ("jetbrains-pycharm.svg", 48, 48),    # PyCharm
-    "clion": ("jetbrains-clion.svg", 48, 48),        # CLion
-    "webstorm": ("jetbrains-webstorm.svg", 48, 48),   # WebStorm
-    "goland": ("jetbrains-goland.svg", 48, 48),     # GoLand
-    "datagrip": ("jetbrains-data-grip.svg", 48, 48),  # DataGrip
-    "android-studio": ("jetbrains-android-studio.svg", 48, 48),
-    "rider": ("jetbrains-rider.svg", 48, 48),       # Rider
-    
-    # 编程语言运行时
-    "python": ("python-logo.svg", 48, 48),          # Python
-    "node": ("nodejs-logo.svg", 48, 48),            # Node.js
-    "java": ("java-logo.svg", 48, 48),              # Java
-    "go": ("golang-logo.svg", 48, 48),              # Go
-    "rust": ("rust-logo.svg", 48, 48),              # Rust
-    "kotlin": ("kotlin-logo.svg", 48, 48),          # Kotlin
-    
-    # Git & 版本控制
-    "git": ("git-logo.svg", 48, 48),                # Git
-    
-    # Docker & K8s
-    "docker": ("docker-logo.svg", 48, 48),          # Docker
-    "kubectl": ("kubernetes-logo.svg", 48, 48),     # Kubernetes
-    
-    # 数据库
-    "redis": ("redis-logo.svg", 48, 48),            # Redis
-    "mongodb": ("mongodb-logo.svg", 48, 48),        # MongoDB
-    "mysql": ("mysql-logo.svg", 48, 48),            # MySQL
-    "postgresql": ("postgresql-logo.svg", 48, 48),  # PostgreSQL
-    
-    # 构建工具
-    "maven": ("maven-logo.svg", 48, 48),            # Maven
-    "gradle": ("gradle-logo.svg", 48, 48),          # Gradle
-    
-    # CLI 工具（用通用色块图标）
-    "jq": ("cli-tool.svg", 48, 48),                 # JSON processor
-    "helm": ("cli-tool.svg", 48, 48),               # Helm package manager
-    
-    # 开发工具（大部分没有官方 logo，用分类色块）
-    "vscode": ("github-logo.svg", 48, 48),          # VS Code (GitHub)
-    "dbeaver": ("database-client.svg", 48, 48),     # Database client
-    "postman": ("api-testing.svg", 48, 48),         # API testing tool
-}
+# 为什么不要映射表：原 `_COMPONENT_ICON_MAP` 登记了 27 条"key → 文件名"，
+# 与 assets/component-icons/ 实有的 124 个文件**逐条核对命中率为 0**，
+# 还混进 4 个根本不存在的 key（java / jq / helm / rider）。维护一张
+# "需要人工与磁盘保持同步"的表，在这种"文件名由采集脚本批量生成"的前提下
+# 必然漂移。这里改成**按 key 探测实际存在的文件**，零同步点。
+#
+# 资产目录：byte-tools.spec 的 datas 已经把整个 assets/ 收进包，
+# 打包后落在 sys._MEIPASS/assets，与 Path(__file__).parent 同一层。
+ICON_DIR_NAME = "component-icons"
+ICON_BOX_PX = 32          # 卡片上图标槽的边长（QLabel.setFixedSize 用同一个值）
+ICON_RENDER_SCALE = 2     # 以 2 倍分辨率渲染再缩回，HiDPI 下不发虚
+# 探测顺序：先 svg（矢量，任意尺寸清晰）后 png（部分官方只有栅格图）
+ICON_EXTS = (".svg", ".png")
 
-def get_component_icon_filename(key: str) -> Optional[str]:
-    """返回图标文件名或 None（用默认色块）"""
-    return _COMPONENT_ICON_MAP.get(key)[0] if key in _COMPONENT_ICON_MAP else None
+# 同一次运行里 87 张卡会各问一次；QImage→QPixmap 有实际开销，按 key 缓存
+_ICON_PIXMAP_CACHE: Dict[str, Optional["QPixmap"]] = {}
+
+
+def icon_asset_dir() -> Path:
+    """组件图标资产目录（源码运行与 PyInstaller 打包后同构）。"""
+    return Path(__file__).parent / "assets" / ICON_DIR_NAME
+
+
+def find_component_icon_file(key: str) -> Optional[Path]:
+    """按组件 key 在资产目录里找图标文件，找不到返回 None。
+
+    入参：
+      key: 组件标识符（如 "jdk"）。
+    返回：
+      命中的文件路径（assets/component-icons/<key>.<ext>），没有则 None。
+    只认 key 本身，不做别名猜测 —— 别名表是一处需要人工同步的数据，
+    与本函数要消除的正是同一类问题。
+    """
+    base = icon_asset_dir()
+    for ext in ICON_EXTS:
+        p = base / f"{key}{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+def load_component_icon_pixmap(key: str, px: int) -> Optional["QPixmap"]:
+    """把组件图标渲染成 px×px 的 QPixmap；没有图标或渲染失败返回 None。
+
+    入参：
+      key: 组件标识符。
+      px:   渲染输出的像素边长（调用方传 ICON_BOX_PX * ICON_RENDER_SCALE）。
+    返回：
+      已渲染好的 QPixmap（devicePixelRatio 已按 1:2 设好，显示时正好 ICON_BOX_PX），
+      或 None —— None 一律由调用方回落到分类色块，本函数不抛异常。
+    """
+    cached = _ICON_PIXMAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    pm = _render_icon_file(find_component_icon_file(key), px)
+    # None 也缓存：没有图标的组件每次建卡都白找一次磁盘没必要
+    _ICON_PIXMAP_CACHE[key] = pm
+    return pm
+
+
+def _render_icon_file(path: Optional[Path], px: int) -> Optional["QPixmap"]:
+    """把单个图标文件渲染成 px×px 的 QPixmap。渲染失败返回 None 而不抛异常。
+
+    入参：
+      path: 图标文件路径，None 直接返回 None。
+      px:   输出像素边长。
+    返回：
+      QPixmap 或 None。
+    """
+    if path is None:
+        return None
+    try:
+        if path.suffix.lower() == ".svg":
+            # 矢量：QSvgRenderer 按目标视口重新栅格化，任意尺寸都清晰
+            renderer = QSvgRenderer(str(path))
+            if not renderer.isValid():
+                return None
+            img = QImage(px, px, QImage.Format_ARGB32)
+            img.fill(Qt.transparent)
+            img.setDevicePixelRatio(float(ICON_RENDER_SCALE))
+            painter = QPainter(img)
+            renderer.render(painter)
+            painter.end()
+            return QPixmap.fromImage(img)
+
+        # 栅格：QPixmap 自己就能读，缩放到目标边长（保持长宽比）
+        src = QPixmap(str(path))
+        if src.isNull():
+            return None
+        out = src.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        out.setDevicePixelRatio(float(ICON_RENDER_SCALE))
+        return out
+    except Exception:
+        # 图标是纯装饰：渲染不了就回色块，绝不能让它把主窗口带崩
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -7069,22 +7122,73 @@ def group_components(components: List[Component]) -> Dict[str, List[Component]]:
     return grouped
 
 
+# ---------------------------------------------------------------------------
+# 组件搜索别名（2026-10-14 新增）
+# ---------------------------------------------------------------------------
+# key → 用户可能敲的别的叫法。只登记**真的有人这么叫**的，
+# 不做穷举（"java 后端""部署工具"这类整句搜索交给 summary/usage 兜）。
+# 写全称官方名的反面例子：官方名（Temurin / PyCharm）本来就能被
+# display_name 子串命中，不必登记。
+COMPONENT_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "jdk": ("java", "temurin", "openjdk", "jdk8", "jdk11", "jdk17", "jdk21"),
+    "go": ("golang", "go语言"),
+    "node": ("nodejs", "node.js"),
+    "maven": ("mvnd",),
+    "postgresql": ("postgres", "pgsql", "pg"),
+    "mysql": ("mariadb",),
+    "mongodb": ("mongo",),
+    "kubernetes": ("k8s",),
+    "kubectl": ("k8s", "kube"),
+    "redis": ("redis-stack",),
+    "miniconda": ("conda", "anaconda"),
+    "powershell": ("pwsh",),
+    "sqlite": ("sqlite3",),
+    "duckdb": ("duck",),
+    "protoc": ("protobuf", "proto"),
+    "yq": ("yaml jq",),
+    "zoxide": ("z",),
+    "ripgrep": ("rg",),
+    "eza": ("exa", "ls",),
+    "fzf": ("fuzzy finder", "模糊查找"),
+    "visual-studio": ("vs", "vs2022", "msbuild"),
+    "idea": ("intellij", "ij", "idea"),
+    "dbeaver": ("数据库客户端",),
+    "navicat": ("数据库客户端",),
+}
+
+
 def component_matches(comp: Component, query: str) -> bool:
     """
     界面搜索框用的模糊匹配：查询词是否命中该组件。
 
     入参 comp:  Component  待判定的组件
     入参 query: str        用户输入的查询词
-    返回:      bool  空查询恒为 True（等于不过滤）；否则要求查询词是
-                     显示名或内部 key 的子串（忽略大小写与首尾空白）
+    返回:      bool  空查询恒为 True（等于不过滤）；否则要求查询词命中
+                     显示名、内部 key、别名、一句话说明或「怎么用」文案中
+                     任意一项的子串（忽略大小写与首尾空白）
 
-    说明: 只匹配「显示名 + key」这两个用户看得见的标识，不匹配分类名——
-          分类已经由 Tab 页表达，再混进来会让搜「开发」跳出全部卡片。
+    说明: 匹配面 2026-10-14 扩过一次。原来只比「显示名 + key」，于是搜
+          「java」「golang」「数据库」「缓存」「消息队列」「服务网格」这类
+          用户真会敲的词**一张卡都搜不出来** —— 而这些词明明就写在
+          COMPONENT_SUMMARY / COMPONENT_USAGE 里（详情弹窗第二段照着它生成）。
+          文案已经写了、搜索读不到，等于没写。
+
+          仍然**不匹配分类名**：分类由 Tab 页表达，混进来会让搜「开发」
+          跳出全部卡片（这条是 R2 的原意，保留）。
     """
     q = query.strip().lower()
     if not q:
         return True
-    return q in comp.display_name.lower() or q in comp.key.lower()
+    for field in (
+        comp.display_name,
+        comp.key,
+        COMPONENT_SUMMARY.get(comp.key, ""),
+        COMPONENT_USAGE.get(comp.key, ""),
+    ):
+        if q in field.lower():
+            return True
+    # 别名单独一轮：别名是短词，不该混进上面的长文本里做无谓的逐条扫描
+    return any(q in alias.lower() for alias in COMPONENT_ALIASES.get(comp.key, ()))
 
 
 def build_components() -> List[Component]:
@@ -13671,6 +13775,66 @@ def cleanup_dead_tool_path_entries() -> List[str]:
 # ---------------------------------------------------------------------------
 # 归档解压
 # ---------------------------------------------------------------------------
+def _safe_archive_members(names: List[str], extract_to: Path, label: str) -> None:
+    """解压前逐条校验归档成员名，发现越界条目就地拒绝整个归档。
+
+    入参 names:     归档内的成员名列表（zip 的 namelist / tar 的 getnames）
+    入参 extract_to: 解压目标目录
+    入参 label:     归档描述，写进异常信息里让用户知道是哪个包
+    返回:           全部成员安全则正常返回
+
+    抛出:           ValueError —— 只要有一条成员名能写到 extract_to 之外
+
+    为什么必须校验（与下载侧 _safe_download_name 的对称防御）：
+    归档里的**成员名同样是外部输入**，而且和产物名来自同一批公开 release API。
+    zip 的 entry 名允许 `../../evil.sh` 与 `/etc/cron.d/x`，tar 允许绝对路径与
+    `../`，裸 extractall 会照单全收 —— 等于"往任意路径写文件"。
+    下载侧早就防了这道（见 _safe_download_name 的 docstring），解压侧原先却是裸的，
+    同一个威胁模型下两套标准是不能接受的。
+
+    判据三条，与 tarfile.extractall(filter=...) 的 data_filter 语义一致：
+      1. 绝对路径（含 Windows 盘符与 UNC）→ 拒
+      2. 解析后逃出 extract_to → 拒
+      3. tar 成员是符号链接/硬链接 → 拒（本工具用不到，少一条少一个入口）
+    """
+    base = extract_to.resolve()
+    for raw in names:
+        name = str(raw).replace("\\", "/")
+        if not name or name in (".", "./"):
+            continue
+        # 1) 绝对路径：POSIX 根、UNC、以及 Windows 盘符
+        if name.startswith("/") or ntpath.isabs(name) or _re.match(r"^[A-Za-z]:", name):
+            raise ValueError(f"{label} 含越界条目（绝对路径）：{raw}")
+        dest = (base / name).resolve()
+        # 2) 逃逸出目标目录
+        try:
+            dest.relative_to(base)
+        except ValueError:
+            raise ValueError(f"{label} 含越界条目（路径穿越）：{raw}") from None
+
+
+def _safe_tar_members(tf: "tarfile.TarFile", extract_to: Path, label: str) -> None:
+    """校验 tar 成员名，并在可用时启用 data_filter 双保险。
+
+    入参 tf:         已打开的 tarfile
+    入参 extract_to: 解压目标目录
+    入参 label:      归档描述
+    返回:            校验通过则正常返回；抛出 ValueError
+
+    在 _safe_archive_members 的名字检查之外，额外拒掉链接类成员
+    （符号链接 / 硬链接 / 设备文件）—— 它们即使名字老实，也能在解压后
+    把后续写入引到目标目录之外。
+    """
+    members = tf.getmembers()
+    for m in members:
+        if m.issym() or m.islnk() or m.isdev() or m.isfifo():
+            raise ValueError(f"{label} 含链接类条目，拒绝解压：{m.name}")
+    _safe_archive_members([m.name for m in members], extract_to, label)
+    # Python 3.12+ 有内置的 data_filter，再叠一层标准实现
+    if hasattr(tarfile, "data_filter"):
+        tf.extraction_filter = tarfile.data_filter
+
+
 def extract_archive(archive: Path, extract_to: Path) -> Path:
     """解压归档，返回解压后（通常包含一个根目录）的根路径。
 
@@ -13685,17 +13849,24 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
       - .msi：Windows 安装包，用 `msiexec /a` 管理性提取成统一 prefix（Rust）
       - .exe / .war / 无扩展名：单二进制 / 单文件（kubectl.exe / kubectl / jenkins.war），
         直接拷贝到 extract_to 根目录；Linux/Mac 上无扩展名单二进制赋予 0o755 执行权限
+
+    zip / tar 三条解压路径**都先过一遍越界校验**（_safe_archive_members /
+    _safe_tar_members），发现成员名能写到 extract_to 之外就整体拒绝并抛
+    ValueError，绝不部分解压 —— 半解压的目录比不解压更难判断。
     """
     ensure_dir(extract_to)
     name = archive.name.lower()
     if name.endswith(".zip"):
         with zipfile.ZipFile(archive, "r") as zf:
+            _safe_archive_members(zf.namelist(), extract_to, archive.name)
             zf.extractall(extract_to)
     elif name.endswith(".tar.gz") or name.endswith(".tgz"):
         with tarfile.open(archive, "r:gz") as tf:
+            _safe_tar_members(tf, extract_to, archive.name)
             tf.extractall(extract_to)
     elif name.endswith(".tar.xz"):
         with tarfile.open(archive, "r:xz") as tf:
+            _safe_tar_members(tf, extract_to, archive.name)
             tf.extractall(extract_to)
     elif name.endswith(".msi"):
         # Rust 的 MSI：走 msiexec 的**管理性提取**（/a）把文件铺出来，不是 /i 真装机。
@@ -14250,6 +14421,16 @@ class ComponentCard(QFrame):
         shadow.setColor(QColor(0, 0, 0, 40))
         self.setGraphicsEffect(shadow)
 
+        # 外部版本接管那组属性**必须**在任何可能提前 return 的渲染代码之前就位。
+        # 2026-10-13 的崩溃就是这么来的：这段初始化原先被塞在 _load_icon() 末尾的
+        # fallback 分支里，而该分支上方有一条「图标加载成功就 return」的早退；
+        # 于是 jdk（外部接管白名单成员，且 assets/component-icons/jdk.png 存在）
+        # 一进卡片就跳过初始化，紧接着 __init__ 里的 _detect_status() 调
+        # _refresh_external_section() 读 self._external_frame → AttributeError，
+        # 主窗口起不来（traceback 停在"正在加载组件 1/87"）。
+        # 规矩：**属性初始化不许挂在任何带早退分支的函数里**。
+        self._init_external_state()
+
         self._build_ui()
         self._detect_status()
 
@@ -14266,9 +14447,9 @@ class ComponentCard(QFrame):
         top = QHBoxLayout()
         top.setSpacing(8)
         
-        # 左侧图标（32×32）
+        # 左侧图标（ICON_BOX_PX 见组件图标一节；渲染尺度 ICON_RENDER_SCALE）
         self.icon_label = QLabel()
-        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setFixedSize(ICON_BOX_PX, ICON_BOX_PX)
         self.icon_label.setStyleSheet("""
             background: linear-gradient(135deg, #f5f7fa 0%, #e3e8ef 100%);
             border-radius: 6px;
@@ -14326,9 +14507,9 @@ class ComponentCard(QFrame):
             top.addWidget(badge)
         top.addStretch(1)
         root.addLayout(top)
-        
-        # 加载图标
-        self._load_icon()
+
+        # 图标在 _build_ui 末尾统一渲染（_render_icon），这里不再画一次 ——
+        # 原先这里和末尾各调了一次，等于每张卡白渲染两遍。
 
         self.status_label = QLabel("检测中…")
         self.status_label.setObjectName("statusLabel")
@@ -14487,49 +14668,29 @@ class ComponentCard(QFrame):
         self.progress.setTextVisible(True)
         self.progress.setValue(0)
         root.addWidget(self.progress)
-        
-        # 加载官方图标（2026-10-13 新增）
-        self._load_icon()
 
-    def _load_icon(self) -> None:
-        """加载官方图标（2026-10-13 新增）。"""
-        key = self.component.key
-        
-        # 优先使用扁平化 SVG 图标
-        icon_filename = get_component_icon_filename(key)
-        if icon_filename and icon_filename.endswith(".svg"):
-            icon_path = Path(__file__).parent / "assets" / "component-icons" / f"{key}.svg"
-            pixmap = QPixmap(str(icon_path))
-            
-            if not pixmap.isNull():
-                # 成功读取 SVG，缩放到 32×32
-                self.icon_label.setPixmap(pixmap.scaled(
-                    32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                return
-        
-        # fallback: 使用默认色块（按分类显示不同颜色）
-        category_map = {
-            "开发环境": ("#4CAF50", "#43A047"),   # 绿色系（编程语言、SDK 等）
-            "开发软件": ("#2196F3", "#1976D2"),   # 蓝色系（数据库、服务器等）
-            "一键启停": ("#FF9800", "#F57C00"),   # 橙色系（服务组件）
-            "开发工具": ("#9C27B0", "#7B1FA2"),   # 紫色系（IDE、客户端等）
-        }
-        cat = COMPONENT_CATEGORY_OF.get(key, "开发工具")
-        grad_from, grad_to = category_map.get(cat, ("#757575", "#424242"))
-        
-        self.icon_label.setStyleSheet(f"""
-            background: linear-gradient(135deg, {grad_from} 0%, {grad_to} 100%);
-            border-radius: 6px;
-            border: 1px solid #d8dde6;
-        """)
-        self.icon_label.setText(key[:3].upper())
-        self.icon_label.setAlignment(Qt.AlignCenter)
-        self.icon_label.setFont(QFont("", 10, QFont.Bold))
-        self.icon_label.setForegroundRole(QPalette.Text)
+        # 卡片左上角的官方图标（2026-10-13 新增）。纯渲染，无副作用、无早退。
+        self._render_icon()
 
         # ---- 「系统里检测到的版本」折叠区＋还原按钮（设计 §6）----
-        # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余 19 张卡片保持原样，
+        # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余卡片保持原样，
         # R3.9 那句"非目标组件文案与按钮零变化"才守得住。
+        # 必须排在 _build_ui 末尾：_build_external_section 会往布局尾部塞一个
+        # 撑高的 stretch，放在进度条之前会被后面的控件顶到折叠区上面去。
+        if supports_external_takeover(self.component):
+            self._build_external_section(root)
+
+    def _init_external_state(self) -> None:
+        """初始化外部版本接管那组实例属性（状态，不碰任何控件）。
+
+        由 __init__ 在 _build_ui() **之前**调用。控件本身在 _build_ui 末尾
+        通过 _build_external_section() 创建；这里只把"还没建"这件事记成
+        None，好让 _refresh_external_section() 在折叠区尚未存在的组件上
+        也能安全空转。
+
+        单独拆出来是为了守住一条规矩：**属性初始化不许写在带早退分支的
+        函数里**。2026-10-13 的启动崩溃就是这么来的（详见 __init__ 里那段注释）。
+        """
         self._external_candidates: List["DiscoveredVersion"] = []
         self._external_scanned = False
         self._external_expanded = False
@@ -14539,14 +14700,39 @@ class ComponentCard(QFrame):
         self._external_frame: Optional[QFrame] = None
         self._external_toggle: Optional[QPushButton] = None
         self._external_body: Optional[QWidget] = None
-        
-        # 支持接管外置版本的卡片，才创建外部折叠区
-        if supports_external_takeover(self.component):
-            # root 布局不在 _load_icon 的参数里 —— 从卡片自己身上拿（_build_ui
-            # 建的 QVBoxLayout(self) 就是 self.layout()）。此前这里直接引用
-            # _build_ui 的局部变量 root，NameError 让建卡第一张卡就崩、
-            # 主窗口永远起不来（2026-10-13 并发改动引入，已修）。
-            self._build_external_section(self.layout())
+
+    def _render_icon(self) -> None:
+        """在卡片左上角渲染该组件的官方图标，取不到就退回分类色块。
+
+        纯渲染：这个方法不建任何后续逻辑依赖的属性，也不提前 return 后还要
+        有人接着干活 —— 渲染成功与否对卡片的其余部分没有任何影响。
+        """
+        key = self.component.key
+
+        pixmap = load_component_icon_pixmap(key, ICON_BOX_PX * 2)
+        if pixmap is not None:
+            self.icon_label.setPixmap(pixmap)
+            return
+
+        # fallback: 使用默认色块（按分类显示不同颜色）
+        category_map = {
+            "开发环境": ("#4CAF50", "#43A047"),   # 绿色系（编程语言、SDK 等）
+            "开发软件": ("#2196F3", "#1976D2"),   # 蓝色系（数据库、服务器等）
+            "一键启停": ("#FF9800", "#F57C00"),   # 橙色系（服务组件）
+            "开发工具": ("#9C27B0", "#7B1FA2"),   # 紫色系（IDE、客户端等）
+        }
+        cat = COMPONENT_CATEGORY_OF.get(key, "开发工具")
+        grad_from, grad_to = category_map.get(cat, ("#757575", "#424242"))
+
+        self.icon_label.setStyleSheet(f"""
+            background: linear-gradient(135deg, {grad_from} 0%, {grad_to} 100%);
+            border-radius: 6px;
+            border: 1px solid #d8dde6;
+        """)
+        self.icon_label.setText(key[:3].upper())
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setFont(QFont("", 10, QFont.Bold))
+        self.icon_label.setForegroundRole(QPalette.Text)
         
     # ------------------------------------------------------------------
     # 「系统里检测到的版本」折叠区（§6）
