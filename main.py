@@ -371,6 +371,68 @@ def _pad_compare(a: Tuple[int, ...], b: Tuple[int, ...]) -> int:
     return (pa > pb) - (pa < pb)
 
 
+def component_registry() -> Dict[str, "Component"]:
+    """进程级的组件表（key → Component），惰性建一次。
+
+    2026-10-14 从 `component_registry()` 抽成模块级函数。
+    原因是 ComponentCard 里有 5 处反向调用 `component_registry()`：
+    卡片为了查前置依赖（needs 判定）而去引用**顶层窗口类**，形成
+    "子组件依赖父容器"的方向倒置 —— 后果是卡片没法脱离 MainWindow 单测，
+    而且 MainWindow 一旦改名/移动，这 5 处跟着炸。
+
+    抽成模块级之后，依赖方向变成「卡片 → 模块单例」，与既有的
+    `SERVICE_MANAGER` 同一模式（那边也是卡片直接用进程级单例）。
+
+    与 MainWindow 的关系：`__init__` 建完 self.components 后会调用
+    `register_components(self.components)` 把这份灌进来，于是**全进程只有
+    一份组件对象**——此前 __init__ 与 current_components() 各建一份，
+    卡片用的和查前置依赖用的不是同一批对象。
+    """
+    if not _COMPONENT_REGISTRY:
+        _COMPONENT_REGISTRY.update(
+            {c.key: c for c in build_components()})
+    return _COMPONENT_REGISTRY
+
+
+# 进程级组件表。空表示还没建，见 component_registry()。
+_COMPONENT_REGISTRY: Dict[str, "Component"] = {}
+
+
+def register_components(components: Sequence["Component"]) -> None:
+    """把 MainWindow 建好的那批组件灌进进程级登记表。
+
+    入参 components: build_components() 的结果
+    返回: 无
+
+    为什么要这一步：MainWindow.__init__ 已经建好了一份（卡片就用它），
+    如果不灌进登记表，component_registry() 会**再建一份** —— 于是同一批组件
+    在进程里存在两套对象，卡片查前置依赖时拿到的是另一套。这是"注册表
+    只有一个真源"的必要条件。
+    """
+    _COMPONENT_REGISTRY.clear()
+    _COMPONENT_REGISTRY.update({c.key: c for c in components})
+
+
+# 关窗标志。原先每处靠 `getattr(self.window(), "_closing", False)` 拿 ——
+# 那是"绕过构造注入、沿 Qt 父指针爬回去读私有属性"，卡片因此与窗口的内部
+# 状态耦合。改成与 FETCH_ABORT 同款的事件后，卡片只问"应用是否正在退出"，
+# 不必知道窗口长什么样。
+_CLOSING = threading.Event()
+
+
+def is_closing() -> bool:
+    """应用是否正在退出（关窗流程已开始）。
+
+    返回: True 表示 closeEvent 已经立旗，此后不再派发后台任务、不再回写界面。
+    """
+    return _CLOSING.is_set()
+
+
+def reset_closing() -> None:
+    """清掉关窗标志。**仅测试用**（一个进程里要反复构造多次窗口）。"""
+    _CLOSING.clear()
+
+
 def _version_parts(text: object):
     """`v1.10.2` → (1, 10, 2)；读不出数字段返回 None（宁可不提示也不猜）。
 
@@ -15794,7 +15856,7 @@ class ComponentCard(QFrame):
             return
         # 「开机就能用」：缺前置运行时（JDK / Erlang）时**先自动装好再启动**，
         # 而不是弹一句"请先装一个 JDK"把活儿交回给用户。
-        missing = prereq_components(self.component, MainWindow.current_components())
+        missing = prereq_components(self.component, component_registry())
         if missing:
             self._install_missing_prereqs(missing)
             return
@@ -15823,7 +15885,7 @@ class ComponentCard(QFrame):
         # parent=self：worker 归卡片的 Qt 对象树持有，run() 还没回来时不依赖
         # launch_worker 这一个引用吊命；结束后由 _on_launch_worker_done deleteLater 收回。
         self.launch_worker = LaunchWorker("start", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          component_registry(), SERVICE_MANAGER,
                                           parent=self)
         self.launch_worker.started_ok.connect(self._on_launch_ok)
         self.launch_worker.failed.connect(self._on_launch_failed)
@@ -15841,7 +15903,7 @@ class ComponentCard(QFrame):
         再问一次等于把决定权丢回去；而这里要装的都是**明确的、可复现的**东西
         （JDK / Erlang 的官方包），装错了也只是多一个版本目录。
         """
-        comps = MainWindow.current_components()
+        comps = component_registry()
         queue: List[Tuple[Component, str]] = []
         for key in keys:
             pre = comps.get(key)
@@ -16052,7 +16114,7 @@ class ComponentCard(QFrame):
         # try 包的是 self.window() 这次 Qt 调用本身：顶层 C++ 对象先没了它会抛 RuntimeError，
         # 而那时候连"记一条日志"的机会都没有 —— 那正是本方法要避免的静默失败。
         try:
-            closing = getattr(self.window(), "_closing", False)
+            closing = is_closing()
         except Exception:
             closing = True
         if closing:
@@ -16073,7 +16135,7 @@ class ComponentCard(QFrame):
         # 可能还没返回，丢掉它最后一个引用会被 PySide 就地销毁还在跑的 QThread。
         # parent=self 把引用交给对象树持有，这条窗口才关得掉。
         self.launch_worker = LaunchWorker("force_stop", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          component_registry(), SERVICE_MANAGER,
                                           parent=self)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
@@ -16121,7 +16183,7 @@ class ComponentCard(QFrame):
         self.btn_start.setEnabled(False)
         self.btn_start.setText("停止中…")
         self.launch_worker = LaunchWorker("stop", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          component_registry(), SERVICE_MANAGER,
                                           parent=self)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
@@ -16261,7 +16323,7 @@ class ComponentCard(QFrame):
     def _start_version_probe(self, exe_path: str) -> None:
         # 关窗途中事件循环还会转（closeEvent 里那些 wait 就是机会），残留的 singleShot
         # 这时再起一条线程 = 窗口析构时它还在跑 = 进程 abort。_launch_fetch_worker 早有这道闸。
-        if getattr(self.window(), "_closing", False):
+        if is_closing():
             return
         worker = VersionProbeWorker(exe_path, list(self.component.version_args), self)
         worker.done.connect(lambda text, w=worker: self._on_version_probed(text, w))
@@ -17754,15 +17816,15 @@ class UpdateCheckWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    _COMPONENTS_CACHE: Dict[str, "Component"] = {}
-
     @staticmethod
     def current_components() -> Dict[str, "Component"]:
-        """只读的组件表：卡片的启动/停止要用别的组件（needs 判定），
-        但不该每张卡片自己再 build_components() 一次。"""
-        if not MainWindow._COMPONENTS_CACHE:
-            MainWindow._COMPONENTS_CACHE = {c.key: c for c in build_components()}
-        return MainWindow._COMPONENTS_CACHE
+        """只读的组件表。
+
+        2026-10-14 起这只是 `component_registry()` 的一层薄壳：卡片不再通过
+        MainWindow 这个**类**去拿组件表（那是"子组件依赖父容器"的方向倒置），
+        而是直接问模块级单例。这里保留是为了不破坏既有调用点与打桩点。
+        """
+        return component_registry()
 
     def __init__(self, splash: Optional["SplashScreen"] = None) -> None:
         super().__init__()
@@ -17782,17 +17844,18 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
 
         self.components = build_components()
-        # 把这一份同步进类级缓存。此前 _adopt_running → current_components()
-        # 会因为缓存还是空的而**再 build 一次**，于是同一批组件在进程里存在
-        # 两套互不相干的对象：卡片用的是 self.components，卡片查前置依赖用的
-        # 是 current_components() 那一套。构造 88 个 Component（含全部版本表）
-        # 白做一遍，且"两份对象"是个长期的一致性隐患。
-        MainWindow._COMPONENTS_CACHE = {c.key: c for c in self.components}
+        # 灌进进程级登记表。全进程只保留这一份组件对象 —— 此前 __init__ 与
+        # _adopt_running → current_components() 各建一份，卡片用的和查前置依赖
+        # 用的不是同一批，等于白构造一次 88 个 Component（含全部版本表）。
+        register_components(self.components)
         self._drag_pos: Optional[QPoint] = None
         self._fetch_workers: List[VersionFetchWorker] = []
         self._fetch_pending: int = 0
-        # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面
+        # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面。
+        # 同时立模块级的 _CLOSING —— 卡片过去靠 getattr(self.window(), "_closing")
+        # 沿 Qt 父指针爬回窗口读私有属性，那等于让卡片知道窗口的内部状态。
         self._closing: bool = False
+        _CLOSING.clear()
         # 视图模式：grid（按宽度自动分列）/ list（恒 1 列）；_load_settings 会按
         # config.json 覆盖它，老配置没有这个键时留在 grid，即"老用户自动获得新默认"。
         self.view_mode: str = "grid"
@@ -18931,9 +18994,10 @@ class MainWindow(QMainWindow):
 
         读不到就跳过——凭据只是便利信息，缺了不该让"认清本机运行状态"看起来失败。
         """
-        # 走类名而不是 self：_COMPONENTS_CACHE 是类属性，用 MainWindow.xxx
-        # 在测试的"半初始化实例"上也能跑通（那类实例的 self 上没有绑定 staticmethod）。
-        comp = MainWindow.current_components().get(key)
+        # 走模块级组件表而不是 self 上的什么：这里在测试里可能被一个
+        # "半初始化实例"（只绑了几个方法、没跑 __init__）调用，
+        # 模块级函数对那种实例一样成立。
+        comp = component_registry().get(key)
         if comp is None or getattr(comp, "launch", None) is None:
             return
         try:
@@ -19121,392 +19185,15 @@ class MainWindow(QMainWindow):
         return None
 
     def _apply_qss(self) -> None:
-        """应用 QSS 样式表。"""
-        self.setStyleSheet(
-            """
-            #centralRoot {
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #eef2f7, stop:1 #dee5ee);
-            }
-            #titleBar {
-                background: #2c3e50;
-                color: white;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }
-            #titleText { color: white; padding-left: 4px; }
-            #versionChip {
-                background: rgba(255, 255, 255, 0.14);
-                color: #dfe7ee;
-                border: 1px solid rgba(255, 255, 255, 0.28);
-                padding: 4px 9px;
-                font-size: 12px;
-                border-radius: 10px;
-            }
-            #versionChip:hover {
-                background: rgba(255, 255, 255, 0.26);
-                color: white;
-            }
-            /* chip 的四种状态配色，全挂在**动态属性**上（objectName 不许改，
-               改了按名字找它的代码与用例就失效）。琥珀色=有新版可点，
-               灰色带问号=没查到（跟"已是最新"必须一眼能分）。 */
-            #versionChip[chipState="update"],
-            #versionChip[chipState="downloading"] {
-                background: #f9a825;
-                color: #3e2723;
-                border: none;
-                padding: 4px 9px;
-                font-size: 12px;
-                font-weight: 700;
-                border-radius: 10px;
-            }
-            #versionChip[chipState="update"]:hover,
-            #versionChip[chipState="downloading"]:hover {
-                background: #ffb74d;
-            }
-            #versionChip[chipState="error"] {
-                background: rgba(255, 255, 255, 0.08);
-                color: #9aa7b3;
-                border: 1px dashed rgba(255, 255, 255, 0.34);
-                padding: 4px 9px;
-                font-size: 12px;
-                border-radius: 10px;
-            }
-            #versionChip[chipState="error"]:hover {
-                color: #dfe7ee;
-                border-color: rgba(255, 255, 255, 0.5);
-            }
-            #iconBtn, #donateBtn, #ctrlBtn, #closeBtn {
-                background: transparent;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                font-size: 14px;
-                border-radius: 6px;
-            }
-            #iconBtn:hover, #ctrlBtn:hover, #donateBtn:hover {
-                background: rgba(255,255,255,0.15);
-            }
-            #donateBtn { color: #ff8181; font-size: 18px; }
-            #closeBtn:hover { background: #e74c3c; }
+        """应用全局样式表。
 
-            #searchBar { background: transparent; }
+        样式表本体在 `theme.QSS`（2026-10-14 从这里抽出去）——它是一份纯声明
+        数据，没有分支也不参与计算，混在 MainWindow 里只会让改配色变成
+        "翻 20000 行找一段 CSS"。
+        """
+        from theme import QSS
+        self.setStyleSheet(QSS)
 
-            /* 搜索框：外壳统一承载放大镜与输入框，聚焦时整条胶囊高亮，
-               比原先「细边框小方框」更有整体感，也和卡片/下拉框的圆角语言一致 */
-            #searchShell {
-                background: #ffffff;
-                border: 1px solid #d5dfea;
-                border-radius: 10px;
-                min-width: 340px;
-                max-width: 460px;
-            }
-            #searchShell:hover { border: 1px solid #b9c9dc; }
-            #searchShell[focused="true"] { border: 1px solid #4a7fd0; }
-            #searchIcon { background: transparent; border: none; }
-            #compSearch {
-                background: transparent;
-                border: none;
-                padding: 8px 0;
-                font-size: 13px;
-                color: #17253b;
-            }
-            #compSearch:focus { border: none; }
-            #compSearch QToolButton { background: transparent; border: none; }
-            #searchHint { color: #66788c; font-size: 12px; padding-left: 2px; }
-            #searchHint[empty="true"] { color: #c0392b; }
-
-            /* 搜索条右侧的两个工具按钮（视图切换 / 日志开关） */
-            #toolBtn {
-                background: #ffffff;
-                color: #33465c;
-                border: 1px solid #d5dfea;
-                border-radius: 8px;
-                padding: 5px 10px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            #toolBtn:hover { border-color: #90caf9; color: #1976d2; }
-
-            /* 卡片名称后的详情入口：一枚 20px 圆点，视觉上必须"轻"，
-               不能与「可多版本」角标争注意力（同在一行）。 */
-            #detailBtn {
-                background: #eef2f6;
-                color: #5c6f82;
-                border: 1px solid #d5dfea;
-                border-radius: 10px;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 0px;
-            }
-            #detailBtn:hover { background: #e3f2fd; color: #1976d2;
-                               border-color: #90caf9; }
-            #detailTitle { color: #263238; }
-
-            #compTabs { background: transparent; border: none; }
-
-            #compTabs::pane { border: none; background: transparent; }
-            #compTabs > QTabBar { background: transparent; }
-            #compTabs > QTabBar::tab {
-                background: #cfd8e3;
-                color: #33465c;
-                padding: 7px 18px;
-                margin-right: 4px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                font-weight: 600;
-            }
-            #compTabs > QTabBar::tab:selected {
-                background: #ffffff;
-                color: #17253b;
-            }
-            #cardsScroll { border: none; background: transparent; }
-            #cardsWrap { background: transparent; }
-
-            #topStack { background: transparent; }
-            #resultsArea { border: none; background: transparent; }
-            #resultsContent { background: transparent; }
-            #resultCatHeader {
-                font-weight: 600;
-                color: #33465c;
-                font-size: 13px;
-                padding: 8px 2px 2px 10px;
-                margin-top: 4px;
-                border-left: 3px solid #4a7fd0;
-            }
-            #card {
-                background: white;
-                border-radius: 12px;
-                border: 1px solid #e6ebf1;
-            }
-            #cardTitle { color: #263238; }
-            #statusLabel { font-size: 12px; }
-            #fieldLabel { color:#546e7a; font-size:13px; }
-
-            /* ---- 「系统里检测到的版本」折叠区（设计 §6）----
-               格子内部只有 271px，所以这里是"一行一件事"的紧凑排版：
-               标题是一条扁按钮，展开后每行是「版本·路径 + 切过去」。 */
-            #externalToggle {
-                text-align: left;
-                padding: 0 6px;
-                border: 1px dashed #cfd8dc;
-                border-radius: 7px;
-                background: #f7f9fc;
-                color: #455a64;
-                font-size: 12px;
-            }
-            #externalToggle:hover { border-color: #90caf9; color: #1565c0; }
-            #externalRow { background: transparent; }
-            #externalVersion { color:#263238; font-size:12px; font-weight:600; }
-            #externalPath { color:#78909c; font-size:11px; }
-            #externalLabel { color:#37474f; font-size:12px; }
-            #externalHint { color:#90a4ae; font-size:12px; }
-            #restoreBtn {
-                border: 1px solid #ffb74d;
-                border-radius: 7px;
-                background: #fff8e1;
-                color: #e65100;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            #restoreBtn:hover { background: #ffecb3; border-color: #ffa726; }
-
-            /* ----------------- 下拉框 ----------------- */
-            QComboBox {
-                padding: 0 34px 0 12px;
-                border: 1px solid #cfd8dc;
-                border-radius: 8px;
-                background: white;
-                color: #263238;
-                font-size: 13px;
-                min-height: 32px;
-                selection-background-color: #1976d2;
-            }
-            QComboBox:hover  { border-color: #90caf9; }
-            QComboBox:focus  { border-color: #1976d2; }
-            QComboBox:on     { border-color: #1976d2; }
-            QComboBox QLineEdit {
-                border: none;
-                background: transparent;
-                padding: 0;
-                margin: 0;
-                color: #263238;
-                font-size: 13px;
-                selection-background-color: #1976d2;
-                selection-color: white;
-            }
-            QComboBox QLineEdit:focus { outline: none; }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: center right;
-                width: 30px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0;
-                height: 0;
-            }
-            #comboArrow {
-                color: #78909c;
-                font-size: 14px;
-                background: transparent;
-                border: none;
-                padding-right: 6px;
-            }
-            QComboBox:hover #comboArrow { color: #1976d2; }
-            QComboBox:focus #comboArrow { color: #1976d2; }
-            QComboBox QAbstractItemView {
-                border: 1px solid #cfd8dc;
-                border-radius: 8px;
-                background: white;
-                padding: 6px;
-                outline: 0;
-                selection-background-color: #1976d2;
-                selection-color: white;
-            }
-            QComboBox QAbstractItemView::item {
-                padding: 8px 14px;
-                border-radius: 6px;
-                min-height: 24px;
-                color: #263238;
-            }
-            QComboBox QAbstractItemView::item:hover {
-                background: #e3f2fd;
-                color: #0d47a1;
-            }
-            QComboBox QAbstractItemView::item:selected {
-                background: #1976d2;
-                color: white;
-            }
-
-            QPushButton#primaryBtn {
-                background: #1976d2;
-                color: white;
-                border: none;
-                padding: 6px 8px;
-                border-radius: 8px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QPushButton#primaryBtn:hover { background: #1e88e5; }
-            QPushButton#primaryBtn:pressed { background: #1565c0; }
-            QPushButton#primaryBtn:disabled { background: #b0bec5; color:#eceff1; }
-
-            QPushButton#secondaryBtn {
-                background: #ffffff;
-                color: #1976d2;
-                border: 1px solid #1976d2;
-                padding: 6px 8px;
-                border-radius: 8px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QPushButton#secondaryBtn:hover { background: #e3f2fd; }
-            QPushButton#secondaryBtn:pressed { background: #bbdefb; }
-            QPushButton#secondaryBtn:disabled {
-                color: #b0bec5;
-                border-color: #cfd8dc;
-                background: #f5f7fa;
-            }
-
-            QPushButton#dangerBtn {
-                background: #ffffff;
-                color: #c62828;
-                border: 1px solid #c62828;
-                padding: 6px 8px;
-                border-radius: 8px;
-                font-size: 13px;
-            }
-            QPushButton#dangerBtn:hover { background: #ffebee; }
-            QPushButton#dangerBtn:disabled { color:#e0a4a4; border-color:#e0a4a4; }
-
-            QProgressBar {
-                background: #eceff1;
-                border: none;
-                border-radius: 6px;
-                height: 14px;
-                text-align: center;
-                color: #263238;
-                font-size: 11px;
-            }
-            QProgressBar::chunk {
-                border-radius: 6px;
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #26c6da, stop:1 #1976d2);
-            }
-
-            /* 日志浮层：盖在卡片区上面，不占布局空间（展开不会挤压网格） */
-            #logOverlay {
-                background: #26303f;
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
-                border-top: 1px solid #3d4a5d;
-            }
-            #logOverlay QLabel { color: #e6e9ef; }
-            #overlayCloseBtn {
-                background: transparent;
-                color: #9fb0c4;
-                border: none;
-                font-size: 16px;
-                border-radius: 6px;
-            }
-            #overlayCloseBtn:hover { background: rgba(255,255,255,0.12); color: #ffffff; }
-            /* 日志浮层头部的「复制」「另存为」（2026-10-14）：比关闭按钮稍重，
-               因为它们是用户报障时会主动去点的两个动作。 */
-            #overlayCopyBtn {
-                background: rgba(255,255,255,0.08);
-                color: #cfd8e3;
-                border: 1px solid rgba(255,255,255,0.14);
-                font-size: 12px;
-                border-radius: 5px;
-            }
-            #overlayCopyBtn:hover { background: rgba(255,255,255,0.18); color: #ffffff; }
-            #overlayCopyBtn:pressed { background: rgba(255,255,255,0.06); }
-            #logView {
-                background: #1e1e2e;
-                color: #dcdcdc;
-                border-radius: 8px;
-                padding: 6px;
-                font-family: Menlo, Consolas, "Courier New", monospace;
-                font-size: 12px;
-            }
-            #statusBar {
-                background: #eceff1;
-                color: #455a64;
-                padding: 6px 14px;
-                font-size: 12px;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-            }
-
-            QScrollBar:vertical {
-                background: transparent;
-                width: 10px;
-                margin: 4px 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #b0bec5;
-                border-radius: 5px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover { background: #90a4ae; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-
-            QToolTip {
-                background: #37474f;
-                color: white;
-                border: 1px solid #263238;
-                padding: 6px 10px;
-                border-radius: 6px;
-            }
-            """
-        )
-
-    # ------------------------------------------------------------------
-    # 无边框窗口拖动
-    # ------------------------------------------------------------------
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self.title_bar.underMouse():
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -20019,6 +19706,7 @@ class MainWindow(QMainWindow):
         # QThread 在运行时被析构会直接 abort 进程（Windows 退出码 0xC0000409），
         # 而版本抓取是启动即触发的，所以关窗必须等这些线程收尾。
         self._closing = True
+        _CLOSING.set()          # 卡片通过模块级事件问"是否正在退出"
         FETCH_ABORT.set()
         # 下载/检查/外部探测/版本探测这几类线程统一在这里等（含被顶替的探测历史线程）
         self._drain_background_workers()

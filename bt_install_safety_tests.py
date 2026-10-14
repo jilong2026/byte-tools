@@ -389,6 +389,83 @@ def _set_running(card, value: bool) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 依赖方向护栏
+# ---------------------------------------------------------------------------
+class DependencyDirection(unittest.TestCase):
+    """卡片不许反过来依赖顶层窗口 —— 那是方向倒置。
+
+    2026-10-14 之前，ComponentCard 里有 5 处 `MainWindow.current_components()`
+    与 3 处 `getattr(self.window(), "_closing", False)`：
+    前者让**子组件依赖父容器的类**（MainWindow 一改名这 5 处跟着炸，
+    而且卡片无法脱离窗口单测）；后者是绕过构造注入、沿 Qt 父指针爬回去读
+    私有属性。两条都在这里钉死。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = _btprelude.ensure_app()
+
+    def test_card_does_not_reference_mainwindow_class(self):
+        import inspect
+        src = inspect.getsource(main.ComponentCard)
+        self.assertNotIn(
+            "MainWindow.", src,
+            "ComponentCard 里不该出现 MainWindow.<...>：卡片是子组件，"
+            "不该依赖顶层窗口的类。要组件表请用 main.component_registry()，"
+            "要服务管理器请用 main.SERVICE_MANAGER。",
+        )
+
+    def test_card_does_not_reach_up_to_the_window_for_state(self):
+        import inspect
+        src = inspect.getsource(main.ComponentCard)
+        self.assertNotIn(
+            'getattr(self.window()', src,
+            "卡片不该靠 self.window() 读窗口的私有属性（绕过构造注入取全局态）。"
+            "退出意图请用 main.is_closing()。",
+        )
+
+    def test_component_registry_is_a_single_shared_instance(self):
+        """全进程只有一份组件对象。
+
+        此前 __init__ 与 _adopt_running → current_components() 各建一份，
+        卡片用的和查前置依赖用的不是同一批对象 —— 等于白构造一次
+        88 个 Component（含全部版本表），且两份对象天然会漂移。
+        """
+        reg_a = main.component_registry()
+        main.register_components(main.build_components())
+        reg_b = main.component_registry()
+        jdk_a, jdk_b = reg_a.get("jdk"), reg_b.get("jdk")
+        self.assertIsNotNone(jdk_a)
+        self.assertIs(jdk_a, jdk_b,
+                      "同一批组件在进程里存在两份对象 —— 必须只有一份真源")
+
+    def test_closing_flag_is_a_module_level_event(self):
+        """退出意图是模块级事件，可查可清，且不依赖某个具体窗口实例。"""
+        main.reset_closing()
+        self.assertFalse(main.is_closing())
+        main._CLOSING.set()
+        self.assertTrue(main.is_closing())
+        main.reset_closing()
+        self.assertFalse(main.is_closing(), "reset 后必须真的清掉（它是粘性的）")
+
+    def test_theme_module_holds_the_stylesheet_not_the_window(self):
+        """样式表搬去了 theme.py —— 它是纯声明数据，不是逻辑。"""
+        from theme import QSS
+        self.assertIsInstance(QSS, str)
+        self.assertGreater(len(QSS), 1000, "QSS 内容异常短，抽取时可能截断了")
+        for selector in ("#centralRoot", "#titleBar", "#logView", "#statusBar"):
+            self.assertIn(selector, QSS, f"QSS 里少了 {selector}")
+        import inspect
+        src = inspect.getsource(main.MainWindow._apply_qss)
+        self.assertIn("from theme import QSS", src,
+                      "_apply_qss 应该只剩一行 setStyleSheet(QSS)")
+        self.assertNotIn("#centralRoot", src,
+                         "样式表又写回 _apply_qss 里了")
+
+
+# ---------------------------------------------------------------------------
+# 归档解压安全护栏（zip-slip / tar-slip）
+# ---------------------------------------------------------------------------
 class ArchiveTraversalGuard(unittest.TestCase):
     """zip-slip / tar-slip 必须被拦住，且正常包照常解开。
 

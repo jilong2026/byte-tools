@@ -1485,6 +1485,12 @@ class LaunchWorkerSignals(unittest.TestCase):
 
 class CardLaunchUi(unittest.TestCase):
     def setUp(self):
+        # 2026-10-14：退出意图改由模块级事件 main._CLOSING 表达后，它就成了一个
+        # **粘性**的进程级标志 —— 本文件里有几条用例真的跑 closeEvent（真的立旗），
+        # 不清掉就会漏给同进程里后跑的任何类，让它们误以为"正在退出"而静默。
+        # 每个用例开头清一次，成本为零。
+        main.reset_closing()
+        self.addCleanup(main.reset_closing)
         self.app = QApplication.instance() or QApplication([])
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -2056,15 +2062,19 @@ class CardLaunchUi(unittest.TestCase):
     def test_launch_failed_stays_quiet_while_the_window_is_closing(self):
         """关窗链路 closeEvent→cancel→worker 的 failed.emit→这里。模态框自己转事件循环，
         在退出途中弹起来能把关窗卡住；"queued 投递赶不上关窗"只是推测、离线也证实不了，
-        所以用 closeEvent 已立的 _closing 旗做便宜的确定性防护，不加新产品状态。"""
+        所以用 closeEvent 已立的退出旗做便宜的确定性防护，不加新产品状态。
+
+        2026-10-14：旗从 `window()._closing` 私有属性挪到**模块级事件**
+        `main._CLOSING`（配套 main.is_closing() / main.reset_closing()）。
+        原先卡片是靠 getattr(self.window(), "_closing", False) 沿 Qt 父指针爬回
+        窗口读私有属性的 —— 那是"绕过构造注入取全局态"，卡片因此与窗口的内部
+        状态耦合。现在卡片只问"应用是否正在退出"，不必知道窗口长什么样。"""
         calls = self._stub_dialogs([])
         logs = []
         self.card.log_cb = lambda level, msg: logs.append((level, msg))
 
-        class FakeWin:
-            _closing = True
-
-        self.card.window = lambda: FakeWin()   # 遮蔽 Qt 的 window()，只影响 Python 侧调用
+        main._CLOSING.set()
+        self.addCleanup(main.reset_closing)
         self.card._on_launch_failed("jenkins", "已取消等待")
         self.assertEqual(calls, [], "窗口正在关闭时不许弹模态\"操作失败\"")
 
@@ -2333,6 +2343,10 @@ class DeadWorkerDrainGuards(unittest.TestCase):
     """
 
     def setUp(self):
+        # 本类有多条用例真的跑 closeEvent，会把模块级 main._CLOSING 立起来；
+        # 不清就会漏给同进程后跑的类，让它们误判"正在退出"而静默（见 CardLaunchUi.setUp）。
+        main.reset_closing()
+        self.addCleanup(main.reset_closing)
         self.app = QApplication.instance() or QApplication([])
 
     def _dead_worker(self):
@@ -2456,7 +2470,11 @@ class DeadWorkerDrainGuards(unittest.TestCase):
         main._probe_version = lambda _e, _a: "1.2.3"
         self.addCleanup(setattr, main, "_probe_version", orig_probe)
         card = main.ComponentCard(comp, lambda _lvl, _msg: None)
-        card._closing = True          # 独立卡片不套窗口时 window() 就是它自己
+        # 2026-10-14：退出意图改由**模块级事件**表达（main._CLOSING），
+        # 卡片不再靠 getattr(self.window(), "_closing") 沿 Qt 父指针爬回窗口读私有属性
+        # —— 那是"绕过构造注入取全局态"。这里用 addCleanup 还原，避免粘到同进程后续用例。
+        main._CLOSING.set()
+        self.addCleanup(main.reset_closing)
 
         started = []
         orig_start = main.VersionProbeWorker.start
