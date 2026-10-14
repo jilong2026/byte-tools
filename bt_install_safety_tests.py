@@ -276,7 +276,118 @@ class IconRendering(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 归档解压安全护栏
+# 启动路径顺序护栏
+# ---------------------------------------------------------------------------
+class StartupOrdering(unittest.TestCase):
+    """R18 分帧建卡之后，几个"建卡后才能做"的调用不许留在建卡之前。
+
+    背景：R18 把建卡改成 `QTimer.singleShot(0, ...)` 分帧（每帧 8 张），
+    建卡完成前 `self.cards` / `_tab_cards` 都是**空列表**。于是任何放在
+    `_build_cards_async` 之前、且遍历这两张列表的调用，都会静默遍历空列表 ——
+    不报错、不变红、界面少一个功能。
+
+    2026-10-14 真机上就是这样丢掉了 Tab 上的 `●` 运行标记与"自动跳到运行页"：
+    `_adopt_running()` 挂在 `MainWindow()` 之后、`_build_cards_async` 之前，
+    它内部的 `for card in self.cards` 与 `_mark_running_tabs()` 全都空跑。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = _btprelude.ensure_app()
+
+    def test_adopt_running_marks_tabs_when_cards_exist(self):
+        """卡片建好后跑一次标记逻辑，Tab 标题上必须出现 `●`。"""
+        orig_detect = main.ComponentCard._detect_status
+        orig_start = main.MainWindow._start_fetch_versions
+        main.ComponentCard._detect_status = lambda self, *a, **k: None
+        main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
+        try:
+            win = main.MainWindow()          # 无 splash → 同步建卡
+        finally:
+            main.ComponentCard._detect_status = orig_detect
+            main.MainWindow._start_fetch_versions = orig_start
+        try:
+            self.assertTrue(win.cards, "窗口建好后 cards 仍为空 —— 本用例的前提不成立")
+
+            # 伪造"一键启停"那一页上有组件在跑。
+            # _mark_running_tabs 的判据是 `hasattr(c, "btn_start") and c._running_per_ui()`，
+            # 所以只桩后者即可，不动被测函数本身。
+            stubbed = []
+            for c in win.cards:
+                if hasattr(c, "btn_start"):
+                    c._running_per_ui = lambda _c=c: True
+                    stubbed.append(c)
+            self.assertTrue(stubbed, "窗口里没有任何可启停卡片")
+
+            win._mark_running_tabs()
+            marked = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+            self.assertTrue(
+                any("●" in t for t in marked),
+                f"没有任何 Tab 标题带 `●` 运行标记：{marked}",
+            )
+
+            # 反向校验：都停了就该清掉标记，否则这是"只加不减"的死标记
+            for c in stubbed:
+                c._running_per_ui = lambda _c=c: False
+            win._mark_running_tabs()
+            cleared = [win.tabs.tabText(i) for i in range(win.tabs.count())]
+            self.assertFalse(
+                any("●" in t for t in cleared),
+                f"组件都停了 Tab 上还留着 `●`：{cleared}",
+            )
+        finally:
+            try:
+                win._closing = True
+                win._drain_background_workers()
+                win.close()
+            except Exception:
+                pass
+            win.deleteLater()
+
+    def test_adopt_running_is_not_called_before_cards_are_built(self):
+        """源码顺序护栏：main() 里 _adopt_running 必须在 _on_cards_ready 内。
+
+        纯行为断言看不见这个 —— 遍历空列表不抛异常。用 inspect.getsource
+        是有意的：它挡的正是"有人又把调用挪回建卡之前"这种**结构性**回归。
+        """
+        import inspect
+        src = inspect.getsource(main.main)
+        self.assertIn("_on_cards_ready", src, "main() 里找不到 _on_cards_ready")
+
+        # 定位 _adopt_running 在源码里的位置，以及 on_done=_on_cards_ready 的位置。
+        # 正确形态：_adopt_running 出现在 _on_cards_ready 的函数体内部，
+        # 也就是它的缩进比 def _on_cards_ready 更深。
+        lines = src.splitlines()
+        def_idx = next((i for i, l in enumerate(lines)
+                        if l.strip().startswith("def _on_cards_ready")), None)
+        self.assertIsNotNone(def_idx, "main() 里没有 def _on_cards_ready")
+        adopt_idx = next((i for i, l in enumerate(lines)
+                          if "win._adopt_running()" in l), None)
+        self.assertIsNotNone(adopt_idx, "main() 里没有调用 _adopt_running")
+        self.assertGreater(
+            adopt_idx, def_idx,
+            "_adopt_running 又被挪到 _on_cards_ready 之前了 —— 那时卡片还没建完，"
+            "Tab 上的运行标记与自动跳页会静默失效（2026-10-14 的真实回归）",
+        )
+        # 缩进更深 = 在函数体内，而不是模块层
+        adopt_indent = len(lines[adopt_idx]) - len(lines[adopt_idx].lstrip())
+        def_indent = len(lines[def_idx]) - len(lines[def_idx].lstrip())
+        self.assertGreater(
+            adopt_indent, def_indent,
+            "_adopt_running 与 def _on_cards_ready 同缩进 —— 说明它不在回调体内，"
+            "建卡完成前就跑了",
+        )
+
+
+def _set_running(card, value: bool) -> bool:
+    """把某张卡的 _running_per_ui 打桩成"恒为 True/False"。
+
+    单独提成函数是为了能被 lambda 闭包安全引用（默认参数在 lambda 里会晚绑定）。
+    """
+    card._fake_running = value
+    return value
+
+
 # ---------------------------------------------------------------------------
 class ArchiveTraversalGuard(unittest.TestCase):
     """zip-slip / tar-slip 必须被拦住，且正常包照常解开。

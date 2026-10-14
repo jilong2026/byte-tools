@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
+import threading
 
 # ---------------------------------------------------------------------------
 # PySide6 依赖
@@ -713,15 +714,25 @@ def _row_to_component_version(row) -> Optional["ComponentVersion"]:
         return None
 
 
+_VERSION_CACHE_PENDING: Dict[str, dict] = {}
+
+
 def load_version_cache() -> Dict[str, dict]:
     path = version_cache_path()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    data: Dict[str, dict] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            data = loaded
+    # 把"已抓到但还没落盘"的条目并进来。批量落盘（见 save_version_entry）
+    # 之后这一层是必须的：抓取过程中紧接着就会读缓存给卡片用，
+    # 不并进来就会出现"刚抓到的版本在下一次读缓存时不见了"。
+    if _VERSION_CACHE_PENDING:
+        data.update(_VERSION_CACHE_PENDING)
+    return data
 
 
 def _cached_versions_from(cache: dict, key: str, now: Optional[float] = None,
@@ -752,21 +763,54 @@ def cached_versions_for(key: str, now: Optional[float] = None,
 
 def save_version_entry(key: str, versions: List["ComponentVersion"],
                        now: Optional[float] = None) -> None:
-    """抓成功就落盘。读-改-写：整体覆盖会把别的组件当天已抓的结果一起清掉。
+    """记下"这个组件抓成功了"，**不立刻落盘**；由 flush_version_cache() 统一写。
+
+    入参 key:      组件标识符
+    入参 versions: 该组件抓到的版本清单
+    入参 now:      时间戳（可注入，便于测试）
+
+    2026-10-14 改为批量落盘。原来这里是"读全文件 → 改一个 key → 全量
+    json.dumps → 原子写"，而一次刷新会抓 87 个组件 —— 也就是**87 次全量读 +
+    87 次全量序列化 + 87 次原子写**，全部跑在主线程上（信号槽里），是可感的卡顿。
+
+    改成：先攒进内存，等整轮抓取结束（_fetch_finished）再写一次。
+    读侧 load_version_cache() 会把内存里这层并进来，所以抓取过程中读缓存
+    仍能看到刚抓到的结果，界面行为不变。
+
+    为什么不靠"每隔 N 秒自动写"：那要在运行期引入定时器与退出时的 flush，
+    而抓取本来就是"一批一批回来、一轮一批结束"的形状 —— 收尾点天然存在。
 
     写失败（只读盘、目录被删、磁盘满）只影响"下次要不要重抓"，不值得让界面报错，
-    所以这里静默吞掉 OSError。
+    所以 flush 里静默吞掉 OSError，且**不清空内存层**（下次 flush 会重试）。
     """
+    _VERSION_CACHE_PENDING[str(key)] = {
+        "ts": float(time.time() if now is None else now),
+        "versions": [_component_version_to_row(v) for v in versions],
+    }
+
+
+def flush_version_cache() -> int:
+    """把内存里攒着的版本条目一次性写进 version_cache.json，返回写入条数。
+
+    入参: 无
+    返回: 实际落盘的条目数（没有待写内容时返回 0 且不碰磁盘）
+
+    调用点：MainWindow._fetch_finished() —— 整轮抓取结束的那一刻。
+    """
+    pending = _VERSION_CACHE_PENDING
+    if not pending:
+        return 0
     try:
         data = load_version_cache()
-        data[str(key)] = {
-            "ts": float(time.time() if now is None else now),
-            "versions": [_component_version_to_row(v) for v in versions],
-        }
+        data.update(pending)
         ensure_dir(CONFIG_DIR)
         _atomic_write(version_cache_path(), json.dumps(data, ensure_ascii=False))
     except (OSError, ValueError, TypeError):
-        pass
+        # 保留内存层不清空：下次 flush 会重试，别让一次磁盘故障把
+        # 这一整轮抓到的结果全丢了
+        return 0
+    pending.clear()
+    return len(pending)
 
 
 def _gh_limited_now(now_mono: Optional[float] = None) -> bool:
@@ -795,7 +839,7 @@ def _is_rate_limit_text(reason: str) -> bool:
 
 def _fetch_release_json(url: str, timeout: float):
     """默认取回实现：只带项目统一 UA，**不带任何用户信息**。"""
-    resp = requests.get(url, headers=HTTP_UA, timeout=timeout)
+    resp = http_session().get(url, timeout=timeout)
     if resp.status_code != 200:
         return int(resp.status_code), {}
     try:
@@ -990,6 +1034,11 @@ class ComponentVersion:
 # 测试桩兼容：_which_fast 先比对 shutil.which 的身份，被测试换掉实现时
 # 直接调用换掉的实现，桩语义逐字保持（bt_launch_tests 有四处打桩点）。
 _PATH_INDEX: dict = {"key": None, "dirs": [], "map": {}}
+# 2026-10-14 补：_path_effective_check 用的目录清单缓存。
+# _path_index 只覆盖 os.environ["PATH"]，而复验走的是**系统合成 PATH**
+# （系统段 + 用户段），两者未必相同，所以另起一张表。失效策略与上面一致，
+# 外加本工具改动 PATH 后由 invalidate_path_caches() 显式清。
+_PATH_DIRLIST: dict = {"key": None, "map": {}}
 _REAL_SHUTIL_WHICH = shutil.which
 
 
@@ -1037,6 +1086,64 @@ def _path_index() -> dict:
     _PATH_INDEX["dirs"] = dirs
     _PATH_INDEX["map"] = idx
     return _PATH_INDEX
+
+
+def _path_dir_listing(dirpath: str) -> frozenset:
+    """列出某个目录下的条目名（大写化），按 PATH 原文缓存整表。
+
+    入参 dirpath: 目录路径
+    返回:        该目录条目名的大写集合；目录读不到时是**空集**（不抛异常）
+
+    为什么需要它：`_path_effective_check` 要在系统合成的 PATH 上按顺序找
+    "第一个含这个命令的目录"，原来是对每个条目 × 每个候选后缀做一次
+    `os.path.exists`。实测 37 条 PATH × 5 个后缀 ≈ 185 次系统调用，
+    **每个组件都要来一遍**（88 张卡建卡时都会走到），也就是说同一批目录被
+    stat 了两万次上下，而内容在这一次启动里根本不会变。
+
+    R18 的 `_path_index` 解决不了这条路径：它以 `os.environ["PATH"]` 为键，
+    而这里查的是系统合成的 PATH（系统段 + 用户段），两者未必相同。
+
+    缓存以 PATH 原文为键（与 _path_index 同一套失效逻辑）：改了环境变量就
+    整表重建，避免"装完组件后新加的目录查不到"。
+    """
+    raw = os.environ.get("PATH", "")
+    if _PATH_DIRLIST["key"] != raw:
+        _PATH_DIRLIST["key"] = raw
+        _PATH_DIRLIST["map"] = {}
+    cache = _PATH_DIRLIST["map"]
+    norm = os.path.normcase(dirpath)
+    hit = cache.get(norm)
+    if hit is not None:
+        return hit
+    try:
+        names = frozenset(
+            ent.name.upper() if sys.platform == "win32" else ent.name
+            for ent in os.scandir(dirpath)
+        )
+    except OSError:
+        # 目录不存在 / 无权限 / 网络盘掉线 —— 与 _path_index 的处理一致：
+        # 当它不含任何命令，而不是当成错误
+        names = frozenset()
+    cache[norm] = names
+    return names
+
+
+def invalidate_path_caches() -> None:
+    """PATH 相关缓存全部失效。
+
+    入参: 无
+    返回: 无
+
+    **什么时候必须调**：本工具自己往 PATH 里加/删条目之后（切换生效版本、
+    卸载、清理残留 PATH）。这些操作会改写环境变量，但不一定改写
+    `os.environ`（后者只在部分路径上被同步），所以靠"读 os.environ 判变化"
+    这条自动失效机制不一定能察觉 —— 显式清一次更可靠。
+    """
+    _PATH_INDEX["key"] = None
+    _PATH_INDEX["dirs"] = None
+    _PATH_INDEX["map"] = {}
+    _PATH_DIRLIST["key"] = None
+    _PATH_DIRLIST["map"] = {}
 
 
 def _which_fast(name: str) -> str:
@@ -1738,7 +1845,11 @@ DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
 # 读取超时给足（单次读 60 秒），连接仍保持短（10 秒，探测到不通就快速切下一个源）。
 DOWNLOAD_CONNECT_TIMEOUT = 10
 DOWNLOAD_READ_TIMEOUT = 60
-DOWNLOAD_RETRY_PER_URL = 2    # 单 URL 内重试次数
+# 原先这里有个 DOWNLOAD_RETRY_PER_URL = 2「单 URL 内重试次数」，2026-10-14 删除。
+# 它**零引用**：下载路径压根不做单 URL 内的重试，靠的是 R1 的多源故障转移
+# （这个 URL 失败就换下一个源，实测更有效），而元数据抓取（_get）另有自己
+# 的重试策略、写死成 range(3)。留着一个与实现脱钩的常量，是"改它以为能生效"
+# 的那种陷阱 —— 必须去 _get 里找真正的次数才能改对。
 # 关窗时等抓取线程收尾的总预算（秒）。抓取线程最长按一个在途请求的超时返回
 # （DOWNLOAD_PROBE_TIMEOUT * 2 = 10s），这里留 2s 余量。
 FETCH_EXIT_WAIT = 12
@@ -1746,6 +1857,39 @@ FETCH_EXIT_WAIT = 12
 # 实测（2026-09-28）：清华/北外对 requests 默认 UA 与浏览器 UA 一律回 403，
 # 只对自定义 UA 放行；列目录（_get）已带，下载（_try_download）也必须带。
 HTTP_UA = {"User-Agent": "byte-tools"}
+
+# HTTP 会话池（2026-10-14 加）。全文件原先零 Session：每个 requests.get 都新建
+# 一个隐式 Session，用完就关 —— 于是每次调用都要重新做 TCP 握手与 TLS 握手。
+# 一次启动要替 88 个组件各抓一次版本清单，其中 30 多个直连 api.github.com，
+# 每个 fetcher 内部还要串行请求若干次（fetch_jdk_versions 最极端：约 18 个 major
+# × 2 个镜像 ≈ 36 次）。这些请求如果能复用连接，光省下的握手时间就很可观。
+#
+# **必须线程本地**：Session 及其底层连接池不是线程安全的，而抓取全跑在
+# QThread 里。用 threading.local() 给每个线程各发一份，既拿到复用又不引入
+# 并发 bug。同一个线程内多次调用复用同一份 —— 这正是想要的粒度。
+_HTTP_LOCAL = threading.local()
+
+
+def http_session() -> "requests.Session":
+    """返回当前线程的 HTTP 会话（首次调用时创建）。
+
+    入参: 无
+    返回: 绑定好默认 UA 与连接池参数的 requests.Session
+
+    为什么 UA 挂在 session 上而不是每次传：省掉每个调用点的字典拷贝，
+    也让"所有请求都带专用 UA"这条实测得来的规矩只有一个落点
+    （部分高校镜像站对默认 UA 一律回 403）。
+    """
+    sess = getattr(_HTTP_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        sess.headers.update(HTTP_UA)
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=4, pool_maxsize=8, max_retries=0)
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        _HTTP_LOCAL.session = sess
+    return sess
 # 实测（2026-09-28 GET + 本 UA）：华为云 anaconda 对任意不存在的路径都回
 # 「301 → 200 + 一小段软 404 HTML、无 Content-Length」，会把错误页当下载成功；
 # 本工具的归档包最小的也有几 MB，故按字节数判真假。
@@ -3150,6 +3294,22 @@ class FetchAborted(RuntimeError):
 # 每个重试边界查一次标志，退避等待改用 Event.wait（置位即醒）。
 FETCH_ABORT = _threading.Event()
 
+# 版本抓取的并发上限（2026-10-14 加）。
+#
+# 为什么需要：启动端那个错峰定时器（gap_ms）只解决"同一瞬间齐发"，不解决
+# "87 条长时间同时在飞"。而 GitHub 匿名 API 是**每 IP 每小时 60 次**，其中
+# 30 多个 fetcher 直连 api.github.com —— 首启、24 小时后首启、点「⟳ 刷新版本」
+# 这三个时刻都会瞬间打满，剩下的组件拿到 403 然后集体降级到内置清单，
+# 现象是"明明联网了，版本却一直很旧"。
+#
+# 取 6：既能压住瞬时并发，又不至于让 87 个组件串成十几轮那么慢
+# （实测单个 fetcher 最长约 1~2s，6 并发下整轮在 30s 内收得住）。
+# 留 1 的余量给不经过 GitHub 的源（Apache / 华为云 / Adoptium 等）。
+VERSION_FETCH_CONCURRENCY = 6
+# 闸门等待被打断的轮询间隔：关窗时 FETCH_ABORT 置位，排队中的 worker
+# 最迟这么久就会退出，不会干等到轮到自己（那会儿界面早没了）。
+FETCH_ABORT_POLL_SEC = 0.25
+
 
 def _get(url: str, timeout: int = 10) -> requests.Response:
     """带自动重试与 SSL 降级的 GET 请求。
@@ -3157,20 +3317,26 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
     - 网络抖动/临时错误：最多重试 3 次，指数退避（1s, 2s）
     - SSL 错误（企业代理 MITM / 系统证书缺失等）：最后一次尝试关闭 SSL 校验
     - 关窗取消：FETCH_ABORT 置位后在下一次尝试或退避处抛 FetchAborted
+    - 走 http_session() 复用连接与默认 UA（2026-10-14）；关闭 SSL 校验那一次
+      用独立的临时会话，因为它带着 verify=False，不能污染线程里那份
     """
-    headers = HTTP_UA
+    sess = http_session()
     last_exc: Optional[Exception] = None
     for attempt in range(3):
         if FETCH_ABORT.is_set():
             raise FetchAborted("应用正在退出，已取消版本抓取")
         try:
             if attempt < 2:
-                r = requests.get(url, timeout=timeout, headers=headers)
+                r = sess.get(url, timeout=timeout)
             else:
-                # 最后一次：关闭 SSL 校验，让企业代理/自签证书场景也能工作
+                # 最后一次：关闭 SSL 校验，让企业代理/自签证书场景也能工作。
+                # 用临时会话而不是给共享那份传 verify=False —— 后者会把这个
+                # 标志留在连接池上，之后的正常请求也跟着不校验证书。
                 import urllib3
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                r = requests.get(url, timeout=timeout, headers=headers, verify=False)
+                with requests.Session() as lax:
+                    lax.headers.update(HTTP_UA)
+                    r = lax.get(url, timeout=timeout, verify=False)
             r.raise_for_status()
             return r
         except requests.exceptions.SSLError as e:
@@ -3216,7 +3382,7 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
             # 额度旗已立，再发请求就是继续烧额度、继续让界面转圈
             raise RuntimeError(GH_LIMITED_TEXT)
         try:
-            r = requests.get(url, timeout=timeout, headers=headers)
+            r = http_session().get(url, timeout=timeout, headers=headers)
             # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
             # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
             # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
@@ -5480,9 +5646,21 @@ del _cli_spec
 
 
 class VersionFetchWorker(QThread):
-    """在后台线程里跑抓取器，避免阻塞 UI。"""
+    """在后台线程里跑抓取器，避免阻塞 UI。
+
+    **并发闸门**（2026-10-14 加）：真正限制"同时在飞多少条抓取"的是这里，
+    不是启动端那个错峰定时器。错峰只解决了"同一瞬间齐发"，没解决
+    "87 条长时间同时在飞" —— 而 GitHub 匿名额度是**每 IP 每小时 60 次**，
+    其中 30 多个 fetcher 直连 api.github.com。首启 / 24 小时后首启 /
+    点「⟳ 刷新版本」都会瞬间打满，后面几个组件拿到 403 集体降级到内置清单，
+    表现是"明明联网了却版本很旧"，而且用户无从判断原因。
+
+    用 Semaphore 而不是换成线程池，是为了不动"每个组件一个 QThread"这个
+    既有结构 —— 测试里有大量按 key 找 worker 的打桩点。
+    """
 
     done = Signal(str, object)  # (component_key, versions or None)
+    _gate = _threading.Semaphore(VERSION_FETCH_CONCURRENCY)
 
     def __init__(self, key: str, fetcher: Callable[[], List[ComponentVersion]],
                  parent: Optional[QObject] = None) -> None:
@@ -5494,19 +5672,29 @@ class VersionFetchWorker(QThread):
         self.error_text: str = ""
 
     def run(self) -> None:  # noqa: D401
+        # 闸门：并发上限见类 docstring。acquire 可被 FETCH_ABORT 打断，
+        # 所以关窗时排队中的 worker 不会干等到轮到自己。
+        if not self._gate.acquire(timeout=FETCH_ABORT_POLL_SEC):
+            return
         try:
-            vs = self.fetcher()
-        except FetchAborted:
-            self.done.emit(self.key, None)  # 关窗取消：静默收尾，不打失败日志
-        except Exception as exc:  # pragma: no cover
-            # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
-            # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
-            self.error_text = str(exc)[:220]
-            if not FETCH_ABORT.is_set():
-                print(f"[fetch:{self.key}] {self.error_text}")
-            self.done.emit(self.key, None)
-        else:
-            self.done.emit(self.key, vs)
+            if FETCH_ABORT.is_set():
+                self.done.emit(self.key, None)
+                return
+            try:
+                vs = self.fetcher()
+            except FetchAborted:
+                self.done.emit(self.key, None)  # 关窗取消：静默收尾，不打失败日志
+            except Exception as exc:  # pragma: no cover
+                # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
+                # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
+                self.error_text = str(exc)[:220]
+                if not FETCH_ABORT.is_set():
+                    print(f"[fetch:{self.key}] {self.error_text}")
+                self.done.emit(self.key, None)
+            else:
+                self.done.emit(self.key, vs)
+        finally:
+            self._gate.release()
 
 
 # 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
@@ -8494,8 +8682,8 @@ class DownloadWorker(QThread):
         # (连接, 读取) 二元组：连接 10 秒（不通就快速换源）、读取 60 秒
         # （大包慢速下载时两次读之间可能超过 30 秒，单值超时会把 jdk/gradle 这类打死）。
         timeout = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT)
-        with requests.get(url, stream=True, timeout=timeout,
-                          allow_redirects=True, headers=HTTP_UA) as r:
+        with http_session().get(url, stream=True, timeout=timeout,
+                                   allow_redirects=True) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length", 0))
             downloaded = 0
@@ -8962,6 +9150,10 @@ class EnvManager:
         if not any(EnvManager._same_path(p, entry) for p in parts):
             parts.append(entry)
             os.environ["PATH"] = os.pathsep.join(parts)
+            # 缓存的键是 PATH 原文，正常会自己失效；但显式清一次是为了覆盖
+            # "目录内容变了而 PATH 原文没变"的情况（新装组件的那个目录
+            # 在加入 PATH 之前就已经被列过一次），见 invalidate_path_caches。
+            invalidate_path_caches()
 
     @staticmethod
     def _filter_path_entries(pred) -> List[str]:
@@ -8976,6 +9168,7 @@ class EnvManager:
         kept = [p for p in proc if not pred(p)]
         if len(kept) != len(proc):
             os.environ["PATH"] = os.pathsep.join(kept)
+            invalidate_path_caches()
         return removed
 
     @staticmethod
@@ -11843,7 +12036,7 @@ class ServiceManager:
             return ""
         url = f"http://127.0.0.1:{port}{spec.console_path}"
         try:
-            r = requests.get(url, timeout=8, allow_redirects=True, headers=HTTP_UA)
+            r = http_session().get(url, timeout=8, allow_redirects=True)
             code = r.status_code
         except Exception:
             return ""
@@ -14520,6 +14713,15 @@ LOG_AUTO_POP_DELAY_MS = 10000
 # 而日志目录是长命目录，不裁会一直涨（一次装 JDK 就能写几百 KB）。
 LOG_KEEP_SESSIONS = 10
 
+# 压制 PyInstaller 遗留 Tk 引导窗（2026-10-13 引入，2026-10-14 调参）。
+# bootloader 抽出 PySide6/Qt 之前会先弹一个基于 Tk 的空引导窗，用户看得见。
+# 实测：Python 起来后约 0.3s 它才出现，且 bootloader **不会**反复 ShowWindow ——
+# 外部压一次就永久消失。所以这里只需要抢"它刚出现的那一瞬"，
+# 剩下的交给常驻后台线程（上限 30s）。
+TK_SUPPRESS_POLL_SEC = 0.05     # 每次轮询的间隔
+TK_SUPPRESS_SYNC_ROUNDS = 6     # 主线程同步轮询次数（6 × 50ms = 0.3s）
+TK_SUPPRESS_BG_LIMIT = 600      # 后台线程轮询上限（600 × 50ms = 30s，防失控）
+
 
 def grid_columns_for(available_px, min_card_px) -> int:
     """给定可用宽度与格子最小宽度，返回列数（恒 ≥ 1）。
@@ -16735,15 +16937,19 @@ class ComponentCard(QFrame):
                  else ([exec_name + s for s in (".exe", ".cmd", ".bat", "")]
                        if not os.path.splitext(exec_name)[1] else [exec_name]))
         expected = str(self._expected_bin_dir(active))
+        # 走目录清单缓存，而不是逐条 os.path.exists：合成 PATH 上有几十个条目，
+        # 每个条目 × 4 个后缀，而这张表在 88 张卡建卡时会被重复问同一批目录
+        # 两万次上下（详见 _path_dir_listing 的说明）。
+        upper = (lambda s: s.upper()) if sys.platform == "win32" else (lambda s: s)
         for entry in path_value.split(";"):
             entry = entry.strip()
             if not entry:
                 continue
             try:
-                hit = any(os.path.exists(os.path.join(entry, n)) for n in names)
+                listing = _path_dir_listing(entry)
             except (OSError, ValueError):
                 continue
-            if hit:
+            if any(upper(n) in listing for n in names):
                 return ("ok", None) if EnvManager._same_path(entry, expected) else ("shadowed", entry)
         return "unknown", None
 
@@ -17428,6 +17634,12 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
 
         self.components = build_components()
+        # 把这一份同步进类级缓存。此前 _adopt_running → current_components()
+        # 会因为缓存还是空的而**再 build 一次**，于是同一批组件在进程里存在
+        # 两套互不相干的对象：卡片用的是 self.components，卡片查前置依赖用的
+        # 是 current_components() 那一套。构造 88 个 Component（含全部版本表）
+        # 白做一遍，且"两份对象"是个长期的一致性隐患。
+        MainWindow._COMPONENTS_CACHE = {c.key: c for c in self.components}
         self._drag_pos: Optional[QPoint] = None
         self._fetch_workers: List[VersionFetchWorker] = []
         self._fetch_pending: int = 0
@@ -19334,6 +19546,10 @@ class MainWindow(QMainWindow):
 
     def _fetch_finished(self) -> None:
         """一轮抓取的收尾：恢复按钮 + 一句完成日志（缓存全命中时也要走这里）。"""
+        # 整轮结束才落盘（原来每个组件抓成功就全量重写一次，一轮 87 次，
+        # 全部跑在主线程信号槽里）。放在"恢复按钮"之前：万一写盘慢，
+        # 按钮先恢复，用户不至于对着一个灰掉的按钮等。
+        flush_version_cache()
         if hasattr(self, "btn_refresh"):
             self.btn_refresh.setEnabled(True)
             self.btn_refresh.setText("⟳ 刷新版本")
@@ -19673,6 +19889,10 @@ class MainWindow(QMainWindow):
                 continue
             remain = max(0.0, deadline - _time.monotonic())
             _qthread_wait(w, int(remain * 1000))
+        # 抓取线程已收尾，把这轮攒在内存里的版本条目落盘。
+        # 放在最后是有意的：关窗时正在抓的那几个组件可能刚好返回了，
+        # 它们的成果不该因为"用户关得比网络快"而白丢。
+        flush_version_cache()
         super().closeEvent(event)
 
 
@@ -19722,11 +19942,10 @@ def main() -> int:
         return False
 
     # Python 起来时 Tk 窗口可能还没被 bootloader 创建（实测 0.3s 才出现），
-    # 且 QTimer 要等 app.exec() 才走。**先同步压一轮**（20 次 × 50ms = 1s，
-    # 覆盖"Python 起来 → Tk 出现 → 稳定隐藏"这段），再交给后台线程持续压制
-    # 直到应用内 splash 接管。实测（2026-10-13）bootloader **不会**反复重新
-    # ShowWindow —— 外部压 1 次就永久消失，所以这里的敌人只有"时机"：同步轮询
-    # 保证在 Tk 出现后的 50ms 内把它藏掉，后台线程兜底防它复活。
+    # 且 QTimer 要等 app.exec() 才走。**先同步压一轮**（见下面两个常量），
+    # 再交给后台线程持续压制直到应用内 splash 接管。实测（2026-10-13）bootloader
+    # **不会**反复重新 ShowWindow —— 外部压 1 次就永久消失，所以这里的敌人只有
+    # "时机"：同步轮询负责抢 Tk 刚出现的那一瞬，后台线程兜底防它复活。
     import time as _t
     import threading as _threading
     import ctypes as _ctypes
@@ -19741,17 +19960,23 @@ def main() -> int:
             return True
         return False
 
-    # 同步轮询：至多 1s（20 × 50ms），藏掉即停。最多让启动延后 1s，
-    # 换取"全程只有一个启动画面"（用户点名要求）。
-    for _ in range(20):
+    # 同步轮询：至多 0.3s（6 × 50ms），藏掉即停。
+    #
+    # 2026-10-14 从 1s（20 次）压到 0.3s（6 次）。依据是注释里已经写明的事实：
+    # bootloader **不会**反复 ShowWindow，外部压一次就永久消失，敌人只是"时机"。
+    # 而这 6 次的窗口已经覆盖了 Tk 出现的实测值（Python 起来后约 0.3s），
+    # 剩下的交给下面那个已经存在的后台线程 —— 它每 50ms 查一次、上限 30s，
+    # 兜底能力远超同步这段。继续用 1s 换来的只是"多 0.7 秒白等"，
+    # 而那 0.7 秒正落在冷启动最宝贵的位置上。
+    for _ in range(TK_SUPPRESS_SYNC_ROUNDS):
         if _hide_tk_once():
             break
-        _t.sleep(0.05)
+        _t.sleep(TK_SUPPRESS_POLL_SEC)
 
     def _suppress_tk_splash() -> None:
         n = 0
         lines = [f"thread alive @{_t.monotonic() - _t0:.2f}s"]
-        while _tk_suppress["on"] and n < 600:      # 上限 30s，防失控
+        while _tk_suppress["on"] and n < TK_SUPPRESS_BG_LIMIT:
             hwnd = _user32.FindWindowW("TkTopLevel", "tk")
             if hwnd:
                 vis = _user32.IsWindowVisible(hwnd)
@@ -19792,7 +20017,6 @@ def main() -> int:
     splash.show()
 
     win = MainWindow(splash=splash)
-    win._adopt_running()      # 认清本机在跑什么；不放 __init__——它会读写用户 running.json、探测真端口，构造窗口的测试会跟着遭殃
 
     def _on_cards_ready():
         # 全部卡片建完：splash 淡出，主窗口显示，然后才开始版本抓取与检查更新
@@ -19801,6 +20025,18 @@ def main() -> int:
         splash.deleteLater()
         win._splash = None
         win._load_settings()        # 建卡后才恢复配置（需要真卡片上的 version_combo）
+        # 认清本机在跑什么。
+        #
+        # ⚠ 必须放在这里，不能放在 MainWindow() 之后、_build_cards_async 之前
+        #（2026-10-14 修的真实回归）。R18 改成**分帧建卡**之后，建卡完成前
+        # self.cards 与 _tab_cards 都还是空列表，而 _adopt_running 里的
+        #   · for card in self.cards: card._refresh_launch_state()
+        #   · _reveal_running_tabs() → _mark_running_tabs()
+        # 全都是遍历这两张列表的 —— 于是它们遍历的是空列表，**Tab 上的
+        # `●` 运行标记与"自动跳到运行页"在启动路径上永久失效**。
+        # 上方那句"卡片在那之前已经画过一遍了，必须让它们重读"的注释，
+        # 其前提（R18 之前，卡片在 __init__ 里就建完）在分帧之后已经不成立。
+        win._adopt_running()
         win.show()
         win.raise_()
         win.activateWindow()

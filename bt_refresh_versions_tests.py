@@ -323,11 +323,80 @@ class VersionListCache(unittest.TestCase):
         self.assertTrue(self.win._fetch_workers, "缓存坏了应该照常抓取，而不是打不开")
         self._pump()
 
+    def test_request_stub_point_is_main_http_session(self):
+        """请求必须经由 main.http_session() 发出，而不是裸 requests.get。
+
+        这不是风格问题，是**正确性**：全套测试都靠替换
+        `main.http_session` / `main._get` / `main._github_api_json` 这几个
+        接缝来保证"不联网"。2026-10-14 把请求改成走线程本地 Session 复用连接
+        之后，有两处用例的桩还挂在 `main.requests.get` 上 —— 桩静默失效，
+        用例照样跑完，只是**网络真出去了**，报出来的是 404 / 连接超时这类
+        与被测行为无关的失败（实测踩过一次）。
+
+        所以这里直接把"代码里不该再出现裸 requests.get"钉住。
+        """
+        import inspect
+        offenders = []
+        for name, obj in vars(main).items():
+            if name.startswith("__"):
+                continue
+            if inspect.isfunction(obj) and getattr(obj, "__module__", None) == main.__name__:
+                try:
+                    src = inspect.getsource(obj)
+                except (OSError, TypeError):
+                    continue
+                if "requests.get(" in src:
+                    offenders.append(name)
+        self.assertEqual(
+            offenders, [],
+            f"这些函数还在裸调 requests.get（不走 http_session，连接池无法复用，"
+            f"且测试桩挂不住）：{offenders}",
+        )
+
+    def test_http_session_is_thread_local(self):
+        """每个线程拿到自己的 Session —— Session 不是线程安全的。"""
+        import threading
+        sess = main.http_session()
+        self.assertIs(sess, main.http_session(),
+                      "同一线程两次调用应拿到同一个 Session（连接才能复用）")
+        self.assertEqual(sess.headers.get("User-Agent"), main.HTTP_UA["User-Agent"],
+                         "Session 上必须带专用 UA：部分高校镜像站对默认 UA 一律 403")
+
+        box = {}
+
+        def _other():
+            box["sess"] = main.http_session()
+
+        t = threading.Thread(target=_other)
+        t.start()
+        t.join(5)
+        self.assertIn("sess", box, "另一个线程没拿到 Session")
+        self.assertIsNot(box["sess"], sess,
+                         "跨线程拿到了同一个 Session —— 连接池会被并发使用，是 bug")
+
+    def test_fetch_concurrency_gate_exists(self):
+        """版本抓取必须有并发上限。
+
+        错峰定时器只解决"同一瞬间齐发"，不解决"87 条长时间同时在飞"；
+        而 GitHub 匿名 API 是每 IP 每小时 60 次，其中 30 多个 fetcher 直连它。
+        首启与「⟳ 刷新版本」都会瞬间打满，剩余组件拿到 403 集体降级到内置清单，
+        现象是"明明联网了却版本很旧"。
+        """
+        self.assertGreater(
+            main.VERSION_FETCH_CONCURRENCY, 1,
+            "并发上限被设成 1 —— 87 个组件会串成 87 轮，慢到不能忍",
+        )
+        self.assertLessEqual(
+            main.VERSION_FETCH_CONCURRENCY, 16,
+            "并发上限过高：GitHub 匿名额度是每 IP 每小时 60 次，"
+            "同时在飞太多会直接打满",
+        )
+
     def test_rate_limit_fails_fast_for_the_rest_of_the_batch(self):
         """命中 403 remaining=0 之后还按 5s/10s 退避重试 = 每个组件白等 31 秒、
         并且继续烧已经见底的额度。第一次看见限流就该立旗，后面快速失败。"""
-        orig_get, orig_abort = main.requests.get, main.FETCH_ABORT
-        self.addCleanup(setattr, main.requests, "get", orig_get)
+        orig_session, orig_abort = main.http_session, main.FETCH_ABORT
+        self.addCleanup(setattr, main, "http_session", orig_session)
         self.addCleanup(main.FETCH_ABORT.clear)
         main.FETCH_ABORT.clear()
         calls = []
@@ -342,11 +411,15 @@ class VersionListCache(unittest.TestCase):
             def json(self):
                 return {}
 
-        def fake_get(url, *a, **k):
-            calls.append(url)
-            return Resp()
+        class _Sess:
+            def get(self, url, *a, **k):
+                calls.append(url)
+                return Resp()
 
-        main.requests.get = fake_get
+        # 2026-10-14：桩点从 main.requests.get 移到 main.http_session ——
+        # 请求改走线程本地 Session 复用连接。桩挂在旧位置会**静默失效**，
+        # 用例照样跑完、只是网络真出去了（这条用例就会在 404 上断言失败）。
+        main.http_session = lambda: _Sess()
         main._GH_LIMITED_UNTIL = 0.0
         t0 = time.monotonic()
         with self.assertRaises(Exception) as ctx:

@@ -539,14 +539,25 @@ class DownloadFlow(_EnvSandbox):
         dest = self.root / "idea-2026.2.3.exe"
         body = b"<html>" + b" " * 20000
         calls = []
-        orig_get = main.requests.get
-        self.addCleanup(setattr, main.requests, "get", orig_get)
+        # 2026-10-14：桩点从 main.requests.get 移到 main.http_session。
+        # 下载改走线程本地的 Session 复用连接（全文件原先零 Session，
+        # 每次请求都要重做 TCP+TLS 握手）。桩要挂在**代码实际调用的那个对象**上，
+        # 否则它会静默失效 —— 用例照样跑完，只是网络真出去了。
+        orig_session = main.http_session
 
-        def fake_get(url, *a, **k):
-            calls.append(url)
-            return _Resp(body)
+        class _Sess:
+            def get(self, url, *a, **k):
+                calls.append(url)
+                return _Resp(body)
 
-        main.requests.get = fake_get
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        self.addCleanup(setattr, main, "http_session", orig_session)
+        main.http_session = lambda: _Sess()
         w = main.DownloadWorker(["https://mirrors.huaweicloud.com/jetbrains/x.exe"],
                                 dest, None, b"MZ")
         results = []
@@ -562,9 +573,21 @@ class DownloadFlow(_EnvSandbox):
         """默认不校验魔数：26 个老组件的行为必须逐字不变。"""
         main.DownloadWorker = self._orig_worker
         dest = self.root / "jdk-21.zip"
-        orig_get = main.requests.get
-        self.addCleanup(setattr, main.requests, "get", orig_get)
-        main.requests.get = lambda url, *a, **k: _Resp(b"PK\x03\x04" + b"z" * 20000)
+        # 桩点见上面那条用例的说明：下载走 main.http_session()
+        orig_session = main.http_session
+
+        class _Sess:
+            def get(self, url, *a, **k):
+                return _Resp(b"PK\x03\x04" + b"z" * 20000)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        self.addCleanup(setattr, main, "http_session", orig_session)
+        main.http_session = lambda: _Sess()
         w = main.DownloadWorker(["https://example.invalid/jdk.zip"], dest)
         got = []
         w.finished_ok.connect(got.append)
@@ -1173,9 +1196,21 @@ class WorkerRobustness(unittest.TestCase):
                 w._cancel = True              # 第一个 chunk 之后用户点了取消
                 yield b"x" * 64
 
-        orig = main.requests.get
-        self.addCleanup(setattr, main.requests, "get", orig)
-        main.requests.get = lambda *a, **k: FakeResp()
+        # 桩点见 DownloadFlow 里那两条用例的说明：下载走 main.http_session()
+        orig_session = main.http_session
+
+        class _Sess:
+            def get(self, *a, **k):
+                return FakeResp()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        self.addCleanup(setattr, main, "http_session", orig_session)
+        main.http_session = lambda: _Sess()
         w.run()
         self.assertEqual(len(hits), 1, f"取消只该发一次终态：{hits}")
         self.assertIn("取消", hits[0], f"取消不该被说成源不可用：{hits}")
