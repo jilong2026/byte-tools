@@ -6148,9 +6148,20 @@ def _render_icon_file(path: Optional[Path], px: int) -> Optional["QPixmap"]:
 
     入参：
       path: 图标文件路径，None 直接返回 None。
-      px:   输出像素边长。
+      px:   输出像素边长（调用方传 ICON_BOX_PX * ICON_RENDER_SCALE = 64）。
     返回：
-      QPixmap 或 None。
+      QPixmap（devicePixelRatio 已设为 ICON_RENDER_SCALE，显示时正好占
+      ICON_BOX_PX 逻辑像素）或 None。
+
+    ⚠ **devicePixelRatio 必须在画完之后再设**，不能设完再开 QPainter（2026-10-14
+    实测踩出来的显示 bug）。设在前面的结果是：QPainter 的逻辑视口被 DPR 缩小，
+    QSvgRenderer 按 SVG 的 defaultSize（本项目的图标多为 128×128）去适配这个
+    视口，渲染出的画面比画布大出一截，于是**每个图标都被放大裁掉一大块**——
+    界面上看到的是"图标缺了右上角"。表现极像资产文件本身损坏，极难定位。
+
+    反过来，画完再设 DPR 就没有这个问题：QPainter 看到的视口就是 px×px，
+    SVG 正确等比缩放填满；DPR 只是事后记录"这块 px×px 的像素要显示成
+    px/scale 逻辑像素"，供 QLabel 排版用。
     """
     if path is None:
         return None
@@ -6162,10 +6173,10 @@ def _render_icon_file(path: Optional[Path], px: int) -> Optional["QPixmap"]:
                 return None
             img = QImage(px, px, QImage.Format_ARGB32)
             img.fill(Qt.transparent)
-            img.setDevicePixelRatio(float(ICON_RENDER_SCALE))
             painter = QPainter(img)
             renderer.render(painter)
             painter.end()
+            img.setDevicePixelRatio(float(ICON_RENDER_SCALE))   # 画完再设
             return QPixmap.fromImage(img)
 
         # 栅格：QPixmap 自己就能读，缩放到目标边长（保持长宽比）
@@ -15339,35 +15350,24 @@ class ComponentCard(QFrame):
         self._external_body: Optional[QWidget] = None
 
     def _render_icon(self) -> None:
-        """在卡片左上角渲染该组件的官方图标，取不到就退回分类色块。
+        """在卡片左上角渲染该组件的官网图标，取不到就退回分类色块。
 
         纯渲染：这个方法不建任何后续逻辑依赖的属性，也不提前 return 后还要
         有人接着干活 —— 渲染成功与否对卡片的其余部分没有任何影响。
-        
-        优先度：SVG > PNG > fallback 色块
-        优先级判断：文件大小>1KB 的视为"真实官网 Logo"，小的视为"占位符/无效"
+        职责拆分：
+          · `load_component_icon_pixmap()` 负责"找到并栅格化"，全部防错都在那边
+          · 本方法只负责"贴上去，贴不上就画色块"
         """
         key = self.component.key
-
-        # 优先尝试加载大尺寸的真实 Logo (>5KB 为安全阈值)
-        pixmap = load_component_icon_pixmap(key, ICON_BOX_PX * 2)
-        if pixmap is not None and pixmap.size().width() >= 32:
-            try:
-                size = pixmap.size()
-                file_size = 0
-                icon_file = Path(__file__).parent / "assets/component-icons" / f"{key}.svg"
-                if not icon_file.exists():
-                    icon_file = Path(__file__).parent / "assets/component-icons" / f"{key}.png"
-                if icon_file.exists():
-                    file_size = icon_file.stat().st_size
-                
-                # 只有大尺寸且文件大于一定阈值的才使用
-                if file_size > 1024 or size.width() >= 64:
-                    self.icon_label.setPixmap(pixmap.scaled(ICON_BOX_PX * 2, ICON_BOX_PX * 2, 
-                                                      Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                    return
-            except Exception:
-                pass
+        pixmap = load_component_icon_pixmap(key, ICON_BOX_PX * ICON_RENDER_SCALE)
+        if pixmap is not None:
+            # 不要再 scaled()：load_component_icon_pixmap 返回的已经是
+            # ICON_BOX_PX 逻辑尺寸、ICON_RENDER_SCALE 倍密度的成品。
+            # 二次缩放会把它压成 64 逻辑像素 = 逻辑尺寸的 2 倍，
+            # QLabel 32x32 的槽位放不下就被裁掉一角 —— 界面看到的是
+            # "图标缺了一块"（2026-10-14 用户截图就是这个现象）。
+            self.icon_label.setPixmap(pixmap)
+            return
 
         # fallback: 使用默认色块（按分类显示不同颜色）
         category_map = {
@@ -15384,8 +15384,6 @@ class ComponentCard(QFrame):
             border-radius: 6px;
             border: 1px solid #d8dde6;
         """)
-        # 只保留一行：并发编辑留下的 `setText("")` 与下一行 `setText(key[:3])`
-        # 互相冲突（后者立刻覆盖前者），是合并残留而非设计。这里恢复基线行为。
         self.icon_label.setText(key[:3].upper())
         self.icon_label.setAlignment(Qt.AlignCenter)
         self.icon_label.setFont(QFont("", 10, QFont.Bold))
