@@ -9,7 +9,8 @@ import platform as _platform
 import sys
 import unittest
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 测试在 tests/ 下，仓库根是上一级。
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path

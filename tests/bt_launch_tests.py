@@ -3072,28 +3072,63 @@ class RunningTabMarker(unittest.TestCase):
         self.app.processEvents()
         return win, logs
 
+    def _running_tab_index(self, win, key="nacos"):
+        """运行中组件所在的 Tab 序号。"""
+        return next(n for n, li in enumerate(win._tab_layouts)
+                    if li.indexOf(next(c for c in win.cards
+                                       if c.component.key == key)) != -1)
+
     def test_tab_of_a_running_component_is_marked_and_jumped_to(self):
+        """用户不在运行页时：标 ● + 自动跳过去 + 日志点名停止按钮在哪。
+
+        ⚠ 2026-10-14 这条用例改过前提：**不许再假设"运行页一定不是当前页"**。
+        用户把「一键启停」提到了第一个 Tab，而窗口默认就停在 Tab0 ——
+        于是"启动那一刻运行页 == 当前页"，本来就不需要跳页，也不该刷跳页日志
+        （原先的断言就是这么变红的：它默认跳页一定会发生）。
+        这里显式先切到别的页，把"需要跳页"的场景造出来；
+        "本来就在那一页"的情形由下面 test_no_jump_or_switch_log_... 覆盖。
+        """
         win, logs = self._win_with_nacos_running()
         self.addCleanup(win.close)
         titles_before = [win.tabs.tabText(i) for i in range(win.tabs.count())]
         self.assertNotIn("●", "".join(titles_before),
                          "还没跑就标了运行标记")
 
+        nacos_tab = self._running_tab_index(win)
+        win.tabs.setCurrentIndex(0 if nacos_tab != 0 else 1)
+
         win._adopt_running()
         self.app.processEvents()
 
         titles = [win.tabs.tabText(i) for i in range(win.tabs.count())]
-        nacos_tab = next(n for n, li in enumerate(win._tab_layouts)
-                         if li.indexOf(next(c for c in win.cards
-                                            if c.component.key == "nacos")) != -1)
         self.assertIn("●", titles[nacos_tab],
                       f"运行中的那一页没标 ●：{titles}")
         self.assertEqual(win.tabs.currentIndex(), nacos_tab,
-                         "打开工具时应自动跳到运行中的那一页")
+                         "用户不在运行页时应自动跳过去")
         joined = "\n".join(logs)
         self.assertIn("停止", joined,
                       f"日志必须点名停止按钮在哪：{logs}")
         self.assertIn("8848", joined, f"日志要点名端口：{logs}")
+
+    def test_no_jump_or_switch_log_when_already_on_the_running_tab(self):
+        """本来就在运行页：不跳、也不刷「已切换」日志。
+
+        这正是「一键启停」提到第一个 Tab 之后的常见情形（窗口默认停在 Tab0）。
+        跳页日志是给"找不到卡片"的人看的；用户已经看着那张卡片时再刷一条，
+        只是在噪音里淹掉真正有用的信息。
+        """
+        win, logs = self._win_with_nacos_running()
+        self.addCleanup(win.close)
+        nacos_tab = self._running_tab_index(win)
+        win.tabs.setCurrentIndex(nacos_tab)
+
+        win._adopt_running()
+        self.app.processEvents()
+
+        self.assertEqual(win.tabs.currentIndex(), nacos_tab, "不该跳到别处去")
+        self.assertFalse([m for m in logs if "已切换" in m],
+                         f"本来就在这一页，不该说「已切换」：{logs}")
+        self.assertIn("●", win.tabs.tabText(nacos_tab), "● 标记仍要有")
 
     def test_mark_survives_switching_to_another_tab(self):
         """手动切到别的页后，`●` 标记不能消失 —— 它是"去那页找"的唯一线索。"""
@@ -5139,9 +5174,10 @@ class DrillCoversEveryLaunchableComponent(unittest.TestCase):
     def test_clean_env_drill_iterates_over_launch_keys_not_a_hand_written_list(self):
         import re
         # 用 __file__ 定位，不依赖 cwd（演练脚本可能在别处跑）。
-        # 2026-10-10 演练脚本归进 tools/ —— 这条护栏当场把搬迁漏改的地方照出来：
-        # 路径不跟着改，用例直接 FileNotFoundError，比"静默不再检查演练脚本"好得多。
-        here = Path(__file__).resolve().parent
+        # 2026-10-10 演练脚本归进 tools/；2026-10-14 本套件又归进 tests/ ——
+        # 这条护栏两次都当场把搬迁漏改的地方照出来：路径不跟着改，用例直接
+        # FileNotFoundError，比"静默不再检查演练脚本"好得多。
+        here = Path(__file__).resolve().parents[1]
         src = (here / "tools" / "bt_clean_env_drill.py").read_text(encoding="utf-8")
         # 找 main_run 里给 order 赋值的那一行
         m = re.search(r"order\s*=\s*(.+)", src)

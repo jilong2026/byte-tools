@@ -32,7 +32,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent
+# 测试在 tests/ 下，仓库根是上一级（同步脚本在仓库根）。
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "同步Gitee产物.sh"
 TAG = "vTEST"
 GH_BASE = f"https://github.com/owner/slug/releases/download/{TAG}"

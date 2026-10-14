@@ -192,6 +192,15 @@ live_*.json
 
 # 采集脚本的失败输出。内容是控制台日志（例如「✓ deno.svg (57KB)」/
 # 「成功：1/23 失败：22」），不是证据文件；真正的结论在脚本与文档里。
-/download_logs.txt
-/library_logs.txt
-/official_logs.txt
+# 2026-10-14 与 drill_*.json 一起归进 artifacts/（见那里的 README）。
+/artifacts/download_logs.txt
+/artifacts/library_logs.txt
+/artifacts/official_logs.txt
+/artifacts/*.log
+
+# 一次性脚本的落位（2026-10-14 从仓库根扫进来的 31 个 `.` 前缀草稿）。
+# 它们原本靠 `/.*.py` 在根目录隐身，一移出根目录就会冒出来，所以单独忽略这个目录。
+# 用 `/*` 而不是整个目录：git 无法重新包含一个"父目录已被排除"的文件，
+# 而 README 必须能提交 —— 那个文件夹需要一句"这是什么"，否则下一个人会当成正式工具。
+/tools/oneoff/*
+!/tools/oneoff/README.md

@@ -20,7 +20,8 @@ import re
 import sys
 import unittest
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 测试在 tests/ 下，仓库根是上一级（一键脚本与 assets/ 都在那里）。
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 

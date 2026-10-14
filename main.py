@@ -5908,8 +5908,10 @@ class VersionFetchWorker(QThread):
             self._gate.release()
 
 
-# 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "开发工具", "一键启停")
+# 界面 Tab 分组：四个分类的显示顺序（Tab 顺序即此顺序）。
+# 2026-10-14 用户要求把「一键启停」提到第一位 —— 它是本工具最能干活的一组长，
+# 原先压在最右边。原先那条"必须是最后一个 Tab"的护栏随之改写成"必须是第一个"。
+COMPONENT_CATEGORIES = ("一键启停", "开发环境", "开发软件", "开发工具")
 
 # 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
 # build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。

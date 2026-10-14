@@ -192,17 +192,17 @@ byte-tools/
 │                            #   bt_bench_sources / bt_probe_newcmp / bt_jdk_mirror_files / bt_render_search
 │                            #   bt_archive_layout_audit（归档布局实测，见 R3.22）/ bt_spike_elevated_hklm（一次性验证）
 │                            #   都靠 `sys.path` 指向仓库根来 import main，跑法：python tools/<脚本名>
-├── bt_multiversion_tests.py       # 离线回归测试：多版本并存与生效版本切换（见 4.9，覆盖清单与用例数以运行输出为准）
-├── bt_component_category_tests.py # 离线回归测试：组件分类分组与 Tab（见 R2）
-├── bt_download_only_tests.py     # 离线回归测试：「开发工具」只下载那一类（见 R13）
-├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
-├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
-├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（见 4.9；套件数以 `run_all_tests.py` 输出为准）
-├── bt_startup_tests.py            # 离线回归测试：启动期不碰 WMI（见 8.2 与 4.9）
-├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
-├── bt_boot_script_tests.py        # 离线回归测试：两个一键脚本的编码/换行/消息表/Python 自动安装闭环（见 8.2）
-├── bt_launch_tests.py             # 离线回归测试：组件一键启动契约（规则 R5；LaunchSpec 表/端口簇/僵尸登记/NoExec 不变量/启停流/卡片与主窗接线）
-├── bt_grid_layout_tests.py        # 离线回归测试：卡片网格布局与日志浮层（列数计算/只排可见卡片/顺序不乱/浮层不重排/未读计数与自动收起/视图模式持久化）
+├── tests/                   # 离线回归用例（20 套，全部不联网）。**不匹配任何默认发现机制**
+│                            #   （unittest 要 test*.py、pytest 要 test_*.py / *_test.py），
+│                            #   所以必须用 runner 跑：`.venv/Scripts/python.exe -u tests/run_all_tests.py`
+│                            #   —— 逐文件起子进程（互不污染模块级 monkey patch、单个 Qt abort 不带走整批），
+│                            #   退出码可直接当 CI 门禁。各套件覆盖见本文 4.9 与 DEVELOPMENT.md 对应规则。
+│                            #   `_btprelude.py` 是公共前置：打 WMI 桩 + offscreen + 把仓库根塞进 sys.path。
+├── tools/oneoff/            # 一次性脚本留档（26 个 `.py` + 5 个 `.png`），**目录整体在 .gitignore 里**
+│                            #   只有 README 被例外放行。⚠ 其中的图标采集脚本**产出过错的图**
+│                            #   （手绘伪造图 / 把 HTML 当图片 / 装错别家的标），别再复活，见该目录 README
+├── artifacts/               # 一次性运行产物落脚处（drill_*.json 结果转储、采集日志）
+│                            #   **不是源码、也不是证据库**：drill 里的 ok 只代表"当时那次"。见该目录 README
 └── assets/                  # 静态资源（PyInstaller 打包时通过 datas 一并打入）
     ├── byte-tools-pt.png    # 主界面截图
     ├── byte-tools.png       # 应用窗口图标
@@ -321,7 +321,7 @@ byte-tools/
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
 | `artifacts` | list[DownloadArtifact] | 仅「开发工具」用：同一个版本的多种产物（exe 安装器 / zip 便携包），各自带 URL 列表与官方声明字节数。**不要把它和 `url_list_map` 混用** —— 后者是同一个文件的多镜像，前者是两个不同的文件 |
-| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（开发环境 / 开发软件 / 开发工具 / 一键启停）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
+| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（一键启停 / 开发环境 / 开发软件 / 开发工具；2026-10-14 起「一键启停」排第一）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
 
 方法：
 - `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`（`main.py:203`）；**这个 `<key>-<version>` 命名是多版本模型的唯一契约**，反解靠模块函数 `version_from_install_dir()`
@@ -738,10 +738,10 @@ UI 组成：
 搜索条右侧还挂着「▦ 网格 / ☰ 列表」与「📋 日志」两颗按钮——**它们也不放标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽
 4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分四个 Tab，Tab 外层
    `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向），**标题带组件数量**：
-   `开发环境（10）` / `开发软件（6）` / `开发工具（17）` / `一键启停（10）`（数字由 `len(comps)` 现算，不写死）；
+   `一键启停（15）` / `开发环境（32）` / `开发软件（14）` / `开发工具（26）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量 43 项
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 87 项，别写死；`build_components()` 一改就会变）
 5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
 6. **底部状态栏**：显示当前系统信息、可点开的工作目录与 `组件：N`（N=界面可见数，现 43；只写数字不写句子，版本号在标题栏 chip 上不重复）
 
@@ -823,10 +823,15 @@ def main() -> int:
 - 创建 `~/.env-tools/` 工作目录
 - 进入 Qt 事件循环
 
-### 4.9 离线回归测试（`bt_*_tests.py`）
+### 4.9 离线回归测试（`tests/bt_*_tests.py`）
 
-根目录下每个 `bt_*_tests.py` 都是一套**离线**回归测试（不联网、不碰真实注册表与用户 shell rc），
-统一用 `QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u <文件>` 运行，输出末行 `Ran N tests` / `OK` 即通过。
+`tests/` 下每个 `bt_*_tests.py` 都是一套**离线**回归测试（不联网、不碰真实注册表与用户 shell rc）。
+2026-10-14 从仓库根移进 `tests/`（原先根目录堆着 20 个 `bt_*_tests.py` 很乱）。
+
+**推荐整批跑**：`.venv/Scripts/python.exe -u tests/run_all_tests.py` —— 逐文件起子进程，退出码即门禁。
+单跑一套时：`QT_QPA_PLATFORM=offscreen .venv/Scripts/python.exe -u tests/<文件>`，输出末行 `Ran N tests` / `OK` 即通过。
+（单跑要注意：每套件都在 `import main` 之前 `import _btprelude`，它负责打 WMI 桩、设 offscreen、
+并把仓库根塞进 `sys.path`；漏掉就会卡死或直接 abort。）
 
 | 文件 | 盯住的东西 |
 |------|-----------|
@@ -1375,7 +1380,7 @@ git push origin v1.0.1
 - **补同步历史 tag**：workflow 支持 `workflow_dispatch`（输入 `tag_name`），在 GitHub → Actions → release → Run workflow 触发，跳过三平台构建。因为 `workflow_dispatch` 读的是默认分支的 workflow，改动合入 master 后即可对任意历史 tag 生效
 - **本机手动补同步**：Windows 跑 `同步Gitee产物.bat`（双击或传参；它会真的把产物传上 Gitee，国内链路快，与 CI 的「只写直链」策略有意不同），Linux/macOS/Git Bash 跑 `同步Gitee产物.sh`（默认只写直链，设 `UPLOAD_ARTIFACTS` 才上传）。两个脚本都**先自动补齐产物、再预检、才请求 Gitee**：缺文件时自己去 `gh-proxy.com` 下（加速器在前、github.com 末位，规则 R1），下载失败会在碰 Gitee 之前报错并打印同样的 curl 命令兜底。`.bat` 的默认产物目录是 `release-assets/`（已 gitignore），**不是仓库自带的 `assets/`**——后者是图标目录（`byte-tools.png`/`.ico`/`alipay.png`/`wechat.png`），指过去就会「一个产物都没有」。脚本对 JSON 解释器做握手测试，避开 Windows 上 `python3` 是 Microsoft Store 占位别名的坑
 - **`.bat` 下载前会清空暂存目录**（`:clear_stale`，2026-10-10）：四个产物**跨 tag 同名**，"文件已存在且非 0 字节"根本证明不了它属于本次 tag，旧写法因此会把上个版本的包传进新 Release，而末尾 `[3/3]` 只核附件名、照样 OK。清空只在 `AUTO_FETCH_ASSETS` 开着时发生，且**只作用于末级名为 `release-assets` 的目录**（第 3 个参数传成别的就打印 `notice:` 跳过）—— 一条 `rmdir /s /q` 的破坏力必须被这个名字闸门锁死。**清不掉就硬停**：脚本会复核目录是否真的消失，因为 `rmdir` 即使整条命令被丢弃也报 `ERRORLEVEL 0` （2026-10-10 就被 `>/dev/null` 这个 Unix 写法骗过：横幅照打、旧包照传）。另外每次开跑会清 `%TEMP%t_gitee_sync` —— 那是固定路径，上个 Release 留下的 `assets.txt` 会让本次 `[2/3]` 误判「附件已存在，跳过」。代价：中途失败后重跑要重新下约 218 MB
-- 同步脚本的离线回归测试：[bt_gitee_sync_tests.py](./bt_gitee_sync_tests.py)（本地 mock Gitee + 产物名一致性守卫，29 个用例，绝不碰真实站点）；覆盖「不传二进制只写直链 / 幂等复用 / 已存在但缺直链→硬失败并给出补救 / 上传子集跳过与补传 / 接口回成功但附件没落地→硬失败 / 5xx 有界重试且可见 / 4xx 不浪费重试 / 产物目录指错时在请求 Gitee 之前就拦下 / Gitee 用 200+null 表示『该 tag 没有 Release』/ 4 处产物名清单一致 / 自动下载契约与加速器顺序 / 清空步骤排在下载前且排在离线开关后 / 闸门只认 release-assets 这个名字 / `AUTO_FETCH_ASSETS=0` 时手放的产物一个字节都不许删 / 上一次真实发版留下的 `%TEMP%t_gitee_syncssets.txt` 不许让本次误判「附件已存在」 / `.bat` 执行行里不许出现 Unix 的 `/dev/null`」
+- 同步脚本的离线回归测试：[bt_gitee_sync_tests.py](./tests/bt_gitee_sync_tests.py)（本地 mock Gitee + 产物名一致性守卫，29 个用例，绝不碰真实站点）；覆盖「不传二进制只写直链 / 幂等复用 / 已存在但缺直链→硬失败并给出补救 / 上传子集跳过与补传 / 接口回成功但附件没落地→硬失败 / 5xx 有界重试且可见 / 4xx 不浪费重试 / 产物目录指错时在请求 Gitee 之前就拦下 / Gitee 用 200+null 表示『该 tag 没有 Release』/ 4 处产物名清单一致 / 自动下载契约与加速器顺序 / 清空步骤排在下载前且排在离线开关后 / 闸门只认 release-assets 这个名字 / `AUTO_FETCH_ASSETS=0` 时手放的产物一个字节都不许删 / 上一次真实发版留下的 `%TEMP%t_gitee_syncssets.txt` 不许让本次误判「附件已存在」 / `.bat` 执行行里不许出现 Unix 的 `/dev/null`」
 - **全自动发布，无需人工操作**：矩阵各平台先上传到草稿 Release 作暂存区（构建中途失败不会对外暴露半成品），待全部平台成功、`sync-to-gitee` 启动后自动 `gh release edit --draft=false` 取消草稿；因此跑绿即等于 `releases/latest/download/...` 已指向新版本
 - 任一平台的构建/上传失败，或 Gitee 侧任一步校验不通过，都会让整个 run 直接变红（不会静默放过）
 

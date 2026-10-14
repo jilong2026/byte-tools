@@ -37,7 +37,9 @@ import platform as _platform
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent
+# 2026-10-14 测试套件移进 tests/，仓库根因此是上一级。
+# ⚠ 这一行错了会让 `import main` 全盘失败（本模块唯一的作用就是把它塞进 sys.path）。
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _wmi_disabled(*_args, **_kwargs):

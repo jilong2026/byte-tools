@@ -36,7 +36,8 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]   # 本文件在 tests/ 下
+TEST_DIR = Path(__file__).resolve().parent
 TEST_GLOB = "bt_*_tests.py"
 
 # 绕开 PySide6 弹窗的关键环境变量：Qt 需要一个"无显示"的平台插件。
@@ -83,12 +84,15 @@ def discover(selected: list[str] | None) -> list[Path]:
         for name in selected:
             p = Path(name if name.endswith(".py") else f"{name}.py")
             if not p.is_absolute():
-                p = REPO_ROOT / p
+                # 先当"tests/ 下的文件名"找，找不到再按仓库根的相对路径找 ——
+                # 显式指定时两种写法都常见（`bt_launch_tests` 与 `tests/bt_launch_tests.py`）。
+                cand = TEST_DIR / p
+                p = cand if cand.is_file() else REPO_ROOT / p
             if not p.is_file():
                 raise SystemExit(f"找不到测试文件：{p}")
             out.append(p)
         return out
-    return sorted(Path(f) for f in glob.glob(str(REPO_ROOT / TEST_GLOB)))
+    return sorted(Path(f) for f in glob.glob(str(TEST_DIR / TEST_GLOB)))
 
 
 def run_one(path: Path, python: str, verbose: bool) -> tuple[bool, str, float, int]:
@@ -186,7 +190,7 @@ def main() -> int:
         print("\n以下文件失败，重跑单个文件看详情：")
         for name, ok, _, _ in results:
             if not ok:
-                print(f"  .venv\\Scripts\\python.exe -u {name}")
+                print(f"  .venv\\Scripts\\python.exe -u tests/{name}")
         return 1
     return 0
 

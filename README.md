@@ -96,7 +96,7 @@
 
 ## 30 秒上手
 
-1. 打开工具，四个 Tab 页（开发环境 / 开发软件 / 开发工具 / 一键启停）列出全部组件，每张卡片右上角是**当前状态**：
+1. 打开工具，四个 Tab 页（一键启停 / 开发环境 / 开发软件 / 开发工具）列出全部组件，每张卡片右上角是**当前状态**：
 
    | 状态 | 含义 |
    |---|---|
@@ -131,10 +131,10 @@ node -v
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
+| 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
 | 开发环境 | 32 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant |
 | 开发软件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
 | 开发工具 | 26 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman |
-| 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
 
 > 想调整归类：普通组件改 `main.py` 里 `COMPONENT_CATEGORY_OF` 的一行即可；「一键启停」那一页不用登记——组件进了启动白名单 `LAUNCH_OF` 就自动出现在那里，退出来就自动回到原分类。
 
@@ -703,7 +703,8 @@ byte-tools/
 ├── MIRROR_REPORT.md            # 镜像源实测报告
 ├── docs/                       # 需求模板、组件接入经验、真机测试报告
 ├── tools/                      # 实测 / 取证 / 性能脚本（不是运行时依赖）
-├── bt_*_tests.py               # 离线回归用例（十余套，全部不联网）
+├── tests/                      # 离线回归用例（20 套，全部不联网）+ 前置 _btprelude.py 与 runner
+├── artifacts/                  # 一次性产物（演练结果转储、采集日志）。不是源码，别当证据库
 ├── 同步Gitee产物.bat / .sh     # 本机与 CI 的 Gitee 同步脚本
 ├── .github/workflows/release.yml   # 三平台自动构建 + 发布（含 Gitee 同步）
 ├── assets/                     # 图标、界面截图、收款码

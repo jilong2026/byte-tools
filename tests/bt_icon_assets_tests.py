@@ -426,6 +426,26 @@ class NoDuplicatedAssets(unittest.TestCase):
                 f"{sorted(pair)} 已经不再共用同一个图标了，请从 ALLOWED_SHARED 里移除它",
             )
 
+    def test_no_asset_is_shadowed_by_another_extension(self):
+        """同一组件不许同时存在 .svg 与 .png。
+
+        `find_component_icon_file()` 按 `ICON_EXTS = (".svg", ".png")` 返回**第一个**
+        存在的文件，而且 SVG 渲染失败时**不会**回退去试 .png（`_render_icon_file`
+        直接返回 None 让调用方落回色块）。所以"两个都有"时后一个纯粹是死文件，
+        只在仓库里占体积。2026-10-14 清掉过 6 个（deno/erlang/git/jenkins/node/rust 的 .png，
+        合计 36 KB）。
+        """
+        by_key = {}
+        for f in main.icon_asset_dir().iterdir():
+            if f.suffix.lower() in (".svg", ".png"):
+                by_key.setdefault(f.stem, set()).add(f.suffix.lower())
+        shadowed = sorted(k for k, exts in by_key.items() if len(exts) > 1)
+        self.assertEqual(
+            shadowed, [],
+            f"这些组件同时有 .svg 与 .png，其中一个永远不会被加载（死文件）：{shadowed}。"
+            f"请删掉不被 `ICON_EXTS` 优先选中的那一个",
+        )
+
 
 class PlaceholdersAreNotIcons(unittest.TestCase):
     """资产不许是"圆角方块 + 文字"这种手绘占位图。

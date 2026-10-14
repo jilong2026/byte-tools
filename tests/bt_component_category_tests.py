@@ -8,8 +8,10 @@
              不解压、不配环境变量、不扫盘、不代跑安装器（见 Component.download_only 与 R13）
   一键启停 = 卡片上有「启动 / 停止」按钮的组件，成员由 LAUNCH_KEYS 派生，不是第二张表
 
-「一键启停」固定是**最后一个** Tab：它是本工具最能干活的一组长，埋在中间等于藏起来
-（原来那条"紧贴「其它软件」"的护栏因为「其它软件」被取消而改写成这条）。
+「一键启停」固定是**第一个** Tab（2026-10-14 用户要求提到最前）：它是本工具最能干活的
+一组长，原先压在最右边。这条护栏经历过两次改写 —— 2026-10-08 原为"紧贴「其它软件」"，
+2026-10-10「其它软件」取消后改成"必须是最后一个"，2026-10-14 用户要求提到最前。
+护栏的意图始终没变：**这一组不许被埋没在中间**。
 """
 import os
 import sys
@@ -25,6 +27,17 @@ REPO_ROOT = str(_btprelude.REPO_ROOT)
 import main  # noqa: E402
 
 EXPECTED_MEMBERSHIP = {
+    # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS）。
+    # 2026-10-14 用户要求把它排到**第一个** Tab（原先固定最后）。
+    # 这里手写一份清单是为了让"扩白名单 = 必须同时改这张表"变成一次可见的改动：
+    # 下面 test_launch_tab_membership_is_derived_from_the_whitelist 会把两边钉在一起。
+    "一键启停": {"jenkins", "nacos", "activemq", "rocketmq", "nginx", "kafka",
+               "tomcat", "elasticsearch", "rabbitmq", "seata", "redis",
+               # 2026-10-12 并发那批接进启停白名单的服务
+               "etcd", "consul", "zookeeper",
+               # 2026-10-12 B4 补：minio（对象存储，API 9000 + 控制台 9001，
+               # 真机实测过起停与端口释放）
+               "minio"},
     "开发环境": {"jdk", "python", "node", "go", "bun", "conda", "git", "maven",
                "gradle", "powershell",
                # 2026-10-12 新增：语言/编译器工具链（kotlin 的 zip、rust 的 MSI 提取、
@@ -72,17 +85,6 @@ EXPECTED_MEMBERSHIP = {
                # （成本最低的一批：只加 URL，不碰解压/环境变量任何一条逻辑）
                "dbeaver", "heidisql", "bruno", "redisinsight", "ardm",
                "mongodb-compass", "pgadmin4", "mysql-workbench", "postman"},
-    # 「一键启停」这一组的成员就是卡片上有启动/停止按钮的那些（LAUNCH_KEYS），
-    # 固定排在最后。这里手写一份清单是为了让
-    # "扩白名单 = 必须同时改这张表"变成一次可见的改动：
-    # 下面 test_launch_tab_membership_is_derived_from_the_whitelist 会把两边钉在一起。
-    "一键启停": {"jenkins", "nacos", "activemq", "rocketmq", "nginx", "kafka",
-               "tomcat", "elasticsearch", "rabbitmq", "seata", "redis",
-               # 2026-10-12 并发那批接进启停白名单的服务
-               "etcd", "consul", "zookeeper",
-               # 2026-10-12 B4 补：minio（对象存储，API 9000 + 控制台 9001，
-               # 真机实测过起停与端口释放）
-               "minio"},
 }
 
 ALL_KEYS = {k for group in EXPECTED_MEMBERSHIP.values() for k in group}
@@ -145,15 +147,16 @@ class GroupComponentsHelper(unittest.TestCase):
         groups = main.group_components(main.build_components())
         self.assertEqual({c.key for c in groups["一键启停"]}, set(main.LAUNCH_KEYS))
 
-    def test_launch_tab_is_the_last_one(self):
-        """「一键启停」固定是最后一个 Tab。
+    def test_launch_tab_is_the_first_one(self):
+        """「一键启停」固定是第一个 Tab。
 
-        原来这条断的是"紧贴「其它软件」前面"，2026-10-10「其它软件」被取消后失去
-        指涉对象，但护栏的意图没变：最能干活的一组长不许埋在中间。
+        这条断言换过三次方向，但意图一直没变：**这一组不许被埋在中间**。
+        2026-10-08 原为"紧贴「其它软件」前面"；2026-10-10「其它软件」取消后
+        改成"必须是最后一个"；2026-10-14 用户要求提到最前，于是断第一个。
         """
         names = list(main.COMPONENT_CATEGORIES)
-        self.assertEqual(names[-1], "一键启停",
-                         "「一键启停」必须是最后一个 Tab，不许被新分类挤到中间")
+        self.assertEqual(names[0], "一键启停",
+                         "「一键启停」必须是第一个 Tab，不许被别的分类挤到后面")
 
 
 class MainWindowUsesTabs(unittest.TestCase):

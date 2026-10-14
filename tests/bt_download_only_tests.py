@@ -72,8 +72,8 @@ class TabStructure(unittest.TestCase):
 
     def test_new_tab_is_the_third_and_holds_the_eleven_keys(self):
         self.assertEqual(list(main.COMPONENT_CATEGORIES),
-                         ["开发环境", "开发软件", "开发工具", "一键启停"],
-                         "「开发工具」放第 3 个，「一键启停」保持最后")
+                         ["一键启停", "开发环境", "开发软件", "开发工具"],
+                         "「一键启停」在第一个（2026-10-14 用户要求），「开发工具」退到第 4 个")
         self.assertEqual({c.key for c in self.groups["开发工具"]}, DOWNLOAD_ONLY_KEYS)
 
     def test_other_software_tab_is_gone(self):

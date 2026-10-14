@@ -81,7 +81,7 @@ def main_run() -> int:
     # QApplication 已经建好之后再改这个变量就不起作用了。
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "bt_icon_assets_tests", Path(REPO) / "bt_icon_assets_tests.py")
+        "bt_icon_assets_tests", Path(REPO) / "tests" / "bt_icon_assets_tests.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)            # type: ignore[union-attr]
     keys = sorted(mod.IconCoverage.NAME_TEXT_FALLBACK)

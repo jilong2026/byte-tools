@@ -131,7 +131,8 @@ jobs:
       # 而某个文件里 Qt 直接 abort 时（进程 127 退出、无 traceback）也
       # 不会把整批用例一起带走。
       - name: 跑全部护栏
-        run: python -u run_all_tests.py
+        # 2026-10-14 测试套件移进 tests/，路径跟着改（runner 自己会定位仓库根）
+        run: python -u tests/run_all_tests.py
 
   build:
     name: 构建 ${{ matrix.platform_name }}

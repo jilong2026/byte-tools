@@ -100,7 +100,7 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
 
 ## Getting started in 30 seconds
 
-1. Open the tool. Four tabs (Dev environment / Dev software / Dev tools / Start-stop) list every component; each card's top-right corner is its **current state**:
+1. Open the tool. Four tabs (Start-stop / Dev environment / Dev software / Dev tools) list every component; each card's top-right corner is its **current state**:
 
    | State | Meaning |
    |---|---|
@@ -135,10 +135,10 @@ node -v
 
 | Tab | Count | Members |
 |-----|-------|---------|
+| Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
 | Dev environment | 32 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq |
 | Dev software | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
 | Dev tools | 26 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman |
-| Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
 
 > To regroup: edit the one line per component in `COMPONENT_CATEGORY_OF` in `main.py`. The Start-stop tab needs no registration — membership is derived from the launch whitelist `LAUNCH_OF`.
 

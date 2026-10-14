@@ -480,12 +480,18 @@ tmp.replace(self.dest)
 
 界面上 **87 个可见组件**归入且仅归入四个 Tab（88 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（33 / 14 / 26 / 15，含隐藏 erlang） |
+| 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
+| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | activemq、consul、elasticsearch、etcd、jenkins、kafka、minio、nacos、nginx、rabbitmq、redis、rocketmq、seata、tomcat、zookeeper |
 | **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | ant、bat、bun、cmake、conda、dart、deno、dotnet-sdk、duckdb、eza、fd、fzf、git、go、graalvm、gradle、jdk、jq、kotlin、maven、ninja、node、pnpm、powershell、protoc、python、ripgrep、rust、sqlite、uv、yq、zoxide（+ 隐藏的 erlang） |
 | **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | caddy、docker、docker-compose、helm、jmeter、k9s、kubectl、mongodb、mysql、nats-server、postgresql、pulsar、traefik、trivy |
 | **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | android-studio、apifox、apipost、ardm、bruno、clion、datagrip、dbeaver、dbx、eclipse、goland、hbuilderx、heidisql、idea、mongodb-compass、mysql-workbench、navicat、pgadmin4、postman、pycharm、redisinsight、visual-studio、vscode、webstorm、wechat-devtools、windterm |
-| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | activemq、consul、elasticsearch、etcd、jenkins、kafka、minio、nacos、nginx、rabbitmq、redis、rocketmq、seata、tomcat、zookeeper |
+
+**Tab 顺序 = `COMPONENT_CATEGORIES` 的顺序**，2026-10-14 用户要求把「一键启停」提到**第一个**
+（原先固定最后一个）—— 它是本工具最能干活的一组长，不许被埋在中间。
+`bt_component_category_tests.test_launch_tab_is_the_first_one` 钉住这条；该断言换过三次方向
+（2026-10-08"紧贴「其它软件」"→ 10-10"必须是最后一个"→ 10-14"必须是第一个"），
+**意图始终是"这一组不许被埋没"**。
 
 > **上面这份名单与数字是 2026-10-14 的快照，且只作示例** —— 组件加得很快（2026-10-10 还是 43 个，
 > 四天后就 87 个）。**权威值一律现算**，别照抄本文：
@@ -493,7 +499,7 @@ tmp.replace(self.dest)
 > 分类的**真源**始终是 `COMPONENT_CATEGORY_OF` + `LAUNCH_KEYS`（见 R2.3），不是这张表。
 
 边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
-（「一键启停」固定是**最后一个** Tab：它是本工具最能干活的一组，埋在中间等于藏起来。2026-10-08 用户要求它紧贴「其它软件」；2026-10-10「其它软件」被取消，护栏改写成"必须是最后一个"。）
+（「一键启停」的 **Tab 位置**见上：2026-10-14 起固定**第一个**。）
 （2026-10-10 取消「其它软件」Tab：它只剩 docker、kubectl 两张卡，用户要求并进「开发软件」。注意 `group_components()` 给每个分类都建空列表、建 Tab 的循环**不跳过空组** —— 只挪成员而不从 `COMPONENT_CATEGORIES` 删名字，界面上会多出一个「其它软件（0）」空白页。）
 （例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；Nginx 与 Tomcat 同理，本地跑起来当 Web / 反向代理依赖，属开发软件。）
 
@@ -1299,7 +1305,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R5.6 护栏用例
 
-`bt_launch_tests.py`（全离线，不真起中间件；用例数以 `.venv/Scripts/python.exe -u run_all_tests.py` 的输出为准——数字写在文档里只会漂移，实测曾长期停在 133 而实际已 257）盯住：
+`bt_launch_tests.py`（全离线，不真起中间件；用例数以 `.venv/Scripts/python.exe -u tests/run_all_tests.py` 的输出为准——数字写在文档里只会漂移，实测曾长期停在 133 而实际已 257）盯住：
 `LaunchSpecTable`（白名单恰为 `{jenkins, activemq, nacos}`、三平台命令非空、白名单外无 launch、
 `test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"、`test_plan_two_fields_default_to_plan_one_behaviour`
 钉住"计划二新字段的默认值就是计划一既有行为"）、`RunningMap`（含旧格式记录缺 `ports` 的加载侧归一）、
