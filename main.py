@@ -200,23 +200,183 @@ UPDATE_CHECK_INTERVAL_SEC = 24 * 3600      # 自动检查的频控：一天最�
 UPDATE_HTTP_TIMEOUT = 8.0                  # 后台线程也要有硬超时，不许挂在那儿
 
 
-def _version_parts(text: object):
-    """`v1.10.2` → (1, 10, 2)；读不出数字段返回 None（宁可不提示也不猜）。"""
-    s = str(text or "").strip().lstrip("vV")
-    if not s:
-        return None
-    parts = []
-    for chunk in s.split("."):
-        digits = ""
-        for ch in chunk:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        if not digits:
+class Version:
+    """版本号值对象：把"一段版本文字怎么变成可比较的数字"收在一处。
+
+    2026-10-14 新增。此前 `main.py` 里有**三套**互不相同的版本语义，
+    各自被用在不同地方，于是"版本号怎么比"这件事没有唯一答案：
+
+      · `_version_parts`  宽松抽取 + 严格识别（`jdk-21.0.5` → None）
+      · `_semver_key`      纯 int 语义，任一段不纯就整档作废 → (0,)
+      · `_version_key`     目录名口径（先剥 `jdk-` 前缀，非数字段补 0）
+
+    这三套**不能抹平成一种**，它们的分歧是承重的（详见 bt_version_tests.py
+    的模块 docstring 与 `KnownDivergences`）。所以这里不"统一口径"，
+    而是把这三种口径做成**具名的方法**，让每个老函数变成薄壳 ——
+    收敛的是"实现只有一份"，不是"语义只有一种"。
+
+    另有第四种职责刻意**不**并进来：`_extract_version_text` 是从命令输出里
+    **抽取**版本号（解析），与比较无关，它产出的字符串再交给本类。
+
+    可哈希（实现了 __hash__/__eq__），能进 set 与 dict 键。
+    """
+
+    __slots__ = ("text", "parts", "prerelease", "_strict", "_dir")
+
+    def __init__(self, text: str, parts: Tuple[int, ...], prerelease: bool) -> None:
+        self.text = text
+        self.parts = parts
+        self.prerelease = prerelease
+        self._strict: Optional[Tuple[int, ...]] = None
+        self._dir: Optional[Tuple[int, ...]] = None
+
+    # -- 构造 --------------------------------------------------------
+    @classmethod
+    def parse(cls, text: object) -> Optional["Version"]:
+        """按**宽松抽取 + 严格识别**口径解析一个版本号。
+
+        入参 text: 版本号文字，可带 v/V 前缀（GitHub tag 就是 v1.2.3）
+        返回:      Version 实例；读不出数字段时返回 None
+
+        规则：剥掉开头的 v/V → 按 "." 切段 → 每段取**开头连续数字**，
+        某段一个数字都没有就整个作废（返回 None）。数字之后若还有字符
+        （`-beta`、`rc1` 这类后缀），记为 prerelease=True 但**不影响 parts** ——
+        这正是 `_version_parts("21.0.4-beta") == (21, 0, 4)` 的由来。
+        """
+        s = str(text or "").strip().lstrip("vV")
+        if not s:
             return None
-        parts.append(int(digits))
-    return tuple(parts)
+        parts: List[int] = []
+        prerelease = False
+        for chunk in s.split("."):
+            digits = ""
+            rest = ""
+            for i, ch in enumerate(chunk):
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    rest = chunk[i:]
+                    break
+            if not digits:
+                return None                      # 这一段不是版本号的形状
+            parts.append(int(digits))
+            if rest:
+                prerelease = True
+        return cls(str(text or ""), tuple(parts), prerelease)
+
+    @classmethod
+    def from_install_dir(cls, dir_name: object) -> "Version":
+        """按**安装目录名**口径解析（`jdk-21.0.5` → 21.0.5）。
+
+        入参 dir_name: 安装目录名，如 "jdk-21.0.5"、"maven-3.10.0"
+        返回:          Version 实例；剥不出数字段时 parts 为空元组
+
+        与 parse 的两处不同，都是被目录命名逼出来的：
+          · 先剥掉第一个 "-" 之前的部分 —— 那是组件 key，不是版本
+          · 非数字段**补 0** 而不是判废 —— `3.12.1rc1` 这种目录仍要能参与排序
+        """
+        s = str(dir_name or "")
+        tail = s.split("-", 1)[1] if "-" in s else s
+        out: List[int] = []
+        for chunk in tail.split("."):
+            out.append(int(chunk) if chunk.isdigit() else 0)
+        return cls(s, tuple(out), False)
+
+    # -- 三种口径 ----------------------------------------------------
+    @property
+    def strict_key(self) -> Tuple[int, ...]:
+        """严格档：逐段 `int()`，任一段不纯就整档作废 → `(0,)`。
+
+        这是 `_semver_key` 的原语义，**别当成 bug 改掉**：它让
+        `21.0.4-beta` / `3.12.1rc1` / `v1.10.2` 统统变成 `(0,)`，
+        于是在降序排序里一律沉底 —— "预发布版不该被当成更新"就靠它实现。
+        改成宽松档的话，用户会看到"检测到新版本 21.0.4-beta"。
+
+        注意 `int("0_1") == 1`：带下划线的段（如 `1.0.0_1`）在这一档会被
+        完整接受，而宽松档只取到 0。这个分歧是纯 Python 巧合，先钉住。
+        """
+        if self._strict is None:
+            try:
+                self._strict = tuple(int(x) for x in self.text.split("."))
+            except (ValueError, AttributeError, TypeError):
+                self._strict = (0,)
+        return self._strict
+
+    @property
+    def dir_key(self) -> Tuple[int, ...]:
+        """目录名档：`from_install_dir` 算出的数字段（非数字补 0）。"""
+        if self._dir is None:
+            self._dir = tuple(int(c) if c.isdigit() else 0
+                              for c in self._text_tail().split("."))
+        return self._dir
+
+    def _text_tail(self) -> str:
+        s = self.text
+        return s.split("-", 1)[1] if "-" in s else s
+
+    # -- 比较 --------------------------------------------------------
+    def is_newer_than(self, other: object) -> bool:
+        """self 是否比 other 新。任一边读不出数字段一律 False（宁可不提示也不猜）。
+
+        入参 other: 另一个 Version，或可被 parse 的版本文字
+        """
+        if isinstance(other, Version):
+            b = Version.parse(other.text)
+        else:
+            b = Version.parse(other)
+        a = Version.parse(self.text)
+        if a is None or b is None:
+            return False
+        return _pad_compare(a.parts, b.parts) > 0
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self.parts == other.parts and self.text == other.text
+
+    def __hash__(self) -> int:
+        return hash((self.text, self.parts))
+
+    def __repr__(self) -> str:
+        return f"Version({self.text!r}, parts={self.parts}, pre={self.prerelease})"
+
+    # -- 老函数的薄壳 ------------------------------------------------
+    @staticmethod
+    def legacy_parts(text: object) -> Optional[Tuple[int, ...]]:
+        """`_version_parts` 的等价物。"""
+        v = Version.parse(text)
+        return v.parts if v is not None else None
+
+    @staticmethod
+    def legacy_semver_key(text: object) -> Tuple[int, ...]:
+        """`_semver_key` 的等价物（含 None 输入的 (0,) 退化）。"""
+        v = Version.parse(text)
+        return v.strict_key if v is not None else (0,)
+
+    @staticmethod
+    def legacy_version_key(dir_name: object) -> Tuple[int, ...]:
+        """`_version_key` 的等价物。"""
+        return Version.from_install_dir(dir_name).dir_key
+
+
+def _pad_compare(a: Tuple[int, ...], b: Tuple[int, ...]) -> int:
+    """按数值分段比两个版本元组：短的一边补 0。
+
+    补 0 而不是补"最小值"：`_version_parts` 的原实现就是把不同长度按
+    尾部补 0 比的（见 `version_is_newer` 里的 `a + (0,) * (...)`）。
+    """
+    n = max(len(a), len(b))
+    pa = a + (0,) * (n - len(a))
+    pb = b + (0,) * (n - len(b))
+    return (pa > pb) - (pa < pb)
+
+
+def _version_parts(text: object):
+    """`v1.10.2` → (1, 10, 2)；读不出数字段返回 None（宁可不提示也不猜）。
+
+    实现已收敛到 Version.parse()，这里只保留薄壳以免动到几十个调用点。
+    """
+    return Version.legacy_parts(text)
 
 
 def version_is_newer(current: str, latest: str) -> bool:
@@ -560,13 +720,7 @@ def pick_update_asset(assets, os_name: str):
 
 def load_update_state() -> dict:
     """读 `config.json` 里的更新检查状态；读不到就是一张空表（= 该查一次）。"""
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:                       # noqa: BLE001
-        return {}
-    state = (data or {}).get("update_check")
+    state = _config_read_raw().get("update_check")
     return dict(state) if isinstance(state, dict) else {}
 
 
@@ -600,13 +754,7 @@ def load_download_dir() -> Path:
     没记录 / 记录的不是目录 / 那个目录后来被删了 —— 一律安静回落到 ~/Downloads。
     这只是一个"默认落在哪"的偏好，为它弹错误框不值得。
     """
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) or {}
-        except Exception:                    # noqa: BLE001  坏配置不该挡住下载
-            data = {}
-    raw = data.get(DOWNLOAD_DIR_KEY) if isinstance(data, dict) else None
+    raw = _config_read_raw().get(DOWNLOAD_DIR_KEY)
     if not isinstance(raw, str) or not raw.strip():
         return default_download_dir()
     candidate = Path(raw)
@@ -3405,11 +3553,12 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
 
 
 def _semver_key(v: str):
-    """语义版本排序键：逐段转 int，转不了的（如 "21.0.4-beta"）退到最小档。"""
-    try:
-        return tuple(int(x) for x in v.split("."))
-    except ValueError:
-        return (0,)
+    """语义版本排序键：逐段转 int，转不了的（如 "21.0.4-beta"）退到最小档。
+
+    薄壳，实现见 Version.strict_key。**那�� `(0,)` 的退化是承重设计**：
+    它让预发布版在排序里沉底，别顺手改成宽松档（理由见该属性的 docstring）。
+    """
+    return Version.legacy_semver_key(v)
 
 
 def _sort_semver_desc(vs) -> list:
@@ -11252,13 +11401,10 @@ def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
 def _version_key(dir_name: str) -> Tuple[int, ...]:
     """`jdk-21.0.5` → (21, 0, 5)。用于挑"已安装的最高版本"。
 
-    按数值分段比而不是字符串比：`2.10.0 > 2.9.0`，字符串比会反过来。
+    薄壳，实现见 Version.dir_key。按数值分段比而不是字符串比：
+    `2.10.0 > 2.9.0`，字符串比会反过来。
     """
-    tail = dir_name.split("-", 1)[1] if "-" in dir_name else dir_name
-    out: List[int] = []
-    for chunk in tail.split("."):
-        out.append(int(chunk) if chunk.isdigit() else 0)
-    return tuple(out)
+    return Version.legacy_version_key(dir_name)
 
 
 def resolve_launch_version(comp: Component) -> Optional[str]:
@@ -12172,21 +12318,39 @@ class ActiveTarget:
     level: str = ""      # "user" | "machine"；工作区固定 user，外部取决于是否动过 HKLM
 
 
+def _config_read_raw() -> Dict[str, object]:
+    """config.json 的统一读入口。读不到 / 不是 dict 一律回空表。
+
+    收敛点（2026-10-14）。此前全文件有 **9 处** `json.loads(CONFIG_FILE.read_text())`，
+    每处各自写一遍"存在吗 → 读 → 解析 → 是不是 dict → 异常回落空表"。
+    样板重复本身不是问题，问题是**回落策略分散**：一处漏了 isinstance 检查，
+    磁盘上一个 `[]` 就会让那条路径在别处炸。
+
+    为什么解析失败要回空表而不是抛：这张表里全是"用户偏好与登记"
+    （选了哪个版本、哪个版本生效、接管过什么），最坏结果是用户多点一次、
+    重新选一次；而抛异常等于**工具直接打不开**。旁边已经留了 .bak 可供回退。
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _update_config(mutate) -> None:
     """config.json 的合并写通用入口：读出 → 交给 mutate 就地改 → 原子写回。
 
     必须是"读-改-写"而不是整体覆盖：active / takeover / selections / view_mode
     是四个互不相干的写入方，任何一方整体覆盖都会把别人的数据抹掉
     （R3.2 的教训：_save_settings 曾经整体覆盖，把 active 登记表清了）。
+
+    读侧统一走 _config_read_raw；写侧统一走 _atomic_write_config
+    （它内部会留一份 .bak）。**新增写入方请一律走这里**，不要再自己
+    read_text + json.loads + write_text —— 那正是 R3.2 事故的形状。
     """
-    data: Dict[str, object] = {}
-    if CONFIG_FILE.exists():
-        try:
-            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            data = {}
+    data = _config_read_raw()
     mutate(data)
     _atomic_write_config(data)
 
@@ -12199,13 +12363,8 @@ def load_takeover_map() -> Dict[str, dict]:
     读侧要挑剔的理由：还原整条链路都靠它，读进来一个半截快照比"没有这条"
     更危险——那会让还原拿一份错的原值去写 HKLM。
     """
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    raw = data.get("takeover") if isinstance(data, dict) else None
+    data = _config_read_raw()
+    raw = data.get("takeover")
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, dict] = {}
@@ -12284,13 +12443,8 @@ def load_machine_fix_map() -> Dict[str, dict]:
 
     读侧同样挑剔：还原整条链路都靠它，半截快照比"没有这条"更危险。
     """
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    raw = data.get("machine_fix") if isinstance(data, dict) else None
+    data = _config_read_raw()
+    raw = data.get("machine_fix")
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, dict] = {}
@@ -14046,13 +14200,8 @@ def load_active_map() -> Dict[str, str]:
     说明: 值只接受非空字符串——磁盘上手改成 {"jdk": 21} 或 {"jdk": {...}} 时
           跳过该键（其余键照常返回，不整体抛），绝不把非字符串当版本号往下传。
     """
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    active = data.get("active") if isinstance(data, dict) else None
+    data = _config_read_raw()
+    active = data.get("active")
     if not isinstance(active, dict):
         return {}
     return {k: v for k, v in active.items()
@@ -14073,23 +14222,22 @@ def save_active_version(comp_key: str, version: Optional[str]) -> None:
     if version is not None and (not isinstance(version, str) or not version):
         raise ValueError(
             f"生效版本号必须是非空字符串或 None（None=清除），收到 {version!r}")
-    data: Dict[str, object] = {}
-    if CONFIG_FILE.exists():
-        try:
-            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            data = {}
-    active = data.get("active")
-    if not isinstance(active, dict):
-        active = {}
-    if version is None:
-        active.pop(comp_key, None)
-    else:
-        active[comp_key] = version
-    data["active"] = active
-    _atomic_write_config(data)
+
+    def _mut(data: Dict[str, object]) -> None:
+        active = data.get("active")
+        if not isinstance(active, dict):
+            active = {}
+        if version is None:
+            active.pop(comp_key, None)
+        else:
+            active[comp_key] = version
+        data["active"] = active
+
+    # 2026-10-14：原先这里手搓了整条"读-改-写"（自己 exists + read_text +
+    # json.loads + _atomic_write_config），与 _update_config 逐字重复 —— 而
+    # R3.2 那次事故（整体覆盖清掉别的登记表）正是这种"自己再写一遍"长出来的。
+    # 现在统一走 _update_config，读侧也是同一个 _config_read_raw。
+    _update_config(_mut)
 
 
 def infer_active_from_env(comp: Component) -> Optional[str]:
@@ -19727,14 +19875,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:
         """加载上次选择的版本。"""
-        if not CONFIG_FILE.exists():
-            return
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return
+        data = _config_read_raw()      # 读不到就是空表，下面每个键各取各的默认值
         # 视图模式：老配置没有这个键，取新默认 grid（不报错、不回退整个加载）
-        mode = data.get("view_mode") if isinstance(data, dict) else None
+        mode = data.get("view_mode")
         self.view_mode = mode if mode in ("grid", "list") else "grid"
         try:
             selections = data.get("selections", {}) if isinstance(data, dict) else {}
@@ -19763,26 +19906,26 @@ class MainWindow(QMainWindow):
         合并写：先读原文件只替换 selections 那一段。整体覆盖会把 active（生效版本
         登记表）抹掉——那是切换功能写的数据，和用户这次选了哪个下拉项无关。
         （负向对照：改回整体覆盖后，测试 SaveSettingsKeepsActive 即报 KeyError: 'active'。）
+
+        2026-10-14：原先这里手搓了整条"读-改-写"，与 _update_config 逐字重复。
+        重复的代价不是难读，而是**两份逻辑必须永远保持一致** —— 而这份注释
+        记着的 R3.2 事故（整体覆盖清掉 active 登记表）正是这种重复长出来的。
+        现在只保留"要改哪几个键"这一段属于本方法的业务，其余全交给统一入口。
         """
         try:
             ensure_dir(CONFIG_DIR)
-            data: dict = {}
-            if CONFIG_FILE.exists():
-                try:
-                    loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        data = loaded
-                except Exception:
-                    data = {}
-            data["selections"] = {
-                card.component.key: card.version_combo.currentText()
-                for card in self.cards
-            }
-            if not isinstance(data.get("active"), dict):
-                data["active"] = {}
-            # 视图模式与 selections 一起合并写回，不整体覆盖（active 是切换那侧的数据）
-            data["view_mode"] = getattr(self, "view_mode", "grid")
-            _atomic_write_config(data)
+
+            def _mut(data: Dict[str, object]) -> None:
+                data["selections"] = {
+                    card.component.key: card.version_combo.currentText()
+                    for card in self.cards
+                }
+                if not isinstance(data.get("active"), dict):
+                    data["active"] = {}
+                # 视图模式与 selections 一起合并写回，不整体覆盖（active 是切换那侧的数据）
+                data["view_mode"] = getattr(self, "view_mode", "grid")
+
+            _update_config(_mut)
         except Exception:
             pass
 
