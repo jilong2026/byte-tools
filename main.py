@@ -235,11 +235,16 @@ def version_is_newer(current: str, latest: str) -> bool:
 
 
 def parse_latest_release(payload: object):
-    """把 `releases/latest` 的响应读成 {tag, version, page_url, assets}。
+    """把 `releases/latest` 的响应读成 {tag, version, page_url, assets, notes}。
 
     draft / prerelease 一律不算：本项目的发布流程是"各平台先传草稿暂存，
     Gitee 同步核对齐全后才自动取消草稿"，所以 latest 里出现 draft 就等于半成品，
     提示用户去下它会把人坑在没传完的包上。
+
+    notes 取 release 的 body（即 release notes）。2026-10-14 补：原先这个字段
+    被整个丢掉，用户点开那颗版本号 chip 得到的全部信息只有"有个新版，去哪下"，
+    看不到"这版改了什么"。而 GitHub 的 `releases/latest` **本来就返回** body，
+    是白捡的。
     """
     if not isinstance(payload, dict):
         return None
@@ -262,6 +267,7 @@ def parse_latest_release(payload: object):
     return {"tag": tag,
             "version": tag[1:] if tag[:1] in ("v", "V") else tag,
             "page_url": str(payload.get("html_url") or ""),
+            "notes": str(payload.get("body") or ""),
             "assets": assets}
 
 
@@ -294,6 +300,199 @@ def parse_gitee_releases(payload: object):
 
 # 每个更新源用自己的解析器；不在表里的按 GitHub 形状读。
 UPDATE_PARSERS = {GITEE_RELEASES_API: parse_gitee_releases}
+
+# release notes 的展示上限。GitHub 的 release body 常带完整 CHANGELOG 与徽章图，
+# 整段塞进日志浮层会把别的东西顶走；这里只取靠前的要点行，够回答"要不要升"。
+RELEASE_NOTES_MAX_LINES = 8
+RELEASE_NOTES_MAX_CHARS = 600
+
+
+# ---------------------------------------------------------------------------
+# 导出诊断信息（2026-10-14 新增）
+# ---------------------------------------------------------------------------
+# 为什么要有这个：用户的报障此前只能靠"在 QQ/微信里手打截图"传回来，而截图
+# 看不清时间戳、看不出用的是哪个源、也带不走日志全文。这里把一次运行里**所有
+# 与故障相关的事实**汇成一份可直接贴进 issue 的纯文本。
+#
+# 脱敏纪律（逐条对应下面代码里的处理）：
+#   · 环境变量：只列**键名**与本工具相关的 XXX_HOME / PATH 条目数，不打印值 ——
+#     PATH 里可能有内网地址，XXX_HOME 路径能反推用户名与目录结构。
+#   · config.json：整份原样贴。它只存组件 key、版本号与路径，没有凭据；
+#     而 `takeover[key].snapshot` 是排查"接管/还原"类问题的唯一依据，
+#     脱敏掉就等于把最有价值的那部分信息删了。
+#   · 不读任何 GITHUB_TOKEN / 密钥类变量。
+
+DIAG_SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")
+
+
+def _diag_section(title: str, lines: List[str]) -> List[str]:
+    """给一段诊断内容加标题分隔，返回可直接拼接的行列表。"""
+    return ["", f"── {title} " + "─" * max(0, 56 - len(title))] + lines
+
+
+def build_diagnostics() -> str:
+    """生成一份完整的诊断报告（纯文本，可直接贴进 issue）。
+
+    返回: 报告全文。任何一个采集环节失败都只在该节里写明"读取失败"，绝不让
+          整份报告生成不出来 —— 一份少一节的报告仍然有用，一份空白的没有。
+    """
+    out: List[str] = ["字节工具箱 ByteTools 诊断信息", "=" * 60]
+
+    # ---- 版本与运行环境 ----
+    env_lines = [
+        f"软件版本: {APP_VERSION}",
+        f"Python: {sys.version.split()[0]}",
+        f"操作系统: {CURRENT_OS} / {MACHINE} (arm={IS_ARM})",
+        f"工作目录: {CONFIG_DIR}",
+        f"配置文件: {CONFIG_FILE}（存在={CONFIG_FILE.is_file()}）",
+        f"本次日志: {Path(CONFIG_DIR) / 'logs' / f'session-{time.strftime('%Y%m%d-%H%M%S')}.log'}",
+        f"采集时刻: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    out += _diag_section("版本与运行环境", env_lines)
+
+    # ---- 组件清单与生效版本 ----
+    comp_lines: List[str] = []
+    try:
+        active = load_active_map()
+        comps = build_components()
+        comp_lines.append(f"组件总数: {len(comps)}（界面可见 {sum(1 for c in comps if c.key != 'erlang')}）")
+        comp_lines.append(f"{'组件':<14}{'生效版本':<14}{'已装版本'}")
+        for c in comps:
+            if c.hidden:
+                continue
+            try:
+                installed = [v for v, _p in installed_versions(c)]
+            except Exception as exc:
+                installed = [f"<读取失败 {type(exc).__name__}>"]
+            comp_lines.append(
+                f"{c.key:<14}{active.get(c.key, '-') or '-':<14}"
+                f"{', '.join(installed) if installed else '-'}")
+    except Exception as exc:
+        comp_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("组件与生效版本", comp_lines)
+
+    # ---- 环境变量现状 ----
+    env_lines = []
+    try:
+        from_env = sorted(k for k in os.environ
+                          if k.endswith("_HOME") or k in ("JAVA_HOME", "NODE_HOME"))
+        env_lines.append("已设置的 XXX_HOME（只列键名与是否指向本工具目录）：")
+        for k in from_env:
+            v = os.environ.get(k, "")
+            in_tool = str(Path(CONFIG_DIR)) in v
+            env_lines.append(f"  {k}: {'指向本工具目录' if in_tool else '工具目录之外（未打印路径）'}")
+        if not from_env:
+            env_lines.append("  （无）")
+        try:
+            entries = EnvManager.read_user_path_entries()
+            dead = [e for e in entries if not Path(e).exists()]
+            env_lines.append("")
+            env_lines.append(f"用户 PATH 条目数: {len(entries)}，其中目录已不存在: {len(dead)}")
+            for e in dead[:10]:
+                env_lines.append(f"  [死条目] {e}")
+            in_tool = [e for e in entries if str(Path(CONFIG_DIR)) in e]
+            env_lines.append(f"指向本工具目录的条目数: {len(in_tool)}")
+        except Exception as exc:
+            env_lines.append(f"PATH 读取失败: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        env_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("环境变量与 PATH", env_lines)
+
+    # ---- 启停登记 ----
+    run_lines = []
+    try:
+        running = load_running_map()
+        run_lines.append(f"登记在跑的服务: {len(running)}")
+        for key, rec in running.items():
+            ports = getattr(rec, "ports", None)
+            run_lines.append(f"  {key}: pid={getattr(rec, 'pid', '?')} ports={ports}")
+    except Exception as exc:
+        run_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("一键启停登记（running.json）", run_lines)
+
+    # ---- 外部版本接管 ----
+    take_lines = []
+    try:
+        takeover = load_takeover_map()
+        machine_fix = load_machine_fix_map()
+        take_lines.append(f"接管登记: {len(takeover)} 项")
+        for key, entry in takeover.items():
+            home = (entry or {}).get("home") or (entry or {}).get("path") or "?"
+            take_lines.append(f"  {key}: {home}（有原文快照={(entry or {}).get('snapshot') is not None}）")
+        take_lines.append(f"系统级 PATH 插队记录: {len(machine_fix)} 项")
+        for key in machine_fix:
+            take_lines.append(f"  {key}")
+    except Exception as exc:
+        take_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("外部版本接管", take_lines)
+
+    # ---- config.json 全文 ----
+    cfg_lines = []
+    try:
+        if not CONFIG_FILE.is_file():
+            cfg_lines.append("（配置文件尚不存在）")
+        else:
+            raw = CONFIG_FILE.read_text(encoding="utf-8")
+            # 校验是不是**合法 JSON**：用户手改坏配置是常见故障，而读侧会把
+            # 解析失败回落成空表 —— 也就是"所有生效版本登记静默消失"。
+            # 只把坏内容原样贴出来，用户看不出问题在哪；这里必须明确说。
+            try:
+                json.loads(raw)
+                cfg_lines.append("（以下是原文，格式合法）")
+                cfg_lines.append(raw)
+            except json.JSONDecodeError as exc:
+                cfg_lines.append(
+                    f"⚠ 配置文件不是合法 JSON（{exc.msg}，第 {exc.lineno} 行第 "
+                    f"{exc.colno} 列）——**读侧会把它回落成空表**，"
+                    f"这意味着所有生效版本登记当前都是丢失状态。"
+                    f"旁边还有一个 {CONFIG_FILE.name}.bak 可用于回退。")
+                cfg_lines.append("--- 原文（供人工修复） ---")
+                cfg_lines.append(raw)
+    except Exception as exc:
+        cfg_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("config.json 全文（生效版本 / 接管快照都在这里）", cfg_lines)
+
+    return "\n".join(out)
+
+
+def _release_notes_digest(notes: str) -> str:
+    """把 release body 压成几行要点，供日志展示。
+
+    入参 notes: release 的 body 原文（可能为空）
+    返回:       压平后的单行文本；没有可用内容时返回空串
+
+    四步清洗：去 HTML 标签 → 去 markdown 图片 → 逐行剔除噪声 → 取前 N 行。
+    剔除的"噪声"有三类，少一类就会在日志里看到废话：
+      · 版本标题行（`## v1.3.0`）—— 它就在版本号 chip 上，重复一遍没意义
+      · 纯标点分隔行（`---` / `***` / `===`）
+      · 空行
+    刻意不解析 Markdown 结构：日志浮层显示纯文本，做成表格反而更难读。
+    """
+    if not notes or not notes.strip():
+        return ""
+    text = _re.sub(r"<[^>]+>", " ", notes)           # 徽章 / 图片标签
+    text = _re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)  # markdown 图片
+    text = text.replace("\r", "")
+    lines: List[str] = []
+    for idx, raw in enumerate(text.split("\n")):
+        line = raw.strip().lstrip("#").strip()
+        # 版本标题：首行恰好是个 v1.2.3 形式的串（release notes 的惯例第一行就是它）。
+        # 必须先剥掉 markdown 标题井号再判，否则 "## v1.3.0" 匹配不上。
+        if idx == 0 and _re.fullmatch(r"[vV]?\d+(\.\d+)+[\s\-—:：]*", line):
+            continue
+        # 去掉列表符号与首尾强调标记（*bold* / **bold**）
+        line = line.strip("*_").lstrip("-*+ ").strip().rstrip("*_").strip()
+        # 去掉 markdown 列表符号后若只剩标点，就是分隔线 / 空装饰
+        stripped = line.lstrip("-*+ ").strip()
+        if not stripped or not _re.search(r"[\w一-鿿]", stripped):
+            continue
+        lines.append(stripped)
+        if len(lines) >= RELEASE_NOTES_MAX_LINES:
+            break
+    out = "；".join(lines)
+    if len(out) > RELEASE_NOTES_MAX_CHARS:
+        out = out[:RELEASE_NOTES_MAX_CHARS] + "…"
+    return out
 
 
 def update_download_urls(asset: dict, tag: str = "") -> list:
@@ -9283,8 +9482,29 @@ def _atomic_write_config(data: Dict[str, object]) -> None:
     _save_settings）把损坏文件回落成空表——用户所有"生效版本"登记就静默消失了。
     replace 在同目录内是原子覆盖：要么新内容完整就位，要么旧文件原样不动，
     最坏只残留一个 .tmp，不影响读侧。
+
+    落盘前**额外留一份 .bak**（2026-10-14）。原子写只防"写崩"，不防"写错"：
+    一份结构合法但内容错了的 config.json 能被 os.replace 完美地写进去，读侧
+    也照样认（它只校验类型不校验语义），用户看到的现象是"切了没生效"之类，
+    而且没有任何线索可查。
+
+    留备份的理由很具体：config.json 里 `takeover[key].snapshot` 是**唯一**能
+    把 HKLM 环境变量还原回接管前状态的东西，而还原环境变量是本工具里唯一
+    需要管理员权限的路径。同一个文件里的接管备份本来就有独立副本
+    （takeover-backups/<key>-<时间戳>.json），唯独这份最重要的没有 —— 保护
+    等级不一致。现在补上。
+
+    备份策略：每次写盘都覆盖同一个 config.json.bak（即"上一版"），
+    不做时间戳轮转 —— 它是给人手工回退用的，不是归档。
     """
     ensure_dir(CONFIG_FILE.parent)
+    # 先备份**当前**内容（不存在时不备份，避免把一个 .bak 占位）
+    if CONFIG_FILE.is_file():
+        try:
+            shutil.copy2(CONFIG_FILE, CONFIG_FILE.with_name(CONFIG_FILE.name + ".bak"))
+        except OSError as exc:
+            # 备份失败不许拦住真正的写盘：写盘有原子替换兜底，而备份只是保险
+            print(f"备份 config.json 失败（继续写盘）：{exc}")
     tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, CONFIG_FILE)
@@ -14295,6 +14515,11 @@ LOG_AUTO_HIDE_MS = 8000
 # 只对"自动弹开"生效；用户手点「📋 日志」不受影响。
 LOG_AUTO_POP_DELAY_MS = 10000
 
+# 日志落盘（2026-10-14 新增）：一次运行一个 session-<时间戳>.log，
+# 目录 ~/.env-tools/logs/。只保留最近这么多个 —— 用户报障看的是最近几次，
+# 而日志目录是长命目录，不裁会一直涨（一次装 JDK 就能写几百 KB）。
+LOG_KEEP_SESSIONS = 10
+
 
 def grid_columns_for(available_px, min_card_px) -> int:
     """给定可用宽度与格子最小宽度，返回列数（恒 ≥ 1）。
@@ -17220,6 +17445,10 @@ class MainWindow(QMainWindow):
         # 日志自动弹开的静默期起点（启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹）。
         import time as _time
         self._startup_mono: float = _time.monotonic()
+        # 本次会话的日志文件标识（落盘用，见 _log_file_path）。在 __init__ 里定一次，
+        # 整条运行期不变 —— 同一次运行的日志必须落在同一个文件里，否则"另存为"
+        # 和"复制"会给用户一份东一段西一段的碎片。
+        self._session_stamp: str = _time.strftime("%Y%m%d-%H%M%S")
 
         self._build_ui()
         self._apply_qss()
@@ -17370,13 +17599,33 @@ class MainWindow(QMainWindow):
         self.btn_clean_terminal.clicked.connect(self._on_clean_terminal_clicked)
         tb.addWidget(self.btn_clean_terminal)
 
+        # 导出诊断信息（2026-10-14）：用户报障时一键产出一份可贴进 issue 的文本。
+        # 放在标题栏而不是日志浮层里，是因为它要在**还没出事**的时候也能主动取。
+        self.btn_diagnostics = QPushButton("🩺 导出诊断")
+        self.btn_diagnostics.setObjectName("iconBtn")
+        self.btn_diagnostics.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_diagnostics.setToolTip(
+            "导出一份诊断报告（版本 / 已装组件 / 环境变量与 PATH 现状 / "
+            "启停登记 / 接管快照 / 本次日志）\n"
+            "反馈问题��把它附上，能省掉大半来回追问"
+        )
+        self.btn_diagnostics.clicked.connect(self._on_export_diagnostics_clicked)
+        tb.addWidget(self.btn_diagnostics)
+
         # 标题栏按钮定宽：空间不足时宁可让窗口最小宽去兜（见上面 setMinimumSize），
         # 也不许把按钮压扁裁字。chip 也在名单里：它的文字按状态变
         # （`v1.2.0` → `↓ v1.2.1 待更新`），不定宽的话一旦某档宽度紧张，布局会先压它 ——
-        # 那状态字就等于没写。真实字体下这一行总共需要 697 像素（见
-        # tools/bt_titlebar_budget.py），1000 这一档余量充足，定宽只是兜底。
+        # 那状态字就等于没写。真实字体下这一行（含 2026-10-14 新增的「导出诊断」）
+        # 共需 802 像素（tools/bt_titlebar_budget.py 实测），1000 这一档余量充足，
+        # 定宽只是兜底。**这个数字只能用真实字体量**：offscreen 没有中文回退字体，
+        # 度量虚高约 1.6 倍，拿它判断会误判成"要裁字"然后白抬窗口最小宽。
+        #
+        # ⚠ 这个循环必须放在**所有**标题栏按钮建完之后（下面 btn_donate 之后）。
+        # 它原先在 btn_donate 创建之前，于是捐赠按钮一直是唯一漏网的：空间紧张时
+        # 被压扁的比例会先落到它身上。加按钮时务必检查自己在不在这个名单里。
         for _btn in (self.btn_version, self.btn_github, self.btn_refresh,
-                     self.btn_cleanup_path, self.btn_clean_terminal):
+                     self.btn_cleanup_path, self.btn_clean_terminal,
+                     self.btn_diagnostics):
             _btn.setSizePolicy(QSizePolicy.Fixed, _btn.sizePolicy().verticalPolicy())
 
         # 捐赠图标（不在 README 中提及）
@@ -17386,6 +17635,9 @@ class MainWindow(QMainWindow):
         self.btn_donate.setToolTip("支持作者")
         self.btn_donate.clicked.connect(self._on_donate_clicked)
         tb.addWidget(self.btn_donate)
+        # 上面那个定宽循环因为位置关系漏了它，在这里补上（见上面那段注释）
+        self.btn_donate.setSizePolicy(QSizePolicy.Fixed,
+                                      self.btn_donate.sizePolicy().verticalPolicy())
 
         # 窗口控制按钮
         self.btn_min = QPushButton("—")
@@ -17580,6 +17832,23 @@ class MainWindow(QMainWindow):
         log_title.setStyleSheet("color:#e6e9ef;font-weight:600;")
         overlay_head.addWidget(log_title)
         overlay_head.addStretch(1)
+        # 「复制日志」：用户报障时最需要的是把原文贴出来。手打上百行中文日志
+        # 不现实，截图又看不清时间戳 —— 落盘之后一键复制是闭环的最后一环。
+        self.btn_log_copy = QPushButton("复制")
+        self.btn_log_copy.setObjectName("overlayCopyBtn")
+        self.btn_log_copy.setFixedSize(52, 26)
+        self.btn_log_copy.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_log_copy.setToolTip("把本次会话的全部日志复制到剪贴板（便于粘贴到反馈里）")
+        self.btn_log_copy.clicked.connect(self._copy_log_to_clipboard)
+        overlay_head.addWidget(self.btn_log_copy)
+        # 「另存为」：落盘文件按会话切，用户想留档或直接发给别人的时候用。
+        self.btn_log_save = QPushButton("另存为")
+        self.btn_log_save.setObjectName("overlayCopyBtn")
+        self.btn_log_save.setFixedSize(62, 26)
+        self.btn_log_save.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_log_save.setToolTip("把本次会话日志另存为一个文本文件")
+        self.btn_log_save.clicked.connect(self._save_log_to_file)
+        overlay_head.addWidget(self.btn_log_save)
         self.btn_log_close = QPushButton("×")
         self.btn_log_close.setObjectName("overlayCloseBtn")
         self.btn_log_close.setFixedSize(26, 26)
@@ -17896,11 +18165,20 @@ class MainWindow(QMainWindow):
             return
         self._update_res = res
         self._set_chip_state("update", new_version=version)
-        if update_notify_due(load_update_state(), version):
+        # 只在这个版本**首次**告知时写一遍（下面 save_update_check 会把 notified 置位，
+        # 所以判定必须取一次存起来，不能写完通知再判第二次 —— 那样恒为 False）
+        first_time = update_notify_due(load_update_state(), version)
+        if first_time:
             save_update_check(notified=version)
             self._append_log("ok", f"发现新版本 v{version}（当前 v{APP_VERSION}）："
                             f"{latest.get('page_url') or GITHUB_URL}"
                             "（点左上角那颗 ↓ 直接下载到默认目录）")
+            # 有 release notes 就把要点写进日志。用户决定要不要升级，看的就是"改了什么"，
+            # 而不是"有个新版存在"——原先整个 body 被解析层丢掉，这里是它第一次
+            # 真正到达用户眼前。
+            notes = _release_notes_digest(str(latest.get("notes") or ""))
+            if notes:
+                self._append_log("info", "新版本更新内容：" + notes)
         if not auto and not isinstance(res.get("asset"), dict):
             # 没有本平台可下的产物时才弹窗；有产物的话点 chip 就下，不该多问一句。
             self._notify_update_without_asset(res)
@@ -18815,6 +19093,17 @@ class MainWindow(QMainWindow):
                 border-radius: 6px;
             }
             #overlayCloseBtn:hover { background: rgba(255,255,255,0.12); color: #ffffff; }
+            /* 日志浮层头部的「复制」「另存为」（2026-10-14）：比关闭按钮稍重，
+               因为它们是用户报障时会主动去点的两个动作。 */
+            #overlayCopyBtn {
+                background: rgba(255,255,255,0.08);
+                color: #cfd8e3;
+                border: 1px solid rgba(255,255,255,0.14);
+                font-size: 12px;
+                border-radius: 5px;
+            }
+            #overlayCopyBtn:hover { background: rgba(255,255,255,0.18); color: #ffffff; }
+            #overlayCopyBtn:pressed { background: rgba(255,255,255,0.06); }
             #logView {
                 background: #1e1e2e;
                 color: #dcdcdc;
@@ -18885,6 +19174,35 @@ class MainWindow(QMainWindow):
             self.btn_max.setText("❐")
 
     # ------------------------------------------------------------------
+    def _on_export_diagnostics_clicked(self) -> None:
+        """生成诊断报告，让用户挑个位置存成文本文件。
+
+        默认落在工作目录的 logs/ 下并把文件名预填好 —— 用户随手点"保存"就能
+        得到一个能直接拖进 issue 的附件，不必自己想文件名。
+        """
+        try:
+            report = build_diagnostics()
+        except Exception as exc:
+            self._toast(f"生成诊断信息失败：{exc}")
+            return
+        default = Path(CONFIG_DIR) / "logs" / f"diagnostics-{self._session_stamp}.txt"
+        try:
+            ensure_dir(default.parent)
+            target, _ = QFileDialog.getSaveFileName(
+                self, "导出诊断信息", str(default), "文本文件 (*.txt);;全部文件 (*)")
+            if not target:
+                self._toast("已取消")
+                return
+            # 带上本次会话日志：报告说明环境，日志说明"刚才发生了什么"，
+            # 两者分开就少了时间线。
+            payload = report + "\n\n" + "=" * 60 + "\n本次会话日志\n" + "=" * 60 + "\n"
+            payload += self._log_text_all()
+            Path(target).write_text(payload, encoding="utf-8")
+            self._append_log("ok", f"诊断信息已导出：{target}")
+            self._toast("已导出，可直接附到反馈里")
+        except Exception as exc:
+            self._toast(f"导出失败：{exc}")
+
     def _on_clean_terminal_clicked(self) -> None:
         """开一个"新进程环境"的命令行窗口，用来判定切换到底生效没有。
 
@@ -19060,6 +19378,98 @@ class MainWindow(QMainWindow):
         DonateDialog(self).exec()
 
     # ------------------------------------------------------------------
+    def _toast(self, text: str, msec: int = 2600) -> None:
+        """在状态栏位置闪一条短提示，不弹模态框。
+
+        入参 text: 提示文案
+        入参 msec: 停留毫秒数
+        用状态栏而不是 QMessageBox：这类提示是"顺带告诉用户一句"，
+        弹模态框会打断他正在做的事（例如刚点完复制就去点别的按钮）。
+        """
+        try:
+            bar = getattr(self, "status_bar", None)
+            if bar is None:
+                return
+            original = bar.text()
+            bar.setText(html_escape(text))
+            QTimer.singleShot(msec, lambda: bar.setText(original))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    def _log_file_path(self) -> Path:
+        """本次会话的日志文件路径：~/.env-tools/logs/session-<时间戳>.log。
+
+        落盘是这个界面**唯一**的诊断来源出口：日志浮层只活在内存里，
+        程序一关，用户这次看到的全部信息（镜像怎么换的、哪个源失败、
+        哪条 warn/error）就永久消失了。而"导出诊断信息"与报障都依赖它。
+        """
+        return Path(CONFIG_DIR) / "logs" / f"session-{self._session_stamp}.log"
+
+    def _log_to_disk(self, level: str, msg: str) -> None:
+        """把一条日志追加到本次会话文件。**任何失败都不许影响界面**。
+
+        入参 level: 日志级别（info/ok/warn/error）
+        入参 msg:   已经过 html 转义的纯文本
+        落盘格式刻意用 `[时间] [级别] 正文` 的纯文本 —— 它要被用户复制出去贴到
+        issue 里，不该带 HTML 标签与颜色代码。
+        """
+        try:
+            path = self._log_file_path()
+            ensure_dir(path.parent)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(f"[{self._session_clock()}] [{level:<5}] {msg}\n")
+            # 顺手裁掉过老的会话文件：日志目录是长命目录，不裁会一直涨
+            self._trim_log_files()
+        except Exception:
+            # 写不了日志是"诊断能力退化"，不是"用户要知道的故障"，所以静默
+            pass
+
+    def _trim_log_files(self) -> None:
+        """只保留最近 LOG_KEEP_SESSIONS 个会话日志，按修改时间倒序删多余的。"""
+        try:
+            log_dir = Path(CONFIG_DIR) / "logs"
+            files = sorted(log_dir.glob("session-*.log"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            for old in files[LOG_KEEP_SESSIONS:]:
+                old.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _log_text_all(self) -> str:
+        """本次会话日志的纯文本全文（不含 HTML），供复制与另存。"""
+        try:
+            return self._log_file_path().read_text(encoding="utf-8")
+        except Exception:
+            # 落盘还没发生过（极少见）：从内存里的日志控件反推
+            return self.log_view.toPlainText()
+
+    def _copy_log_to_clipboard(self) -> None:
+        """把本次会话日志全文复制到剪贴板。"""
+        try:
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.clipboard().setText(self._log_text_all())
+            self._toast("日志已复制到剪贴板")
+        except Exception as exc:
+            self._toast(f"复制失败：{exc}")
+
+    def _save_log_to_file(self) -> None:
+        """让用户挑个位置，把本次会话日志另存为文本文件。"""
+        try:
+            name = f"byte-tools-{self._session_stamp}.log"
+            target, _ = QFileDialog.getSaveFileName(
+                self, "另存日志", str(Path.home() / name), "日志文件 (*.log);;文本 (*.txt)")
+            if not target:
+                return
+            Path(target).write_text(self._log_text_all(), encoding="utf-8")
+            self._toast(f"已保存到 {target}")
+        except Exception as exc:
+            self._toast(f"保存失败：{exc}")
+
+    def _session_clock(self) -> str:
+        """当前时刻，格式 HH:MM:SS。会话日志只要时分秒，跨天由文件名区分。"""
+        return time.strftime("%H:%M:%S")
+
     def _append_log(self, level: str, msg: str) -> None:
         color = {
             "info": "#dcdcdc",
@@ -19068,6 +19478,9 @@ class MainWindow(QMainWindow):
             "error": "#FF6B6B",
         }.get(level, "#dcdcdc")
         self.log_view.append(f'<span style="color:{color};">{msg}</span>')
+        # 同时落盘（纯文本、不带 HTML）。界面写的是转义后的 msg，直接用同一个
+        # 字符串落盘最省事，也保证"用户复制的"与"界面显示的"逐字一致。
+        self._log_to_disk(level, msg)
         # 只有 warn/error 才自动弹开浮层：下载/安装这类常规进度在卡片上已有进度条，
         # 每来一条都弹会把用户正在操作的那张卡盖住。弹开同时在按钮上挂未读条数，
         # 点开一次即清零。

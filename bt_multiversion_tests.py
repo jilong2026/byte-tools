@@ -23,6 +23,18 @@ import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscr
 
 REPO_ROOT = str(_btprelude.REPO_ROOT)
 
+# 标题栏在**真实字体**下的整行最小宽度实测值（tools/bt_titlebar_budget.py，
+# 2026-10-14 测得，含新增的「导出诊断」按钮）。窗口最小宽 1000，余量 198。
+#
+# 维护方式：标题栏增删按钮后重跑
+#     .venv/Scripts/python.exe tools/bt_titlebar_budget.py
+# 然后把这里的数字改成它打印的"整行最小总需"，并确认仍 <= 窗口最小宽。
+# 为什么记一个常量而不是每次现量：offscreen 平台的字宽虚高约 1.6 倍，
+# 在测试环境里量出来的数字不能当"真机会不会裁字"的判据；而这个常量是
+# 在真实渲染环境量一次、拿到仓库里当基线用的，既与字体度量无关，又能挡住
+# "再加按钮把真机预算顶出窗口"。
+TITLEBAR_REAL_BUDGET_PX = 802
+
 import main  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402  断言里要用 Qt.DecorationRole
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -3124,18 +3136,59 @@ class CleanTerminalWindow(EnvSandbox):
     def test_title_bar_buttons_are_not_clipped_at_minimum_width(self):
         """多一个按钮不许把标题栏挤裁字（实测最窄窗口下「清理残留 PATH」曾裁字）。
 
-        判据是 `fontMetrics().horizontalAdvance(text)`：offscreen 平台的字体度量大 ~1.6 倍
-        （同一句 `v1.2.0` 的 minimumSizeHint 是 92，真实渲染 54），换成 minimumSizeHint
-        就会报出真机上并不存在的裁字。真字体下的宽度预算用 `tools/bt_titlebar_budget.py` 量。
+        **像素结论只在真实渲染环境下下**（2026-10-14 改）。offscreen 平台没有中文
+        回退字体，字宽虚高约 1.6 倍：同一句 `v1.2.0` 的 minimumSizeHint 在 offscreen
+        下是 92、真实渲染只有 54。原先这条断言在 offscreen 下跑，2026-10-14 新增
+        「导出诊断」按钮后它报 `btn_cleanup_path 宽118 < 文字154` —— 但真实字体量下来
+        整行只需要 802 像素、窗口 1000 像素，**真机上根本没有裁字**。按真机去改窗口
+        最小宽，就是 2026-10-12 已经踩过一次的坑（那次把最小宽误抬到 1060）。
+
+        因此拆成两部分：
+
+        ① 与字体度量**无关**的不变量，任何平台都断言 —— 按钮都在、都存在、
+           都是 Fixed 水平策略（这才是真正的防线：空间不够时宁可让窗口变宽，
+           也不许压扁按钮）。
+        ② 像素裁字断言：**只在真实平台下跑**；offscreen 下用 TITLEBAR_REAL_BUDGET_PX
+           这个真实字体实测值代替（见 tools/bt_titlebar_budget.py），它是与字体
+           无关的纯数字，能挡住"再加一个按钮把真机预算顶出窗口"这件事。
         """
         win = self.win
         win.show()
         win.resize(win.minimumWidth(), 700)
         for _ in range(30):
             self.app.processEvents()
+
+        names = ("btn_github", "btn_version", "btn_refresh", "btn_cleanup_path",
+                 "btn_clean_terminal", "btn_diagnostics", "btn_donate")
+
+        # ① 与字体无关的不变量
+        from PySide6.QtWidgets import QSizePolicy
+        for name in names:
+            b = getattr(win, name, None)
+            self.assertIsNotNone(b, f"标题栏少了 {name}")
+            self.assertTrue(
+                b.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed,
+                f"{name} 的水平策略不是 Fixed：空间不足时它会被压扁而不是把窗口撑宽",
+            )
+        # btn_diagnostics 是 2026-10-14 新增的，别忘了它也在定宽名单里
+        self.assertEqual(
+            win.btn_diagnostics.sizePolicy().horizontalPolicy(), QSizePolicy.Fixed,
+            "新增的「导出诊断」没进定宽名单",
+        )
+
+        offscreen = os.environ.get("QT_QPA_PLATFORM", "") == "offscreen"
+        if offscreen:
+            # ② offscreen：用真实字体实测值替代像素比较
+            self.assertLessEqual(
+                TITLEBAR_REAL_BUDGET_PX, win.width(),
+                f"真实字体下标题栏整行需要 {TITLEBAR_REAL_BUDGET_PX} 像素，"
+                f"已经超过窗口最小宽 {win.width()} —— 该裁字了。"
+                f"重新跑 tools/bt_titlebar_budget.py 拿新数字并更新这个常量。",
+            )
+            return
+
         clipped, right = [], 0
-        for name in ("btn_github", "btn_version", "btn_refresh", "btn_cleanup_path",
-                     "btn_clean_terminal", "btn_donate"):
+        for name in names:
             b = getattr(win, name)
             need = b.fontMetrics().horizontalAdvance(b.text())
             right = max(right, b.geometry().x() + b.geometry().width())
