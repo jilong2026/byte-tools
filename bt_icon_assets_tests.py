@@ -219,28 +219,61 @@ class IconRendersUncropped(unittest.TestCase):
 
 
 class IconCoverage(unittest.TestCase):
-    """没有图标的组件必须**逐一登记原因**，而不是默默回色块。
+    """每个组件都必须有图标；「没有官方标识」的那几个用**组件名文字图**兜底。
 
-    分两类，原因完全不同：
-      · NO_OFFICIAL_LOGO —— 项目**确实没有**可用的官方图形标识（查过官网与仓库）
-      · PENDING_SOURCE    —— 项目**有**官方标识，但本轮没采到
-    两类混在一起会导致"少一个"与"忘了采"在报告上完全一样。
+    历史（2026-10-14 一天之内演进了三轮，值得留档）：
+      · 最初分两本账：NO_OFFICIAL_LOGO（确实没有图形标识）与
+        PENDING_SOURCE（有标识但没采到），最后查剩 6 个。
+      · 用户连着两轮对着界面截图指出"还是有组件没图标"，逼出 **6 个里 4 个其实是漏了**：
+        protoc / fzf / navicat / pgadmin4（详见 assets/component-icons.md 的取图方法论）。
+        教训一句话：**报"找不到"之前先怀疑自己的检索面太窄。**
+      · 剩下 3 个（ninja / ripgrep / yq）经穷举确认**项目自己就没有图形标识**，
+        最硬的证据是官方 Windows 二进制的 PE 资源段里没有任何 ICON
+        （rg.exe / ninja.exe 只有 MANIFEST；yq.exe 连 .rsrc 都没有）。
+      · 用户裁定：这三个**用组件名做白底黑字的图标**兜底，不再空着。
+
+    所以现在没有"缺图标登记"这回事了 —— 88 个组件每个都必须有资产文件。
+    NAME_TEXT_FALLBACK 记的是"哪几个用的是名称文字图 + 为什么"，供后人追溯。
     """
 
-    NO_OFFICIAL_LOGO = {
-        "ninja": "官网 ninja-build.org 是纯文字页（全文无任何图片引用），"
-                 "官方仓库 ninja-build/ninja 内 0 个图片文件，"
-                 "ninja-build.github.io 也没有图片资源。"
-                 "其视觉形象只有终端里的 ASCII 忍者脸与字标，没有可用的图形标识。",
+    # 没有官方图形标识、经用户同意改用「白底黑字组件名」兜底的组件。
+    # 生成方式：Arial Bold 居中，自动缩字号让文字占满画布 84% 宽，256×256 PNG，
+    # 底色 #FFFFFF、字色 #000000（见 assets/component-icons.md）。
+    NAME_TEXT_FALLBACK = {
+        "ninja": "官网 ninja-build.org 是纯文字页（HTML 里除一个 canonical 外没有任何 "
+                 "<link>/<img>/<svg>/url() 引用，manual.html 同样 0 张图）；"
+                 "源码仓 ninja-build/ninja、官网仓 ninja-build.github.io、"
+                 "组织下第三个仓库 ninja-emacs 全都 0 个图片文件；GitHub wiki 首页 0 张图。"
+                 "ninja-build 组织的头像是 GitHub **自动生成的 identicon**（未上传头像），不是标识。"
+                 "**最硬的一条：官方发布的 ninja.exe 的 .rsrc 里只有 MANIFEST，"
+                 "没有任何 ICON 资源** —— 项目自己都不带图形标识。"
+                 "其视觉形象只有终端里的 ASCII 忍者脸与字标。",
+        "ripgrep": "BurntSushi/ripgrep 仓库 0 个图片文件；README 内 0 个 <img>；"
+                   "作者发布页 burntsushi.net/ripgrep/ 上只有 1 张图，而它是**终端运行截图**"
+                   "（alt 原文 \"A screenshot of a sample search\"），不是标识。"
+                   "**最硬的一条：官方发布的 rg.exe 的 .rsrc 里只有 MANIFEST，无任何 ICON 资源**。"
+                   "另核：Simple Icons 当前 3307 条索引里 0 条，"
+                   "历史版本 v9~v13 的 `icons/ripgrep.svg` 也全是 404 —— "
+                   "即它**从未**进过 Simple Icons（早前记的「已下架」不准确）。",
+        "yq": "mikefarah/yq 仓库 0 个图片文件，README 内 0 个 <img>；"
+              "最新 release（v4.54.1）的附件只有各平台二进制与 checksum，没有图；"
+              "**官方发布的 yq.exe 连 .rsrc 段都没有（没有版本信息、没有图标）**；"
+              "Simple Icons 索引 0 条、历史版本 v9~v13 也全 404（从未收录）。"
+              "GitBook 文档站（mikefarah.gitbook.io/yq）能取到一个字母 \"Y\" 的图标，"
+              "但 GitBook 对未设自定义图标的空间会**自动生成字母头像**，"
+              "无法确认它是作者设定的标识，故不采用（宁缺勿错）。",
     }
 
-    # 已查遍以下来源仍未取到合格素材（每条都实际试过，不是没试）：
-    #   · Simple Icons CDN（slug 存在性已逐一探测，多个为 404 —— 该库已因商标原因下架）
+    # 已查遍以下来源（每条都实际试过，不是没试）：
+    #   · Simple Icons CDN（当前全量索引 3307 条 + 历史版本 v9~v13 都核过）
     #   · 项目官方 GitHub 仓库（API 检索全量图片清单）
-    #   · 项目官网 HTML（提取 <img>/<link> 里的 logo/icon 资源）
-    #   · 官方 README 的图片引用
-    # 2026-10-14 第二轮：Simple Icons 确认全部没有（全量索引 3307 条逐一查过），
-    # 改从**各项目官方仓库/官网**直取，又补上 6 个（来源如下，均已肉眼复核 32px 观感）：
+    #   · 项目官网 HTML（提取 <img>/<link>/<svg>/url() 里的 logo/icon 资源）
+    #   · 官方 README 的图片引用（**含指向别的仓库的跨仓引用**）
+    #   · 官网 favicon / apple-touch-icon、GitHub 组织头像、GitHub wiki
+    #   · 包管理器渠道（Apple Mac App Store 搜索 API）
+    #   · 官方发布二进制里的 PE 资源段（RT_ICON / RT_GROUP_ICON）
+    #
+    # 2026-10-14 各轮补进来的（来源如下，均已肉眼复核 32px 观感）：
     #   · nacos           alibaba/nacos  develop  console-ui-next/public/img/nacos-icon.png
     #   · seata           apache/incubator-seata  2.x  console-fe/public/img/seata_logo_small.jpeg
     #                     （200×200 蓝底白 S，原为 JPEG，入库时转成真 PNG）
@@ -250,23 +283,21 @@ class IconCoverage(unittest.TestCase):
     #   · windterm        kingToolbox/WindTerm  master  images/WindTerm_icon_1024x1024.png
     #   · visual-studio   visualstudio.microsoft.com 官方品牌资源
     #                     wp-content/uploads/2019/02/BrandVisualStudioWin2019-2.svg（viewBox 70×70）
-    PENDING_SOURCE = {
-        "protoc": "Simple Icons 的 protocolbuffers 已下架（探测 404）；"
-                  "protocolbuffers/protobuf 仓库全量树里只有 3 张文档配图"
-                  "（docs/design/editions/images/*），无标识文件；"
-                  "protobuf.dev 页面内 0 个图片引用；protocolbuffers/protobuf.dev 仓库不存在。",
-        "ripgrep": "Simple Icons 的 ripgrep 已下架（探测 404）；"
-                   "BurntSushi/ripgrep 仓库内 **0 个图片文件**；"
-                   "作者官网只有横幅 ripgrep1.png（769×295，宽高比 2.6 边缘、32px 下不可读）。",
-        "fzf": "Simple Icons 的 fzf 已下架（探测 404）；junegunn/fzf 仓库内 **0 个图片文件**；"
-               "README 引用的是功能截图（imgur）与徽章，不是标识。",
-        "yq": "Simple Icons 的 mikefarahyq 已下架（探测 404）；mikefarah/yq 仓库内 **0 个图片文件**；"
-              "README 引用全是 CI 徽章。",
-        "navicat": "Simple Icons 的 navicat 已下架（探测 404）；"
-                   "navicat.com 与 navicat.com.cn 本机均不可达（curl 连接超时，非 404）；"
-                   "en.wikipedia.org 与 upload.wikimedia.org 同样不通，取不到词条配图；"
-                   "navicat 组织下未找到公开仓库。",
-    }
+    #   · apipost         apipost.cn 官方 favicon 内嵌的 256×256 PNG
+    #                     （原 apipost.svg 装的其实是 Apifox 的标 —— 两家竞品，见 NoDuplicatedAssets）
+    #   · uv              Simple Icons 的 `uv` 条目
+    #                     （原来装的是 Astral 母公司标识；该库同时收录 uv 与 astral）
+    #   · protoc          protobuf.dev 的 favicon（/favicons/favicon.ico，48×48）
+    #                     —— Protocol Buffers 那个软盘标识。此前只查了仓库，没查官网 favicon。
+    #   · fzf             **junegunn/i 仓库**里的 fzf-color.png（4000×2200，缩到 512 宽入库）
+    #                     —— 官方 README 顶部就是它。此前只扫 junegunn/fzf，
+    #                     漏了 README 指向**另一个仓库**的跨仓引用。
+    #   · navicat         Apple Mac App Store（itunes.apple.com/search → artworkUrl512），
+    #                     发行方标注 PremiumSoft CyberTech Ltd.（即 Navicat 厂商本身）。
+    #                     navicat.com 本机始终连不上，这是唯一可用的官方渠道。
+    #   · pgadmin4        pgadmin-org/pgadmin4  docs/en_US/images/logo-128.png（官方大象线稿）。
+    #                     它此前**有**图标，但那份是手绘占位图（圆角蓝底 + 文字 "Pg"）；
+    #                     为此新增 PlaceholdersAreNotIcons 这条护栏。
 
     @classmethod
     def setUpClass(cls):
@@ -279,40 +310,46 @@ class IconCoverage(unittest.TestCase):
                 if main.load_component_icon_pixmap(
                     c.key, main.ICON_BOX_PX * main.ICON_RENDER_SCALE) is None]
 
-    def test_missing_icons_are_all_explained(self):
-        explained = set(self.NO_OFFICIAL_LOGO) | set(self.PENDING_SOURCE)
-        unexplained = [k for k in self._missing() if k not in explained]
+    def test_no_component_is_missing_an_icon(self):
+        """88 个组件一个都不许缺 —— 没有官方标识的也要有名称文字图兜底。"""
+        missing = self._missing()
         self.assertEqual(
-            unexplained, [],
-            f"这些组件没有图标也没有登记原因：{unexplained}。"
-            f"要么补上官网标识，要么在 NO_OFFICIAL_LOGO / PENDING_SOURCE 里写清理由",
+            missing, [],
+            f"这些组件没有图标：{missing}。没有官方标识的请按 NAME_TEXT_FALLBACK "
+            f"的做法补一张白底黑字的组件名图，并在那里登记原因",
         )
 
-    def test_registrations_actually_match_reality(self):
-        """登记为"没有标识"的必须确实没有；反过来也成立。
+    def test_name_text_fallbacks_are_real_and_look_right(self):
+        """登记为"名称文字图兜底"的必须真有一张白底黑字的名字图。
 
-        防止两种漂移：补了真图标却忘了删登记（清单永久少报），
-        或者登记了却其实已经有图标（清单多报，掩盖真实缺失）。
+        只查"文件在不在"是不够的 —— 那三个的 PNG 是脚本生成的，
+        哪天生成参数被改坏（比如底色变成透明、字号小到看不见），
+        文件仍在、也能渲染，但卡片上会是一片空白。
         """
-        missing = set(self._missing())
-        for key in set(self.NO_OFFICIAL_LOGO) | set(self.PENDING_SOURCE):
+        from PySide6.QtGui import QImage
+        for key, _why in self.NAME_TEXT_FALLBACK.items():
             with self.subTest(组件=key):
-                self.assertIn(
-                    key, missing,
-                    f"{key} 现在有图标了，请把它从登记里移除并写清来源，"
-                    f"否则「缺图标」清单会永久少报这一项",
+                p = main.icon_asset_dir() / f"{key}.png"
+                self.assertTrue(p.is_file(), f"{key} 的兜底图不见了：{p}")
+                img = QImage(str(p))
+                self.assertFalse(img.isNull(), f"{key} 的兜底图读不出来")
+                for x, y in ((2, 2), (img.width()-3, 2), (2, img.height()-3),
+                             (img.width()-3, img.height()-3)):
+                    self.assertGreater(
+                        img.pixelColor(x, y).lightness(), 240,
+                        f"{key} 的兜底图不是白底（四角应当接近纯白）")
+                # 逐像素查黑色文字。**不要用带步长的采样网格**：字体栅格化会把竖笔画
+                # 落在非整除数上，step=4 的网格实测能在整条笔画之间穿过去（假报"没有字"）。
+                dark = sum(
+                    1
+                    for yy in range(img.height())
+                    for xx in range(img.width())
+                    if img.pixelColor(xx, yy).lightness() < 60
                 )
-
-    def test_every_component_has_an_asset_file(self):
-        """登记之外的所有组件都必须有资产文件。"""
-        missing_file = []
-        for c in self.comps:
-            if c.key in self.NO_OFFICIAL_LOGO or c.key in self.PENDING_SOURCE:
-                continue
-            if not (main.icon_asset_dir() / f"{c.key}.svg").is_file() \
-                    and not (main.icon_asset_dir() / f"{c.key}.png").is_file():
-                missing_file.append(c.key)
-        self.assertEqual(missing_file, [], f"这些组件既没资产文件也没登记：{missing_file}")
+                self.assertGreater(
+                    dark, 50,
+                    f"{key} 的兜底图上几乎没有黑色文字（暗像素 {dark} 个）—— "
+                    f"生成参数被改坏了？")
 
 
 class SimpleIconsConvention(unittest.TestCase):
@@ -388,6 +425,37 @@ class NoDuplicatedAssets(unittest.TestCase):
                 pair, shared,
                 f"{sorted(pair)} 已经不再共用同一个图标了，请从 ALLOWED_SHARED 里移除它",
             )
+
+
+class PlaceholdersAreNotIcons(unittest.TestCase):
+    """资产不许是"圆角方块 + 文字"这种手绘占位图。
+
+    2026-10-14 用户对着界面截图指出 pgAdmin 4 的图标是一个蓝方块。查下去发现
+    `pgadmin4.svg` 的内容是：
+
+        <rect width="32" height="32" rx="6" fill="#336791"/>
+        <text ... font-size="16" font-weight="bold" fill="#ffffff">Pg</text>
+
+    —— 采集脚本临时画的占位符，**它躲过了原有的伪造签名**：那条只认
+    `width="128" height="128" rx="24"` 的底板，而这个是 viewBox 0 0 32 32 / rx=6。
+
+    判据取"有 `<text>` 却没有 `<path>`"：真实品牌 SVG 里的文字几乎总是被转成
+    路径（转曲）以脱离字体依赖，会把 `Pg` 这类字留成活的 `<text>` 元素的，
+    基本都是脚本生成的占位图。注意 `activemq.svg` / `fd.svg` 也含 `<text>`，
+    但它们同时有 `<path>`，是正规标识 —— 所以判据必须是**两者同时成立**。
+    """
+
+    def test_no_rect_plus_text_placeholders(self):
+        offenders = []
+        for f in sorted(main.icon_asset_dir().glob("*.svg")):
+            src = f.read_text(encoding="utf-8", errors="replace")
+            if "<text" in src and "<path" not in src:
+                offenders.append(f.name)
+        self.assertEqual(
+            offenders, [],
+            f"这些 svg 像是手绘占位图（有 <text> 却没有 <path>，即圆角方块上写字）："
+            f"{offenders}。请换成该项目官网/官方仓库的真实标识",
+        )
 
 
 if __name__ == "__main__":
