@@ -231,34 +231,45 @@ class IconCoverage(unittest.TestCase):
         "ninja": "官网 ninja-build.org 是纯文字页（全文无任何图片引用），"
                  "官方仓库 ninja-build/ninja 内 0 个图片文件，"
                  "ninja-build.github.io 也没有图片资源。"
-                 "其视觉形象只有终端里的 ASCII 忍者脸与字标，没有可用的图形标识。"
-                 "按「不自己造」的要求，此处保持占位。",
+                 "其视觉形象只有终端里的 ASCII 忍者脸与字标，没有可用的图形标识。",
     }
 
+    # 已查遍以下来源仍未取到合格素材（每条都实际试过，不是没试）：
+    #   · Simple Icons CDN（slug 存在性已逐一探测，多个为 404 —— 该库已因商标原因下架）
+    #   · 项目官方 GitHub 仓库（API 检索全量图片清单）
+    #   · 项目官网 HTML（提取 <img>/<link> 里的 logo/icon 资源）
+    #   · 官方 README 的图片引用
     PENDING_SOURCE = {
-        "nacos": "官网 nacos.io 上只有 features3.svg 这类功能示意图，"
-                 "仓库内未见独立标识；采到的 features3.svg 宽高比 5.3（横幅），"
-                 "在 32px 方格里只剩一条色带，已删除不做用。",
-        "k9s": "官网 k9scli.io 的 imhotep_logo.png 是 100×100 但为吉祥物画，"
+        "nacos": "官网只有 features3.svg 这类功能示意图（宽高比 5.3，横幅）；"
+                 "官方仓库 alibaba/nacos 内未见独立标识。"
+                 "Simple Icons 的 nacos 已下架，alibabacloud 是阿里云标识、非 Nacos 自己的，已撤回。",
+        "seata": "官方仅有带文字的横幅 seata_logo.png（1497×401，宽高比 3.7），"
+                 "32px 方格里必然糊成一条线，已删除；"
+                 "仓库内 seata_logo_white.png 同样是 3.74 的横幅。"
+                 "Simple Icons 的 apache 是**基金会**标识、不是 Seata 自己的，已撤回。",
+        "k9s": "官网 k9scli.io 的 imhotep_logo.png 是 100×100 吉祥物画，"
                "仓库内主标识为大幅插画（695KB、宽高比 2.0 以上），32px 下不可用，已删除。",
-        "docker-compose": "官方 logo.png 是 200×219 的字标组合，缩到 32px 后 "
-                          "文字糊成一团；Simple Icons 的 dockercompose 亦已下架。",
-        "seata": "Apache 官网有 seata_logo.png（1497×401），但它是带文字的横幅，"
-                 "在 32px 方格里会糊成一团；待找纯图形版。",
-        "protoc": "Simple Icons 的 protocolbuffers 已被下架；"
-                  "protocolbuffers/protobuf 仓库里的图片经检索均不是标识。",
-        "ripgrep": "Simple Icons 已下架；BurntSushi/ripgrep 仓库内无 logo 文件。",
-        "eza": "Simple Icons 已下架 eza/exa/lsd；eza-community/eza 仓库检索无合格候选。",
-        "fzf": "Simple Icons 已下架；junegunn/fzf 仓库检索无合格候选。",
-        "yq": "Simple Icons 的 mikefarahyq 已下架；mikefarah/yq 仓库检索无合格候选。",
-        "dbx": "dbgate/dbgate 仓库检索到的候选均非标识。",
-        "windterm": "Ka-Yi-Xu/windterm 仓库检索无合格候选。",
-        "hbuilderx": "dcloudio/HBuilderX 仓库检索无合格候选。",
-        "visual-studio": "Simple Icons 已下架；microsoft/vs-icons 仓库名/路径待确认。",
-        "navicat": "Simple Icons 已下架；官网 logo 路径需人工确认。",
-        "heidisql": "HeidiSQL/HeidiSQL 仓库检索无合格候选；官网 heidisql.com 本机不可达。",
-        "ardm": "AnotherRedisDesktopManager 仓库检索无合格候选；"
-                "官网 anotherredisdesktopmanager.com 本机不可达。",
+        "docker-compose": "官方 logo.png 为 200×219 字标组合，缩到 32px 后文字糊成一团；"
+                          "Simple Icons 的 dockercompose 已下架，docker 是 Docker 而非 Compose，已撤回。",
+        "protoc": "Simple Icons 的 protocolbuffers 已下架（探测 404）；"
+                  "protocolbuffers/protobuf 仓库仅 3 张文档配图，无标识文件；"
+                  "protobuf.dev 上未取到独立 logo 资源。",
+        "ripgrep": "Simple Icons 的 ripgrep 已下架（探测 404）；"
+                   "BurntSushi/ripgrep 仓库无 logo 文件；"
+                   "作者官网只有横幅 ripgrep1.png（769×295，宽高比 2.6 边缘、32px 下不可读）。",
+        "fzf": "Simple Icons 的 fzf 已下架（探测 404）；junegunn/fzf 仓库内 **0 个图片文件**；"
+               "README 引用的是功能截图（imgur）与徽章，不是标识。",
+        "yq": "Simple Icons 的 mikefarahyq 已下架（探测 404）；mikefarah/yq 仓库内 **0 个图片文件**；"
+              "README 引用全是 CI 徽章。",
+        "windterm": "kingToolbox/WindTerm 仓库内只有 libssh 文档里的控件图标"
+                    "（nav_edge_right.svg、splitbar_handle.svg 等），无标识文件；"
+                    "windterm.app 本机 DNS 不可达。",
+        "visual-studio": "Simple Icons 的 visualstudio / visualstudiocode 均已下架（探测 404）；"
+                         "microsoft/vscode-icons 仓库里与 visual_studio 同名的只有 16×16 的"
+                         " markdown.svg / bookmark.svg（文件类型小图标，不是品牌标识），太小不可用。",
+        "navicat": "Simple Icons 的 navicat 已下架（探测 404）；"
+                   "官网自动提取到的是展开箭头等界面图标（00_expand_up_icon.svg），不是标识，已撤回；"
+                   "navicat 组织下未找到公开仓库。",
     }
 
     @classmethod
