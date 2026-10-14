@@ -197,7 +197,7 @@ byte-tools/
 ├── bt_download_only_tests.py     # 离线回归测试：「开发工具」只下载那一类（见 R13）
 ├── bt_search_and_newcmp_tests.py  # 离线回归测试：组件搜索与新组件（26 个用例，见 R2.5）
 ├── bt_mirror_spec_tests.py        # 离线回归测试：镜像 URL 规范（27 个用例，见 R1.3）
-├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（见 4.9，全量回归 9 套件之一）
+├── bt_refresh_versions_tests.py   # 离线回归测试：刷新版本链路（见 4.9；套件数以 `run_all_tests.py` 输出为准）
 ├── bt_startup_tests.py            # 离线回归测试：启动期不碰 WMI（见 8.2 与 4.9）
 ├── bt_gitee_sync_tests.py         # 离线回归测试：Gitee 同步脚本（16 个用例，见 8.4）
 ├── bt_boot_script_tests.py        # 离线回归测试：两个一键脚本的编码/换行/消息表/Python 自动安装闭环（见 8.2）
@@ -777,10 +777,11 @@ UI 组成：
 
 - **为什么不改回挤压式**：浮层不在 `body` 的布局里，`show/hide` 不触发重排 ⇒ 列数与行数只由窗口宽度决定，
   开关日志不会让格子忽大忽小，也省掉"挤压式折叠"带来的二次 relayout。代价是展开时遮住最下面一行格子
-- **只有 `warn` / `error` 才自动弹开**：下载/安装这类常规进度在卡片上已有进度条，每来一条都弹会把用户
-  正在操作的那张卡盖住。未读条数挂在按钮文字里（`📋 日志 (N)`，不新增控件），
-  **只在"弹开前是收起的"时才累加**；手动点开即清零且**不自动收起**（`_log_user_open`）；
-  自动弹开的那个静默 `LOG_AUTO_HIDE_MS = 8000` 后自愈收起
+- **浮层永不自动弹开、也永不自动收起**（2026-10-14 用户要求改写）：`warn` / `error` 只把未读数
+  累加到按钮文字里（`📋 日志 (N)`，不新增控件），用户想看点一下、再点收起。手动打开即视为已读。
+  > 旧策略（`LOG_AUTO_HIDE_MS = 8000` 自动收起 + `LOG_AUTO_POP_DELAY_MS = 10000` 启动静默期）
+  > 已整套删除 —— 那个 10 秒静默期挡不住 30~40 秒的版本抓取，晚到的告警照弹，
+  > 用户看到的是"偶尔自己打开"。详见 `DEVELOPMENT.md` R2.3
 
 无边框窗口拖动：
 - `mousePressEvent` 在标题栏区域按下左键时记录 `_drag_pos`
@@ -791,7 +792,7 @@ UI 组成：
 - `_on_cleanup_path_clicked()` — "清理残留 PATH"入口：先用 `find_dead_tool_path_entries()` 只读预览并弹确认框，确认后 `cleanup_dead_tool_path_entries()` 删除死条目、写日志并逐卡片 `_detect_status()` 刷新
 - `_start_fetch_versions()` — 从各官网并发拉取版本列表。若仍有 worker 运行则提示；否则清理旧 worker，为每个有 fetcher 的卡片启动一个 `VersionFetchWorker`（并发，按 N 归一的错峰间隔，见 R18），计数器 `_fetch_pending` 等所有完成后再恢复按钮
 - `_on_versions_fetched(key, versions)` — 单个抓取完成回调，versions 为 None 时日志告警降级，否则调 `card.set_versions`
-- `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`；**只有 `warn`/`error` 会顺带自动弹开日志浮层并累加未读条数**
+- `_append_log(level, msg)` — 彩色日志输出：info 灰 / ok 绿 / warn 橙 / error 红，用 `<span style="color:...">` 包裹塞进 `QTextEdit`；同时把纯文本落盘到 `~/.env-tools/logs/session-<时间戳>.log`；**`warn`/`error` 在浮层关着时只累加未读条数，绝不自动弹开**（2026-10-14 起）
 - `_card_columns()` — 当前该排几列（列表模式恒 1 列，网格模式按 `QScrollArea` **视口**净宽算，不是窗口宽度）
 - `relayout_cards(container_key)` / `_fill_rows(...)` — 把一个容器里的卡片按当前列数重排成"行"；`container_key` 为 Tab 序号或 `RESULTS_KEY`（统一搜索结果面板，固定单列）
 - `_set_log_open(open_)` / `_on_log_button_clicked()` / `_close_log_by_user()` — 浮层的开/关；**浮层的 show/hide 不触发 relayout**，这是"展开日志不重排网格"这条承诺的实现基础
@@ -837,8 +838,8 @@ def main() -> int:
 | `bt_startup_tests.py` | 启动期健壮性：`import main` 不许调用 `platform.system/machine/uname/win32_ver`（那些函数会走一次 WMI 查询） |
 | `bt_gitee_sync_tests.py` | `同步Gitee产物.sh` 的离线 mock 回归（见 8.4） |
 | `bt_boot_script_tests.py` | 两个一键脚本：`.bat` 必须纯 ASCII + CRLF、消息表必须 LF 且 key 与脚本双向对账、Python 自动安装链路完整（winget → 三源镜像 → 体积校验 → 不改 PATH）、外部调用一律带 `call`（见 8.2） |
-| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 15 个：tomcat / nginx / rabbitmq / kafka / rocketmq / activemq / nacos / seata / elasticsearch / jenkins / redis / etcd / consul / zookeeper / minio，三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（用例数以 `run_all_tests.py` 输出为准）。全量回归 16 套件之一 |
-| `bt_grid_layout_tests.py` | 卡片网格与日志浮层：`grid_columns_for` 表驱动（含非法入参兜底 1 列）、`chunk_visible` 保序且不含隐藏卡片（= 空洞回归护栏）、`relayout_cards` 行数 == `ceil(N/C)` 且拼接顺序 == `self.cards`、视图模式默认 `grid` 与 `config.json` 缺键取 `grid`、**浮层展开/收起前后行数与每行卡片数完全不变**（浮层方案的核心承诺）、`warn`/`error` 自动弹开与未读条数、搜索命中数 < 列数时只有一行且无空位 |
+| `bt_launch_tests.py` | 组件一键启动契约（规则 R5）：`LAUNCH_OF` 表完整性（白名单恰 15 个：tomcat / nginx / rabbitmq / kafka / rocketmq / activemq / nacos / seata / elasticsearch / jenkins / redis / etcd / consul / zookeeper / minio，三平台命令非空、`min_java_major` 未实测钉为 `None`）、端口簇整簇同空、派生口跟主口平移与独立口各找自己的基准、conf 副本幂等回写与"官方文件一个字节不动"、**"回写失败 → 拒绝 spawn、不留登记"**、`netstat` 解析与端口归属歧义、僵尸登记矩阵（含旧格式记录缺 `ports` 的加载侧归一）、`NoExecInvariant`（`status`/`adopt`/`reconcile` 路径既不 `Popen` 也不查端口归属表，**且反向钉住 `force_stop` 确实会查**）、启动/停止/强杀流探针、卡片按钮与主窗 `_adopt_running`/`closeEvent` 接线（用例数与套件数以 `run_all_tests.py` 输出为准，别写死）。 |
+| `bt_grid_layout_tests.py` | 卡片网格与日志浮层：`grid_columns_for` 表驱动（含非法入参兜底 1 列）、`chunk_visible` 保序且不含隐藏卡片（= 空洞回归护栏）、`relayout_cards` 行数 == `ceil(N/C)` 且拼接顺序 == `self.cards`、视图模式默认 `grid` 与 `config.json` 缺键取 `grid`、**浮层展开/收起前后行数与每行卡片数完全不变**（浮层方案的核心承诺）、搜索命中数 < 列数时只有一行且无空位。**浮层"不自动弹开"的护栏不在这里，在 `bt_install_safety_tests.LogOverlayNeverAutoPops`** |
 
 #### `bt_multiversion_tests.py` 覆盖面
 

@@ -296,21 +296,51 @@ class DiagnosticsExport(unittest.TestCase):
         )
 
     def test_export_button_is_wired(self):
-        """标题栏上要有「导出诊断」按钮且接线完整。"""
-        with _TempConfigDir(self):
+        """「导出诊断」的入口在日志浮层的「导出诊断」按钮，且接线完整。
+
+        2026-10-14：原先这条钉的是标题栏上的按钮。它按用户要求移除后，导出能力
+        搬到了日志浮层（浮层本来就是这些数据的所在地，不必为它在标题栏单占位置）。
+        这里跟着改钉新位置 —— 能力**不许**因为搬了家而丢失：处理器必须还在、
+        必须真的把 build_diagnostics() 与本次会话日志一起写进用户选的文件。
+        """
+        with _TempConfigDir(self) as cfg:
             win = main.MainWindow()
-            # 窗口清理先注册 => LIFO 下最先执行（先关窗，再删临时目录）
             self.addCleanup(_close_window, win)
-            self.assertTrue(hasattr(win, "btn_diagnostics"))
-            btn = win.btn_diagnostics
+            self.assertTrue(hasattr(win, "btn_log_save"))
+            btn = win.btn_log_save
             self.assertIn("诊断", btn.text())
-            # 处理器存在且可调用（真跑会弹文件对话框，只查存在性与可调用性）
-            self.assertTrue(callable(getattr(win, "_on_export_diagnostics_clicked", None)))
+
+            # 真跑一次：文件对话框用桩替掉，验证落盘内容而不只是"按钮能点"。
+            out = cfg / "diag.txt"
+
+            def fake_get_save_file_name(*_a, **_k):
+                return str(out), ""
+
+            self.addCleanup(setattr, main.QFileDialog, "getSaveFileName",
+                            main.QFileDialog.getSaveFileName)
+            main.QFileDialog.getSaveFileName = staticmethod(fake_get_save_file_name)
+
+            win._append_log("warn", "用于验证导出的样本告警")
+            win._save_log_to_file()
+
+            self.assertTrue(out.exists(), "点「导出诊断」没有落盘")
+            body = out.read_text(encoding="utf-8")
+            self.assertIn("用于验证导出的样本告警", body,
+                          "落盘内容里没有本次会话日志 —— 少了时间线，"
+                          "用户没法说明问题出在哪一步")
+            # 诊断报告本身也得在：它说明"环境是什么样"，日志说明"刚才发生了什么"，
+            # 两者互补，只有一份都不够用户定位。
+            self.assertIn("版本与运行环境", body,
+                          "落盘内容里没有诊断报告段落（只有日志）")
+            self.assertIn("本次会话日志", body,
+                          "落盘内容里没有会话日志段落（只有报告）")
+
+            # 顺带钉住：那两个已按用户要求取消的标题栏按钮不许复活。
+            for gone in ("btn_diagnostics", "btn_clean_terminal"):
+                self.assertFalse(hasattr(win, gone),
+                                 f"{gone} 已按用户要求取消，不该复活")
 
 
-# ---------------------------------------------------------------------------
-# changelog
-# ---------------------------------------------------------------------------
 class ReleaseNotes(unittest.TestCase):
     """release body 不许再被解析层丢掉，且展示前要压干净。"""
 

@@ -39,6 +39,49 @@ REPO_ROOT = str(_btprelude.REPO_ROOT)
 import main  # noqa: E402
 
 
+class _TempConfig:
+    """把 CONFIG_DIR / CONFIG_FILE 指到临时目录，用例结束后还原。
+
+    为什么必须包一层：`MainWindow()` 关闭时会走 `closeEvent` → `_save_settings()`，
+    而这两个是**模块级全局**。不重定向就等于直接往用户真实的
+    `~/.env-tools/config.json` 里写 —— 2026-10-14 实测本文件确实在写
+    （跑一遍 `bt_install_safety_tests.py`，真实 config 的 mtime 就变），
+    验收四步里的第 4 条「真实配置不许被污染」因此不过。
+
+    ⚠ 清理顺序是**承重的**（同 bt_feedback_tests 的 `_TempConfigDir` 踩过的坑）：
+    必须"先关窗 → 再删临时目录 → 最后还原 CONFIG_DIR"。用 cleanup 的**后进先出**
+    保证这一点：先注册"删目录 + 还原"（最后执行），后注册窗口清理（最先执行）。
+    顺序反了会在 closeEvent 里往一个已消失的目录写，进程撞 0xC0000409。
+    """
+
+    def __init__(self, owner, class_level: bool = False):
+        self.owner = owner
+        self.class_level = class_level
+        self.tmp = None
+        self._dir = None
+        self._file = None
+
+    def _add(self, fn) -> None:
+        if self.class_level:
+            self.owner.addClassCleanup(fn)
+        else:
+            self.owner.addCleanup(fn)
+
+    def start(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="bt_install_safety_")
+        self._add(self.tmp.cleanup)          # 最后执行
+        self._dir = main.CONFIG_DIR
+        self._file = main.CONFIG_FILE
+        self._add(self._restore)             # 倒数第二
+        main.CONFIG_DIR = Path(self.tmp.name)
+        main.CONFIG_FILE = main.CONFIG_DIR / "config.json"
+        return main.CONFIG_DIR
+
+    def _restore(self) -> None:
+        main.CONFIG_DIR = self._dir
+        main.CONFIG_FILE = self._file
+
+
 # ---------------------------------------------------------------------------
 # 卡片初始化护栏（崩溃回归）
 # ---------------------------------------------------------------------------
@@ -297,6 +340,9 @@ class StartupOrdering(unittest.TestCase):
 
     def test_adopt_running_marks_tabs_when_cards_exist(self):
         """卡片建好后跑一次标记逻辑，Tab 标题上必须出现 `●`。"""
+        # 本用例会 win.close()，而 closeEvent 里会 _save_settings() 写 config.json
+        # ⇒ 不隔离就等于写用户的真实配置。见 _TempConfig 的说明。
+        _TempConfig(self).start()
         orig_detect = main.ComponentCard._detect_status
         orig_start = main.MainWindow._start_fetch_versions
         main.ComponentCard._detect_status = lambda self, *a, **k: None
@@ -578,5 +624,99 @@ class ArchiveTraversalGuard(unittest.TestCase):
         self.assertTrue((root / "bin" / "tool").exists(), f"tar 解压后根不对：{root}")
 
 
+# ---------------------------------------------------------------------------
+# 日志浮层：绝不自动弹开（2026-10-14 用户要求"默认不打开"且"偶尔自己弹"要修掉）
+# ---------------------------------------------------------------------------
+class LogOverlayNeverAutoPops(unittest.TestCase):
+    """告警不许把日志浮层顶到用户脸上，只允许在按钮上留未读数。
+
+    这条护栏存在的理由是**曾经真出过这个 bug**：原先的策略是"启动后 10 秒内不自动
+    弹，静默 8 秒后自动收起"。那个 10 秒静默期只挡住启动头一段，而一轮版本抓取要
+    30~40 秒，于是第 12/25/35 秒到达的告警（GitHub 限流、各组件抓取失败）全都照弹。
+    表现上像随机 —— 网络快时失败来得早被挡住，网络慢或撞限流时来得晚就弹，
+    用户于是报告"偶尔还是会打开"。所以这里不测"启动后第几秒弹"，只测终局语义：
+    **无论过多久、无论多少条告警，浮层都不会自己打开。**
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = _btprelude.ensure_app()
+        # 关窗路径会写 config.json，不隔离就会写进用户的真实配置（见 _TempConfig）
+        _TempConfig(cls, class_level=True).start()
+        _orig_fetch = main.MainWindow._start_fetch_versions
+        _orig_detect = main.ComponentCard._detect_status
+        main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
+        main.ComponentCard._detect_status = lambda self, *a, **k: None
+        cls._orig_fetch, cls._orig_detect = _orig_fetch, _orig_detect
+        cls.win = main.MainWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        main.MainWindow._start_fetch_versions = cls._orig_fetch
+        main.ComponentCard._detect_status = cls._orig_detect
+        cls.win.deleteLater()
+
+    def setUp(self):
+        # 每个用例都从"浮层关着"这个初始态开始
+        self.win._set_log_open(False)
+        self.win._log_unread = 0
+
+    def test_a_warn_does_not_pop_the_overlay(self):
+        self.win._append_log("warn", "GitHub API 限流")
+        self.assertTrue(self.win.log_overlay.isHidden(),
+                        "一条 warn 就把日志浮层弹出来了 —— 用户要的是默认不打开")
+
+    def test_an_error_does_not_pop_the_overlay_either(self):
+        self.win._append_log("error", "安装失败：磁盘空间不足")
+        self.assertTrue(self.win.log_overlay.isHidden(), "error 也不许自动弹")
+
+    def test_a_burst_of_alerts_never_pops_it(self):
+        """模拟真实情形：一轮抓取几十秒内陆续到达几十条告警。"""
+        for i in range(50):
+            self.win._append_log("warn" if i % 2 else "error", f"第 {i} 条告警")
+        self.assertTrue(
+            self.win.log_overlay.isHidden(),
+            "连续 50 条告警之后浮层自己打开了 —— 自动弹开的逻辑没删干净")
+
+    def test_the_auto_pop_helpers_are_gone(self):
+        """连同自动弹开/自动收起的那一整套基础设施一起消失，别留半截。
+
+        只要 _log_autopop_allowed 这类函数还在，就迟早有人再把它接回去 ——
+        那个 bug 的成因正是"一个听起来合理的静默期其实盖不住真正的时长"。
+        """
+        for gone in ("_log_autopop_allowed", "_on_log_auto_hide",
+                     "_log_auto_hide", "_log_user_open", "_startup_mono"):
+            self.assertFalse(
+                hasattr(self.win, gone),
+                f"{gone} 还在：日志浮层的自动弹开/自动收起应当整套移除")
+        for gone in ("LOG_AUTO_POP_DELAY_MS", "LOG_AUTO_HIDE_MS"):
+            self.assertFalse(
+                hasattr(main, gone),
+                f"模块级常量 {gone} 还在，自动弹开可能被别人再接回去")
+
+    def test_alerts_still_raise_the_unread_badge(self):
+        """取消自动弹**不等于**取消提示：未读数必须照旧累加。
+
+        否则用户就完全不知道出事了 —— 浮层不弹是因为"有未读角标可点"，
+        不是因为"出事了没人管"。
+        """
+        self.win._append_log("warn", "第一条")
+        self.win._append_log("error", "第二条")
+        self.assertGreaterEqual(
+            self.win._log_unread, 2,
+            "未读数没有累加 —— 用户将完全无从得知发生过告警")
+        self.assertIn("日志", self.win.btn_log.text(),
+                      "日志按钮上的未读提示不见了")
+
+    def test_clicking_the_button_still_opens_it(self):
+        """不自动弹 ≠ 不能手动开。这条钉住取消的是"自动"而不是"功能"。"""
+        self.win._on_log_button_clicked()
+        self.assertFalse(self.win.log_overlay.isHidden(),
+                         "手动点「📋 日志」打不开浮层了 —— 能力被误伤")
+        self.win._on_log_button_clicked()
+        self.assertTrue(self.win.log_overlay.isHidden(), "再点一次没有收起")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

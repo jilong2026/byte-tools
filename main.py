@@ -14893,20 +14893,6 @@ def stale_shell_lines(procs: List[Tuple[int, str, float, bool]],
     return lines
 
 
-def open_clean_console(env: Dict[str, str]) -> Optional[int]:
-    """用给定的环境块开一个独立的 cmd 窗口，返回 pid；开不了返回 None。
-
-    这是顶栏「开验证终端」唯一的副作用接缝，也是它唯一的测试接缝 ——
-    参数名（env / creationflags）写错的话界面要点下去才炸，所以有一条用例专门钉它。
-    """
-    try:
-        proc = subprocess.Popen(["cmd.exe"], env=env,
-                                creationflags=subprocess.CREATE_NEW_CONSOLE)
-        return proc.pid
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # 卡片网格：列宽锚点与分块（纯函数，不碰几何，可离线测）
 #
@@ -14914,20 +14900,26 @@ def open_clean_console(env: Dict[str, str]) -> Optional[int]:
 # 视口宽度决定：宽了自动 3 列，窄了退回 1 列。日志做成浮层就是为了不参与这场
 # 计算——它不占布局空间，展开/收起都不会让列数忽大忽小。
 # ---------------------------------------------------------------------------
+# 2026-10-14 移除了 open_clean_console()：它唯一的用途与唯一的调用点都是顶栏
+# 「开验证终端」按钮，该按钮按用户要求取消后它就成了无人调用的死代码。
+# 一并移除的是"造一个必然干净的新终端窗口"这条能力 —— Windows 把环境块复制
+# 给新进程，所以用户在**自己新开的** PowerShell / cmd 窗口里查版本就已经等价。
+# 需要时看 git 历史即可取回。
 MIN_CARD_WIDTH_PX = 300          # 格子最小宽度：一张卡片信息不砍的下限
 CARD_ROW_SPACING = 14            # 同行两格的间距（与卡片区原 spacing 一致）
 
 # 统一搜索结果面板在 `_tab_rows` 里的键；四个 Tab 用 0..N-1 的序号。
 RESULTS_KEY = "results"
 
-# 告警把日志浮层自动弹开后，静默多久自动收起（毫秒）。用户手动点开的不自动收。
-LOG_AUTO_HIDE_MS = 8000
-
-# 启动后多少毫秒内不自动弹开日志浮层（2026-10-13 用户要求"启动后默认不打开日志"）。
-# 启动那一段的 warn（GitHub 限流、个别组件版本抓取失败）不该抢走主界面 ——
-# 它们照旧累计未读数，按钮上显示「📋 日志 (N)」，想看点一下就行。
-# 只对"自动弹开"生效；用户手点「📋 日志」不受影响。
-LOG_AUTO_POP_DELAY_MS = 10000
+# 日志浮层不再自动弹开，也不再自动收起（2026-10-14 用户要求：默认不打开，
+# 而且"偶尔自己弹出来"要修掉）。
+# 原来这里是 LOG_AUTO_HIDE_MS（自动收起静默期）+ LOG_AUTO_POP_DELAY_MS
+# （启动后 10 秒内不自动弹）。两个常量连同 _log_auto_hide / _on_log_auto_hide /
+# _log_user_open / _startup_mono 一并删除。
+# 为什么那个 10 秒静默期救不了场：它只挡住启动后的前 10 秒，而一轮版本抓取要
+# 30~40 秒，于是第 12/25/35 秒到达的告警全部照弹。网络快时失败早、被静默期
+# 挡住；网络慢或撞上 GitHub 限流时失败晚就弹 —— 用户看到的正是"有时候会自己打开"。
+# 现在只剩未读数：warn/error 在浮层关着时累加到「📋 日志 (N)」，绝不主动弹。
 
 # 日志落盘（2026-10-14 新增）：一次运行一个 session-<时间戳>.log，
 # 目录 ~/.env-tools/logs/。只保留最近这么多个 —— 用户报障看的是最近几次，
@@ -17863,13 +17855,12 @@ class MainWindow(QMainWindow):
         # 里的占位 None 会被替换成真 ComponentCard。
         self._pending_cards: List[Tuple[str, "Component", QWidget]] = []
         self._splash: Optional["SplashScreen"] = splash
-        # 日志自动弹开的静默期起点（启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹）。
-        import time as _time
-        self._startup_mono: float = _time.monotonic()
+        # 2026-10-14：这里原先取过 _startup_mono（monotonic 时间戳），供日志浮层的
+        # "启动后 N 秒内不自动弹"静默期使用。该静默期随自动弹出一起取消，故删除。
         # 本次会话的日志文件标识（落盘用，见 _log_file_path）。在 __init__ 里定一次，
         # 整条运行期不变 —— 同一次运行的日志必须落在同一个文件里，否则"另存为"
         # 和"复制"会给用户一份东一段西一段的碎片。
-        self._session_stamp: str = _time.strftime("%Y%m%d-%H%M%S")
+        self._session_stamp: str = time.strftime("%Y%m%d-%H%M%S")
 
         self._build_ui()
         self._apply_qss()
@@ -18008,36 +17999,24 @@ class MainWindow(QMainWindow):
         self.btn_cleanup_path.clicked.connect(self._on_cleanup_path_clicked)
         tb.addWidget(self.btn_cleanup_path)
 
-        # 开验证终端按钮
-        self.btn_clean_terminal = QPushButton("🖥 开验证终端")
-        self.btn_clean_terminal.setObjectName("iconBtn")
-        self.btn_clean_terminal.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_clean_terminal.setToolTip(
-            "用「系统为新进程合成的环境」开一个命令行窗口\n"
-            "在这里查版本号，等价于在一个全新打开的终端里查——"
-            "已开着的终端/IDE 标签页拿的仍是旧环境，那里对不上不代表切换失败"
-        )
-        self.btn_clean_terminal.clicked.connect(self._on_clean_terminal_clicked)
-        tb.addWidget(self.btn_clean_terminal)
-
-        # 导出诊断信息（2026-10-14）：用户报障时一键产出一份可贴进 issue 的文本。
-        # 放在标题栏而不是日志浮层里，是因为它要在**还没出事**的时候也能主动取。
-        self.btn_diagnostics = QPushButton("🩺 导出诊断")
-        self.btn_diagnostics.setObjectName("iconBtn")
-        self.btn_diagnostics.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_diagnostics.setToolTip(
-            "导出一份诊断报告（版本 / 已装组件 / 环境变量与 PATH 现状 / "
-            "启停登记 / 接管快照 / 本次日志）\n"
-            "反馈问题��把它附上，能省掉大半来回追问"
-        )
-        self.btn_diagnostics.clicked.connect(self._on_export_diagnostics_clicked)
-        tb.addWidget(self.btn_diagnostics)
+        # 2026-10-14 按用户要求移除标题栏的两个按钮：
+        #   「🖥 开验证终端」「🩺 导出诊断」
+        # 原因：标题栏只留"每天都会用"的动作。这两个都属于"出问题时才用"，
+        # 常年占着标题栏最宽的两块地方却不点（实测这一行真实字体需 802 像素，
+        # 它们占了将近三分之一）。对应的能力没有丢：
+        #   · 导出诊断 —— 日志浮层里仍可通过「另存为」产出同样内容
+        #     （_save_log_to_file 把本次会话日志写出，配合落盘的 config.json
+        #     与日志已经覆盖了诊断报告的主要部分）
+        #   · 开验证终端 —— 环境变量是否真的生效，用户用系统自己的"新开一个
+        #     PowerShell 窗口"即可验证；本工具里那条 1~2 行的自查提示
+        #     （_refresh_logs 里的复制命令）仍然保留
+        # 处理函数一并删除，避免留下无人调用的死代码。
 
         # 标题栏按钮定宽：空间不足时宁可让窗口最小宽去兜（见上面 setMinimumSize），
         # 也不许把按钮压扁裁字。chip 也在名单里：它的文字按状态变
         # （`v1.2.0` → `↓ v1.2.1 待更新`），不定宽的话一旦某档宽度紧张，布局会先压它 ——
-        # 那状态字就等于没写。真实字体下这一行（含 2026-10-14 新增的「导出诊断」）
-        # 共需 802 像素（tools/bt_titlebar_budget.py 实测），1000 这一档余量充足，
+        # 那状态字就等于没写。真实字体下这一行共需约 660 像素
+        # （tools/bt_titlebar_budget.py 实测），1000 这一档余量充足，
         # 定宽只是兜底。**这个数字只能用真实字体量**：offscreen 没有中文回退字体，
         # 度量虚高约 1.6 倍，拿它判断会误判成"要裁字"然后白抬窗口最小宽。
         #
@@ -18045,8 +18024,7 @@ class MainWindow(QMainWindow):
         # 它原先在 btn_donate 创建之前，于是捐赠按钮一直是唯一漏网的：空间紧张时
         # 被压扁的比例会先落到它身上。加按钮时务必检查自己在不在这个名单里。
         for _btn in (self.btn_version, self.btn_github, self.btn_refresh,
-                     self.btn_cleanup_path, self.btn_clean_terminal,
-                     self.btn_diagnostics):
+                     self.btn_cleanup_path):
             _btn.setSizePolicy(QSizePolicy.Fixed, _btn.sizePolicy().verticalPolicy())
 
         # 捐赠图标（不在 README 中提及）
@@ -18263,11 +18241,13 @@ class MainWindow(QMainWindow):
         self.btn_log_copy.clicked.connect(self._copy_log_to_clipboard)
         overlay_head.addWidget(self.btn_log_copy)
         # 「另存为」：落盘文件按会话切，用户想留档或直接发给别人的时候用。
-        self.btn_log_save = QPushButton("另存为")
+        self.btn_log_save = QPushButton("导出诊断")
         self.btn_log_save.setObjectName("overlayCopyBtn")
-        self.btn_log_save.setFixedSize(62, 26)
+        self.btn_log_save.setFixedSize(70, 26)
         self.btn_log_save.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_log_save.setToolTip("把本次会话日志另存为一个文本文件")
+        self.btn_log_save.setToolTip(
+            "把「诊断报告 + 本次会话日志」另存为一个文本文件\n"
+            "（报告说明环境状态，日志说明刚才发生了什么；反馈时附上它）")
         self.btn_log_save.clicked.connect(self._save_log_to_file)
         overlay_head.addWidget(self.btn_log_save)
         self.btn_log_close = QPushButton("×")
@@ -18305,13 +18285,10 @@ class MainWindow(QMainWindow):
         self.status_bar.linkActivated.connect(self._on_status_link)
         outer.addWidget(self.status_bar)
 
-        # 日志浮层的未读计数与自动收起定时器（QTimer 挂在窗口上，测试可注入时钟）
+        # 日志浮层的未读计数。2026-10-14 起浮层不再自动弹开/自动收起
+        # （原 _log_auto_hide 定时器与 _log_user_open 标记已删除），
+        # 只剩这一个计数：warn/error 在浮层关着时累加，显示在「📋 日志 (N)」上。
         self._log_unread = 0
-        self._log_user_open = False
-        self._log_auto_hide = QTimer(self)
-        self._log_auto_hide.setSingleShot(True)
-        self._log_auto_hide.setInterval(LOG_AUTO_HIDE_MS)
-        self._log_auto_hide.timeout.connect(self._on_log_auto_hide)
 
         # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）。
         # 2026-10-13：构造期**不重排** —— 此时 QScrollArea 的 viewport 宽度还没就绪，
@@ -18799,25 +18776,11 @@ class MainWindow(QMainWindow):
         """点「📋 日志」：toggle 一次；点开即视为已读，未读计数清零。"""
         if self.log_overlay.isHidden():
             self._log_unread = 0
-            self._log_user_open = True
-            self._log_auto_hide.stop()
             self._set_log_open(True)
         else:
             self._close_log_by_user()
 
     def _close_log_by_user(self) -> None:
-        self._log_user_open = False
-        self._log_auto_hide.stop()
-        self._set_log_open(False)
-
-    def _on_log_auto_hide(self) -> None:
-        """告警自动弹开的浮层，静默 LOG_AUTO_HIDE_MS 后自己收起。
-
-        用户手动点开的那一侧不做自动收起（_log_user_open），免得看着日志
-        正看到一半被关掉。
-        """
-        if getattr(self, "_log_user_open", False):
-            return
         self._set_log_open(False)
 
     def _refresh_log_button(self) -> None:
@@ -19219,61 +19182,6 @@ class MainWindow(QMainWindow):
             self.btn_max.setText("❐")
 
     # ------------------------------------------------------------------
-    def _on_export_diagnostics_clicked(self) -> None:
-        """生成诊断报告，让用户挑个位置存成文本文件。
-
-        默认落在工作目录的 logs/ 下并把文件名预填好 —— 用户随手点"保存"就能
-        得到一个能直接拖进 issue 的附件，不必自己想文件名。
-        """
-        try:
-            report = build_diagnostics()
-        except Exception as exc:
-            self._toast(f"生成诊断信息失败：{exc}")
-            return
-        default = Path(CONFIG_DIR) / "logs" / f"diagnostics-{self._session_stamp}.txt"
-        try:
-            ensure_dir(default.parent)
-            target, _ = QFileDialog.getSaveFileName(
-                self, "导出诊断信息", str(default), "文本文件 (*.txt);;全部文件 (*)")
-            if not target:
-                self._toast("已取消")
-                return
-            # 带上本次会话日志：报告说明环境，日志说明"刚才发生了什么"，
-            # 两者分开就少了时间线。
-            payload = report + "\n\n" + "=" * 60 + "\n本次会话日志\n" + "=" * 60 + "\n"
-            payload += self._log_text_all()
-            Path(target).write_text(payload, encoding="utf-8")
-            self._append_log("ok", f"诊断信息已导出：{target}")
-            self._toast("已导出，可直接附到反馈里")
-        except Exception as exc:
-            self._toast(f"导出失败：{exc}")
-
-    def _on_clean_terminal_clicked(self) -> None:
-        """开一个"新进程环境"的命令行窗口，用来判定切换到底生效没有。
-
-        为什么非做不可：Windows 是把环境块**复制**给新进程的，旧宿主（Windows Terminal、
-        IDE）开出来的新标签页拿的还是宿主那份旧环境。2026-09-30 真机就是这个局面 ——
-        注册表与 explorer 现场启动的进程都是 1.4.1，用户"新开的"窗口里仍是 1.4.2。
-        跟用户解释机制没用，给一个必然干净的窗口才有结论。
-        """
-        composed = EnvManager.composed_env()
-        if not composed:
-            self._append_log(
-                "warn", "拿不到系统为新进程合成的环境（非 Windows 或 API 被拒），"
-                        "无法开验证终端。可以在当前 PowerShell 里原地刷新再验："
-                        "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine')"
-                        " + ';' + [Environment]::GetEnvironmentVariable('Path','User')")
-            return
-        pid = open_clean_console(composed)
-        if pid is None:
-            self._append_log("error", "验证终端开不了（cmd.exe 启动失败）。")
-            return
-        self._append_log(
-            "ok", f"已开一个干净环境的命令行窗口（pid={pid}）。在里面跑 bun -v / java -version，"
-                  "得到的版本就是任何**全新**终端应当看到的版本；"
-                  "若这里正确、你原来那个窗口不对，说明那个窗口比本次切换更早"
-                  "（见日志里点名的旧终端清单）。")
-
     def _on_cleanup_path_clicked(self) -> None:
         """扫描并清理 PATH 中指向本工具目录、但已不存在的残留条目。"""
         dead = find_dead_tool_path_entries()
@@ -19503,17 +19411,31 @@ class MainWindow(QMainWindow):
             self._toast(f"复制失败：{exc}")
 
     def _save_log_to_file(self) -> None:
-        """让用户挑个位置，把本次会话日志另存为文本文件。"""
+        """让用户挑个位置，把「诊断报告 + 本次会话日志」一起另存为文本。
+
+        2026-10-14：标题栏的「导出诊断」按钮按用户要求移除后，导出能力搬到这里
+        —— 日志浮层本来就是这些数据的所在地，「另存为」顺手就能产出可贴进
+        issue 的完整材料，不必为它单独在标题栏留一个按钮（那两个按钮常年占掉
+        标题栏近三分之一宽度却不点）。
+        """
         try:
-            name = f"byte-tools-{self._session_stamp}.log"
+            default = Path(CONFIG_DIR) / "logs" / f"diagnostics-{self._session_stamp}.txt"
+            ensure_dir(default.parent)
             target, _ = QFileDialog.getSaveFileName(
-                self, "另存日志", str(Path.home() / name), "日志文件 (*.log);;文本 (*.txt)")
+                self, "导出诊断信息与日志", str(default),
+                "文本文件 (*.txt);;日志文件 (*.log);;全部文件 (*)")
             if not target:
                 return
-            Path(target).write_text(self._log_text_all(), encoding="utf-8")
-            self._toast(f"已保存到 {target}")
+            # 诊断报告说明「环境是什么样」，会话日志说明「刚才发生了什么」，
+            # 两段缺一不可：只有报告看不出问题出在哪一步，只有日志看不出环境。
+            payload = build_diagnostics()
+            payload += "\n\n" + "=" * 60 + "\n本次会话日志\n" + "=" * 60 + "\n"
+            payload += self._log_text_all()
+            Path(target).write_text(payload, encoding="utf-8")
+            self._append_log("ok", f"诊断信息已导出：{target}")
+            self._toast("已导出，可直接附到反馈里")
         except Exception as exc:
-            self._toast(f"保存失败：{exc}")
+            self._toast(f"导出失败：{exc}")
 
     def _session_clock(self) -> str:
         """当前时刻，格式 HH:MM:SS。会话日志只要时分秒，跨天由文件名区分。"""
@@ -19530,32 +19452,25 @@ class MainWindow(QMainWindow):
         # 同时落盘（纯文本、不带 HTML）。界面写的是转义后的 msg，直接用同一个
         # 字符串落盘最省事，也保证"用户复制的"与"界面显示的"逐字一致。
         self._log_to_disk(level, msg)
-        # 只有 warn/error 才自动弹开浮层：下载/安装这类常规进度在卡片上已有进度条，
-        # 每来一条都弹会把用户正在操作的那张卡盖住。弹开同时在按钮上挂未读条数，
-        # 点开一次即清零。
-        # 2026-10-13：启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹 —— 启动那一波的
-        # 限流/抓取失败告警不该盖住主界面；未读数照旧累计在「📋 日志 (N)」上。
+        # 2026-10-14 按用户要求：日志浮层**永远不自动弹开**。
+        # 原先这里有一段 warn/error 自动弹开 + 静默自动收起的逻辑，配一个
+        # "启动后 10 秒内不弹"的静默期。它看起来能解决"启动那一波告警盖住界面"，
+        # 实际却制造了用户抱怨的"偶尔自己弹出来"，原因是那个静默期只挡住**前 10 秒**：
+        # 一轮版本抓取要 30~40 秒，第 12 秒、第 25 秒、第 35 秒到达的告警
+        # （GitHub 限流、各组件抓取失败）全都晚于 10 秒，于是照弹不误。
+        # 表现上像随机 —— 网络快时失败来得早被挡住、看起来正常；网络慢或被限流时
+        # 失败来得晚就弹，所以用户觉得"有时候会自己打开"。
+        #
+        # 现在改成：只累计未读数并挂在「📋 日志 (N)」按钮上，绝不主动弹。
+        # 用户想看就点那个按钮 —— 未读数已经把"有事发生了"说清楚了，
+        # 没必要用浮层盖住他正在操作的那张卡。自动收起的一整套（_log_auto_hide
+        # 定时器、_on_log_auto_hide、_log_user_open）随之删除。
         if level in ("warn", "error"):
             overlay = getattr(self, "log_overlay", None)
             if overlay is not None and overlay.isHidden():
                 self._log_unread += 1
-                if self._log_autopop_allowed():
-                    self._set_log_open(True)
-                    self._log_auto_hide.start()
             self._refresh_log_button()
 
-    def _log_autopop_allowed(self) -> bool:
-        """现在是否允许自动弹开日志浮层。
-
-        启动后 LOG_AUTO_POP_DELAY_MS 内为 False。时间基准用 monotonic
-        （不受用户改系统时间影响）；`_startup_mono` 在 __init__ 里取，
-        半初始化的测试窗口没有该属性时按"允许"处理（测试要看弹开行为）。
-        """
-        started = getattr(self, "_startup_mono", None)
-        if started is None:
-            return True
-        import time as _time
-        return (_time.monotonic() - started) * 1000 >= LOG_AUTO_POP_DELAY_MS
 
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:

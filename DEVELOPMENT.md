@@ -478,14 +478,19 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 49 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **87 个可见组件**归入且仅归入四个 Tab（88 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（10 / 6 / 17 / 10） |
+| 分类 | 判定标准 | 组件（33 / 14 / 26 / 15，含隐藏 erlang） |
 |------|----------|--------------------|
-| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
-| **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | mysql、mongodb、postgresql、pulsar、docker、kubectl |
-| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools、eclipse、apipost、apifox、hbuilderx、android-studio、visual-studio、navicat |
-| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | jenkins、nacos、activemq、rocketmq、nginx、kafka、tomcat、elasticsearch、rabbitmq、seata |
+| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | ant、bat、bun、cmake、conda、dart、deno、dotnet-sdk、duckdb、eza、fd、fzf、git、go、graalvm、gradle、jdk、jq、kotlin、maven、ninja、node、pnpm、powershell、protoc、python、ripgrep、rust、sqlite、uv、yq、zoxide（+ 隐藏的 erlang） |
+| **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | caddy、docker、docker-compose、helm、jmeter、k9s、kubectl、mongodb、mysql、nats-server、postgresql、pulsar、traefik、trivy |
+| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | android-studio、apifox、apipost、ardm、bruno、clion、datagrip、dbeaver、dbx、eclipse、goland、hbuilderx、heidisql、idea、mongodb-compass、mysql-workbench、navicat、pgadmin4、postman、pycharm、redisinsight、visual-studio、vscode、webstorm、wechat-devtools、windterm |
+| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | activemq、consul、elasticsearch、etcd、jenkins、kafka、minio、nacos、nginx、rabbitmq、redis、rocketmq、seata、tomcat、zookeeper |
+
+> **上面这份名单与数字是 2026-10-14 的快照，且只作示例** —— 组件加得很快（2026-10-10 还是 43 个，
+> 四天后就 87 个）。**权威值一律现算**，别照抄本文：
+> `.venv/Scripts/python.exe -c "import _btprelude,main;cs=main.build_components();import collections;print(len(cs), collections.Counter(c.category for c in cs))"`
+> 分类的**真源**始终是 `COMPONENT_CATEGORY_OF` + `LAUNCH_KEYS`（见 R2.3），不是这张表。
 
 边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
 （「一键启停」固定是**最后一个** Tab：它是本工具最能干活的一组，埋在中间等于藏起来。2026-10-08 用户要求它紧贴「其它软件」；2026-10-10「其它软件」被取消，护栏改写成"必须是最后一个"。）
@@ -519,7 +524,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 （上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（49 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（当前 87 项，跨 Tab 收集；数字会随组件增减而变，别写死）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -543,9 +548,23 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 底部日志区已**移出 `QSplitter` 的 3:2 分配**，改成浮层（同 parent + `raise_()`，几何随 resize 跟随），
 展开时**遮住**最下面一行格子而不是把网格压扁。选浮层的理由：它不在 `body` 的布局里，`show/hide` 不触发
 重排 ⇒ 列数与行数只由窗口宽度决定，开关日志不会让格子忽大忽小，也省掉"挤压式折叠"的二次 relayout。
-触发规则：**只有 `warn` / `error` 才自动弹开**并挂未读条数（写在 `📋 日志 (N)` 按钮文字里，不新增控件）；
-下载/安装这类常规进度不弹（进度条已在卡片上，每来一条都弹会把用户正在操作的那张卡盖住）。
-未读数只在"弹开前是收起的"时才累加；手动打开即清零且**不自动收起**；自动弹开的那个静默 8 秒后自愈收起。
+触发规则（**2026-10-14 用户要求改写**）：**日志浮层永不自动弹开、也永不自动收起**。
+`warn` / `error` 只累加未读数并写在 `📋 日志 (N)` 按钮文字里（不新增控件），
+用户想看点一下按钮；再点一次收起。手动打开即视为已读，未读清零。
+
+> **旧策略与它为什么失败**（别再改回去）：原先是"只有 warn/error 才自动弹开 + 静默
+> `LOG_AUTO_HIDE_MS = 8000` 后自愈收起"，并配一个"启动后 `LOG_AUTO_POP_DELAY_MS = 10000`
+> 内不自动弹"的静默期。那个静默期只挡住启动**头 10 秒**，而一轮版本抓取要 **30~40 秒**，
+> 于是第 12 / 25 / 35 秒到达的告警（GitHub 限流、各组件抓取失败）全都晚于 10 秒，照弹不误。
+> 表现上像随机 —— 网络快时失败来得早被挡住、看着正常；网络慢或撞限流时失败来得晚就弹，
+> 于是用户报告"偶尔还是会自己打开"。
+>
+> 现在整套基础设施已删除：模块级常量 `LOG_AUTO_HIDE_MS` / `LOG_AUTO_POP_DELAY_MS`、
+> 方法 `_log_autopop_allowed()` / `_on_log_auto_hide()`、窗口属性 `_log_auto_hide` /
+> `_log_user_open` / `_startup_mono`。**一个都不许复活**——那个 bug 的成因正是
+> "一个听起来合理的静默期其实盖不住真正的时长"。
+> 护栏用例：`bt_install_safety_tests.LogOverlayNeverAutoPops`（6 条，含"连发 50 条告警
+> 也不许弹"与"这一整套符号必须不存在"的反向断言）。
 
 ### R2.4 新增 / 调整组件分类 checklist
 
@@ -578,7 +597,7 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 - **全组件搜索的呈现方式**：搜索时收起四个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
   把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
   清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
-  右侧 `#searchHint` 仍显示"匹配 N / 49 个组件"（0 命中转警示红）。数字一律现算
+  右侧 `#searchHint` 仍显示"匹配 N / 87 个组件"（0 命中转警示红）。数字一律现算（别写死，组件数在涨）
 - 这正是"全组件搜索、而不是只搜某个 table 内"的要求：结果跨三个分类，统一归并展示
 - 新增组件**不需要**为搜索做任何登记：卡片建好就自动可搜。改匹配规则要同步 `bt_search_and_newcmp_tests.py`
 - 外观约定：输入框不直接描边，而是套一层胶囊外壳 `#searchShell`（放大镜 + 输入框同属一块白底圆角），
@@ -749,20 +768,25 @@ UIPI 挡着我们的 `WM_SETTINGCHANGE`，环境块还是登录时那一份）�
 这条信息只能以 **info** 级输出——它是附加说明，写成 warn 会让"复验通过"的用例凭空多一条告警。
 扫描失败绝不影响切换本身（`_apply_active` 仍返回 True）。护栏用例：`StaleTerminalNotice`（7 条）。
 
-### R3.13 必须提供"必然干净的环境"验证入口
+### R3.13 不提供"验证终端"入口，让用户用系统自己的新终端验证
 
-R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对了没有"。顶栏 `btn_clean_terminal`
-（「🖥 开验证终端」）用 `EnvManager.composed_env()` 现算的那份环境块起一个 `cmd.exe`
-（`open_clean_console(env)`，`CREATE_NEW_CONSOLE`），这个窗口里的版本号就是任何全新终端应当看到的版本。
-
-三条硬约束：
-- **拿不到合成环境就不许开**（`composed_env()` 返回空 ⇒ 只写 warn 并给出原地刷新的 PowerShell 命令）。
-  退化成用本进程 `os.environ` 开出来的窗口，验证价值为零，还会给出错误结论。
-- 开不了（`Popen` 抛异常）要 `error` 级说明，不许静默。
-- `open_clean_console()` 是唯一副作用接缝；有一条用例真桩 `subprocess.Popen` 钉住
-  `env` 与 `creationflags` 两个参数名——写错了只有用户点下去才会炸。
-
-护栏用例：`CleanTerminalWindow`（8 条）。
+> **2026-10-14 用户取消本节原先要求的功能。** 原先是顶栏 `btn_clean_terminal`（「🖥 开验证终端」）
+> 用 `EnvManager.composed_env()` 现算的环境块起一个 `cmd.exe`，理由是"给一个必然干净的窗口才有结论"。
+> 现按用户要求移除，连同 `open_clean_console()`、`_on_clean_terminal_clicked()` 与护栏用例
+> `CleanTerminalWindow` 一并删除。原因有二：
+>
+> 1. **标题栏只留"每天都会用"的动作**。这一颗属于"出问题时才用"，常年占着最宽的位置却不点。
+> 2. **那条能力是可替代的**：Windows 把环境块**复制**给新进程，用户**自己新开的**
+>    PowerShell / cmd 窗口拿到的就是系统现算的那份环境，与工具开的窗口等价。
+>    所以取消的是"替用户开"这个动作，不是"能不能验证"。
+>
+> 配套保留：`_log_verification_hint` / `stale_shell_lines`（R3.12）仍然把"比这次切换更早、
+> 还开着的终端"点名到 pid，日志里也仍然给出原地刷新 PATH 的 PowerShell 命令。
+> **回归护栏**：`bt_feedback_tests.DiagnosticsExport.test_export_button_is_wired` 里有一条
+> 反向断言钉住 `btn_clean_terminal` / `btn_diagnostics` 不许复活。
+>
+> 若将来要重新加回来：能力本身没丢，从 git 历史取回 `open_clean_console()` 即可；
+> 但**必须先量标题栏预算**（见下一段），并且不要把它做成唯一入口。
 
 **加标题栏按钮要重量最窄窗口**：标题栏（标题 + 按钮 + 窗口控制）实测需要 ~992 像素，
 而窗口最小宽原本只有 880 —— 布局早就在挤压标题文字，多一个按钮后开始把
@@ -770,6 +794,12 @@ R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对�
 并给四个文字按钮设 `QSizePolicy.Fixed`。`test_title_bar_buttons_are_not_clipped_at_minimum_width`
 钉住这条；注意 `QLabel.setMinimumWidth(0)` 和 `QSizePolicy.Fixed` **都挡不住**总宽不足时
 布局的挤压（实测仍裁字），唯一有效的是把窗口最小宽抬到实际需要的值。
+
+> 量预算的工具：`tools/bt_titlebar_budget.py`（它显式 `pop("QT_QPA_PLATFORM")` 走真实平台）。
+> **2026-10-14 移除「开验证终端」「导出诊断」两颗按钮后，实测整行只需 580 像素**
+> （chip 最长文案「↓ v1.10.0 待更新」占 111），1000 这一档余量充足。
+> 该脚本的 `NAMES` 元组里还留着已删的两个按钮名 —— 无害（找不到就 `continue`），
+> 但下次动它时顺手清掉。
 
 ### R3.14 两个一键脚本都不许为 WMI 阻塞用户
 
