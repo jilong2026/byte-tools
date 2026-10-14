@@ -40,12 +40,51 @@ ARTIFACTS = ["ByteTools.exe", "ByteTools-windows-x64.zip",
              "ByteTools-macos-arm64.zip", "ByteTools-linux-x64"]
 
 # 用 Git Bash 跑脚本；必须走登录 shell（-l），否则 mingw64/bin 不在 PATH 里，脚本找不到 curl
-_BASH_CANDIDATES = [
-    r"C:\Users\E5430\.qoder\bin\git\bin\bash.exe",
-    r"C:\Users\E5430\.qoder\bin\git\usr\bin\bash.exe",
-    r"C:\Program Files\Git\bin\bash.exe",
-]
-BASH = next((p for p in _BASH_CANDIDATES if Path(p).exists()), None) or shutil.which("bash")
+#
+# 2026-10-14 修正：这里原先硬编码了作者本机的 Qoder 私有路径
+# （C:\Users\E5430\.qoder\bin\git\...）。换一台机器、Git 又不在 PATH 上时，
+# BASH 会静默变成 None，于是文件开头宣称的那 9 个端到端场景**全部空转**，
+# 而报告是全绿的 —— 最坏的一种失效：护栏看起来在跑，实际什么都没验。
+#
+# 现在的解析顺序（找不到就明确跳过，让"没跑"在报告上看得见）：
+#   1) 环境变量 BT_TEST_BASH —— Git 不在 PATH 上的机器（公司内部封装、
+#      便携版、IDE 自带 git）用它指路。这是**每机一次**的配置，不写进仓库。
+#   2) PATH 上的 bash —— Linux / macOS runner 与装了 Git for Windows 的机器
+#   3) Git for Windows 的标准安装位置（按目录 glob，不写死版本号）
+_BASH_CANDIDATES = []
+_env_bash = os.environ.get("BT_TEST_BASH", "").strip()
+if _env_bash:
+    _BASH_CANDIDATES.append(_env_bash)
+for _root in (r"C:\Program Files\Git", r"C:\Program Files (x86)\Git",
+              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git")):
+    _root_path = Path(_root)
+    if not _root_path.is_dir():
+        continue
+    for _rel in ("bin/bash.exe", "usr/bin/bash.exe"):
+        _cand = _root_path / _rel
+        if _cand.exists():
+            _BASH_CANDIDATES.append(str(_cand))
+BASH = shutil.which("bash") or next(
+    (p for p in _BASH_CANDIDATES if Path(p).exists()), None)
+
+BASH_MISSING_REASON = (
+    "本机找不到 bash，这组端到端场景无法执行。"
+    "Git 不在 PATH 上时，用环境变量 BT_TEST_BASH 指向 bash.exe"
+    "（例如 set BT_TEST_BASH=C:/path/to/git/bin/bash.exe）后重跑；"
+    "在 Linux / macOS CI runner 上本用例是正常执行的。"
+)
+
+
+def _require_bash():
+    """返回可用的 bash；找不到就抛 SkipTest，让"没跑"在报告上看得见。
+
+    刻意**不**接受 testcase 参数：setUpClass 里没有 TestCase 实例可调
+    `skipTest`（那是实例方法），而直接 `raise unittest.SkipTest` 是
+    setUpClass 里唯一能让整类被正确跳过的写法。
+    """
+    if BASH is None:
+        raise unittest.SkipTest(BASH_MISSING_REASON)
+    return BASH
 
 # 每个场景的服务端状态（附件名 + 正文），由 handler 读写
 STATE = {}
@@ -179,6 +218,9 @@ def write_assets(tmpdir):
 class SyncScriptTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # 没有 bash 就整类跳过，而不是让 9 个场景在 BASH=None 时炸成一个看不懂的
+        # TypeError、更不能悄悄通过（原先的写法就坏在后者）。
+        _require_bash()
         cls.srv = start_server()
         cls.port = cls.srv.server_address[1]
 

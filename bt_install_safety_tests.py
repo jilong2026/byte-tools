@@ -32,21 +32,9 @@ import unittest
 import zipfile
 from pathlib import Path
 
-import platform as _platform
+import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path
 
-
-def _no_wmi(*_a, **_k):
-    raise OSError("WMI disabled for test process")
-
-
-_platform._wmi_query = _no_wmi
-if hasattr(_platform.uname, "cache_clear"):
-    _platform.uname.cache_clear()
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+REPO_ROOT = str(_btprelude.REPO_ROOT)
 
 import main  # noqa: E402
 
@@ -76,10 +64,9 @@ class CardInitRegression(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # 造任何 QWidget 之前必须先有 QApplication，否则 Qt 直接 abort()
-        # （症状是进程以 127 退出、日志里一行 traceback 都没有）。
-        from PySide6.QtWidgets import QApplication
-        cls._app = QApplication.instance() or QApplication([])
+        # 造任何 QWidget 之前必须先有 QApplication，否则 Qt 直接 abort()（症状是
+        # 进程以 127 退出、日志里一行 traceback 都没有）。见 _btprelude.ensure_app。
+        cls._app = _btprelude.ensure_app()
         cls._components = main.build_components()
 
     def _make_card(self, comp):
@@ -167,8 +154,7 @@ class IconRendering(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from PySide6.QtWidgets import QApplication
-        cls._app = QApplication.instance() or QApplication([])
+        cls._app = _btprelude.ensure_app()
         cls._components = main.build_components()
         # 渲染要 QtGui/QtSvg，起应用实例就够了，但先按 key 把缓存清掉，
         # 免得本文件与其它套件在同一进程里互相污染缓存结果

@@ -22,18 +22,9 @@ from pathlib import Path
 import platform as _platform
 
 
-def _no_wmi(*_a, **_k):
-    raise OSError("WMI disabled for test process")
+import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path
 
-
-_platform._wmi_query = _no_wmi
-if hasattr(_platform.uname, "cache_clear"):
-    _platform.uname.cache_clear()
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+REPO_ROOT = str(_btprelude.REPO_ROOT)
 
 import main  # noqa: E402
 
@@ -265,7 +256,15 @@ class SingleTopDirRule(unittest.TestCase):
     """
 
     def _extract(self, entries):
-        """造一个只含给定条目的 zip，跑 extract_archive，返回它认定的安装根。"""
+        """造一个只含给定条目的 zip，跑 extract_archive，返回它认定的安装根。
+
+        异常**不许**在这里被吞掉转成 None（2026-10-14 修正）。原先是
+        `except Exception: return None`，后果是：extract_archive 一旦因为
+        任何原因抛异常（例如新加的归档越界校验），这三条用例会**静默**
+        变成"返回 None"，而其中两条只断言 `assertNotEqual(root.name, ...)`，
+        对 None 取 .name 本该抛错 —— 于是它们从"钉住 collapse 规则"退化成
+        "什么都钉不住"，而且报告是绿的。"抛异常"和"没跑"必须在报告上可区分。
+        """
         import tempfile
         import zipfile
         tmp = Path(tempfile.mkdtemp())
@@ -277,9 +276,9 @@ class SingleTopDirRule(unittest.TestCase):
         out = tmp / "out"
         try:
             return main.extract_archive(zpath, out)
-        except Exception:
-            # 解压目标不存在等副作用不在本组用例的断言范围
-            return None
+        except Exception as exc:
+            self.fail(f"extract_archive({entries!r}) 抛了异常："
+                      f"{type(exc).__name__}: {exc}")
 
     def test_one_dir_and_no_loose_files_collapses_into_it(self):
         root = self._extract(["only/one.txt"])
@@ -290,6 +289,7 @@ class SingleTopDirRule(unittest.TestCase):
     def test_one_dir_plus_loose_files_keeps_install_dir(self):
         """1 目录 + 根上散文件 ⇒ 不许 collapse，否则散文件被留在外面。"""
         root = self._extract(["dist/", "dist/x.txt", "tool.exe"])
+        self.assertIsNotNone(root, "extract_archive 返回了 None")
         self.assertIsNotNone(root, "extract_archive 返回了 None")
         self.assertNotEqual(root.name, "dist",
                             "根上有散文件时 collapse 会丢掉那些文件（pnpm 实测踩过）")
@@ -322,15 +322,18 @@ class MsiExtraction(unittest.TestCase):
         main.subprocess.run = self._run
 
     def test_msi_does_not_fall_into_the_single_binary_copy_branch(self):
-        """单文件分支只会把文件拷进目录根 —— 那等于"装机完成"是假的。"""
+        """单文件分支只会把文件拷进目录根 —— 那等于"装机完成"是假的。
+
+        2026-10-14：原先这里是 `except Exception: pass`，于是"msiexec 提取得
+        失败"与"代码根本没走到提取分支"在报告上完全一样。这条用例真正想证的是
+        **不落进单二进制拷贝分支**，那件事由 finally 里的断言负责；异常该冒就冒。
+        """
         tmp = Path(os.environ.get("TEMP", "/tmp")) / "bt_msi_probe"
         shutil.rmtree(tmp, ignore_errors=True)
         (tmp).mkdir(parents=True, exist_ok=True)
         (tmp / "x.msi").write_bytes(b"\xd0\xcf\x11\xe0" + b"\0" * 64)
         try:
             main.extract_archive(tmp / "x.msi", tmp / "out")
-        except Exception:
-            pass
         finally:
             self.assertFalse((tmp / "out" / "x.msi").exists(),
                              "msi 被当成单二进制直接拷贝了，没有走提取")
@@ -340,10 +343,7 @@ class MsiExtraction(unittest.TestCase):
         tmp = Path(os.environ.get("TEMP", "/tmp")) / "bt_msi_probe"
         tmp.mkdir(exist_ok=True)
         try:
-            try:
-                main.extract_archive(tmp / "x.msi", tmp / "out")
-            except Exception:
-                pass    # 目录还不存在之类的副作用不在本用例断言范围
+            main.extract_archive(tmp / "x.msi", tmp / "out")
             self.assertTrue(self.calls, "没调用 msiexec")
             cmd = self.calls[0]
             self.assertIn("msiexec", cmd[0].lower())

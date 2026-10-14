@@ -42,6 +42,15 @@ on:
     # 仅 v 开头的版本号 tag 触发，避免任意分支推送误触发
     tags:
       - 'v*'
+    # 2026-10-14 新增：dev 分支的普通推送也跑护栏测试。
+    # 此前唯一触发点是打 tag，而 tag 是发版动作 —— 也就是说 834 条用例在
+    # 整个开发周期里**一次都不会自动跑过**。test job 只需要 3~5 分钟，
+    # 换"改坏了当场就红"，这笔账非常划算。
+    branches:
+      - 'dev'
+      - 'master'
+  # PR 也跑：不用等推上去才发现自己打坏了护栏。
+  pull_request:
   # 手动触发：用于补同步历史 tag —— 例如 Gitee 侧网络失败导致产物缺失，
   # 而 GitHub Release 已经是好的。填写 tag_name 后只跑 Gitee 同步任务，
   # 不重新构建，直接复用 GitHub Release 上已有的产物。
@@ -78,10 +87,59 @@ env:
   GITEE_REPO: byte-tools
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 护栏测试门禁（2026-10-14 新增）
+  # ---------------------------------------------------------------------------
+  # 为什么必须有这个 job：bt_*_tests.py 不匹配任何默认发现机制的名字
+  # （unittest 要 test*.py、pytest 要 test_*.py / *_test.py），所以
+  # `unittest discover` 与 `pytest` 都是收集到 0 条。加之此前 CI 只有
+  # build 与 sync 两个 job —— 834 条用例在自动化流程里等于完全不存在。
+  # 现在由 run_all_tests.py 逐文件起子进程跑，build 必须 needs 本 job：
+  # 护栏红的包不许发出去。
+  test:
+    name: 护栏测试
+    # 手动补同步时不跑测试：那条路径只重建 Gitee 附件，产物早就在 GitHub 上了
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # PySide6 在 Linux 上即使走 offscreen 平台插件也要这几个系统库：
+      # 缺任何一个的表现是 "Failed to create a QGuiApplication" 或
+      # "could not load the Qt platform plugin"，看起来像测试代码坏了，
+      # 其实是 runner 缺依赖。
+      - name: 装 Qt 运行所需的系统库
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3 \
+            libfontconfig1 libxrender1 libxi6 libxcb-cursor0
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip --retries 3 --timeout 60
+          python -m pip install -r requirements.txt
+
+      # 逐文件起子进程是这个 runner 存在的意义：各文件 monkey patch 的是
+      # 同一批模块级全局（main.setattr 有 168 处），同进程跑会互相污染；
+      # 而某个文件里 Qt 直接 abort 时（进程 127 退出、无 traceback）也
+      # 不会把整批用例一起带走。
+      - name: 跑全部护栏
+        run: python -u run_all_tests.py
+
   build:
     name: 构建 ${{ matrix.platform_name }}
     # 手动补同步时不重新构建：产物已经在 GitHub Release 上了，重新打包纯属浪费
     if: github.event_name != 'workflow_dispatch'
+    # 2026-10-14：发版前必须过护栏。tag 推送即发布，这条依赖保证测试红时
+    # 三个平台都不会被打包、也不会有 Release 被创建。
+    needs: test
     runs-on: ${{ matrix.runner }}
     # 兜底：单个平台 job 的最长运行时长，超时会被取消（默认 360 分钟太长，
     # 一卡就是 6 小时，且会让 needs: build 的 Gitee 同步 job 一直等）。

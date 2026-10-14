@@ -1165,7 +1165,10 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R5.2 适用范围
 
-- `LAUNCH_KEYS` 里的组件。当前为 `{"jenkins", "activemq", "nacos"}`。
+- `LAUNCH_KEYS` 里的组件。**不手写清单**：真源是 `main.py` 的 `LAUNCH_OF`，
+  `LAUNCH_KEYS = set(LAUNCH_OF)` 由它派生（`bt_launch_tests.py` 会把实际集合钉死）。
+  此处曾写死 `{"jenkins", "activemq", "nacos"}` 并长期漂移到落后 12 个组件 ——
+  手抄的第二份白名单必然对不上。
 - 不在白名单的组件不得出现启动按钮，也不得被 `ServiceManager` 写入登记
   （`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)`，不在登记表就是 `None`）。
 
@@ -1266,7 +1269,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R5.6 护栏用例
 
-`bt_launch_tests.py`（133 条，全离线，不真起中间件）盯住：
+`bt_launch_tests.py`（全离线，不真起中间件；用例数以 `.venv/Scripts/python.exe -u run_all_tests.py` 的输出为准——数字写在文档里只会漂移，实测曾长期停在 133 而实际已 257）盯住：
 `LaunchSpecTable`（白名单恰为 `{jenkins, activemq, nacos}`、三平台命令非空、白名单外无 launch、
 `test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"、`test_plan_two_fields_default_to_plan_one_behaviour`
 钉住"计划二新字段的默认值就是计划一既有行为"）、`RunningMap`（含旧格式记录缺 `ports` 的加载侧归一）、
@@ -1608,7 +1611,7 @@ README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文�
 
 ### R12.4 用例
 
-`bt_update_check_tests.py`（23 条，全离线：`check_for_update(fetch=...)` 是可注入接缝，
+`bt_update_check_tests.py`（全离线，用例数以 `run_all_tests.py` 输出为准：`check_for_update(fetch=...)` 是可注入接缝，
 测试不联网）：响应解析与拒绝形状、无产物 Release、数值版本比较、两时代产物挑选、
 24 小时频控、同版本只提示一次、失败静默位、加速器兜底、隐私线、
 chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R12.5 那五条：

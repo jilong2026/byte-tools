@@ -15,18 +15,9 @@ import unittest
 import platform as _platform
 
 
-def _no_wmi(*_a, **_k):
-    raise OSError("WMI disabled for test process")
+import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path
 
-
-_platform._wmi_query = _no_wmi
-if hasattr(_platform.uname, "cache_clear"):
-    _platform.uname.cache_clear()
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+REPO_ROOT = str(_btprelude.REPO_ROOT)
 
 import main  # noqa: E402
 
@@ -573,8 +564,13 @@ class MirrorSpeedOrder(unittest.TestCase):
                 continue
             try:
                 lst = comp.versions[0].urls_for_current()
-            except Exception:
-                continue
+            except Exception as exc:
+                # 2026-10-14 修正：原先是 `except Exception: continue`，
+                # 于是"这个组件的源列表解析炸了"与"它压根不在断言范围内"
+                # 在报告上完全一样 —— 而本组用例要的正是"源顺序"这条事实，
+                # 解析失败时最该红。用 subTest 定位到具体组件再失败。
+                self.fail(f"{key} 的 urls_for_current() 抛了异常（源顺序无从校验）："
+                          f"{type(exc).__name__}: {exc}")
             mainland = [u for u in lst if is_mainland(u)]
             if not mainland or self._host(mainland[0]) != "repo.huaweicloud.com":
                 continue

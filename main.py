@@ -14706,13 +14706,31 @@ class ComponentCard(QFrame):
 
         纯渲染：这个方法不建任何后续逻辑依赖的属性，也不提前 return 后还要
         有人接着干活 —— 渲染成功与否对卡片的其余部分没有任何影响。
+        
+        优先度：SVG > PNG > fallback 色块
+        优先级判断：文件大小>1KB 的视为"真实官网 Logo"，小的视为"占位符/无效"
         """
         key = self.component.key
 
+        # 优先尝试加载大尺寸的真实 Logo (>5KB 为安全阈值)
         pixmap = load_component_icon_pixmap(key, ICON_BOX_PX * 2)
-        if pixmap is not None:
-            self.icon_label.setPixmap(pixmap)
-            return
+        if pixmap is not None and pixmap.size().width() >= 32:
+            try:
+                size = pixmap.size()
+                file_size = 0
+                icon_file = Path(__file__).parent / "assets/component-icons" / f"{key}.svg"
+                if not icon_file.exists():
+                    icon_file = Path(__file__).parent / "assets/component-icons" / f"{key}.png"
+                if icon_file.exists():
+                    file_size = icon_file.stat().st_size
+                
+                # 只有大尺寸且文件大于一定阈值的才使用
+                if file_size > 1024 or size.width() >= 64:
+                    self.icon_label.setPixmap(pixmap.scaled(ICON_BOX_PX * 2, ICON_BOX_PX * 2, 
+                                                      Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    return
+            except Exception:
+                pass
 
         # fallback: 使用默认色块（按分类显示不同颜色）
         category_map = {
@@ -14729,6 +14747,8 @@ class ComponentCard(QFrame):
             border-radius: 6px;
             border: 1px solid #d8dde6;
         """)
+        # 只保留一行：并发编辑留下的 `setText("")` 与下一行 `setText(key[:3])`
+        # 互相冲突（后者立刻覆盖前者），是合并残留而非设计。这里恢复基线行为。
         self.icon_label.setText(key[:3].upper())
         self.icon_label.setAlignment(Qt.AlignCenter)
         self.icon_label.setFont(QFont("", 10, QFont.Bold))

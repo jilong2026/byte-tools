@@ -25,18 +25,9 @@ from pathlib import Path
 import platform as _platform
 
 
-def _no_wmi(*_a, **_k):
-    raise OSError("WMI disabled for test process")
+import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path
 
-
-_platform._wmi_query = _no_wmi
-if hasattr(_platform.uname, "cache_clear"):
-    _platform.uname.cache_clear()
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+REPO_ROOT = str(_btprelude.REPO_ROOT)
 
 import main  # noqa: E402
 from bt_component_category_tests import EXPECTED_MEMBERSHIP  # noqa: E402
@@ -46,7 +37,13 @@ from bt_multiversion_tests import EnvSandbox as _EnvSandbox  # noqa: E402
 
 # 造任何 QWidget 之前必须先有 QApplication，否则 Qt 直接 abort() —— 症状是进程以
 # 127 退出、日志里一行 traceback 都没有，极易被误判成"命令没跑起来"。
-# 整套 discover 时对面 bt_grid_layout_tests 会先把 app 建好，所以这条只在**单独跑本文件**时才暴露。
+#
+# 注：原注释写的是"整套 discover 时对面 bt_grid_layout_tests 会先把 app 建好，
+# 所以这条只在单独跑本文件时才暴露"。那句话是**错的**：bt_*_tests.py 不匹配任何
+# 默认 discover pattern（unittest 要 test*.py、pytest 要 test_*.py / *_test.py），
+# `unittest discover` 与 pytest 都是**收集到 0 条**，"整套 discover"从来没发生过。
+# 现在统一由 run_all_tests.py 逐文件起子进程来跑（每个进程自建 app）。
+# 前置三段（WMI 桩 / offscreen / sys.path）已收敛到 _btprelude。
 from PySide6.QtWidgets import QApplication  # noqa: E402
 _APP = QApplication.instance() or QApplication([])
 

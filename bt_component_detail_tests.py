@@ -17,15 +17,9 @@ import re
 import sys
 import unittest
 
-_platform._wmi_query = lambda *a, **k: (_ for _ in ()).throw(
-    OSError("WMI disabled for test process"))
-if hasattr(_platform.uname, "cache_clear"):
-    _platform.uname.cache_clear()
+import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+REPO_ROOT = str(_btprelude.REPO_ROOT)
 
 import main  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
