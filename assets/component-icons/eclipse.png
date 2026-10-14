@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="client-nojs">
+<head>
+<meta charset="UTF-8"/>
+<title>Eclipsepedia</title>
+<script>document.documentElement.className = document.documentElement.className.replace( /(^|\s)client-nojs(\s|$)/, "$1client-js$2" );</script>
+<script>window.RLQ = window.RLQ || []; window.RLQ.push( function () {
+mw.config.set({"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":!1,"wgNamespaceNumber":0,"wgPageName":"Main_Page","wgTitle":"Main Page","wgCurRevisionId":440858,"wgRevisionId":440858,"wgArticleId":1,"wgIsArticle":!0,"wgIsRedirect":!1,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":[],"wgBreakFrames":!1,"wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgMonthNamesShort":["","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"],"wgRelevantPageName":"Main_Page","wgRelevantArticleId":1,"wgIsProbablyEditable":!1,"wgRestrictionEdit":["sysop"],"wgRestrictionMove":["sysop"],"wgIsMainPage":!0,"wgWikiEditorEnabledModules":{"toolbar":!1,"dialogs":!1,"preview":!1,"publish":!1},
+"wgCategoryTreePageCategoryOptions":"{\"mode\":0,\"hideprefix\":20,\"showcount\":true,\"namespaces\":false}"});mw.loader.implement("user.options",function($,jQuery){mw.user.options.set({"variant":"en"});});mw.loader.implement("user.tokens",function($,jQuery){mw.user.tokens.set({"editToken":"+\\","patrolToken":"+\\","watchToken":"+\\"});});mw.loader.load(["mediawiki.page.startup","mediawiki.legacy.wikibits"]);
+} );</script>
+<link rel="stylesheet" href="/load.php?debug=false&amp;lang=en&amp;modules=mediawiki.legacy.commonPrint%2Cshared%7Cmediawiki.sectionAnchor&amp;only=styles&amp;skin=solstice"/>
+<link rel="stylesheet" href="/skins/solstice/public/css/styles.css?303" media="screen, print"/>
+<meta name="ResourceLoaderDynamicStyles" content=""/>
+<style>a:lang(ar),a:lang(kk-arab),a:lang(mzn),a:lang(ps),a:lang(ur){text-decoration:none}</style>
+<script async="" src="/load.php?debug=false&amp;lang=en&amp;modules=startup&amp;only=scripts&amp;skin=solstice"></script>
+<meta name="generator" content="MediaWiki 1.26.4"/>
+<link rel="shortcut icon" href="/eclipse.org-common/themes/solstice/public/images/favicon.ico"/>
+<link rel="search" type="application/opensearchdescription+xml" href="/opensearch_desc.php" title="Eclipsepedia (en)"/>
+<link rel="EditURI" type="application/rsd+xml" href="https://wiki.eclipse.org/api.php?action=rsd"/>
+<link rel="alternate" type="application/atom+xml" title="Eclipsepedia Atom feed" href="/index.php?title=Special:RecentChanges&amp;feed=atom"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body class="mediawiki ltr sitedir-ltr ns-0 ns-subject page-Main_Page skin-solstice action-view" id="solstice">
+
+<a class="sr-only" href="#content">Skip to main content</a>
+<header class="header-wrapper" id="header-wrapper">
+  <div class="clearfix toolbar-container-wrapper">
+    <div class="container-fluid">
+      <div class="text-right toolbar-row row hidden-print">
+        <div class="col-md-24 row-toolbar-col">
+               <ul class="list-inline">
+                  <li id="pt-login">
+            <a href="/index.php?title=Special:UserLogin&amp;returnto=Main+Page" class="toolbar-link toolbar-login">
+              <i class="fa fa-sign-in fa-fw"></i> Log in            </a>
+          </li>
+                <li><a class="toolbar-link toolbar-manage-cookies dropdown-toggle"><i class="fa fa-wrench"></i> Manage Cookies</a></li>
+      </ul>
+            </div>
+      </div>
+    </div>
+  </div>
+  <div class="container-fluid">
+    <div class="row" id="header-row">
+      <div class="col-sm-5 col-md-4" id="header-left">
+        <div class="wrapper-logo-default"><a href="https://www.eclipse.org/"><img class="logo-eclipse-default hidden-xs" alt="Eclipse.org logo" width="160" src="//www.eclipse.org/eclipse.org-common/themes/solstice/public/images/logo/eclipse-foundation-white-orange.svg"/></a></div>
+      </div>
+      <div class="col-sm-19 col-md-20 margin-top-10" id="main-menu-wrapper">
+        <div class="float-right hidden-xs" id="btn-call-for-action"><a href="https://eclipse.org/downloads/" class="btn btn-huge btn-warning"><i class="fa fa-download"></i> Download</a></div>
+        <div class="navbar yamm float-sm-right" id="main-menu">
+          <div class="navbar-collapse collapse" id="navbar-main-menu">
+            <ul class="nav navbar-nav">
+              <li><a href="https://www.eclipse.org/projects/" target="_self">Projects</a></li>
+              <li><a href="https://www.eclipse.org/org/workinggroups/" target="_self">Working Groups</a></li>
+              <li><a href="https://www.eclipse.org/membership/" target="_self">Members</a></li>
+              <li class="dropdown visible-xs">
+                <a href="#" data-toggle="dropdown" class="dropdown-toggle">Community <b class="caret"></b></a>
+                <ul class="dropdown-menu">
+                  <li><a href="http://marketplace.eclipse.org">Marketplace</a></li>
+                  <li><a href="http://events.eclipse.org">Events</a></li>
+                  <li><a href="http://www.planeteclipse.org/">Planet Eclipse</a></li>
+                  <li><a href="https://www.eclipse.org/community/eclipse_newsletter/">Newsletter</a></li>
+                  <li><a href="https://www.youtube.com/user/EclipseFdn">Videos</a></li>
+                  <li><a href="https://blogs.eclipse.org">Blogs</a></li>
+                </ul>
+              </li>
+              <li class="dropdown visible-xs">
+                <a href="#" data-toggle="dropdown" class="dropdown-toggle">Participate <b class="caret"></b></a>
+                <ul class="dropdown-menu">
+                  <li><a href="https://bugs.eclipse.org/bugs/">Report a Bug</a></li>
+                  <li><a href="https://www.eclipse.org/forums/">Forums</a></li>
+                  <li><a href="https://www.eclipse.org/mail/">Mailing Lists</a></li>
+                  <li><a href="https://wiki.eclipse.org/">Wiki</a></li>
+                  <li><a href="https://wiki.eclipse.org/IRC">IRC</a></li>
+                  <li><a href="https://www.eclipse.org/org/research/">Research</a></li>
+                </ul>
+              </li>
+              <li class="dropdown visible-xs">
+                <a href="#" data-toggle="dropdown" class="dropdown-toggle">Eclipse IDE <b class="caret"></b></a>
+                <ul class="dropdown-menu">
+                  <li><a href="https://www.eclipse.org/downloads">Download</a></li>
+                  <li><a href="https://www.eclipse.org/eclipseide">Learn More</a></li>
+                  <li><a href="https://help.eclipse.org">Documentation</a></li>
+                  <li><a href="https://www.eclipse.org/getting_started">Getting Started / Support</a></li>
+                  <li><a href="https://www.eclipse.org/contribute/">How to Contribute</a></li>
+                  <li><a href="https://www.eclipse.org/ide/">IDE and Tools</a></li>
+                  <li><a href="https://www.eclipse.org/forums/index.php/f/89/">Newcomer Forum</a></li>
+                </ul>
+              </li>
+              <!-- More -->
+              <li class="dropdown eclipse-more hidden-xs">
+                <a data-toggle="dropdown" class="dropdown-toggle" role="button">More<b class="caret"></b></a>
+                <ul class="dropdown-menu">
+                  <li>
+                    <!-- Content container to add padding -->
+                    <div class="yamm-content">
+                      <div class="row">
+                        <ul class="col-sm-8 list-unstyled">
+                          <li>
+                            <p><strong>Community</strong></p>
+                          </li>
+                          <li><a href="http://marketplace.eclipse.org">Marketplace</a></li>
+                          <li><a href="http://events.eclipse.org">Events</a></li>
+                          <li><a href="http://www.planeteclipse.org/">Planet Eclipse</a></li>
+                          <li><a href="https://www.eclipse.org/community/eclipse_newsletter/">Newsletter</a></li>
+                          <li><a href="https://www.youtube.com/user/EclipseFdn">Videos</a></li>
+                          <li><a href="https://blogs.eclipse.org">Blogs</a></li>
+                        </ul>
+                        <ul class="col-sm-8 list-unstyled">
+                          <li>
+                            <p><strong>Participate</strong></p>
+                          </li>
+                          <li><a href="https://bugs.eclipse.org/bugs/">Report a Bug</a></li>
+                          <li><a href="https://www.eclipse.org/forums/">Forums</a></li>
+                          <li><a href="https://www.eclipse.org/mail/">Mailing Lists</a></li>
+                          <li><a href="https://wiki.eclipse.org/">Wiki</a></li>
+                          <li><a href="https://wiki.eclipse.org/IRC">IRC</a></li>
+                          <li><a href="https://www.eclipse.org/org/research/">Research</a></li>
+                        </ul>
+                        <ul class="col-sm-8 list-unstyled">
+                          <li>
+                            <p><strong>Eclipse IDE</strong></p>
+                          </li>
+                          <li><a href="https://www.eclipse.org/downloads">Download</a></li>
+                          <li><a href="https://www.eclipse.org/eclipseide">Learn More</a></li>
+                          <li><a href="https://help.eclipse.org">Documentation</a></li>
+                          <li><a href="https://www.eclipse.org/getting_started">Getting Started / Support</a></li>
+                          <li><a href="https://www.eclipse.org/contribute/">How to Contribute</a></li>
+                          <li><a href="https://www.eclipse.org/ide/">IDE and Tools</a></li>
+                          <li><a href="https://www.eclipse.org/forums/index.php/f/89/">Newcomer Forum</a></li>
+                        </ul>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </li>
+            </ul>
+          </div>
+          <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target="#navbar-main-menu">
+            <span class="sr-only">Toggle navigation</span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            </button>
+            <div class="wrapper-logo-mobile"><a class="navbar-brand visible-xs" href="https://www.eclipse.org/"><img class="logo-eclipse-default-mobile img-responsive" alt="Eclipse.org logo" width="160" src="//www.eclipse.org/eclipse.org-common/themes/solstice/public/images/logo/eclipse-foundation-white-orange.svg"/></a></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+<section class="default-breadcrumbs hidden-print" id="breadcrumb">
+  <div class="container-fluid">
+    <h3 class="sr-only">Breadcrumbs</h3>
+    <div class="row">
+      <div class="col-sm-24">
+        <ol class="breadcrumb">
+          <li><a href="https://www.eclipse.org/">Home</a></li>
+          <li><a href="/Main_Page">Eclipse Wiki</a></li>
+          <li class="active">Main Page</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- /#breadcrumb -->
+<main>
+<div class="container-fluid padding-15 padding-top-20">
+    
+    
+    <!-- content -->
+    <section id="content" class="mw-body container-full clearfix 0">
+      <div id="mw-js-message" style="display:none;"></div>
+
+            <!-- sitenotice -->
+      <div id="siteNotice"><div id="localNotice" lang="en" dir="ltr"><h2><span class="mw-headline" id="Notice:_This_Wiki_is_now_read_only_and_edits_are_no_longer_possible._Please_see:_https:.2F.2Fgitlab.eclipse.org.2Feclipsefdn.2Fhelpdesk.2F-.2Fwikis.2FWiki-shutdown-plan_for_the_plan.">Notice: This Wiki is now read only and edits are no longer possible.  Please see: <a rel="nofollow" class="external free" href="https://gitlab.eclipse.org/eclipsefdn/helpdesk/-/wikis/Wiki-shutdown-plan">https://gitlab.eclipse.org/eclipsefdn/helpdesk/-/wikis/Wiki-shutdown-plan</a> for the plan.</span></h2>
+</div></div>
+      <!-- /sitenotice -->
+      
+      <!-- bodyContent -->
+      <div id="bodyContent">
+
+        
+                <!-- jumpto -->
+        <div id="jump-to-nav" class="mw-jump">
+          Jump to: <a href="#mw-head">navigation</a>,
+          <a href="#p-search">search</a>
+        </div>
+        <!-- /jumpto -->
+        
+          <!-- leftcol -->
+          <aside class="col-md-4 noprint hidden-print" id="leftcol">
+                      <form class="input-group" role="form" id="form-eclipse-search" action="/index.php" id="searchform">
+              <input id="searchInput" class="search-query form-control" type="search" accesskey="f" title="Special:Search" placeholder="Search" name="search" value="">
+
+              <span class="input-group-btn">
+                <button value="search" id="mw-searchButton" type="submit" class="btn btn-default" title="Search the pages for this text" name="fulltext">
+                  <i class="fa fa-search"></i>
+                </button>
+              </span>
+            </form>
+                      <select class="form-control margin-top-10 margin-bottom-10 visible-xs visible-sm" onchange="this.options[this.selectedIndex].value && (window.location = this.options[this.selectedIndex].value);"><option class="fw-700 "><span class="fw-700">---Navigation---</span></option><option value="/Main_Page" selected="selected">Main Page</option><option value="/Eclipsepedia:Community_portal">Community portal</option><option value="/Eclipsepedia:Current_events">Current events</option><option value="/Special:RecentChanges">Recent changes</option><option value="/Special:Random">Random page</option><option value="https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents">Help</option></select><ul class="ul-left-nav fa-ul hidden-print leftnav hidden-xs hidden-sm"><li class="separator"><span class="separator">Navigation</span></li>                <li class="active"><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Main_Page" id="n-mainpage" title="Visit the main page [z]" accesskey="z">Main Page</a></li>                <li class=""><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Eclipsepedia:Community_portal" id="n-portal" title="About the project, what you can do, where to find things">Community portal</a></li>                <li class=""><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Eclipsepedia:Current_events" id="n-currentevents" title="Find background information on current events">Current events</a></li>                <li class=""><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Special:RecentChanges" id="n-recentchanges" title="A list of recent changes in the wiki [r]" accesskey="r">Recent changes</a></li>                <li class=""><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Special:Random" id="n-randompage" title="Load a random page [x]" accesskey="x">Random page</a></li>                <li class=""><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents" id="n-help" title="The place to find out">Help</a></li></ul>            <select class="form-control margin-top-10 margin-bottom-10 visible-xs visible-sm" onchange="this.options[this.selectedIndex].value && (window.location = this.options[this.selectedIndex].value);"><option class="fw-700 "><span class="fw-700">---Toolbox---</span></option><option value="/index.php?title=Main_Page&amp;action=info">Page information</option><option value="/index.php?title=Main_Page&amp;oldid=440858">Permanent link</option><option value="/index.php?title=Main_Page&amp;printable=yes">Printable version</option><option value="/Special:SpecialPages">Special pages</option><option value="/Special:RecentChangesLinked/Main_Page">Related changes</option><option value="/Special:WhatLinksHere/Main_Page">What links here</option></select><ul class="ul-left-nav fa-ul hidden-print leftnav hidden-xs hidden-sm"><li class="separator"><span class="separator">Toolbox</span></li><li><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/index.php?title=Main_Page&amp;action=info" id="t-info" title="More information about this page">Page information</a></li><li><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/index.php?title=Main_Page&amp;oldid=440858" id="t-permalink" title="Permanent link to this revision of the page">Permanent link</a></li><li><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/index.php?title=Main_Page&amp;printable=yes" id="t-print" rel="alternate" title="Printable version of this page [p]" accesskey="p">Printable version</a></li><li><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Special:SpecialPages" id="t-specialpages" title="A list of all special pages [q]" accesskey="q">Special pages</a></li><li><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Special:RecentChangesLinked/Main_Page" id="t-recentchangeslinked" title="Recent changes in pages linked from this page [k]" accesskey="k">Related changes</a></li><li><i class="fa fa-angle-double-right orange fa-fw"></i> <a href="/Special:WhatLinksHere/Main_Page" id="t-whatlinkshere" title="A list of all wiki pages that link here [j]" accesskey="j">What links here</a></li></ul>                                  </aside>
+          <!-- /leftcol -->
+
+          <!-- mainContent -->
+          <div id="mainContent" class="col-md-20">
+                      <ul class="nav nav-tabs noprint hidden-print" role="tablist">
+                       <li id="ca-nstab-main" class="active"><a href="/Main_Page"  title="View the content page [c]" accesskey="c" tabindex="-1">Main page</a></li>
+                        <li id="ca-talk"><a href="/Talk:Main_Page"  title="Discussion about the content page [t]" accesskey="t" tabindex="-1">Discussion</a></li>
+                        <li id="ca-viewsource"><a href="/index.php?title=Main_Page&amp;action=edit"  title="This page is protected.&#10;You can view its source [e]" accesskey="e" tabindex="-1">View source</a></li>
+                        <li id="ca-history" class="collapsible"><a href="/index.php?title=Main_Page&amp;action=history"  title="Past revisions of this page [h]" accesskey="h" tabindex="-1">History</a></li>
+                      </ul>            <div class="tab-content background-white">
+              <div id="tab-pane-main-page-content" class="tab-pane active">
+
+                
+                <h1 id="firstHeading" class="firstHeading page-header">
+                  <span dir="auto">Main Page</span>
+                </h1>
+                <div id="main-page-content">
+                                    
+                  
+                  <div id="mw-content-text" lang="en" dir="ltr" class="mw-content-ltr"><table border="0" width="100%" cellspacing="0" cellpadding="0"> 
+  <tr>
+    <td colspan="2" valign="top" style="padding-right: 10px;">
+<p>Welcome to the Eclipsepedia - the Eclipse.org Wiki. You can browse the Wiki anonymously, but you must log in using your Eclipse Foundation account to edit pages.  If you don't have an account, you can <a rel="nofollow" class="external text" href="https://dev.eclipse.org/site_login/createaccount.php">create one here</a>.  
+</p><p>Want to know what extensions we're running on this Wiki?  Check them out <a href="/Special:Version" title="Special:Version">here</a>.
+</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <table cellpadding="0" cellspacing="0" border="0" width="99%" style="background-color: #f6f6f6; border-style: solid; border-color: #afbbdc; border-width: thin;">
+        <tr>
+          <td style="background-color: #afbbdc; border-style: solid; border-color: #afbbdc; border-width: thin; padding-left:10px;"><h2><span class="mw-headline" id="Links">Links</span></h2></td>
+        </tr>
+        <tr>
+<td style="padding: 5px;">
+<table border="0" width="100%" style="background-color: transparent;height: 330px;">
+<tr>
+<td>
+<ul><li> <a href="/Ssh_fingerprints" title="Ssh fingerprints"> Eclipse.org SSH fingerprints</a></li>
+<li> <a href="/Architecture_Council" title="Architecture Council">Architecture Council</a></li>
+<li> <a href="/Development_Resources/Builds" title="Development Resources/Builds" class="mw-redirect">Builds at Eclipse</a></li>
+<li> <a href="/Campus_Ambassador_Program" title="Campus Ambassador Program" class="mw-redirect">Campus Ambassador Program</a></li>
+<li> <a href="/Events" title="Events" class="mw-redirect">Events Calendar</a></li>
+<li> <a href="/Eclipse_Day" title="Eclipse Day">Eclipse Days Information</a></li>
+<li> <a href="/Eclipse_DemoCamp" title="Eclipse DemoCamp">Eclipse Demo Camps</a></li>
+<li> <a href="/Evangelism" title="Evangelism">Evangelism</a></li>
+<li> <a rel="nofollow" class="external text" href="https://www.eclipse.org/projects/handbook/">Eclipse Project Handbook</a></li>
+<li> <a href="/Development_Resources" title="Development Resources">Development Resources</a></li>
+<li> <a href="/Foundation" title="Foundation">Eclipse Foundation</a></li>
+<li> <a href="/Getting_Involved_with_the_Community" title="Getting Involved with the Community">Getting Involved with the Community</a></li>
+<li> <a href="/Google_Summer_of_Code" title="Google Summer of Code">Google Summer of Code</a> </li></ul>
+</td>
+<td>
+<ul><li> <b><a href="/Simultaneous_Release" title="Simultaneous Release"> Simultaneous Release</a></b></li>
+<li> <a href="/IP_Stuff" title="IP Stuff">IP Stuff</a></li>
+<li> <a href="/IRC" title="IRC">IRC</a></li>
+<li> <a href="/Kudos" title="Kudos">Kudos</a></li>
+<li> <b><a href="/Main_Page_CN" title="Main Page CN"> Main Page in Chinese</a></b></li>
+<li> <a href="/Learn_About_Eclipse" title="Learn About Eclipse">Learn About Eclipse</a></li>
+<li> <a href="/Marketing_Resources" title="Marketing Resources">Marketing Resources</a></li>
+<li> <a href="/Regional_Communities" title="Regional Communities"> Regional Eclipse Communities</a></li>
+<li> <a href="/Rich_Client_Platform" title="Rich Client Platform">Rich Client Platform</a> (RCP)</li>
+<li> <a href="/index.php?title=Training_Schedule&amp;action=edit&amp;redlink=1" class="new" title="Training Schedule (page does not exist)"> Training</a></li>
+<li> <a href="/User_Interface_Guidelines" title="User Interface Guidelines">User Interface Guidelines</a></li>
+<li> <a href="/DocumentationGuidelines" title="DocumentationGuidelines"> Guidelines for Using the Wiki for Documentation</a></li>
+<li> <a href="/Project_Management_Infrastructure" title="Project Management Infrastructure">Project Management Infrastructure</a></li></ul>
+</td></tr></table>
+</td>
+        </tr>
+      </table>
+    </td>
+    <td>
+<table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f6f6f6; border-style: solid; border-color: #afbbdc; border-width: thin;">
+  <tr>
+    <td style="background-color: #afbbdc; border-style: solid; border-color: #afbbdc; border-width: thin; padding-left:10px;"><h2><span class="mw-headline" id="FAQs">FAQs</span></h2></td>
+  </tr>
+<tr>
+<td style="padding: 5px;">
+<ul><li> <a href="/Glossary" title="Glossary">Glossary</a> (including Eclipse initialisms)</li>
+<li> <a href="/The_Official_Eclipse_FAQs" title="The Official Eclipse FAQs">The Official Eclipse FAQs</a></li>
+<li> <a href="/Bug_Reporting_FAQ" title="Bug Reporting FAQ">Bug Reporting FAQ</a></li>
+<li> <a href="/BIRT/FAQ" title="BIRT/FAQ"> BIRT/FAQ</a></li>
+<li> <a href="/CDT/User/FAQ" title="CDT/User/FAQ"> C Development Tools FAQ</a></li>
+<li> <a href="/Git" title="Git"> Git FAQ</a></li>
+<li> <a href="/GEF_Developer_FAQ" title="GEF Developer FAQ" class="mw-redirect"> Graphical Editing Framework (GEF) FAQ</a></li>
+<li> <a href="/Graphical_Modeling_Framework_FAQ" title="Graphical Modeling Framework FAQ" class="mw-redirect"> Graphical Modeling Framework (GMF) FAQ</a></li>
+<li> <a href="/JFace_Data_Binding_FAQ" title="JFace Data Binding FAQ" class="mw-redirect">JFace Data Binding FAQ</a></li>
+<li> <a rel="nofollow" class="external text" href="https://www.eclipse.org/legal/epl-2.0/faq.php">Licensing/EPL 2.0 FAQ</a></li>
+<li> <a href="/Platform-releng-faq" title="Platform-releng-faq"> Platform Release Engineering FAQ</a></li>
+<li> <a href="/Team_FAQ" title="Team FAQ"> Platform/Team Component FAQ</a></li>
+<li> <a href="/RCP_FAQ" title="RCP FAQ" class="mw-redirect"> Rich Client Platform FAQ</a></li>
+<li> <a href="/WTP_FAQ" title="WTP FAQ"> Web Tools Platform FAQ</a></li>
+<li> <a href="/Webmaster_FAQ" title="Webmaster FAQ">Webmaster FAQ</a></li></ul>
+<ul><li> <b><a href="/Category:FAQ" title="Category:FAQ"> ...more FAQs</a></b></li></ul>
+</td>
+</tr>
+</table>
+</td>
+  </tr>
+  <tr>
+    <td colspan="2">
+<p><br />
+</p>
+<table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #f6f6f6; border-style: solid; border-color: #afbbdc; border-width: thin;">
+<tr>
+  <td colspan="2" style="background-color: #afbbdc; border-style: solid; border-color: #afbbdc; border-width: thin;padding-left:10px;"><h2><span class="mw-headline" id="Categories">Categories</span></h2></td>
+</tr>
+<tr>
+  <td colspan="2" style="padding-left:10px; padding-top:5px;">
+<p>All top-level wiki pages (e.g. <a href="/SWT" title="SWT">SWT</a>) should be categorized within one or more of the categories below.
+</p>
+  </td>
+</tr>
+<tr>
+<td style="vertical-align: top; padding: 5px;">
+<ul><li> <a href="/Category:Architecture_Council" title="Category:Architecture Council"> Architecture Council</a></li>
+<li> <a href="/Category:Best_Practices" title="Category:Best Practices"> Best Practices</a></li>
+<li> <a href="/Category:BIRT" title="Category:BIRT"> BIRT</a></li>
+<li> <a href="/Category:Data_Tools_Platform" title="Category:Data Tools Platform"> Data Tools Platform</a></li>
+<li> <a href="/Category:DSDP" title="Category:DSDP"> Device Software Development Platform</a></li>
+<li> <a href="/Category:Eclipse_IWG" title="Category:Eclipse IWG"> Eclipse Working Groups</a></li>
+<li> <a href="/Category:Modeling" title="Category:Modeling"> Eclipse Modeling Project</a></li>
+<li> <a href="/Category:Eclipse_Project" title="Category:Eclipse Project"> Eclipse Project</a></li>
+<li> <a href="/Category:EclipseRT" title="Category:EclipseRT"> Eclipse RT Project</a></li>
+<li> <a href="/Category:Eclipse_Technology_Project" title="Category:Eclipse Technology Project"> Eclipse Technology Project</a></li>
+<li> <a href="/Category:Eclipse_Web_Tools_Platform_Project" title="Category:Eclipse Web Tools Platform Project"> Eclipse Web Tools Platform Project</a></li></ul>
+</td>
+<td style="vertical-align: top; padding: 5px;">
+<ul><li> <a href="/Category:FAQ" title="Category:FAQ"> FAQs</a></li>
+<li> <a href="/Category:Jakarta_EE" title="Category:Jakarta EE"> Jakarta EE</a></li>
+<li> <a href="/Category:How_to_Contribute" title="Category:How to Contribute"> How to Contribute</a></li>
+<li> <a href="/Category:RCP" title="Category:RCP"> Rich Client Platform</a></li>
+<li> <a href="/Category:Releng" title="Category:Releng"> Releng</a></li>
+<li> <a href="/Category:Snippets" title="Category:Snippets"> Snippets</a></li>
+<li> <a href="/Category:SOA_Tools" title="Category:SOA Tools"> SOA Tools</a></li>
+<li> <a href="/Category:Tools_Project" title="Category:Tools Project"> Tools Project</a></li>
+<li> <a href="/Category:UI_Guidelines" title="Category:UI Guidelines"> UI Guidelines</a></li>
+<li> <a href="/Category:Documentation_Guidelines" title="Category:Documentation Guidelines"> Documentation Guidelines</a></li>
+<li> <b><a href="/Special:Categories" title="Special:Categories"> ...more categories</a></b></li></ul>
+</td>
+</tr>
+</table>
+</td>
+  </tr>
+<tr>
+<td colspan="2" valign="bottom" style="padding-top: 10px; padding-left: 10px; padding-right: 10px;">
+<p><small>All contributions you make to our web site (including this wiki) are governed by our <a rel="nofollow" class="external text" href="http://www.eclipse.org/legal/termsofuse.php">Terms of Use</a>, so please take the time to actually read it. Your interactions with the Eclipse Foundation web properties and any information you may provide us about yourself are governed by our <a rel="nofollow" class="external text" href="http://www.eclipse.org/legal/privacy.php">Privacy Policy</a>.</small>
+</p>
+</td>
+</tr>
+</table>
+
+<!-- 
+NewPP limit report
+Cached time: 20240524131954
+Cache expiry: 86400
+Dynamic content: false
+CPU time usage: 0.044 seconds
+Real time usage: 0.045 seconds
+Preprocessor visited node count: 17/1000000
+Preprocessor generated node count: 36/1000000
+Post‐expand include size: 0/2097152 bytes
+Template argument size: 0/2097152 bytes
+Highest expansion depth: 1/40
+Expensive parser function count: 0/100
+-->
+
+<!-- 
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    0.000      1 - -total
+-->
+
+<!-- Saved in parser cache with key my_wiki:pcache:idhash:1-0!*!0!!*!*!* and timestamp 20240524131954 and revision id 440858
+ -->
+</div>
+                                      <!-- catlinks -->
+                    <div id='catlinks' class='catlinks catlinks-allhidden'></div>                     <!-- /catlinks -->
+                                  </div>
+              </div>
+            </div>
+          </div>
+        <!-- /maincontent -->
+
+                <!-- printfooter -->
+        <div class="printfooter">
+        Retrieved from "<a dir="ltr" href="https://wiki.eclipse.org/index.php?title=Main_Page&amp;oldid=440858">https://wiki.eclipse.org/index.php?title=Main_Page&amp;oldid=440858</a>"        </div>
+        <!-- /printfooter -->
+        
+        
+        <!-- debughtml -->
+                <!-- /debughtml -->
+
+      </div>
+      <!-- /bodyContent -->
+    </section>
+    <!-- /content -->
+
+    <!-- footer -->
+    
+</div>
+<div class="featured-footer featured-footer-newsletter background-secondary">
+  <div class="container">
+    <p id="footercredit">This page was last modified 05:22, 17 September 2020 by Eclipsepedia anonymous user <a href="/Special:Contributions/Unnamed_Poltroon" title="Special:Contributions/Unnamed Poltroon">Unnamed Poltroon</a>. Based on work by Eclipsepedia anonymous user <a href="/Special:Contributions/MediaWiki_default" title="Special:Contributions/MediaWiki default">MediaWiki default</a>.</p><p id="footerviews"></p>  </div>
+</div>
+</main> <!-- /#main-content-container-row -->
+<p id="back-to-top" class="noprint hidden-print">
+  <a class="visible-xs" href="#top">Back to the top</a>
+</p>
+<footer id="solstice-footer">
+  <div class="container">
+    <div class="row">
+      <section class="col-sm-6 hidden-print" id="footer-eclipse-foundation">
+        <h2 class="section-title">Eclipse Foundation</h2>
+        <ul class="nav">
+          <li><a href="https://www.eclipse.org/org/">About Us</a></li>
+          <li><a href="https://www.eclipse.org/org/foundation/contact.php">Contact Us</a></li>
+          <li><a href="https://www.eclipse.org/donate">Donate</a></li>
+          <li><a href="https://www.eclipse.org/membership/">Members</a></li>
+          <li><a href="https://www.eclipse.org/org/documents/">Governance</a></li>
+          <li><a href="https://www.eclipse.org/org/documents/Community_Code_of_Conduct.php">Code of Conduct</a></li>
+          <li><a href="https://www.eclipse.org/artwork/">Logo and Artwork</a></li>
+          <li><a href="https://www.eclipse.org/org/foundation/directors.php">Board of Directors</a></li>
+        </ul>
+      </section>
+      <section class="col-sm-6 hidden-print" id="footer-legal">
+        <h2 class="section-title">Legal</h2>
+        <ul class="nav">
+          <li><a href="https://www.eclipse.org/legal/privacy.php">Privacy Policy</a></li>
+          <li><a href="https://www.eclipse.org/legal/termsofuse.php">Terms of Use</a></li>
+          <li><a href="https://www.eclipse.org/legal/copyright.php">Copyright Agent</a></li>
+          <li><a href="https://www.eclipse.org/legal/epl-2.0/">Eclipse Public License</a></li>
+          <li><a href="https://www.eclipse.org/legal/">Legal Resources</a></li>
+        </ul>
+      </section>
+      <section class="col-sm-6 hidden-print" id="footer-useful-links">
+        <h2 class="section-title">Useful Links</h2>
+        <ul class="nav">
+          <li><a href="https://bugs.eclipse.org/bugs/">Report a Bug</a></li>
+          <li><a href="//help.eclipse.org/">Documentation</a></li>
+          <li><a href="https://www.eclipse.org/contribute/">How to Contribute</a></li>
+          <li><a href="https://www.eclipse.org/mail/">Mailing Lists</a></li>
+          <li><a href="https://www.eclipse.org/forums/">Forums</a></li>
+          <li><a href="//marketplace.eclipse.org">Marketplace</a></li>
+        </ul>
+      </section>
+      <section class="col-sm-6 hidden-print" id="footer-other">
+        <h2 class="section-title">Other</h2>
+        <ul class="nav">
+          <li><a href="https://www.eclipse.org/ide/">IDE and Tools</a></li>
+          <li><a href="https://www.eclipse.org/projects">Projects</a></li>
+          <li><a href="https://www.eclipse.org/org/workinggroups/">Working Groups</a></li>
+          <li><a href="https://www.eclipse.org/org/research/">Research@Eclipse</a></li>
+          <li><a href="https://www.eclipse.org/security/">Report a Vulnerability</a></li>
+          <li><a href="https://status.eclipse.org">Service Status</a></li>
+        </ul>
+      </section>
+      <div class="col-sm-24 margin-top-20">
+        <div class="row">
+          <div id="copyright" class="col-md-16">
+            <p id="copyright-text">Copyright &copy; Eclipse Foundation, Inc. All Rights Reserved.</p>
+          </div>
+          <div class="col-md-8 social-media">
+            <ul class="list-inline">
+              <li>
+                <a class="social-media-link fa-stack fa-lg" href="https://twitter.com/EclipseFdn">
+                <i class="fa fa-circle-thin fa-stack-2x"></i>
+                <i class="fa fa-twitter fa-stack-1x"></i>
+                </a>
+              </li>
+              <li>
+                <a class="social-media-link fa-stack fa-lg" href="https://www.facebook.com/eclipse.org">
+                <i class="fa fa-circle-thin fa-stack-2x"></i>
+                <i class="fa fa-facebook fa-stack-1x"></i>
+                </a>
+              </li>
+              <li>
+                <a class="social-media-link fa-stack fa-lg" href="https://www.youtube.com/user/EclipseFdn">
+                <i class="fa fa-circle-thin fa-stack-2x"></i>
+                <i class="fa fa-youtube fa-stack-1x"></i>
+                </a>
+              </li>
+              <li>
+                <a class="social-media-link fa-stack fa-lg" href="https://www.linkedin.com/company/eclipse-foundation">
+                <i class="fa fa-circle-thin fa-stack-2x"></i>
+                <i class="fa fa-linkedin fa-stack-1x"></i>
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <a href="#" class="scrollup">Back to the top</a>
+    </div>
+  </div>
+</footer>
+    <!-- /footer -->
+    <script>window.RLQ = window.RLQ || []; window.RLQ.push( function () {
+mw.loader.state({"skins.solstice":"loading","user":"ready","user.groups":"ready"});mw.loader.load("/load.php?debug=false\u0026lang=en\u0026modules=skins.solstice\u0026only=scripts\u0026skin=solstice");mw.loader.load(["mediawiki.action.view.postEdit","site","mediawiki.user","mediawiki.hidpi","mediawiki.page.ready","mediawiki.searchSuggest"]);
+} );</script><script>window.RLQ = window.RLQ || []; window.RLQ.push( function () {
+mw.config.set({"wgBackendResponseTime":270});
+} );</script>  </body>
+</html>

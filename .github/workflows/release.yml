@@ -118,11 +118,11 @@ jobs:
             artifact_name: ByteTools-linux-x64
             artifact_extra: ''
             artifact_kind: linux
-          # Windows x64：单 exe（onefile + splash，双击运行）
+          # Windows x64：单 exe（onefile + splash，双击运行），另出 zip 分发备份
           - platform_name: Windows (x64)
             runner: windows-latest
             artifact_name: ByteTools.exe
-            artifact_extra: ''
+            artifact_extra: ByteTools-windows-x64.zip
             artifact_kind: windows
 
     steps:
@@ -239,14 +239,17 @@ jobs:
           echo "产物大小: $(du -sh ${{ matrix.artifact_name }} | cut -f1)"
         shell: bash
 
-      # 9. Windows 产物：onefile 单 exe，直接就是最终名
+      # 9. Windows 产物：onefile 单 exe 就是最终名，另压一份 zip 作分发备份
       #    $ErrorActionPreference='Stop' 让 PowerShell 命令出错时立即抛异常而非静默继续
-      - name: 校验 Windows 产物（单 exe）
+      - name: 准备 Windows 产物（.exe + .zip）
         if: matrix.artifact_kind == 'windows'
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not (Test-Path 'dist/ByteTools.exe')) { throw '产物未生成: dist/ByteTools.exe' }
+          Copy-Item dist/ByteTools.exe ${{ matrix.artifact_name }} -Force
+          Compress-Archive -Path dist/ByteTools.exe -DestinationPath ${{ matrix.artifact_extra }} -Force
           Write-Host "exe 大小: $((Get-Item dist/ByteTools.exe).Length) bytes"
+          Write-Host "zip 大小: $((Get-Item ${{ matrix.artifact_extra }}).Length) bytes"
         shell: pwsh
 
       # 10. 构造上传文件列表（Windows 平台同时上传 exe 和 zip，其他平台只上传主产物）

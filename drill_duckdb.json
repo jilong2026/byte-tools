@@ -1,0 +1,93 @@
+[
+  {
+    "key": "duckdb",
+    "phase": "audit",
+    "check": "installed_versions",
+    "ok": true,
+    "detail": "磁盘上未安装"
+  },
+  {
+    "key": "duckdb",
+    "phase": "audit",
+    "check": "has_download_url",
+    "ok": true,
+    "detail": "4 个源，首选 https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-wi"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "download",
+    "ok": true,
+    "detail": "duckdb-1.5.6.zip 12.3 MB 17.4s"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "install_downloaded",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\duckdb\\duckdb-1.5.6 0.2s"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "exec_path_in_home",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\duckdb\\duckdb-1.5.6\\duckdb.exe"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "apply_active_version",
+    "ok": true,
+    "detail": "PATH 已收敛为生效版本这一条：C:\\Users\\E5430\\.env-tools\\duckdb\\duckdb-1.5.6；当前进程已同步；已开着的终端与 IDE 需重开才会读到新值（Windows 若装了 Oracle javapath，个别命令仍可能被它抢先）"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "env_var_points_here",
+    "ok": true,
+    "detail": "该组件无 *_HOME（只进 PATH）"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "path_entry_persisted",
+    "ok": true,
+    "detail": "已在 HKCU Path 中：C:\\Users\\E5430\\.env-tools\\duckdb\\duckdb-1.5.6"
+  },
+  {
+    "key": "duckdb",
+    "phase": "install",
+    "check": "path_visible_in_composed_env",
+    "ok": true,
+    "detail": "合成 PATH 命中=C:\\Users\\E5430\\.env-tools\\duckdb\\duckdb-1.5.6"
+  },
+  {
+    "key": "duckdb",
+    "phase": "verify",
+    "check": "runs_in_host_env",
+    "ok": true,
+    "detail": "rc=0 out=v1.5.6 (Variegata) 069cc9f9b5"
+  },
+  {
+    "key": "duckdb",
+    "phase": "verify",
+    "check": "found_in_clean_env_path",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\duckdb\\duckdb-1.5.6\\duckdb.exe"
+  },
+  {
+    "key": "duckdb",
+    "phase": "verify",
+    "check": "runs_in_clean_env",
+    "ok": true,
+    "detail": "rc=0 out=v1.5.6 (Variegata) 069cc9f9b5"
+  },
+  {
+    "key": "duckdb",
+    "phase": "verify",
+    "check": "detect_says_installed",
+    "ok": true,
+    "detail": "installed=True source=PATH home= version="
+  }
+]

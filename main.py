@@ -5474,6 +5474,62 @@ COMPONENT_SUMMARY: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# 组件官方图标映射表（2026-10-13 新增）
+# ---------------------------------------------------------------------------
+# key: 组件标识符 → (icon_filename, default_width, default_height)
+# 所有图标最终统一缩放到 32×32 显示；width/height 仅用于原始尺寸记录。
+_COMPONENT_ICON_MAP: Dict[str, Tuple[str, int, int]] = {
+    # JetBrains 全家桶：统一的黄色 LOGO
+    "idea": ("jetbrains-intellij.svg", 48, 48),      # IntelliJ IDEA
+    "pycharm": ("jetbrains-pycharm.svg", 48, 48),    # PyCharm
+    "clion": ("jetbrains-clion.svg", 48, 48),        # CLion
+    "webstorm": ("jetbrains-webstorm.svg", 48, 48),   # WebStorm
+    "goland": ("jetbrains-goland.svg", 48, 48),     # GoLand
+    "datagrip": ("jetbrains-data-grip.svg", 48, 48),  # DataGrip
+    "android-studio": ("jetbrains-android-studio.svg", 48, 48),
+    "rider": ("jetbrains-rider.svg", 48, 48),       # Rider
+    
+    # 编程语言运行时
+    "python": ("python-logo.svg", 48, 48),          # Python
+    "node": ("nodejs-logo.svg", 48, 48),            # Node.js
+    "java": ("java-logo.svg", 48, 48),              # Java
+    "go": ("golang-logo.svg", 48, 48),              # Go
+    "rust": ("rust-logo.svg", 48, 48),              # Rust
+    "kotlin": ("kotlin-logo.svg", 48, 48),          # Kotlin
+    
+    # Git & 版本控制
+    "git": ("git-logo.svg", 48, 48),                # Git
+    
+    # Docker & K8s
+    "docker": ("docker-logo.svg", 48, 48),          # Docker
+    "kubectl": ("kubernetes-logo.svg", 48, 48),     # Kubernetes
+    
+    # 数据库
+    "redis": ("redis-logo.svg", 48, 48),            # Redis
+    "mongodb": ("mongodb-logo.svg", 48, 48),        # MongoDB
+    "mysql": ("mysql-logo.svg", 48, 48),            # MySQL
+    "postgresql": ("postgresql-logo.svg", 48, 48),  # PostgreSQL
+    
+    # 构建工具
+    "maven": ("maven-logo.svg", 48, 48),            # Maven
+    "gradle": ("gradle-logo.svg", 48, 48),          # Gradle
+    
+    # CLI 工具（用通用色块图标）
+    "jq": ("cli-tool.svg", 48, 48),                 # JSON processor
+    "helm": ("cli-tool.svg", 48, 48),               # Helm package manager
+    
+    # 开发工具（大部分没有官方 logo，用分类色块）
+    "vscode": ("github-logo.svg", 48, 48),          # VS Code (GitHub)
+    "dbeaver": ("database-client.svg", 48, 48),     # Database client
+    "postman": ("api-testing.svg", 48, 48),         # API testing tool
+}
+
+def get_component_icon_filename(key: str) -> Optional[str]:
+    """返回图标文件名或 None（用默认色块）"""
+    return _COMPONENT_ICON_MAP.get(key)[0] if key in _COMPONENT_ICON_MAP else None
+
+
+# ---------------------------------------------------------------------------
 # 「怎么用」：详情对话框第二段的文案真源（2026-10-12 用户要求详情"简洁且专业"）
 # ---------------------------------------------------------------------------
 # 写法纪律：20–45 字；动词开头，给能直接敲的命令或能直接点的按钮；
@@ -14206,9 +14262,24 @@ class ComponentCard(QFrame):
         root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(6)
 
-        # 顶部：名称 & 角标
+        # 顶部：图标 + 名称 & 角标
         top = QHBoxLayout()
-        top.setSpacing(10)
+        top.setSpacing(8)
+        
+        # 左侧图标（32×32）
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setStyleSheet("""
+            background: linear-gradient(135deg, #f5f7fa 0%, #e3e8ef 100%);
+            border-radius: 6px;
+            border: 1px solid #d8dde6;
+        """)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setPixmap(QPixmap(":/icons/default-icon.svg").scaled(
+            28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        top.addWidget(self.icon_label)
+        
+        # 标题 & 角标
         title = QLabel(self.component.display_name)
         title.setObjectName("cardTitle")
         title.setFont(QFont("", 13, QFont.Bold))
@@ -14255,6 +14326,9 @@ class ComponentCard(QFrame):
             top.addWidget(badge)
         top.addStretch(1)
         root.addLayout(top)
+        
+        # 加载图标
+        self._load_icon()
 
         self.status_label = QLabel("检测中…")
         self.status_label.setObjectName("statusLabel")
@@ -14413,6 +14487,45 @@ class ComponentCard(QFrame):
         self.progress.setTextVisible(True)
         self.progress.setValue(0)
         root.addWidget(self.progress)
+        
+        # 加载官方图标（2026-10-13 新增）
+        self._load_icon()
+
+    def _load_icon(self) -> None:
+        """加载官方图标（2026-10-13 新增）。"""
+        key = self.component.key
+        
+        # 优先使用扁平化 SVG 图标
+        icon_filename = get_component_icon_filename(key)
+        if icon_filename and icon_filename.endswith(".svg"):
+            icon_path = Path(__file__).parent / "assets" / "component-icons" / f"{key}.svg"
+            pixmap = QPixmap(str(icon_path))
+            
+            if not pixmap.isNull():
+                # 成功读取 SVG，缩放到 32×32
+                self.icon_label.setPixmap(pixmap.scaled(
+                    32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                return
+        
+        # fallback: 使用默认色块（按分类显示不同颜色）
+        category_map = {
+            "开发环境": ("#4CAF50", "#43A047"),   # 绿色系（编程语言、SDK 等）
+            "开发软件": ("#2196F3", "#1976D2"),   # 蓝色系（数据库、服务器等）
+            "一键启停": ("#FF9800", "#F57C00"),   # 橙色系（服务组件）
+            "开发工具": ("#9C27B0", "#7B1FA2"),   # 紫色系（IDE、客户端等）
+        }
+        cat = COMPONENT_CATEGORY_OF.get(key, "开发工具")
+        grad_from, grad_to = category_map.get(cat, ("#757575", "#424242"))
+        
+        self.icon_label.setStyleSheet(f"""
+            background: linear-gradient(135deg, {grad_from} 0%, {grad_to} 100%);
+            border-radius: 6px;
+            border: 1px solid #d8dde6;
+        """)
+        self.icon_label.setText(key[:3].upper())
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setFont(QFont("", 10, QFont.Bold))
+        self.icon_label.setForegroundRole(QPalette.Text)
 
         # ---- 「系统里检测到的版本」折叠区＋还原按钮（设计 §6）----
         # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余 19 张卡片保持原样，
@@ -14426,9 +14539,15 @@ class ComponentCard(QFrame):
         self._external_frame: Optional[QFrame] = None
         self._external_toggle: Optional[QPushButton] = None
         self._external_body: Optional[QWidget] = None
+        
+        # 支持接管外置版本的卡片，才创建外部折叠区
         if supports_external_takeover(self.component):
-            self._build_external_section(root)
-
+            # root 布局不在 _load_icon 的参数里 —— 从卡片自己身上拿（_build_ui
+            # 建的 QVBoxLayout(self) 就是 self.layout()）。此前这里直接引用
+            # _build_ui 的局部变量 root，NameError 让建卡第一张卡就崩、
+            # 主窗口永远起不来（2026-10-13 并发改动引入，已修）。
+            self._build_external_section(self.layout())
+        
     # ------------------------------------------------------------------
     # 「系统里检测到的版本」折叠区（§6）
     # ------------------------------------------------------------------
@@ -16244,7 +16363,11 @@ class ComponentCard(QFrame):
     def on_detail_clicked(self) -> None:
         """打开详情对话框。无副作用：只读地展示登记表里已有的事实。"""
         dlg = ComponentDetailDialog(self.component, self.detail_lines(), self)
-        dlg.exec()
+        # 2026-10-13 修：用 show() 而不是 exec()，modal=False 让 eventFilter 能捕获
+        # "点击外部"的动作（exec() 会变成真正模态，把鼠标事件全吞掉）。show() 后
+        # 对话框虽然还带"知道了"按钮，但用户习惯外点即关，体验更好。
+        dlg.setModal(False)
+        dlg.show()
 
     def active_version(self) -> Optional[str]:
         """当前生效版本：active 登记表 → 持久层 XXX_HOME 反推 → PATH 实际命中。
@@ -18947,6 +19070,94 @@ def main() -> int:
             return 2
         return elevate_helper_main(argv[1])
 
+    # 2026-10-13：立刻关掉 PyInstaller 的 Tk splash 引导窗（onefile 打包 + Splash
+    # target 时 bootloader 会开一个标题为 "tk" 的 TkTopLevel 窗口显示 assets/splash.png）。
+    # 用户实测：它一直挂到主界面出现，和应用内 SplashScreen 同屏两窗。
+    # ⚠ 2026-10-13 实测：**不能用 `import pyi_splash`** —— main() 探针证明执行到
+    # 它进程就死了（后续代码全部不跑，bt_tk_close.log 永远不出现），疑似它与
+    # bootloader 的握手在 PYZ 冻结环境里触发 fail-fast。所以只走 Win32 路线：
+    # SW_HIDE 隐藏窗口（bootloader 会周期性重新 ShowWindow，所以要持续压制）。
+    def _close_tk_splash() -> bool:
+        """隐藏 bootloader 的 Tk splash 窗口（标题 'tk'，类 TkTopLevel）。
+
+        只精确匹配这个窗口：类名必须是 TkTopLevel、标题必须是 'tk' ——
+        这是 PyInstaller splash 的固定特征（源码里写死的），不误伤别的窗口。
+
+        为什么用 ShowWindow(SW_HIDE) 而不是 WM_CLOSE / pyi_splash.close()：
+        实测（2026-10-13）这窗口的消息循环归 bootloader 线程管，WM_CLOSE 投递
+        后没人处理（窗口挂 5.5s+ 才消失）；SW_HIDE 让它**立即从屏幕上消失**
+        （本工具要的是"看不见"，不是"进程里销毁"），窗口对象等进程退出时自然回收。
+        返回是否找到了窗口（false = 还没出现或已隐藏）。
+        """
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW("TkTopLevel", "tk")
+            if hwnd:
+                # 已隐藏就不用再藏（重复 SW_HIDE 无害，但省一次调用）
+                if user32.IsWindowVisible(hwnd):
+                    user32.ShowWindow(hwnd, 0)        # SW_HIDE
+                    return True
+                return True            # 已不可见：视为成功，停止重试
+        except Exception:
+            pass
+        return False
+
+    # Python 起来时 Tk 窗口可能还没被 bootloader 创建（实测 0.3s 才出现），
+    # 且 QTimer 要等 app.exec() 才走。**先同步压一轮**（20 次 × 50ms = 1s，
+    # 覆盖"Python 起来 → Tk 出现 → 稳定隐藏"这段），再交给后台线程持续压制
+    # 直到应用内 splash 接管。实测（2026-10-13）bootloader **不会**反复重新
+    # ShowWindow —— 外部压 1 次就永久消失，所以这里的敌人只有"时机"：同步轮询
+    # 保证在 Tk 出现后的 50ms 内把它藏掉，后台线程兜底防它复活。
+    import time as _t
+    import threading as _threading
+    import ctypes as _ctypes
+    from pathlib import Path as _P_home
+    _tk_suppress = {"on": True}
+    _user32 = _ctypes.windll.user32
+
+    def _hide_tk_once() -> bool:
+        hwnd = _user32.FindWindowW("TkTopLevel", "tk")
+        if hwnd and _user32.IsWindowVisible(hwnd):
+            _user32.ShowWindow(hwnd, 0)        # SW_HIDE
+            return True
+        return False
+
+    # 同步轮询：至多 1s（20 × 50ms），藏掉即停。最多让启动延后 1s，
+    # 换取"全程只有一个启动画面"（用户点名要求）。
+    for _ in range(20):
+        if _hide_tk_once():
+            break
+        _t.sleep(0.05)
+
+    def _suppress_tk_splash() -> None:
+        n = 0
+        lines = [f"thread alive @{_t.monotonic() - _t0:.2f}s"]
+        while _tk_suppress["on"] and n < 600:      # 上限 30s，防失控
+            hwnd = _user32.FindWindowW("TkTopLevel", "tk")
+            if hwnd:
+                vis = _user32.IsWindowVisible(hwnd)
+                if vis:
+                    _user32.ShowWindow(hwnd, 0)
+                if n % 20 == 0:
+                    lines.append(f"@{_t.monotonic() - _t0:.2f}s n={n} "
+                                 f"hwnd={hwnd} vis={vis}")
+                    try:
+                        (_P_home() / "AppData/Local/Temp/bt_tk_suppress.log"
+                         ).write_text("\n".join(lines), encoding="utf-8")
+                    except Exception:
+                        pass
+            n += 1
+            _t.sleep(0.05)
+        lines.append(f"thread end @{_t.monotonic() - _t0:.2f}s (on={_tk_suppress['on']})")
+        try:
+            (_P_home() / "AppData/Local/Temp/bt_tk_suppress.log"
+             ).write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+
+    _threading.Thread(target=_suppress_tk_splash, daemon=True,
+                      name="bt-tk-splash-suppressor").start()
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -18966,6 +19177,7 @@ def main() -> int:
 
     def _on_cards_ready():
         # 全部卡片建完：splash 淡出，主窗口显示，然后才开始版本抓取与检查更新
+        _tk_suppress["on"] = False       # 主窗口已接管，停止压制 Tk 引导窗
         splash.close()
         splash.deleteLater()
         win._splash = None

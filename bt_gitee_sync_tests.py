@@ -363,16 +363,15 @@ class SyncScriptTest(unittest.TestCase):
 class ArtifactNameConsistency(unittest.TestCase):
     """产物文件名在四个地方各写了一份，改一处忘改别处就是「静默少传」的老坑。
 
-    2026-10-12 Windows 切 onedir 后矩阵与同步清单**有意**分叉（release.yml 头部
-    变更记录写明了）：build matrix 只构建 3 个新产物，而 RELEASE_ARTIFACTS /
-    .sh / .bat 三处多带旧版 onefile 的 ByteTools.exe 兼容老下载链接。
-    所以两组真源分开核对：矩阵对 BUILT，同步三件套对 BUILT ∪ LEGACY ——
-    任何一个方向被顺手删改都仍然全红。
+    2026-10-13 Windows 回归单 exe（onefile + Splash 启动图）后，四个地方**重新
+    对齐**：build matrix 构建全部 4 个产物（ByteTools.exe / windows-x64.zip /
+    macos-arm64.zip / linux-x64），RELEASE_ARTIFACTS 与 .sh / .bat 与之一致。
+    （2026-10-12 onedir 时代 matrix 与同步清单曾有意分叉，那个模型已随
+    onefile 回归作废 —— LEGACY 集合不再存在。任何一个方向被顺手删改都仍然全红。
     """
 
-    LEGACY = {"ByteTools.exe"}          # 旧 onefile：不再生成，只为老链接兜底
-    BUILT = set(ARTIFACTS) - LEGACY     # build matrix 的真源（3 个）
-    EXPECT = BUILT | LEGACY             # 同步三件套的真源（4 个）
+    BUILT = set(ARTIFACTS)              # build matrix 的真源（4 个）
+    EXPECT = BUILT                      # 同步三件套的真源（与 matrix 一致）
 
     def _yml(self):
         return (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
