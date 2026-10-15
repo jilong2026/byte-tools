@@ -156,7 +156,17 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                # ——只有 mongodb-compass / mysql-workbench / postman
                                # 这三个纯官方直链的是 0 源。
                                "mongodb-compass",
-                               "mysql-workbench", "postman"}
+                               "mysql-workbench", "postman",
+                               # 2026-10-15 「Agent客户端」：只有这几个是**纯官网/CDN 直发、
+                               # 没有任何大陆镜像**（R1.5 要求凑不出 2 个源时必须在这里点名，
+                               # 而不是靠"表里没写"悄悄跳过）。
+                               # ⚠ `claude-code` / `codex-cli` **不在这里** —— 它们是 GitHub
+                               # 产物，`_gh_accelerated()` 会给前面挂 3 个加速器，而加速器算
+                               # 大陆源（实测 3 个），所以走常规检查、登记在下面的 github_assets。
+                               # 另两条 CN 域名也在这张表里：is_mainland() 认的是**镜像站**标记，
+                               # 不是"域名在国内" —— cdn-zcode.z.ai / download.qoder.com 是厂商
+                               # 自己的 CDN，不是可复用的镜像源。
+                               "cursor", "zcode", "qoderwork-cn"}
 
     def test_counts(self):
         for key, comp in COMPS.items():
@@ -263,7 +273,9 @@ class OfficialIsLast(unittest.TestCase):
         两个是 GitHub 产物、末位天然是 github.com，一个是 Eclipse（有真镜像，走常规检查）。
         但这两组都要**点名**，加组件时得来这里登记一句，而不是让检查自动跳过它。
         """
-        github_assets = {"dbx", "windterm"}
+        # GitHub 产物、末位天然是裸 github.com（前面挂着加速器）→ 走常规检查，
+        # 只是要在这里点名。2026-10-15 加入 claude-code / codex-cli（同 dbx / windterm 一类）。
+        github_assets = {"dbx", "windterm", "claude-code", "codex-cli"}
         accounted = (set(self.OFFICIAL_HOST)
                      | WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION
                      | github_assets)

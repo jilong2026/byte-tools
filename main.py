@@ -5572,6 +5572,10 @@ CAT_LAUNCH = "一键启停"       # 卡片上有「启动/停止」按钮的组�
 CAT_SERVER = "服务端组件"     # 装在服务器上、命令行操作的后台服务与运维组件
 CAT_ENV = "开发环境"          # 装完进 PATH、直接在开发机上写/编译/打包代码的东西
 CAT_TOOL = "开发工具"         # **只下载**的 GUI 软件（IDE / 数据库客户端 / 接口调试）
+# Agent 客户端：AI 编程 / 办公 Agent 的桌面端与 CLI 发行包。
+# 形态与「开发工具」同类（**只下载**，见 _AGENT_CLIENTS 与 R13），单独立一个 Tab 是因为
+# 它既不是"开发环境"也不是"工具"：用户 2026-10-15 要求单列，并**放在最后**。
+CAT_AGENT = "Agent客户端"
 
 
 # 字段：key / name 显示名 / arch 归档类型 / exe 探测用可执行文件名（不含扩展名）
@@ -5944,7 +5948,7 @@ class VersionFetchWorker(QThread):
 #   服务端组件 —— **位置**维度：装在服务器上
 #   开发环境 —— **位置**维度：装在本机开发机上
 #   开发工具 —— **形态**维度：带图形界面的软件（26 个全是 IDE / GUI 客户端）
-COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL)
+COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL, CAT_AGENT)
 
 # 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
 # build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。
@@ -6004,6 +6008,60 @@ COMPONENT_CATEGORY_OF = {
 # key→分类：两处各写一份迟早会漂，而漂了的症状是"组件出现在错的 Tab"，
 # 界面测试比的是集合、看不出归属错了还是漏登记了。
 COMPONENT_CATEGORY_OF.update({s["key"]: s["cat"] for s in _CLI_TOOLS})
+
+# ---------------------------------------------------------------------------
+# 「Agent客户端」：用户 2026-10-15 要求新增的第 5 个 Tab（放最后）
+# ---------------------------------------------------------------------------
+# 与「开发工具」同类：**只下载、不解压不配置**，卡片形态就是「版本下拉 + 下载」。
+# 所以下面这张表**刻意复用 `_DEVTOOLS` 的行格式**，由同一个 builder 生成
+# （见 `_download_only_components`）—— 抄两遍必然漏一处，而漏抄的后果是建卡时去扫盘
+# 或者往注册表写环境变量。
+#
+# 两条与「开发工具」不同的现实（都在各行的 data_note 里写明了）：
+#   1. **几乎没有大陆镜像**：这批全是各家官网/CDN 直发，所以按 R1 属"单源官网"，
+#      已按 R1.5 登记为例外（同 mongodb / postgresql / powershell）。
+#   2. **多数只有滚动 latest**：官方不给"列历史版本"的接口，做不出多版本下拉 ——
+#      用户 2026-10-15 明确"只要能下载就好"，所以版本位取实测到的版本号，
+#      实在没有版本号的（QoderWork）就取服务端文件 Last-Modified 的年月
+#      （与「微信开发者工具」同一套先例）。
+#
+# ⚠ 每条的 URL 与字节数都是**带 byte-tools UA 实测**的（R1 的口径），别凭记忆改。
+_AGENT_CLIENTS: tuple = (
+    ("cursor", "Cursor", "exe",
+     "商业软件：只提供官方安装包直链，**不含授权与账号**。版本位写的是**主.次**版本号 ——"
+     "官方的 golden 链就是按这个粒度发版（…/golden/win32-x64-user/cursor/<主.次>，"
+     "实测 3.24 / 3.23 / 3.20 均可取），装完以 About 面板里的完整版本为准。",
+     (("3.24", "https://api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/3.24",
+       215228800),
+      ("3.23", "https://api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/3.23",
+       214105952))),
+    ("zcode", "ZCode", "exe",
+     "智谱（Z.ai）的 AI 编程 IDE。官方 CDN 按版本号分目录，实测 3.15.3 可取；"
+     "官方没给「列全部版本」的接口（latest.yml 实测 404），所以版本位只登记实测到的那几个。",
+     (("3.15.3", "https://cdn-zcode.z.ai/zcode/electron/releases/3.15.3/windows-x64/"
+                 "ZCode-3.15.3-win-x64.exe", 181367144),)),
+    ("claude-code", "Claude Code", "zip",
+     "Anthropic 的命令行编程 Agent，Windows 官方发 zip（解压得到 claude.exe）。"
+     "**是 CLI 不是 GUI 安装器**：本工具只负责把包下到你选的目录，怎么配怎么用看官方文档。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2.1.300", "https://github.com/anthropics/claude-code/releases/download/v2.1.300/"
+                  "claude-win32-x64.zip", 121043936),)),
+    ("codex-cli", "Codex CLI", "exe",
+     "OpenAI 的命令行编程 Agent，Windows 官方发单文件 exe。它的 release tag 形如"
+     "`rust-v0.162.1`，与版本号不同形，所以版本位只留数字。GitHub 产物，走加速器优先。"
+     "同一次 release 也发了 zip（体积小一半），列在「下载 ▾」里让你挑。",
+     (("0.162.1", "https://github.com/openai/codex/releases/download/rust-v0.162.1/"
+                  "codex-x86_64-pc-windows-msvc.exe", 333479728,
+       ("zip", "https://github.com/openai/codex/releases/download/rust-v0.162.1/"
+               "codex-x86_64-pc-windows-msvc.exe.zip", 164672399)),)),
+    ("qoderwork-cn", "QoderWork CN", "exe",
+     "Qoder 的办公 Agent 中文版。**官方只发一个滚动 latest 链接**（试过按版本目录取，404），"
+     "所以版本位写的是实测当天服务端文件的 Last-Modified 年月 —— 与「微信开发者工具」"
+     "同一套做法，不是软件版本号；装完以程序里的「关于」为准。",
+     (("2026.09", "https://download.qoder.com/qoder-work/releases/latest/"
+                  "QoderWork-Setup-x64.exe", 253672408),)),
+)
+COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})
 
 # ---------------------------------------------------------------------------
 # 组件「它是干嘛的」一句话说明（详情对话框的唯一内容真源）
@@ -6110,6 +6168,14 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "postman": "Postman：全球主流 API 调试工具。Collection 管理、环境变量、自动化测试；核心功能免费。",
     "bruno": "Bruno：开源 API 客户端。集合就是普通文件夹，可直接进 Git 版本管理，适合团队协作且不锁数据。",
     "windterm": "WindTerm：开源高性能 SSH/终端工具。多标签、分屏、图形化 SFTP；官方只发便携 zip。",
+    # ---- Agent 客户端（2026-10-15 新增 Tab，表见 _AGENT_CLIENTS）----
+    "cursor": "Cursor：AI 编程 IDE。整库上下文对话、多文件编辑、内联补全一体化。"
+              "商业软件：本工具只给官方安装包直链，**不含授权与账号**。",
+    "zcode": "ZCode：智谱（Z.ai）的 AI 编程 IDE，深度接入 GLM 系列模型，中文场景友好。",
+    "claude-code": "Claude Code：Anthropic 的命令行编程 Agent，在终端里读改代码、跑命令。"
+                   "Windows 官方发 zip（解压得到 claude.exe）——它是 CLI，不是 GUI 安装器。",
+    "codex-cli": "Codex CLI：OpenAI 的命令行编程 Agent，Windows 官方发单文件 exe。",
+    "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
     "erlang": "Erlang/OTP 运行时。RabbitMQ 的必需前置（本工具按需自动安装）；不单独出现在界面上。",
 }
 
@@ -6358,6 +6424,12 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "dbx": "https://github.com/t8y2/dbx",              # INT  个人项目，仓库即官网
     "ardm": "https://github.com/qishibo/AnotherRedisDesktopManager",  # INT  个人项目，仓库即官网
     "windterm": "https://github.com/KingToolbox/WindTerm",  # INT  个人项目，仓库即官网
+    # ---- Agent 客户端（R19 官网登记；2026-10-15 逐条实测）----
+    "cursor": "https://cursor.com/",                          # INT
+    "zcode": "https://zcode.z.ai/",                           # CN   智谱官方站，国内直连
+    "claude-code": "https://www.anthropic.com/claude-code",   # INT
+    "codex-cli": "https://openai.com/codex/",                 # INT  403 按 UA 反爬，浏览器可正常打开
+    "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
 
     # ---- API 调试 / 接口管理 ----
     "apipost": "https://www.apipost.cn/",              # CN  国产工具，原生中文站
@@ -6536,6 +6608,16 @@ COMPONENT_USAGE: Dict[str, str] = {
     "bruno": "安装后把集合当普通文件夹管，git 里直接版本化接口。",
     "windterm": "解压后双击 WindTerm.exe；建 SSH 会话输主机账号即连。"
                 "分屏、SFTP、多标签齐全。",
+    # ---- Agent 客户端（2026-10-15 新增 Tab）----
+    "cursor": "装完启动会让你登录（有免费额度）。打开一个代码目录即可对话；"
+              "要它改文件时，先看清它列出的改动再确认执行。",
+    "zcode": "装完启动用智谱账号登录，打开项目目录后即可对话改代码。",
+    "claude-code": "解压后把 claude.exe 放进 PATH（或直接用完整路径跑）。首次运行 `claude` "
+                   "会引导登录授权；之后在项目目录里执行 `claude` 就能用。"
+                   "⚠ 它面向终端，不是双击即用的窗口程序。",
+    "codex-cli": "单文件 exe，放进 PATH 或直接用完整路径跑；首次运行会让你登录。"
+                 "⚠ 同样是终端工具。",
+    "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
     "erlang": "RabbitMQ 缺它时本工具自动装它，无需手动使用。",
 }
 
@@ -6797,15 +6879,19 @@ def _devtool_urls(src: object) -> List[str]:
     return list(src)
 
 
-def _devtool_components() -> List["Component"]:
-    """把 _DEVTOOLS 那张表变成组件。
+def _download_only_components(table: tuple) -> List["Component"]:
+    """把「只下载」类组件的表变成组件 —— 目前 `_DEVTOOLS` 与 `_AGENT_CLIENTS` 共用。
 
-    集中生成而不是手写十个 Component(...)：这批的字段全是同一套"什么都不配"的取值
+    集中生成而不是手写十几个 Component(...)：这批的字段全是同一套"什么都不配"的取值
     （env_var / exec_name 为空、version_probe=False、installer_mode=False），
-    抄十遍只会让人漏抄一处 —— 而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+    抄十几遍只会让人漏抄一处 —— 而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+
+    入参 table: 行格式为
+        (key, 显示名, 主产物格式, data_note, ((版本, URL, 字节数[, 备用产物]), ...))
+    返回:       组件列表（顺序即表内顺序）。
     """
     out: List[Component] = []
-    for key, name, arch, note, rows in _DEVTOOLS:
+    for key, name, arch, note, rows in table:
         versions = []
         for row in rows:
             ver, src, size = row[0], row[1], row[2]
@@ -6836,6 +6922,11 @@ def _devtool_components() -> List["Component"]:
             data_note=note,
         ))
     return out
+
+
+def _devtool_components() -> List["Component"]:
+    """「开发工具」Tab 的组件（表见 `_DEVTOOLS`）。"""
+    return _download_only_components(_DEVTOOLS)
 
 # 允许并存多版本、可切换生效版本的组件（2026-09-29 与用户确认，固定 7 个，别自行扩大）。
 # 排除 conda：installer_mode 组件装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立。
@@ -8891,6 +8982,10 @@ def build_components() -> List[Component]:
     # 放在最后追加，是为了不打散上面按字母/依赖顺序排的旧组件 —— 卡片顺序会跟着变，
     # 而网格排布与"最后一个格子"的用例都依赖这个顺序稳定。
     components.extend(_devtool_components())
+
+    # 「Agent客户端」Tab（2026-10-15 用户要求新增，放最后一页）：形态与「开发工具」完全同类
+    # ——只下载、不配置，表见 `_AGENT_CLIENTS`。同样追加在最后，保持上面旧组件的顺序稳定。
+    components.extend(_download_only_components(_AGENT_CLIENTS))
 
     for comp in components:
         # 可一键启停的组件全部集中到「一键启停」Tab（2026-10-08 用户要求），

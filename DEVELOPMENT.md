@@ -36,6 +36,7 @@
 - [规则 R17：组件详情弹窗](#规则-r17组件详情弹窗2026-10-12)
 - [规则 R18：冷启动预算——建卡不许逐个扫 PATH](#规则-r18冷启动预算建卡不许逐个扫-path2026-10-13)
 - [规则 R19：官网地址必须人工登记，不许从下载 URL 推导](#规则-r19官网地址必须人工登记不许从下载-url-推导2026-10-14)
+- [规则 R20：「Agent客户端」是第五个只下载的 Tab](#规则-r20agent客户端是第五个只下载的-tab2026-10-15)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -479,7 +480,7 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 **87 个可见组件**归入且仅归入四个 Tab（88 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **92 个可见组件**归入且仅归入五个 Tab（93 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
 | 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
@@ -487,17 +488,19 @@ tmp.replace(self.dest)
 | **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码，**跑在本机开发机上** | ant、bat、bun、cmake、conda、dart、deno、dotnet-sdk、duckdb、eza、fd、fzf、git、go、graalvm、gradle、jdk、jq、kotlin、maven、ninja、node、pnpm、powershell、protoc、python、ripgrep、rust、sqlite、uv、yq、zoxide（+ 隐藏的 erlang） |
 | **服务端组件** | 装在**服务器 / 集群**上、命令行操作的后台服务与运维组件（数据库 / 消息队列 / 网关 / 容器与编排 / K8s 运维）—— 原名「开发软件」，2026-10-14 改名 | caddy、docker、docker-compose、helm、jmeter、k9s、kubectl、mongodb、mysql、nats-server、postgresql、pulsar、traefik、trivy |
 | **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | android-studio、apifox、apipost、ardm、bruno、clion、datagrip、dbeaver、dbx、eclipse、goland、hbuilderx、heidisql、idea、mongodb-compass、mysql-workbench、navicat、pgadmin4、postman、pycharm、redisinsight、visual-studio、vscode、webstorm,wechat-devtools、windterm |
+| **Agent客户端** | 与「开发工具」**同类**（`download_only`，只下载不配置），单列一个 Tab 是因为它既不是开发环境也不是工具 —— AI 编程 / 办公 Agent 的桌面端与 CLI 发行包。成员由 `_AGENT_CLIENTS` 那张表派生（见 R13 与 R20） | cursor、zcode、claude-code、codex-cli、qoderwork-cn |
 
 **Tab 顺序 = `COMPONENT_CATEGORIES` 的顺序**：
 
 ```
-一键启停 → 服务端组件 → 开发环境 → 开发工具
+一键启停 → 服务端组件 → 开发环境 → 开发工具 → Agent客户端
 ```
 
-顺序改过两次，都由用户指定：
+顺序改过三次，都由用户指定：
 - **2026-10-14**「一键启停」提到**第一个**（原先固定最后一个）—— 它是本工具最能干活的一组长，
   不许被埋在中间。
 - **2026-10-14**「开发软件」改名「服务端组件」并提到**第二位**。
+- **2026-10-15** 新增**第五个**「Agent客户端」，用户明确要求**放最后**。
 
 后者为什么排第二：它与「开发环境」的界线是**东西跑在哪** —— 服务端组件装在服务器/集群上，
 开发环境跑在你自己这台机器上。用户装东西时先问的就是"装服务器还是装本机"，
@@ -545,7 +548,7 @@ tmp.replace(self.dest)
 # 分类名一律用常量，不写裸字符串（见 R2.1 的说明）
 CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL = "一键启停", "服务端组件", "开发环境", "开发工具"
 
-COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL)   # Tab 顺序即此顺序
+COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL, CAT_AGENT)   # Tab 顺序即此顺序
 COMPONENT_CATEGORY_OF = {
     ...
     "foo": CAT_SERVER,        # 新增组件在这里加一行（它接进 LAUNCH_OF 后会自动进「一键启停」）
@@ -2230,3 +2233,66 @@ offscreen 没有系统中文字体的回退链，Qt 换了一个宽得多的替�
   的 `test_download_hosts_are_not_registered_as_official` 会拦。
 - 这 88 条是人工核实的事实，**项目改名换域名后会悄悄过期**。接新组件时必须在
   `COMPONENT_OFFICIAL_URLS` 补一条（漏登记即测试变红），不是可选项。
+
+---
+
+## 规则 R20：「Agent客户端」是第五个只下载的 Tab（2026-10-15）
+
+### R20.1 规则描述
+
+用户 2026-10-15 要求：**在 Tab 末尾新增一个「Agent客户端」**，把 AI 编程 / 办公 Agent 的
+桌面端与 CLI 发行包做成组件，"图标、详情、下载链接一律按现有组件的流程来"。
+
+- **位置**：必须是**最后一个** Tab（用户原话"table 放在最后"）。插到中间即为违约。
+- **形态**：与「开发工具」**同类** —— `download_only=True`，卡片只有「版本下拉 + 下载」，
+  不解压、不配环境变量、不扫盘、不代跑安装器（R13 的八个短路点原样适用）。
+- **成员真源**：`main.py` 的 `_AGENT_CLIENTS` 那张表（表驱动，与 `_DEVTOOLS` 同行格式、
+  共用 `_download_only_components()` 生成器）。分类由
+  `COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})` 自动喂进去。
+
+### R20.2 三条硬约束
+
+1. **表驱动，不许手写 Component(...)**：两张只下载表共用一个 builder。抄十几遍必然漏一处，
+   而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+   接一个新客户端 = 只改 `_AGENT_CLIENTS` 一行 + 补三张登记表
+   （`COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`，见 R19）——
+   **漏登记直接 KeyError 或测试变红**，这是刻意的。
+2. **版本位：拿不到版本列表就退而求其次，但不许编**。这批产品多数**只发滚动 latest**，
+   官方没有"列历史版本"的接口（用户 2026-10-15 明确"只要能下载就好"）。取值顺序：
+   ① 官方给的版本号（如 Cursor 的 golden 链按 `主.次` 发版）；
+   ② 直链路径里的版本号（如 ZCode 的 `/releases/3.15.3/`）；
+   ③ **实在没有就取服务端文件的 `Last-Modified` 年月**（先例：`wechat-devtools` 的 `2026.09`），
+   并在 `data_note` 里写明"这不是软件版本号"。
+3. **几乎没有大陆镜像 → 必须走 R1.5 例外登记**。这批全是各家官网 / 厂商自有 CDN 直发。
+   `bt_mirror_spec_tests.WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION`
+   里必须点名（否则"≥2 个大陆源"那条会红）；**GitHub 产物的**（`claude-code` / `codex-cli`）
+   不在这张表里 —— `_gh_accelerated()` 会给它们挂 3 个加速器，而**加速器算大陆源**，
+   它们走常规检查、登记在 `test_no_component_escapes_this_table` 的 `github_assets`。
+   ⚠ 注意 `is_mainland()` 认的是**镜像站**标记，不是"域名在国内"：
+   `cdn-zcode.z.ai` / `download.qoder.com` 是厂商自己的 CDN，仍算 0 源。
+
+### R20.3 实测口径与首批登记
+
+URL 与字节数**一律带 `byte-tools/1.2.1` UA 实测**（R1 的口径）。首批 5 个（用
+`Content-Range` 拿总体积，不整包下载）：
+
+| key | 显示名 | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|
+| `cursor` | Cursor | 3.24 | 215,228,800 | `api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/<主.次>` |
+| `zcode` | ZCode | 3.15.3 | 181,367,144 | `cdn-zcode.z.ai/zcode/electron/releases/3.15.3/windows-x64/…` |
+| `claude-code` | Claude Code | 2.1.300 | 121,043,936 | GitHub Releases（加速器优先） |
+| `codex-cli` | Codex CLI | 0.162.1 | 333,479,728 | GitHub Releases（另发 zip，164,672,399） |
+| `qoderwork-cn` | QoderWork CN | 2026.09 | 253,672,408 | `download.qoder.com/…/latest/…`（滚动，版本位取 Last-Modified 年月） |
+
+**CLI ≠ GUI，`data_note` 要写清**：Claude Code / Codex CLI 是终端工具，下载解压后要自己
+配 PATH 并登录授权 —— 卡片说明里必须点明"不是双击即用的窗口程序"，否则用户会以为是装了个失败的应用。
+
+### R20.4 护栏
+
+- `tests/bt_download_only_tests.py`：`TabStructure`（顺序 + 成员 + **最后一个必须是它**）、
+  `CapabilityFlag`（`DOWNLOAD_ONLY_KEYS` 是「开发工具」∪「Agent客户端」的**并集**）、
+  `test_visible_component_count_is_92`（全仓库唯一写死可见组件数的地方）。
+- `tests/bt_component_category_tests.py`：`EXPECTED_MEMBERSHIP[CAT_AGENT]` 与
+  `test_tab_order_is_exactly_launch_server_env_tool_agent`。
+- `tests/bt_mirror_spec_tests.py`：R20.2 第 3 条的两张名单。
+- `tests/bt_icon_assets_tests.py`：接新组件必须同时补图标（缺图标即红）。

@@ -49,7 +49,12 @@ _APP = QApplication.instance() or QApplication([])
 
 # 这一批的 key 清单。它是"加一个只下载组件要过一遍评审"的那个点：
 # 成员表在对面（bt_component_category_tests.EXPECTED_MEMBERSHIP），这里只挑出下载型的那些。
-DOWNLOAD_ONLY_KEYS = set(EXPECTED_MEMBERSHIP["开发工具"])
+# 「只下载」型的**全部**成员 = 「开发工具」∪「Agent客户端」（2026-10-15 起）。
+# 两个 Tab 的能力位语义完全相同（download_only=True、不落盘、不配环境变量），
+# 所以基线必须是**并集**：只写"开发工具"会让新 Tab 的 5 个组件被下面
+# `test_flag_defaults_to_false_for_the_established_twenty_six` 误判成"不该标只下载"。
+DOWNLOAD_ONLY_KEYS = (set(EXPECTED_MEMBERSHIP["开发工具"])
+                      | set(EXPECTED_MEMBERSHIP["Agent客户端"]))
 
 # 用户点名要、但这一版**没进表**的候选。登记一个没实测过的源违反 R1（200 也可能是
 # 拿 HTML 应付的假源），所以宁可少几个也不硬凑；这张表存在的意义是别让人以为"漏了"。
@@ -71,17 +76,35 @@ class TabStructure(unittest.TestCase):
         self.groups = main.group_components(self.components)
 
     def test_dev_tools_tab_is_the_fourth_and_holds_the_eleven_keys(self):
-        """Tab 顺序钉死（2026-10-14 用户两次调整过顺序）。
+        """Tab 顺序钉死（2026-10-14~15 用户三次调整过）。
 
-        变更史：「一键启停」从最后提到第一；随后「开发软件」改名「服务端组件」
-        并提到第二位。本用例原名 test_new_tab_is_the_third_and_holds_the_eleven_keys
-        —— 那是在「开发工具」刚是第三个 Tab 的时候写的，名字里的 "third" 早就不成立了，
-        一并改成按名字断言（按位置断言的用例改顺序后必然失效，得跟着改）。
+        变更史：「一键启停」从最后提到第一；「开发软件」改名「服务端组件」并提到第二位；
+        2026-10-15 新增第五个 Tab「Agent客户端」并**明确放最后**。
+        本用例原名 test_new_tab_is_the_third_and_holds_the_eleven_keys —— 那是在
+        「开发工具」刚是第三个 Tab 时写的，名字里的 "third" 早就不成立，已改成按名字断言
+        （按位置断言的用例每次改顺序都必然失效，得跟着改）。
         """
         self.assertEqual(list(main.COMPONENT_CATEGORIES),
-                         [main.CAT_LAUNCH, main.CAT_SERVER, main.CAT_ENV, main.CAT_TOOL],
-                         "Tab 顺序必须是「一键启停 → 服务端组件 → 开发环境 → 开发工具」")
-        self.assertEqual({c.key for c in self.groups[main.CAT_TOOL]}, DOWNLOAD_ONLY_KEYS)
+                         [main.CAT_LAUNCH, main.CAT_SERVER, main.CAT_ENV,
+                          main.CAT_TOOL, main.CAT_AGENT],
+                         "Tab 顺序必须是「一键启停 → 服务端组件 → 开发环境 → "
+                         "开发工具 → Agent客户端」")
+        self.assertEqual({c.key for c in self.groups[main.CAT_TOOL]},
+                         set(EXPECTED_MEMBERSHIP["开发工具"]))
+
+    def test_agent_client_tab_is_the_fifth_and_holds_its_keys(self):
+        """第五个 Tab 是「Agent客户端」且**必须排在最后**（2026-10-15 用户指定）。
+
+        与「开发工具」同类：只下载不配置。这里同时钉住"它是最末一个"——
+        用户要的是"末尾新增"，插到中间就不是他要的东西了。
+        """
+        self.assertEqual(list(main.COMPONENT_CATEGORIES)[-1], main.CAT_AGENT,
+                         "「Agent客户端」必须是最后一个 Tab")
+        self.assertEqual({c.key for c in self.groups[main.CAT_AGENT]},
+                         set(EXPECTED_MEMBERSHIP["Agent客户端"]))
+        for c in self.groups[main.CAT_AGENT]:
+            self.assertTrue(c.download_only,
+                            f"{c.key} 在「Agent客户端」里却不是只下载型")
 
     def test_other_software_tab_is_gone(self):
         """用户要求少一个 Tab：「其它软件」整个取消，不是留一张空白页。
@@ -123,18 +146,18 @@ class TabStructure(unittest.TestCase):
         for key in DEFERRED_KEYS:
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
-    def test_visible_component_count_is_87(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 26 只下载）。
+    def test_visible_component_count_is_92(self):
+        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 26 只下载 + 5 Agent客户端）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
         2026-10-12 一路累加：47 → 49（protoc/uv）→ 58（B6a 九个只下载）→ 75（+pnpm/helm）
         → 83（B3/B5 与并发那批）→ 85（B7 的 ant / jmeter）→ 86（B4 补的 minio）
-        → 87（Dart）。
+        → 87（Dart）→ **92（2026-10-15 新增「Agent客户端」首批 5 个）**。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 87)
-        self.assertEqual(len(self.components), 88, "87 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 92)
+        self.assertEqual(len(self.components), 93, "92 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -1109,7 +1132,12 @@ class ArtifactMenu(_EnvSandbox):
                    "downloads.mongodb.com",      # compass：msi / exe / zip 三形态
                    "mirror.nju.edu.cn", "ftp.postgresql.org",   # pgadmin4：南大 + 官方
                    "cdn.mysql.com",              # workbench：msi / zip
-                   "dl.pstmn.io")                # postman：按版本取的那条地址
+                   "dl.pstmn.io",                # postman：按版本取的那条地址
+                   # 2026-10-15 「Agent客户端」首批五个，域名逐个 range 实测过
+                   # （拿 HTTP 206 + Content-Range 确认总字节数，见各行的实测数字）：
+                   "api2.cursor.sh",             # cursor：golden 链，按主.次版本号取
+                   "cdn-zcode.z.ai",             # zcode：按版本号分目录的官方 CDN
+                   "download.qoder.com")         # qoderwork-cn：滚动 latest（官方无版本目录）
         for comp in main.build_components():
             if not comp.download_only:
                 continue

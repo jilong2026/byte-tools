@@ -96,7 +96,7 @@
 
 ## 30 秒上手
 
-1. 打开工具，四个 Tab 页（一键启停 / 服务端组件 / 开发环境 / 开发工具）列出全部组件，每张卡片右上角是**当前状态**：
+1. 打开工具，五个 Tab 页（一键启停 / 服务端组件 / 开发环境 / 开发工具 / Agent客户端）列出全部组件，每张卡片右上角是**当前状态**：
 
    | 状态 | 含义 |
    |---|---|
@@ -127,7 +127,7 @@ node -v
 
 ## 支持的组件
 
-共 **87 个**：**61 个可一键装配** + **26 个只提供官方安装包下载**（那 26 个是 GUI 工具；61 个里有 15 个还额外支持一键启停）。界面按四个 Tab 分组，Tab 标题自带数量：
+共 **92 个**：**61 个可一键装配** + **31 个只提供官方安装包下载**（31 = 26 个 GUI 工具 + 5 个 Agent 客户端；61 个里有 15 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
@@ -135,6 +135,7 @@ node -v
 | 服务端组件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
 | 开发环境 | 32 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant |
 | 开发工具 | 26 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman |
+| Agent客户端 | 5 | Cursor、ZCode、Claude Code、Codex CLI、QoderWork CN |
 
 > **四个 Tab 各自按什么分？**「一键启停」按**能力**分（这个工具能不能替你一键起停）；
 > 「服务端组件」与「开发环境」按**装在哪**分 —— 前者装在服务器/集群上、命令行操作，

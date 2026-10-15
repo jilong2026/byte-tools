@@ -321,7 +321,7 @@ byte-tools/
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
 | `artifacts` | list[DownloadArtifact] | 仅「开发工具」用：同一个版本的多种产物（exe 安装器 / zip 便携包），各自带 URL 列表与官方声明字节数。**不要把它和 `url_list_map` 混用** —— 后者是同一个文件的多镜像，前者是两个不同的文件 |
-| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（一键启停 / 服务端组件 / 开发环境 / 开发工具；2026-10-14 起「一键启停」排第一、「服务端组件」排第二）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
+| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（一键启停 / 服务端组件 / 开发环境 / 开发工具 / **Agent客户端**；2026-10-14 起「一键启停」排第一、「服务端组件」排第二，2026-10-15 新增的「Agent客户端」排最后）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
 | `official_url` | str \| None | 详情页那个可点击官网链接的 href（2026-10-14 新增）。**不在构造处手写**：`build_components()` 末尾按 `COMPONENT_OFFICIAL_URLS[comp.key]` 统一赋值，漏登记即 KeyError。该表 88 条均为人工逐条核实，口径是"有中国大陆官网入口的优先用（含独立 CN 域名与同域名中文路径），否则用真实国际官网首页"。**绝不可从下载 URL 推导** —— 推导会产出 `api.adoptium.net`、`artifacts.elastic.co`、`github.com` 这类非官网域名，详见 DEVELOPMENT.md 规则 R19 |
 
 方法：
@@ -737,12 +737,12 @@ UI 组成：
 2. **标题栏**（固定高度 48）：应用名 + GitHub 按钮 + "⟳ 刷新版本"按钮 + "🧹 清理残留 PATH"按钮 + 打赏按钮 ♥ + 最小化 — / 最大化 ▢ / 关闭 ×
 3. **搜索条**（标题栏与 Tab 之间，`objectName="searchBar"`）：外壳 `QFrame#searchShell` 里放放大镜 `QLabel#searchIcon` + `QLineEdit#compSearch`（透明无边框、自绘 × 清空按钮），右侧 `QLabel#searchHint` 实时显示"匹配 N / 43 个组件"（0 命中时转警示红）。`textChanged` → `MainWindow._apply_search()`；聚焦时整条外壳描蓝边（`MainWindow.eventFilter()` 转发焦点 → `_set_search_focus()` 改 `focused` 属性并重刷样式，QSS 的 `:focus` 管不到父级），放大镜同步变色。图标由 `_make_search_icon()` / `_make_clear_icon()` 用 QPainter 现画，不引入图片资源。**放在标题栏之外**，因为标题栏整条是窗口拖拽区（`mousePressEvent` 里 `title_bar.underMouse()` 会开始拖动），输入框塞进去就点不动了。
 搜索条右侧还挂着「▦ 网格 / ☰ 列表」与「📋 日志」两颗按钮——**它们也不放标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽
-4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分四个 Tab，Tab 外层
+4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分五个 Tab，Tab 外层
    `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向），**标题带组件数量**：
-   `一键启停（15）` / `服务端组件（14）` / `开发环境（32）` / `开发工具（26）`（数字由 `len(comps)` 现算，不写死）；
+   `一键启停（15）` / `服务端组件（14）` / `开发环境（32）` / `开发工具（26）` / `Agent客户端（5）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 87 项，别写死；`build_components()` 一改就会变）
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起五个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 92 项，别写死；`build_components()` 一改就会变）
 5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
 6. **底部状态栏**：显示当前系统信息、可点开的工作目录与 `组件：N`（N=界面可见数，现 43；只写数字不写句子，版本号在标题栏 chip 上不重复）
 

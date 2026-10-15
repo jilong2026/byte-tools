@@ -100,7 +100,7 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
 
 ## Getting started in 30 seconds
 
-1. Open the tool. Four tabs (Start-stop / Dev environment / Dev software / Dev tools) list every component; each card's top-right corner is its **current state**:
+1. Open the tool. Five tabs (Start-stop / Server components / Dev environment / Dev tools / Agent clients) list every component; each card's top-right corner is its **current state**:
 
    | State | Meaning |
    |---|---|
@@ -131,14 +131,15 @@ node -v
 
 ## Supported components
 
-**87 in total**: **61 installable end to end** + **26 download-only** (those 26 are GUI tools; 16 of the 63 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**92 in total**: **61 installable end to end** + **31 download-only** (31 = 26 GUI tools + 5 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
 | Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
 | Dev environment | 32 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq |
-| Dev software | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
+| Dev software → Server components | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
 | Dev tools | 26 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman |
+| Agent clients | 5 | Cursor, ZCode, Claude Code, Codex CLI, QoderWork CN |
 
 > To regroup: edit the one line per component in `COMPONENT_CATEGORY_OF` in `main.py`. The Start-stop tab needs no registration — membership is derived from the launch whitelist `LAUNCH_OF`.
 
@@ -391,7 +392,7 @@ Delete an install directory by hand, or interrupt an uninstall, and `PATH` can k
 | Title bar (left) | Icon + app name + **version chip**. The chip is also a status light: plain = not checked yet; `⟳ v1.2.1 checking` = check in flight; `v1.2.1 up to date` = latest; `↓ v1.2.2 update available` (amber) = newer release exists, **one click downloads it**; `↓ 37%` = downloading; `? v1.2.1 unknown` (grey, dashed) = the check failed and the tooltip says why. **The version number is always visible** — that is the first thing needed when reporting a problem |
 | Title bar (right) | "★ GitHub" opens the repository · "⟳ Refresh versions" bypasses the cache and re-fetches live lists · "🧹 Clean PATH"（清理残留 PATH） clears dead entries · "♥" supports the author · minimise / maximise / close |
 | Search bar | Component search (fuzzy over names and keys, showing "matched N / 85"); while searching, the tabs collapse and hits are grouped by category with small headings; clearing restores everything. Next to it: "▦ Grid / ☰ List" and "📋 Log" |
-| Cards | Four tabs (counts in titles). Each card: name, status capsule (hover for the full text), searchable version dropdown (green tick = installed), action buttons (Install / Switch / Uninstall; plus Start / Stop and Console or Page for services; download-only tools show just Download), gradient progress bar. Cards re-flow into columns with window width |
+| Cards | Five tabs (counts in titles). Each card: name, status capsule (hover for the full text), searchable version dropdown (green tick = installed), action buttons (Install / Switch / Uninstall; plus Start / Stop and Console or Page for services; download-only tools show just Download), gradient progress bar. Cards re-flow into columns with window width |
 | Log overlay | Collapsed by default over the card area; "📋 Log" expands it, warn/error auto-opens it and puts an unread counter on the button. Four levels (info grey, ok green, warn orange, error red), Chinese throughout, including mirror switching and failover narration |
 | Status bar | System info, the **clickable working directory**, component count. The version is not here — it is the chip |
 

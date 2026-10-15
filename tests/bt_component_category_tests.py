@@ -39,8 +39,8 @@ import main  # noqa: E402
 
 # 分类名一律走 CAT_* 常量，不写裸字符串 —— 改名时只改 main.py 一处，
 # 这里漏改会表现为"断言拿不到那个 key"而不是静默通过。
-CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL = (
-    main.CAT_LAUNCH, main.CAT_SERVER, main.CAT_ENV, main.CAT_TOOL,
+CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL, CAT_AGENT = (
+    main.CAT_LAUNCH, main.CAT_SERVER, main.CAT_ENV, main.CAT_TOOL, main.CAT_AGENT,
 )
 
 EXPECTED_MEMBERSHIP = {
@@ -102,6 +102,10 @@ EXPECTED_MEMBERSHIP = {
                # （成本最低的一批：只加 URL，不碰解压/环境变量任何一条逻辑）
                "dbeaver", "heidisql", "bruno", "redisinsight", "ardm",
                "mongodb-compass", "pgadmin4", "mysql-workbench", "postman"},
+    # 「Agent客户端」：2026-10-15 用户要求新增的第五个 Tab，**放在最后**。
+    # 形态与「开发工具」同类 —— 只下载、不配置，登记表在 main.py 的 `_AGENT_CLIENTS`
+    # （表驱动，key 从那里来；这里手写一份是为了让"扩表 = 必须同时改这张基线"可见）。
+    CAT_AGENT: {"cursor", "zcode", "claude-code", "codex-cli", "qoderwork-cn"},
 }
 
 ALL_KEYS = {k for group in EXPECTED_MEMBERSHIP.values() for k in group}
@@ -175,17 +179,18 @@ class GroupComponentsHelper(unittest.TestCase):
         self.assertEqual(names[0], CAT_LAUNCH,
                          "「一键启停」必须是第一个 Tab，不许被别的分类挤到后面")
 
-    def test_tab_order_is_exactly_launch_server_env_tool(self):
-        """整个 Tab 顺序钉死：一键启停 → 服务端组件 → 开发环境 → 开发工具。
+    def test_tab_order_is_exactly_launch_server_env_tool_agent(self):
+        """整个 Tab 顺序钉死：一键启停 → 服务端组件 → 开发环境 → 开发工具 → Agent客户端。
 
         2026-10-14 用户要求「开发软件」改名「服务端组件」并提到第二位。
+        2026-10-15 用户要求新增「Agent客户端」并明确**放最后**。
         只断"第一个是一键启停"是不够的 —— 那样"服务端组件"被谁挤到第三、
-        或者掉到最后，测试都不会红，而用户看到的是完全不同的信息架构。
+        或者新增的 Tab 插到中间，测试都不会红，而用户看到的是完全不同的信息架构。
         """
         self.assertEqual(
             list(main.COMPONENT_CATEGORIES),
-            [CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL],
-            "Tab 顺序必须是「一键启停 → 服务端组件 → 开发环境 → 开发工具」")
+            [CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL, CAT_AGENT],
+            "Tab 顺序必须是「一键启停 → 服务端组件 → 开发环境 → 开发工具 → Agent客户端」")
 
     def test_server_tab_is_the_second_one(self):
         """单独再断一次第二位。
