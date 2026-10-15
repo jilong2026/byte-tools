@@ -100,7 +100,17 @@ jobs:
     name: 护栏测试
     # 手动补同步时不跑测试：那条路径只重建 Gitee 附件，产物早就在 GitHub 上了
     if: github.event_name != 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    # 2026-10-15 从 ubuntu-latest 换成 windows-latest。
+    # 原因：这套护栏**本来就是断言 Windows 行为的** —— 注册表写入、PATH/HOME 环境变量、
+    # .bat 一键脚本、`ByteTools.exe` / msi 产物名、DLL/链接器路径等等。
+    # 放 ubuntu 上跑会成批假红：实测 9 个套件失败，而失败原因全是
+    # "在非 Windows 上按平台取到的产物/URL 与写死的 Windows 期望不符"
+    # （`urls_for_current()` 返回 Linux 包、`archive_for_current()` 返回 zip 而非 msi、
+    # 更新检查拿到 `ByteTools-linux-x64` 而断言写的是 `ByteTools.exe`）。
+    # 本地 Windows 全绿、CI 全红，就是这个错配。
+    # 仓库是 public，Windows runner 的分钟数同样免费，换过来零成本；
+    # 而且 `bt_gitee_sync_tests.BatEndToEnd` 不再被 Skip（它要 cmd.exe），覆盖反而更多。
+    runs-on: windows-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -110,11 +120,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # PySide6 在 Linux 上即使走 offscreen 平台插件也要这几个系统库：
-      # 缺任何一个的表现是 "Failed to create a QGuiApplication" 或
-      # "could not load the Qt platform plugin"，看起来像测试代码坏了，
-      # 其实是 runner 缺依赖。
-      - name: 装 Qt 运行所需的系统库
+      # PySide6 在 Linux 上即使走 offscreen 平台插件也要这几个系统库：缺任何一个的表现是
+      # "Failed to create a QGuiApplication" / "could not load the Qt platform plugin"，
+      # 看起来像测试代码坏了，其实是 runner 缺依赖。
+      # 当前 runner 是 Windows（不需要这些库），保留成条件步骤是为了将来若切回 Linux
+      # 不用重新踩一遍；否则 `sudo apt-get` 在 Windows 上会直接把 job 打红。
+      - name: 装 Qt 运行所需的系统库（仅 Linux）
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
@@ -137,7 +149,16 @@ jobs:
   build:
     name: 构建 ${{ matrix.platform_name }}
     # 手动补同步时不重新构建：产物已经在 GitHub Release 上了，重新打包纯属浪费
-    if: github.event_name != 'workflow_dispatch'
+    #
+    # 2026-10-15 加**显式 tag 白名单**。此前这里只有 `event != workflow_dispatch`，
+    # 也就是说推 dev / master 也会进入本 job —— 之所以没误发版，纯属**副作用式保护**：
+    # 后面「校验 APP_VERSION 与 tag 一致」那步在分支推送时取到 `GITHUB_REF_NAME=dev`，
+    # 与 `APP_VERSION=1.2.1` 不等，于是 exit 1 把 job 打红，才没走到打包与发布。
+    # 那个闸门的本意是"防止版本号忘了改就发版"，不是"区分 tag 与分支"；
+    # 一旦有人放宽它、或 APP_VERSION 恰好写成 "dev"，分支推送就会真的建 draft、
+    # 并由 sync-to-gitee 取消草稿 + 同步 Gitee —— 即**误发版**。
+    # 现在把意图写成显式条件：**只有 v* tag 才构建**。
+    if: github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     # 2026-10-14：发版前必须过护栏。tag 推送即发布，这条依赖保证测试红时
     # 三个平台都不会被打包、也不会有 Release 被创建。
     needs: test

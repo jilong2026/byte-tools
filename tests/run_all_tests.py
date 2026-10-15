@@ -166,6 +166,10 @@ def main() -> int:
     results = []
     total_tests = 0
     failed = 0
+    # 失败详情要**打印出来**（2026-10-15 修）：此前 run_one 明明算了 detail，
+    # main 却只打一行"失败 N 用例"，于是 CI 日志里只有总结、没有 traceback ——
+    # 2026-10-14 那次 CI 红就是这样，只能看到"9 个套件失败"却不知道为什么。
+    failures_detail: list[tuple[str, str]] = []
 
     for f in files:
         sys.stdout.write(f"  {f.name:<38} ")
@@ -177,6 +181,7 @@ def main() -> int:
             print(f"通过  {count:>4} 用例  {elapsed:6.2f}s")
         else:
             failed += 1
+            failures_detail.append((f.name, detail))
             print(f"失败  {count:>4} 用例  {elapsed:6.2f}s")
 
     print("\n" + "=" * 72)
@@ -187,6 +192,13 @@ def main() -> int:
           f"{len(files) - failed} 通过 / {failed} 失败")
 
     if failed:
+        # 先把每套件的失败输出原样贴出来（这是 CI 日志里唯一能定位问题的东西），
+        # 再给"怎么单跑重看"的提示。
+        for name, detail in failures_detail:
+            print("\n" + "-" * 72)
+            print(f"▼ {name} 的失败输出（末尾若干行）")
+            print("-" * 72)
+            print(detail)
         print("\n以下文件失败，重跑单个文件看详情：")
         for name, ok, _, _ in results:
             if not ok:
