@@ -44,7 +44,12 @@ class LaunchSpecTable(unittest.TestCase):
              "etcd", "consul", "zookeeper",
              # 2026-10-12 B4 补：minio 同为"单 exe + CLI flag 改口 + Popen.pid 就是
              # 监听者"（真机实测：两口齐听 1.6–2.9s、terminate 0.07s 退出、端口即释放）。
-             "minio"},
+             "minio",
+             # 2026-10-16 由 15 扩到 16：nats-server。当天在 %TEMP% 里跑真进程实测
+             # （2.15.1 官方 zip）：`-p` 改口生效、`-js -sd <dir>` 会建出 jetstream/、
+             # terminate 后 4224 从"在听"变"不在听"。⚠ 只给 `-sd` 不带 `-js` 时
+             # **数据目录不会被创建** —— 这条是实测出来的，别凭直觉写。
+             "nats-server"},
             "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
         self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
@@ -4081,14 +4086,16 @@ class NewSixComponents(unittest.TestCase):
         2026-10-12 由 10 个扩到 11 个（新增 redis，当天真机实测）。
         同日 B4/B2 再扩到 14 个（etcd / consul / zookeeper，三个都在 %TEMP% 跑过真进程）。
         同日 B4 补扩到 15 个（minio：真机量过启动耗时、PID 归属、停止与端口释放）。
+        2026-10-16 扩到 16 个（nats-server：%TEMP% 真机实测改口、JetStream 落盘、
+        停止后端口释放；实测教训是"只给 -sd 不带 -js 数据目录不会建"）。
         """
         self.assertEqual(
             main.LAUNCH_KEYS,
             {"jenkins", "nacos", "activemq",
              "rocketmq", "nginx", "kafka", "tomcat",
              "elasticsearch", "rabbitmq", "seata", "redis",
-             "etcd", "consul", "zookeeper", "minio"})
-        self.assertEqual(len(main.LAUNCH_KEYS), 15)
+             "etcd", "consul", "zookeeper", "minio", "nats-server"})
+        self.assertEqual(len(main.LAUNCH_KEYS), 16)
         # 登记表与 key 集合不许脱节（多一个 key 却没有 spec 就查不到）。
         self.assertEqual(set(main.LAUNCH_OF), main.LAUNCH_KEYS)
 

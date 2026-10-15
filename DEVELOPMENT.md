@@ -480,7 +480,7 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 **180 个可见组件**归入且仅归入五个 Tab（181 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **182 个可见组件**归入且仅归入五个 Tab（183 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
 | 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
@@ -2582,6 +2582,35 @@ minikube / kind / k3d / kustomize / stern / nerdctl / velero / kubeseal / mkcert
 terragrunt / act（GitHub，多数也能接）、zig / julia / php / nim / groovy / tinygo / v / nasm /
 clojure / jj / lazygit / aria2 / hyperfine / dust / duf / scc / miller（语言与效率 CLI）。
 本批只挑了我能一次验完的 19 个。
+
+### R20.9 nats-server 接进「一键启停」（2026-10-16）
+
+「一键启停」从 15 个扩到 **16 个**：新增 `nats-server`（NATS Server，消息/流服务）。
+它是**第一个**从「服务端组件」挪过来的组件 —— 进了 `LAUNCH_OF` 就自动归到「一键启停」
+（`group_components()` 按 `LAUNCH_KEYS` 归类），所以 `EXPECTED_MEMBERSHIP` 里
+CAT_SERVER 少一个、CAT_LAUNCH 多一个。（`caddy` / `traefik` 仍未接，原因见下。）
+
+**当天在 %TEMP% 跑真进程实测出来的四条事实**（规格里逐条写了引用）：
+
+1. 归档是「单顶层目录 + nats-server.exe」（条目只有 LICENSE / README / nats-server.exe）
+   ⇒ 解压塌层后 `path_subdir=""` 正确 —— 与 `bt_archive_layout_audit` 的结论一致。
+2. `-p <端口>` 能改口 ⇒ `port_writeback="cli_flag"`，不碰配置文件。
+3. ⚠ **只给 `-sd <dir>` 不够**：实测数据目录根本不会被创建 —— NATS 只在启用 JetStream
+   时才落盘。必须 `-js -sd <dir>` 一起给，才会建出 `<dir>/jetstream/`。
+   **这条是纯实测得来的，凭直觉写会得到一个"看起来配了数据目录、其实什么都没存"的规格。**
+4. `nats-server.exe` 自己就是监听进程（不是包装器）⇒ `stop_kind="pid"`，
+   `terminate()` 后端口随即释放（实测 4224 从"在听"变"不在听"）。
+
+没有网页控制台：4222 讲的是 NATS 协议（不带 `-m` 时连监控口都没有），
+所以 `console_path` / `health_path` 都是 None、判活只看端口 —— 与 redis 同一档。
+
+**`caddy` / `traefik` 为什么仍没接**：两者都能跑（单二进制），但
+① caddy 的默认 80/443 在 Windows 上会撞 http.sys（本项目 nginx 就是因此特意用 8888），
+要另定端口策略；② traefik 的 dashboard 在 8080、与 jwt/jenkins 那一簇口的避让关系要逐个核；
+③ 两者的"优雅停"要区分 `caddy stop`（走 admin API）与按 PID；**都必须在真机上把
+「起 → 端口整簇在听 → 停 → 端口释放」跑一遍才算数**（R5/R14 的口径）。
+`prometheus` / `victoriametrics` 同理（单二进制、9090/8428，但要先定配置文件从哪来）。
+这四个是下一批的自然候选，方法同本节。
 
 ## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
 

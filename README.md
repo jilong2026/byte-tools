@@ -78,7 +78,7 @@
 - **一份代码三平台**：自动判断系统与 CPU 架构（Apple Silicon 下 JDK 走 aarch64、Node 走 arm64）。
 - **80 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
 - **26 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
-- **15 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
+- **16 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
 - **前置运行时自动就位**：需要 JDK 的组件（Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata）在本机没有 JDK 或版本太低时，点「启动」会先自动下载安装一个够用的 JDK 再继续；RabbitMQ 需要的 Erlang/OTP 同理（按 RabbitMQ 版本自动配 27.x / 26.x）。用户不需要自己准备任何前置依赖，也不用手改文件。
 - **国内镜像优先 + 多源故障转移**：内置 11 家大陆镜像基址与 3 个 GitHub 加速器，按"大陆源在前 → 逐个换源 → 末位回退官网"走，全程中文日志，**无需手动改 URL**（少数组件只有官网一个源，见[平台支持与例外](#平台支持与例外)）。
 - **多版本并存 + 生效版本切换**：80 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
@@ -127,14 +127,14 @@ node -v
 
 ## 支持的组件
 
-共 **180 个**：**80 个可一键装配** + **100 个只提供官方安装包下载**（100 = 36 个 GUI 工具 + 64 个 Agent 客户端；80 个里有 15 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
+共 **182 个**：**80 个可一键装配** + **102 个只提供官方安装包下载**（102 = 38 个 GUI 工具 + 64 个 Agent 客户端；80 个里有 16 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
-| 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
-| 服务端组件 | 23 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter、Terraform、OpenTofu、Argo CD CLI、Prometheus、VictoriaMetrics、k6、Pulumi、Istio CLI、Talos Linux CLI |
+| 一键启停 | 16 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO |
+| 服务端组件 | 22 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、Caddy、Traefik、Apache JMeter、Terraform、OpenTofu、Argo CD CLI、Prometheus、VictoriaMetrics、k6、Pulumi、Istio CLI、Talos Linux CLI |
 | 开发环境 | 42 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant、Elixir、Scala CLI、Bazelisk、Just、Task、Oxlint、Biome、Nushell、Starship、GitHub CLI |
-| 开发工具 | 36 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim) |
+| 开发工具 | 38 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim)、CC-Switch、CodexAppManager |
 | Agent客户端 | 64 | Cursor、ZCode、Claude Code、Codex CLI、opencode、OpenHands、Cherry Studio、Goose、Qwen Code、Crush、Kiro、Jan、OpenClaw、Hermes Agent、Gemini CLI、Aider、Ollama、LM Studio、GPT4All、AnythingLLM、LobeHub、GitHub Copilot CLI、ima（腾讯）、Kilo Code、Wave Terminal、Msty Studio、Mistral Vibe、Kimi Work、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火 |
 
 > **Agent客户端这一 Tab 有两档**：64 个里 **56 个**有实测过的官方直链，卡片主按钮是「下载」；

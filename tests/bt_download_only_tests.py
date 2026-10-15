@@ -147,7 +147,7 @@ class TabStructure(unittest.TestCase):
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
     def test_visible_component_count_is_127(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（80 全流程 + 36 只下载 + 64 Agent客户端）。
+        """**全仓库唯一一处**写死界面可见组件数的地方（80 全流程 + 38 只下载 + 64 Agent客户端）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
@@ -159,13 +159,14 @@ class TabStructure(unittest.TestCase):
         → 128（同日补 opencode，它有实测直链，不是「官网下载」那一档）
         → 139（同日第四批 11 个：9 个有实测直链 + gemini-cli / aider 两个只有官网入口）
         → 161（同日第五批 22 个：12 个 Agent + 10 个开发工具，全部有实测直链）
-        → **180（同日第六批 19 个：9 个服务端/运维 + 10 个语言与开发 CLI，
-        全部"解压即用"、归档布局已用 bt_archive_layout_audit 逐个验过）**。
+        → 180（同日第六批 19 个：9 个服务端/运维 + 10 个语言与开发 CLI，
+        全部"解压即用"、归档布局已用 bt_archive_layout_audit 逐个验过）
+        → **182（2026-10-16 用户点名的 CC-Switch 与 CodexAppManager，都是开发工具）。**
         方法名里的 127 是历史名，不改 —— 改名的收益抵不上一次全仓库检索。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 180)
-        self.assertEqual(len(self.components), 181, "180 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 182)
+        self.assertEqual(len(self.components), 183, "182 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):

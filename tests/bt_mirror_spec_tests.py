@@ -354,7 +354,9 @@ class OfficialIsLast(unittest.TestCase):
                          "gpt4all", "anything-llm", "lobehub", "copilot-cli",
                          "wave-terminal", "mistral-vibe",
                          "notepad-plus-plus", "insomnia", "beekeeper-studio",
-                         "obsidian", "zettlr", "yaak", "gvim"}
+                         "obsidian", "zettlr", "yaak", "gvim",
+                         # 2026-10-16：CC-Switch / CodexAppManager（都是 GitHub 发行）
+                         "cc-switch", "codex-app-manager"}
         accounted = (set(self.OFFICIAL_HOST)
                      | WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION
                      | WindowsDefaultMustHaveTwoMainlandSources.WEB_ONLY

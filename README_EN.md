@@ -131,14 +131,14 @@ node -v
 
 ## Supported components
 
-**180 in total**: **80 installable end to end** + **100 download-only** (100 = 36 GUI tools + 64 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**182 in total**: **80 installable end to end** + **102 download-only** (102 = 38 GUI tools + 64 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
-| Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
+| Start-stop | 16 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO |
 | Dev environment | 42 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq, Apache Ant, Elixir, Scala CLI, Bazelisk, Just, Task, Oxlint, Biome, Nushell, Starship, GitHub CLI |
-| Server components | 23 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter, Terraform, OpenTofu, Argo CD CLI, Prometheus, VictoriaMetrics, k6, Pulumi, Istio CLI, Talos Linux CLI |
-| Dev tools | 36 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman, Notepad++, Wireshark, GitKraken, SourceTree, Insomnia, Beekeeper Studio, Obsidian, Zettlr, Yaak, Vim (gVim) |
+| Server components | 22 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, Caddy, Traefik, Apache JMeter, Terraform, OpenTofu, Argo CD CLI, Prometheus, VictoriaMetrics, k6, Pulumi, Istio CLI, Talos Linux CLI |
+| Dev tools | 38 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman, Notepad++, Wireshark, GitKraken, SourceTree, Insomnia, Beekeeper Studio, Obsidian, Zettlr, Yaak, Vim (gVim), CC-Switch, CodexAppManager |
 | Agent clients | 64 | Cursor, ZCode, Claude Code, Codex CLI, opencode, OpenHands, Cherry Studio, Goose, Qwen Code, Crush, Kiro, Jan, OpenClaw, Hermes Agent, Gemini CLI, Aider, Ollama, LM Studio, GPT4All, AnythingLLM, LobeHub, GitHub Copilot CLI, ima (Tencent), Kilo Code, Wave Terminal, Msty Studio, Mistral Vibe, Kimi Work, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark |
 
 > **This tab has two tiers.** 34 of the 40 have a measured official direct link, so the card's main

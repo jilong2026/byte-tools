@@ -6188,6 +6188,7 @@ COMPONENT_CATEGORY_OF = {
     "notepad-plus-plus": "开发工具", "wireshark": "开发工具", "gitkraken": "开发工具",
     "sourcetree": "开发工具", "insomnia": "开发工具", "beekeeper-studio": "开发工具",
     "obsidian": "开发工具", "zettlr": "开发工具", "yaak": "开发工具", "gvim": "开发工具",
+    "cc-switch": "开发工具", "codex-app-manager": "开发工具",
     # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
     # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
     "consul": CAT_SERVER, "zookeeper": CAT_SERVER,
@@ -6761,6 +6762,8 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "nushell": "Nushell：把管道数据当结构化表格处理的现代 shell（命令名 nu）。",
     "starship": "Starship：跨 shell 的提示符，自动显示 git 分支/语言版本/耗时。",
     "gh": "GitHub CLI：GitHub 官方命令行，开 PR/看 issue/跑 workflow 不用开浏览器。",
+    "cc-switch": "CC-Switch：Claude Code / Codex / OpenCode 等 CLI 的统一配置管理器。",
+    "codex-app-manager": "CodexAppManager：官方 Codex 桌面应用的安装/更新/卸载管理器。",
     "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
     "trae": "Trae：字节跳动的 AI 编程 IDE（国际版）。整库理解、多文件改写、Builder 模式从需求直出工程。",
     "trae-cn": "Trae CN：Trae 的中国大陆版。功能与界面同国际版，独立站点、国内直连不需要科学上网。",
@@ -7106,6 +7109,8 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "nushell": "https://www.nushell.sh/",                     # INT 官网（下载入口同页）
     "starship": "https://starship.rs/guide/#%F0%9F%9A%80-installation",  # INT 官方安装说明
     "gh": "https://cli.github.com/",                          # INT 官网（下载入口同页）
+    "cc-switch": "https://ccswitch.io/",                      # CN/INT 官方站（作者声明这是唯一官网）
+    "codex-app-manager": "https://github.com/Wangnov/Codex-App-Manager/releases",  # 只在 GitHub 发版
     "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
     "trae": "https://www.trae.ai/",                           # INT  国际站
     "trae-cn": "https://www.trae.cn/",                        # CN   大陆站
@@ -7421,6 +7426,10 @@ COMPONENT_USAGE: Dict[str, str] = {
                 "重启终端后提示符就变了。本工具不改你的 shell 配置。",
     "gh": "首次用 `gh auth login` 登录 GitHub。之后 `gh pr create`、`gh issue list`、"
           "`gh run watch` 都能在终端里做完。",
+    "cc-switch": "装完启动，在界面里添供应商（填 API Key / 中转端点）并「切换」即可；"
+                 "它会去改对应 CLI 自己的配置文件，所以**先装好目标 CLI** 再切。",
+    "codex-app-manager": "装完启动，界面里选 Codex 桌面端的版本并安装；后续更新与卸载也在同一处。"
+                         "它只管那个桌面应用本体。",
     "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
     "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
     "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",
@@ -7764,6 +7773,22 @@ _DEVTOOLS: tuple = (
      "Windows 构建地。GitHub 产物，下载走加速器优先。",
      (("9.2.1192", "https://github.com/vim/vim-win32-installer/releases/download/"
                    "v9.2.1192/gvim_9.2.1192_x64.exe", 12401328),)),
+    # 2026-10-16 用户点名要的两个"AI 编码工具链管理器"。
+    ("cc-switch", "CC-Switch", "msi",
+     "Claude Code / Codex / OpenCode / OpenClaw / Grok Build / Hermes Agent 的**统一管理器**"
+     "（14 万 star）：图形界面里切供应商配置、管多个 CLI 的 API Key 与端点，省得手改配置文件。"
+     "官方 Windows 产物是 **msi 安装包**（另有便携 zip，见「下载 ▾」），没有裸 exe。"
+     "GitHub 产物，下载走加速器优先。",
+     (("4.0.13", "https://github.com/farion1231/cc-switch/releases/download/v4.0.13/"
+                 "CC-Switch-v4.0.13-Windows.msi", 16846848,
+       ("zip", "https://github.com/farion1231/cc-switch/releases/download/v4.0.13/"
+               "CC-Switch-v4.0.13-Windows-Portable.zip", 17039432)),)),
+    ("codex-app-manager", "CodexAppManager", "exe",
+     "**官方 Codex 桌面应用**的安装 / 增量更新 / 干净卸载管理器（含国内可达的镜像自更新）。"
+     "注意它管的是 OpenAI 那个 Codex 桌面端，**不是** Codex CLI。"
+     "GitHub 产物，下载走加速器优先。",
+     (("0.5.14", "https://github.com/Wangnov/Codex-App-Manager/releases/download/v0.5.14/"
+                 "CodexAppManager_0.5.14_x64-setup.exe", 5281355),)),
 )
 
 
@@ -8875,6 +8900,42 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "（9000 只讲 S3 协议，浏览器打开是 403，属正常）。"
             "出厂默认凭据 minioadmin / minioadmin（实测该组合登录返回 204，"
             "admin/password 返回 401）。"
+        ),
+    ),
+    "nats-server": LaunchSpec(
+        # 2026-10-16 在 %TEMP% 里跑真进程实测（2.15.1，官方 windows-amd64.zip）：
+        #   ① 归档是「单顶层目录 + nats-server.exe」⇒ 解压塌层后 path_subdir="" 正确；
+        #   ② `-p <端口>` 实测能改口 ⇒ port_writeback="cli_flag"，不碰配置文件；
+        #   ③ **只给 `-sd` 是不够的**：实测数据目录根本不会被创建（NATS 只在启用
+        #      JetStream 时才落盘），必须连 `-js` 一起给，才会建出 <dir>/jetstream/；
+        #   ④ nats-server.exe 自己就是监听进程（不是包装器）⇒ stop_kind="pid"，
+        #      terminate() 后端口随即释放（实测从"在听"变"不在听"）。
+        commands={"Windows": ["{home}/nats-server.exe", "-p", "{port}", "-js",
+                              "-sd", "{data_dir}"],
+                  "Linux":   ["{home}/nats-server", "-p", "{port}", "-js",
+                              "-sd", "{data_dir}"],
+                  "Darwin":  ["{home}/nats-server", "-p", "{port}", "-js",
+                              "-sd", "{data_dir}"]},
+        stop_kind="pid",
+        main_port=4222,
+        port_search_span=99,
+        port_writeback="cli_flag",
+        # 4222 讲的是 NATS 协议，不是 HTTP；不带 `-m` 时压根没有监控口
+        # ⇒ 没有控制台、也不能用 HTTP 探活，判活只看端口（与 redis 同一档）。
+        console_path=None,
+        health_path=None,
+        startup_timeout=30,
+        risk_note=("命令行启动用的是官方默认：**只监听 127.0.0.1、无认证**。"
+                   "本工具不替你加 --user/--pass，也不改配置文件。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/nats-server-data"
+                   "（实测 `-js -sd` 会建出里面的 jetstream/）。"
+                   "切换生效版本与卸载都**不碰它**。"),
+        credentials_hint=(
+            "**NATS 没有网页控制台** —— 4222 说的是 NATS 协议，浏览器打开只会看到协议错误，"
+            "所以本工具不给它挂「访问页」按钮。"
+            "官方这个 zip 里**只有 nats-server.exe**（实测条目就三个：LICENSE / README / "
+            "nats-server.exe），没带 nats 命令行；要验活就自己下一个 nats CLI，"
+            "执行 `nats -s nats://127.0.0.1:<端口> server check`。"
         ),
     ),
 }

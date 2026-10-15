@@ -54,13 +54,16 @@ EXPECTED_MEMBERSHIP = {
                 "etcd", "consul", "zookeeper",
                 # 2026-10-12 B4 补：minio（对象存储，API 9000 + 控制台 9001，
                 # 真机实测过起停与端口释放）
-                "minio"},
+                "minio",
+                # 2026-10-16：nats-server（消息/流服务，单 exe，4222；当天真机实测
+                # 改口 / JetStream 落盘 / 停止后端口释放）—— 它一进 LAUNCH_KEYS
+                # 就自动从「服务端组件」挪到这里（本表随之更新）。
+                "nats-server"},
     CAT_SERVER: {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl",
-               # 2026-10-12 B3/B5：nats-server / caddy / traefik 是服务型，
-               # 先落这里，接进 LAUNCH_OF 后会自动挪到「一键启停」。
-               # （etcd 已经接进去了，所以它不在这张表里 —— 它和 consul / zookeeper
-               #   一起出现在「一键启停」，两边同时登记会让本表比出差异。）
-               "nats-server", "caddy", "traefik", "helm",
+               # 2026-10-12 B3/B5：caddy / traefik 是服务型，先落这里，
+               # 接进 LAUNCH_OF 后会自动挪到「一键启停」（nats-server 已于 2026-10-16
+               # 接进去、挪走了；etcd 同理）。
+               "caddy", "traefik", "helm",
                # 2026-10-12 并发那批补的服务型 CLI
                "k9s", "trivy", "docker-compose",
                # 2026-10-12 B7：JMeter（压测服务型，需 JDK 前置）
@@ -113,7 +116,9 @@ EXPECTED_MEMBERSHIP = {
                # _DEVTOOLS 尾部，台账见 DEVELOPMENT.md R20.7。
                "notepad-plus-plus", "wireshark", "gitkraken", "sourcetree",
                "insomnia", "beekeeper-studio", "obsidian", "zettlr",
-               "yaak", "gvim"},
+               "yaak", "gvim",
+               # 2026-10-16：用户点名的两个 AI 编码工具链管理器
+               "cc-switch", "codex-app-manager"},
     # 「Agent客户端」：2026-10-15 用户要求新增的第五个 Tab，**放在最后**。
     # 形态与「开发工具」同类 —— 只下载、不配置，登记表在 main.py 的 `_AGENT_CLIENTS`
     # （表驱动，key 从那里来；这里手写一份是为了让"扩表 = 必须同时改这张基线"可见）。
