@@ -6266,7 +6266,7 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "k9s": "https://k9scli.io/",                       # INT
 
     # ---- 数据库 ----
-    "mysql": "https://www.mysql.com/",                 # INT  403 反爬，浏览器可正常打开
+    "mysql": "https://www.mysql.com/",                 # 403 按 UA 反爬：curl/8.0 请求直接 200，浏览器同理
     "mongodb": "https://www.mongodb.com/",             # INT
     "postgresql": "https://www.postgresql.org/",       # INT  不是 get.enterprisedb.com（那是下载站）
     "redis": "https://redis.io/",                      # INT
@@ -6313,7 +6313,7 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     # ---- 其它 IDE / 编辑器 ----
     "vscode": "https://code.visualstudio.com/docs/?locale=zh-cn",  # CN  站点用 ?locale= 而不是 /zh-cn（实测 /zh-cn 是 404）
     "eclipse": "https://www.eclipse.org/downloads/",   # INT
-    "android-studio": "https://developer.android.com/studio",  # INT  该域名在部分网络下不可达，但官网确为此处
+    "android-studio": "https://developer.android.com/studio?hl=zh-cn",  # CN  官方中文页（?hl= 不是路径；/zh-cn 形式不存在）
     "visual-studio": "https://visualstudio.microsoft.com/zh-hans/",  # CN  微软自带 zh-hans 路径
     "hbuilderx": "https://www.dcloud.io/hbuilderx.html",  # CN  DCloud（国内公司）官网
     "wechat-devtools": "https://developers.weixin.qq.com/miniprogram/dev/devtools/download.html",  # CN  微信官方
@@ -6322,7 +6322,7 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "navicat": "https://www.navicat.com.cn/",          # CN  Navicat 中国版官网（海外版是 navicat.com）
     "dbeaver": "https://dbeaver.io/",                   # INT
     "heidisql": "https://www.heidisql.com/",           # INT
-    "mysql-workbench": "https://www.mysql.com/products/workbench/",  # INT  403 反爬，域名有效
+    "mysql-workbench": "https://www.mysql.com/products/workbench/",  # 403 按 UA 反爬，同 mysql，curl/8.0 请求 200
     "pgadmin4": "https://www.pgadmin.org/",            # INT
     "mongodb-compass": "https://www.mongodb.com/products/compass",  # INT
     "redisinsight": "https://redis.io/insight/",       # INT
