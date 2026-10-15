@@ -245,6 +245,16 @@ def run_one(path: Path, python: str, verbose: bool) -> tuple[bool, str, float, i
     if not passed and not detail:
         detail = f"退出码 {proc.returncode}，且没有可解析的 unittest 摘要（疑似进程崩溃/退出）"
 
+    # 2026-10-16 加：**把子进程退出码钉进失败信息**。起因是 CI 上
+    # bt_launch_tests 打印了 `OK (skipped=1)` 却被判失败 —— 也就是
+    # "用例全绿、进程却非 0 退出"（PASS 到 OK 之后才崩，最典型的是 Qt 在解释器
+    # 退出阶段的 fail-fast，见 requirements.txt 里 PySide6 6.12 那段）。
+    # 之前这类失败只贴输出尾巴，尾巴上明明写着 OK，看的人无从下手 ——
+    # 退出码是唯一能把"真失败"和"退出阶段崩"分开的证据，必须带出来。
+    if not passed:
+        detail = f"[子进程退出码 {proc.returncode}]
+" + detail
+
     return passed, detail, elapsed, count
 
 
