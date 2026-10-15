@@ -220,16 +220,24 @@ class MainWindowSearchBox(unittest.TestCase):
         self.assertEqual(len([c for c in self.win.cards if not c.isHidden()]), TOTAL)
 
     def _result_widgets(self):
-        """结果面板里的控件：分类小标题直接挂在布局上，卡片住在 cardRow 行里。
+        """结果面板里的控件：分类小标题直接挂在布局上，卡片住在「行」里。
 
-        搜索结果改用网格之后，卡片不再直接挂在 results_layout 上（它的父级是行
-        控件），所以遇到 objectName 为 cardRow 的行要钻进去把它装着的卡片一起
-        收回来 —— "分类标题要在"与"命中的卡片要在且 key 正确"两条断言都靠它。
+        行有**两种形态**（2026-10-15 起搜索结果的行改成了**无宿主的 QHBoxLayout**，
+        见 DEVELOPMENT.md R2.6；浏览 Tab 里仍是 `QWidget#cardRow`）：两种都要能钻进去
+        把卡片收回来 —— "分类标题要在"与"命中的卡片要在且 key 正确"两条断言都靠它。
         """
         lay = self.win.results_layout
         out = []
         for i in range(lay.count()):
-            w = lay.itemAt(i).widget()
+            item = lay.itemAt(i)
+            sub = item.layout()
+            if sub is not None:                     # 无宿主行布局（搜索结果）
+                for j in range(sub.count()):
+                    card = sub.itemAt(j).widget()
+                    if card is not None:
+                        out.append(card)
+                continue
+            w = item.widget()
             if w is None:
                 continue
             out.append(w)
@@ -253,13 +261,17 @@ class MainWindowSearchBox(unittest.TestCase):
         # datagrip / dbeaver / pgadmin4（summary 里点名 SQL 工具）。它们都是货真价实的
         # SQL 工具，搜「sql」时不该被藏起来 —— 这里是**精确**记录扩充后的命中集，
         # 将来若有人再改匹配面，这条会直接告诉他在哪些组件上动了口径。
+        #
+        # 2026-10-15 第五批又多了 beekeeper-studio（summary："开源 SQL 客户端"）——
+        # 同理，它是 SQL 工具，命中是对的，扩充基线即可。
         self.win.search_box.setText("sql")
         self.assertEqual(self.win.top_stack.currentIndex(), 1, "应切到统一结果面板")
         self.assertIs(self.win.top_stack.currentWidget(), self.win.results_area)
         visible = {c.component.key for c in self.win.cards if not c.isHidden()}
         self.assertEqual(visible, {"mysql", "postgresql", "sqlite",
                                    "heidisql", "mysql-workbench",
-                                   "duckdb", "datagrip", "dbeaver", "pgadmin4"})
+                                   "duckdb", "datagrip", "dbeaver", "pgadmin4",
+                                   "beekeeper-studio"})
         # 结果面板里应出现「服务端组件」分类小标题
         headers = [w.text() for w in self._result_widgets()
                    if w.objectName() == "resultCatHeader"]

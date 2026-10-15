@@ -480,7 +480,7 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 **127 个可见组件**归入且仅归入五个 Tab（128 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **161 个可见组件**归入且仅归入五个 Tab（162 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
 | 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
@@ -648,6 +648,90 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
   改外壳的 `focused` 属性并 `unpolish/polish` 重刷样式（QSS 的 `:focus` 选不到父级控件）。
   放大镜与清空按钮图标都用 `QPainter` 现画，不加图片资源；清空按钮用 `QLineEdit.TrailingPosition`
   的 QAction 代替内置清除按钮，以保证跨平台观感一致、颜色可控
+
+### R2.6 搜索卡顿的真因：搬家会触发 QSS 重算（2026-10-15 实测）
+
+用户报"左上角搜索响应太慢"。**先测再改**，实测口径是造一个真窗口（offscreen）、
+让 128 张卡都在，然后按真实交互序列打点。最终结果：
+
+| 场景（128 组件，命中数见括注） | 原始 | 现在 |
+|---|---|---|
+| 搜索态之间 `a` → `e`（各百余命中） | 4288 ms | **213 ms** |
+| `e` → `i` | 3648 ms | **158 ms** |
+| 输入 `a` 后改成 `zzzz`（→0 命中） | 1285 ms | **18 ms** |
+| 逐字敲 `cursor` 小计（84→3→1） | 3978 ms | 2387 ms |
+| 浏览态 → 搜 `a`（进入搜索，115 命中） | 2331 ms | 757 ms |
+| 清空回浏览（退出搜索） | 1447 ms | 1442 ms |
+
+**打字过程中改词**快了一个数量级（20 倍上下）——这正是用户抱怨的那件事。
+剩下两个大数字是**进入/退出搜索那一次性**的：一百多张卡整体搬一次家，各约 0.7 s / 1.4 s，
+那是 Qt 给每张卡重算样式的硬成本（见下）；要再压就得把浏览 Tab 的行也换成无宿主布局，
+而浏览态的像素断言与 `_reveal_running_tabs` 都按 `cardRow` 找行，风险另算。
+
+**真因不是"逻辑重"，是 Qt 的样式重算。**三组对照实验（同一个 `_apply_search('a')`）：
+
+| 改动 | 耗时 | 说明 |
+|---|---|---|
+| 基线 | 2449 ms | |
+| 套 `setUpdatesEnabled(False)` | 1622 ms | 只省掉重绘那部分，约 1/3 |
+| **临时代码里摘掉窗口样式表** | **339 ms** | **7.2 倍** —— 82% 的时间是 QSS |
+
+`theme.QSS` 挂在**窗口**上（`main.py` 的 `_apply_theme`），里面有 `#card` 这条规则；
+于是**每搬一次家**（`setParent` / `layout.addWidget` 把卡片换父级）都会让
+`QStyleSheetStyle` 把该卡**整棵子树**重新解析一遍样式。
+
+一条特别反直觉、也最该记住的实测：
+
+> **搬到"同一个父级"也不便宜。** `card.setParent(卡片当前父级)` 实测仍约 **5 ms/张**，
+> 因为 Qt 照样走一遍 `inheritStyle` → 重新 polish。115 张就是 ~0.6 s。
+> 所以"顺手再 setParent 一次确保正确"是纯粹的净损失，不是无操作。
+
+### 由此得出的四条实现约定
+
+1. **搜索结果的行用无宿主的 `QHBoxLayout`，不是 `QWidget#cardRow`**（`_make_layout_rows`）。
+   `QLayout::addChildWidget` 把控件 reparent 到**布局的 `parentWidget()`** ——
+   行是 `QWidget` 时卡片父级变成那个新行，而布局的 `parentWidget()` 就是容器本身，
+   **卡片父级不变**，整条 polish 路径被跳过。实测同一份 115 张卡：
+
+   | `_make_rows` 的做法 | 耗时 |
+   |---|---|
+   | 行控件 `QWidget#cardRow` | 1001 ms |
+   | 行是 `QHBoxLayout` | **3.5 ms** |
+
+   代价：行没有 `objectName` 了，`_drop_rows` / `_clear_results_layout` /
+   `CardColumnLayout.indexOf` 三处都要认「行也可能是布局」。**Tab 的行不动**
+   （浏览态的 `findChildren` / 像素断言 / `_reveal_running_tabs` 都按行控件写）。
+
+2. **搜索期间一张卡都不许"搬家"**：不再是命中项就只 `setVisible(False)`，
+   **不要**顺手送回 Tab。逐字输入时这最贵 —— 实测 `'c' → 'cu'`（84→3 命中）
+   光是送回这 81 张卡就要 **0.7 s**。它们留在结果面板宿主上藏着，退出搜索时一次扫干净。
+
+3. **退出搜索时那记扫尾不能省**（`_clear_results_layout(send_home=True)` 末尾按
+   `card.parent() is self.results_content` 全量扫一遍）。搜索期间留下的卡片**不属于任何一行**，
+   而"拆行"那圈只走到"行里的卡"—— 漏掉这步的后果是**清空搜索后卡片凭空少一批**：
+   结果面板是 `top_stack` 的隐藏页，卡挂在那儿 = 浏览态里消失。
+   2026-10-15 自查时实测到清空后仍有 **115 张**卡留在 `results_content` 上（自动化用例全绿、
+   只有专门写脚本按"卡片的父级是谁"点数才看得出）。判据脚本见下方"自查"一句。
+
+4. **重建期间关重绘**（`setUpdatesEnabled(False)`，`try/finally` 兜底 —— 异常也必须还回去，
+   否则窗口从此不再刷新），以及**删掉 `_build_unified` 里那句多余的
+   "先把命中的卡挂到 `results_content`"**（`_relayout_results` 紧接着会做同一件事）。
+
+**自查这类"卡片搬家"改动的最小手段**（比看用例红绿可靠）：
+起一个真窗口，按 `'a' → 'zzzz' → ''` 这类序列打完，然后数
+`sum(1 for c in win.cards if c.parent() is win.results_content)` ——
+**清空之后它必须是 0**；搜索态下它是"刻意的非零"（就是第 2 条省下来的那批）。
+
+**这条 286 倍的收益已经在 2026-10-15 落地**（用户看过数据后拍板"现在就改"）。
+改完同步了两处按"行是控件"写的测试断言：`bt_grid_layout_tests` 的
+`_row_cards` / `_row_cells`（现在三种行形态都认）与 `bt_search_and_newcmp_tests._result_widgets`
+（遇到 `item.layout()` 也要钻进去收卡片）；`CardColumnLayout.indexOf` 同样加了布局行分支
+（`_reveal_running_tabs` 那一族按它判归属，漏了会静默失效）。
+
+另外两条**试过但否掉**的方案，别再走一遍：把窗口样式表整段摘掉再挂回（恢复那一次
+`setStyleSheet(QSS)` 本身要 681 ms，净赚只有 18%）；以及"防抖"（`textChanged` 后延时再搜）——
+`bt_search_and_newcmp_tests` 有一批用例是 `search_box.setText(...)` 之后**立刻**断言的，
+加防抖会成批变红，且会改变"同步出结果"这个既有语义。
 
 ---
 
@@ -2325,6 +2409,120 @@ URL 与字节数**一律带 `byte-tools/1.2.1` UA 实测**（R1 的口径）。�
 三张登记表（`COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`）、
 一个图标、以及 `EXPECTED_MEMBERSHIP[CAT_AGENT]` 与
 `test_visible_component_count_is_127` 这两个常量。
+
+**2026-10-15 又补了一个 `opencode`**（用户点名要的，当时 40 个里没有它）：21 万 star 的
+开源编程 Agent，**同一次 release 同时发桌面端安装器与终端版便携包**，所以它是本项目第一个
+"一行两个产物都登记"的 Agent 组件 —— 主产物写桌面端 exe，终端版 zip 放进第 4 项，
+卡片上就是「下载 ▾」菜单（同 `codex-cli` 的写法）。版本位取 release tag 的数字
+（`v1.19.0` → `1.19.0`），它是 GitHub 产物所以**不进** `OFFICIAL_ONLY_EXCEPTION`、
+而是登记进 `bt_mirror_spec_tests.test_no_component_escapes_this_table` 的 `github_assets`。
+找仓库时的坑：`opencode-ai/opencode` 已 archived（那是 Go 老版）、
+`sst/opencode` 也已 301 跳到 `anomalyco/opencode` —— 别照着"opencode 是 SST 的"去登记旧仓库。
+图标取自 Simple Icons 的 `opencode` 条目（该条目 `source` 指的就是
+`anomalyco/opencode` 仓库里的 `packages/identity/mark.svg`，不是旧版的标）。
+
+### R20.6 第四批：候选清单里用户点名的 11 个（2026-10-15）
+
+用户看到"还有哪些热门的没接进来"的候选清单后，勾了 7 个我已实测过的 + OpenClaw / Hermes
++ 两个只能走「官网下载」的。**同一天这一 Tab 从 41 到 52**（44 有直链 + 8 只有官网入口）。
+
+| key | 显示名 | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|
+| `openhands` | OpenHands | 1.27.1 | 140,354,744 | GitHub Releases（`Agent-Canvas-Setup-*.exe`） |
+| `cherry-studio` | Cherry Studio | 2.1.6 | 396,037,216 / 便携 395,662,608 | GitHub Releases |
+| `goose` | Goose | 1.54.0 | 247,217,050 / CLI 77,666,256 | GitHub Releases（桌面 + CLI 同发） |
+| `qwen-code` | Qwen Code | 0.25.1 | 52,505,536 / CLI 72,012,450 | GitHub Releases（tag 是 `desktop-v0.25.1`） |
+| `crush` | Crush | 0.98.1 | 27,319,516 | GitHub Releases |
+| `kiro` | Kiro | 1.3.0 | 210,208,904 | `prod.download.desktop.kiro.dev`（厂商 CDN、带签名） |
+| `jan` | Jan | 0.8.6 | 556,441,144 | GitHub Releases |
+| `openclaw` | OpenClaw | 2026.10 | 128,746,840 | GitHub `releases/latest/download/`（滚动，无版本号） |
+| `hermes` | Hermes Agent | 2026.08 | 7,946,048 | `hermes-assets.nousresearch.com`（滚动，无版本号） |
+| `gemini-cli` | Gemini CLI | —（空版本表） | — | **无 Windows 安装包**，只有 npm → 走 R21「官网下载」 |
+| `aider` | Aider | —（空版本表） | — | **无安装包**，只有 pip/pipx → 走 R21「官网下载」 |
+
+**这一批踩到/确认的几件事**（都影响后面接组件）：
+
+1. **`ARTIFACT_LABELS` 多了一组 `cli` / `portable`**。原因是 Goose 与 Qwen Code 都
+   "桌面端 + 终端版"同发，而两个若都标 `zip`，「下载 ▾」里会出现**两条一模一样的文案**。
+   加标签键是安全的：全项目取标签都走 `ARTIFACT_LABELS.get(fmt, fmt)`。
+2. **`bt_download_only_tests` 有一份"产物域名白名单"**（`test_every_artifact_url_is_a_measured_host`）——
+   每个**新域名**都要在那里点名，包括「下载 ▾」里备选产物那条。这一批只多了两个非 GitHub 域名
+   （kiro / hermes）；其余 7 个走 GitHub，加速器域名早已在白名单里。
+3. **否定结论要穷举**：`gemini-cli` 的 release 资产实测只有 `gemini-cli-bundle.zip` +
+   两个 darwin 包（10.7 万 star 的项目**不发 Windows 包**）；`aider` 官方装法只有 pip/pipx。
+   这两条都不是"我没找到"，是把 `releases/expanded_assets/<tag>` 列完确认的。
+4. **Hermes 的产物可疑，已在 `data_note` 里写明**：官方页面那个 Windows 按钮指向的安装器
+   实测只有 **7.9 MB**、服务端 `Last-Modified` 停在 2026-08。多半是"联网拉取组件的小体积安装器"，
+   但没验证过，所以文案里**不替它下结论**，只写实测数字并提示"装之前请自行确认"。
+   它的图标是 Hermes 桌面页自己声明的 `<link rel="icon" sizes="48x48">`（
+   `/marketing-static/assets/hermes-agent/icon.png`），是**产品自己的标**；不是
+   nousresearch.com 首页那个 180×180 的插图版（那张在 32px 槽里会糊）。
+   ⚠ Simple Icons 里那个 `hermes` **不是它** —— 那是爱马仕，别取错。
+5. **Kiro 与官网逐字对齐**：`kiro.dev/downloads/` 页面上的 Windows 链接就是本工具登记的那条
+   （含 `1.3.0` 版本目录），所以版本位不是猜的。
+
+### R20.7 第五批：一次"各 Tab 还缺什么"的专项调研（2026-10-15）
+
+用户问"各个 Tab 还有哪些热门组件没接入"，于是按 Tab 分头调研（服务端/运维、开发环境、
+开发工具、Agent 客户端各一个子 agent），**每条直链都由我本人再用 `byte-tools/1.2.1` UA
+复测一遍**（206 + 前四字节 `MZ`/`PK`/OLE + `Content-Range` 取字节）才写进表 ——
+子 agent 的结论只当线索，不当数据。这一批落地 **22 个**（Agent 12 + 开发工具 10），
+两个 Tab 的计数同步为 64 / 36。
+
+**Agent 客户端（+12，全部有实测直链）**
+
+| key | 显示名 | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|
+| `ollama` | Ollama | 2026.10 | 1,581,967,176 | `ollama.com/download/OllamaSetup.exe`（滚动，无版本号） |
+| `lm-studio` | LM Studio | 2026.10 | 618,785,040 | `lmstudio.ai/download/latest/win32/x64`（302 到版本化安装器） |
+| `gpt4all` | GPT4All | 3.10.0 | 744,456,856 | GitHub Releases |
+| `anything-llm` | AnythingLLM | 1.18.0 | 407,381,240 | GitHub Releases（资产名不带版本号） |
+| `lobehub` | LobeHub | 2.2.19 | 151,357,692 | GitHub Releases（仓库已改名 `lobehub/lobehub`） |
+| `copilot-cli` | GitHub Copilot CLI | 1.0.98 | 95,662,080 | GitHub Releases（主推 msi） |
+| `ima` | ima（腾讯） | 2.3.0_3717 | 205,057,816 | `ima-app.image.myqcloud.com`（按版本目录） |
+| `kilo-code` | Kilo Code | 2026.10 | 410,662,216 | `autoupdate.desktop.anaconda.com`（滚动 latest） |
+| `wave-terminal` | Wave Terminal | 0.14.5 | 163,826,544 | GitHub Releases |
+| `msty` | Msty Studio | 2026.10 | 226,457,032 | `next-assets.msty.studio`（滚动 latest） |
+| `mistral-vibe` | Mistral Vibe | 2.26.1 | 61,496,201 | GitHub Releases（CLI zip） |
+| `kimi-work` | Kimi Work | 2026.10 | 438,668,088 | `appsupport.kimi.ai`（滚动端点，302 到版本化文件） |
+
+**开发工具（+10）**：Notepad++ 8.9.8.1 / Wireshark 4.6.9 / GitKraken 2026.10（稳定别名）/
+SourceTree 3.4.20 / Insomnia 13.3.1 / Beekeeper Studio 6.1.6 / Obsidian 1.14.4 /
+Zettlr 4.8.0 / Yaak 2026.9.0 / Vim (gVim) 9.2.1192。
+
+**这一批抓到的坑（下次直接照抄）**
+
+1. **`/releases/latest/download/<带版本号的资产名>` 是错的写法**。调研报告里有几条这么给
+   （Notepad++ / VSCodium / gVim），而 `latest` 会随时间指向新 tag，资产名里的版本号却不跟着变 ——
+   登记进去就是个定时炸弹。一律换成**带具体 tag 的** `/releases/download/<tag>/<资产>`，
+   而且 tag 与版本号**不同形**的要注意：Insomnia 是 `core%4013.3.1`（`@` 要转义成 `%40`）、
+   Ollama 是 `v0.40.5`、Copilot CLI 是 `v1.0.98`。
+2. **`ARTIFACT_LABELS` 又加了一档 `msi`**（Copilot CLI 官方主推 msi）。
+3. **图标别串品牌**：Simple Icons 的 `hermes` 是爱马仕、`mistral` 不存在（要 `mistralai`）；
+   同家的两个组件共用一张标时必须**逐字节相同**并进 `ALLOWED_SHARED`（本批是 `kimi`/`kimi-work`，
+   我第一版从 CDN 现取导致与仓库里那份不一致，`test_the_allowed_shared_pairs_still_exist`
+   当场报"不再共用"—— 正确做法是 `cp` 仓库里已有那份）。
+4. **msty 没有 PNG/SVG 的站点图标**（`/favicon.ico` 只有 16/32px，短边 <48 被护栏拒），
+   用它 `/brands/studio.svg`（官方 Studio 品牌标）兜住。
+
+**这一批我判定"不能接"的（附原因，供以后复核）**
+
+| 组件 | 原因 |
+|---|---|
+| `warp` | 直链存在（`releases.warp.dev/stable/v<日期>.stable_00/WarpSetup.exe`，206），但**我 4 次都取不到前四字节** —— 验不出就登记不了（只有版本化目录，没有稳定入口） |
+| `httpie-desktop` | 调研给的 tag `2025.2.0` 实测 **404**；该仓库 release 实际只到 `v2023.3.x`，资产名也对不上 |
+| `chatbox` | GitHub Release **只有源码**，官网直链没挖到 |
+| `void` | 项目已声明弃坑（GitHub deprecated，release 无资产） |
+| `iflow-cli` / `roo-code` | 官方已停运 / 公告将停运（roo 迁 Kilo） |
+| 只上微软商店的一批（`quark` / `perplexity` / `xiaoyi` / `lingguang` / `devtoys`） | 官方只发 msix / 商店分发，没有可直接下载的独立 exe |
+
+**仍未接入、但**能**接的（下一批候选，方式已明确）**：本批只落了"只下载"类的两个 Tab。
+「开发环境 / 服务端组件」那两批调研出的候选（terraform / rclone / minikube / argocd / gitea /
+prometheus / grafana / k6 / mariadb / influxdb / gh / act / k9s 之外的运维 CLI 等约 40 个）**都还没接** ——
+它们要额外做两件事：① 写进 `_CLI_TOOLS`（GitHub 托管的能自动配抓取器，HashiCorp / Grafana /
+InfluxData / MariaDB 这类厂商 CDN 的**要另写版本抓取器**）；② 用
+`tools/bt_archive_layout_audit.py` 逐个验证归档布局（`path_subdir` 写错会让"装好了但 PATH 里没东西"）。
+按项目惯例这批应当**单独一排**做。
 
 ## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
 

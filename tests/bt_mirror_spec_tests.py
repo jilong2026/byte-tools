@@ -185,12 +185,25 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                # 第三批大厂中文助手：同样是官方/CDN 直发、无大陆镜像。
                                # （`lingma` 不在这里 —— 它的官方源就在阿里云内地 OSS 上，
                                # 被判成"1 个大陆源"，登记在 SINGLE_SOURCE_EXCEPTION。）
+                               # 2026-10-15 第四批里只有这两个是**厂商自有 CDN 直发**、
+                               # 没有可复用的大陆镜像：kiro 走 prod.download.desktop.kiro.dev、
+                               # hermes 走 hermes-assets.nousresearch.com。同批其余都在
+                               # GitHub（走加速器，算大陆源，登记在 github_assets）。
+                               "kiro", "hermes",
+                               # 2026-10-15 第五批里的 9 个非 GitHub 域名：全是官方
+                               # 站点 / 厂商 CDN 直发，逐个实测过（同批其余 13 个在 GitHub）。
+                               "ollama", "lm-studio", "ima", "kilo-code", "msty",
+                               "kimi-work", "wireshark", "gitkraken", "sourcetree",
                                "doubao", "yuanbao", "tongyi-qianwen",
                                "ernie", "chatglm"}
     # 「官网下载」型（`official_page_only`，R21）：**连直链都没有**，版本表是空的，
     # 上面 test_counts 直接 `continue` 跳过。但它们仍必须在本套件点名，否则会从
     # OfficialIsLast.test_no_component_escapes_this_table 的后门溜过去。
-    WEB_ONLY = {"metaso", "windsurf", "claude", "antigravity", "gemini", "xinghuo"}
+    WEB_ONLY = {"metaso", "windsurf", "claude", "antigravity", "gemini", "xinghuo",
+                # 2026-10-15 第四批：这两个官方**不发 Windows 安装包**（只有 npm / pip），
+                # 卡片给「官网下载」——实测过：gemini-cli 的 release 资产只有
+                # bundle.zip + 两个 darwin 包；aider 官方装法只有 pip/pipx。
+                "gemini-cli", "aider"}
 
     def test_counts(self):
         for key, comp in COMPS.items():
@@ -315,9 +328,20 @@ class OfficialIsLast(unittest.TestCase):
         """
         # GitHub 产物、末位天然是裸 github.com（前面挂着加速器）→ 走常规检查，
         # 只是要在这里点名。2026-10-15 加入 claude-code / codex-cli（同 dbx / windterm 一类）；
-        # 同日第二批又加了 openworker / orkas / zed / cline / reasonix（同样 GitHub 发行）。
+        # 同日第二批又加了 openworker / orkas / zed / cline / reasonix（同样 GitHub 发行），
+        # 之后补的 opencode 也是 GitHub 发行（桌面端 + 终端版两个产物）。
         github_assets = {"dbx", "windterm", "claude-code", "codex-cli",
-                         "openworker", "orkas", "zed", "cline", "reasonix"}
+                         "openworker", "orkas", "zed", "cline", "reasonix",
+                         "opencode",
+                         # 2026-10-15 第四批：这 7 个也全是 GitHub 发行（加速器算大陆源）
+                         "openhands", "cherry-studio", "goose", "qwen-code",
+                         "crush", "jan", "openclaw",
+                         # 2026-10-15 第五批：这 13 个同样是 GitHub 发行（其余 9 个是厂商自有域名，
+                         # 已登记在 OFFICIAL_ONLY_EXCEPTION）
+                         "gpt4all", "anything-llm", "lobehub", "copilot-cli",
+                         "wave-terminal", "mistral-vibe",
+                         "notepad-plus-plus", "insomnia", "beekeeper-studio",
+                         "obsidian", "zettlr", "yaak", "gvim"}
         accounted = (set(self.OFFICIAL_HOST)
                      | WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION
                      | WindowsDefaultMustHaveTwoMainlandSources.WEB_ONLY

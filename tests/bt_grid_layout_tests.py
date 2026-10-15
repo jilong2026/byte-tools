@@ -46,8 +46,8 @@ import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscr
 REPO_ROOT = str(_btprelude.REPO_ROOT)
 
 import main  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton,  # noqa: E402
-                               QWidget)
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLayout,  # noqa: E402
+                               QPushButton, QWidget)
 
 # 分类基线复用对面那份，不另写一张表（理由见 bt_search_and_newcmp_tests.py 顶部）。
 from bt_component_category_tests import EXPECTED_MEMBERSHIP  # noqa: E402
@@ -139,14 +139,35 @@ def _rows_registry(win):
 
 
 def _row_cards(rows):
-    """把"行"统一成卡片列表：行可以是 QWidget 行容器，也可以是卡片序列。"""
+    """把"行"统一成卡片列表（**只含 ComponentCard**，行尾透明占位格不算）。
+
+    行有**三种**形态：浏览 Tab 里是 `QWidget#cardRow` 行控件；统一结果面板里是
+    **无宿主的 QHBoxLayout**（2026-10-15 性能修复，见 DEVELOPMENT.md R2.6）；
+    另外有些地方直接把"卡片序列"当行传进来。三种都要认 —— 行控件那条走
+    `findChildren(ComponentCard)` 天然滤掉占位格，所以布局行也要按类型滤一遍。
+    """
     out = []
     for row in rows:
         if isinstance(row, QWidget):
             out.append(list(row.findChildren(main.ComponentCard)))
+        elif isinstance(row, QLayout):
+            out.append([w for w in (row.itemAt(i).widget() for i in range(row.count()))
+                        if isinstance(w, main.ComponentCard)])
         else:
             out.append(list(row))
     return out
+
+
+def _row_cells(row):
+    """一行有几个格子（含行尾的透明占位格）。
+
+    行控件看它的内层布局；无宿主布局行直接数自己的条目 —— 判据都是"格子数"，
+    不是卡片像素宽（像素宽在 offscreen 下受窗口是否 show 影响，不是干净的判据）。
+    """
+    if isinstance(row, QWidget):
+        lay = row.layout()
+        return 0 if lay is None else lay.count()
+    return row.count()
 
 
 def _container_keys(win):
@@ -666,8 +687,8 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
                    if any(c.component.key == "node" for c in win._tab_cards[i]))
         browse_row = next(r for r in win._tab_rows[idx]
                           if any(c.component.key == "node"
-                                 for c in r.findChildren(main.ComponentCard)))
-        cells = browse_row.layout().count()
+                                 for c in _row_cards([r])[0]))
+        cells = _row_cells(browse_row)
         self.assertGreaterEqual(cells, 2, "浏览时 node 所在行只有一格，这条用例钉不住东西")
 
         win.search_box.setText("nodejs")
@@ -675,11 +696,11 @@ class SearchGridHasNoHoles(_UsesRealWindow, unittest.TestCase):
         rows = win._tab_rows.get(main.RESULTS_KEY) or []
         hit_row = next((r for r in rows
                         if any(c.component.key == "node"
-                               for c in r.findChildren(main.ComponentCard))), None)
+                               for c in _row_cards([r])[0])), None)
         self.assertIsNotNone(hit_row, "搜索后 node 不在任何结果行里")
-        self.assertEqual(hit_row.layout().count(), cells,
+        self.assertEqual(_row_cells(hit_row), cells,
                          "命中 1 个时结果行的格子数与浏览时不等 —— 那张卡被拉成了整行宽")
-        self.assertEqual([c.component.key for c in hit_row.findChildren(main.ComponentCard)],
+        self.assertEqual([c.component.key for c in _row_cards([hit_row])[0]],
                          ["node"], "结果行里混进了别的卡片")
 
     def test_clearing_search_puts_every_card_back_in_order(self):

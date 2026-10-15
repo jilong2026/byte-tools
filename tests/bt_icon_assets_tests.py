@@ -419,6 +419,12 @@ class NoDuplicatedAssets(unittest.TestCase):
         # 都取自 Simple Icons 的同一条目（Claude / OpenAI），不是为了省事复制粘贴。
         frozenset({"claude", "claude-code"}): "Claude 桌面版与 Claude Code 是同一个 Claude 标识",
         frozenset({"chatgpt", "codex-cli"}): "ChatGPT 与 Codex CLI 都是 OpenAI 的标识",
+        # 2026-10-15：Gemini 桌面版与 Gemini CLI 同理，官方用同一个 Google Gemini 标识
+        # （两者都取自 Simple Icons 的同一条目），不是为了省事复制粘贴。
+        frozenset({"gemini", "gemini-cli"}): "Gemini 桌面版与 Gemini CLI 是同一个 Google Gemini 标识",
+        # 2026-10-15 第五批：Kimi 系的第二个客户端。Kimi / Kimi Code / Kimi Work 是同一家
+        # （月之暗面）的三个产品，官方共用同一个标识。
+        frozenset({"kimi", "kimi-work"}): "Kimi Work 与 Kimi 是同一家（月之暗面）的标识",
     }
 
     def test_no_two_components_share_the_same_icon_bytes(self):

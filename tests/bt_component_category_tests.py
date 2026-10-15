@@ -101,7 +101,12 @@ EXPECTED_MEMBERSHIP = {
                # 2026-10-12 B6a：与 MySQL / Mongo / PG / Redis 一一配套的客户端
                # （成本最低的一批：只加 URL，不碰解压/环境变量任何一条逻辑）
                "dbeaver", "heidisql", "bruno", "redisinsight", "ardm",
-               "mongodb-compass", "pgadmin4", "mysql-workbench", "postman"},
+               "mongodb-compass", "pgadmin4", "mysql-workbench", "postman",
+               # 2026-10-15 第五批：开发者桌面工具（只下载）。表在 main.py 的
+               # _DEVTOOLS 尾部，台账见 DEVELOPMENT.md R20.7。
+               "notepad-plus-plus", "wireshark", "gitkraken", "sourcetree",
+               "insomnia", "beekeeper-studio", "obsidian", "zettlr",
+               "yaak", "gvim"},
     # 「Agent客户端」：2026-10-15 用户要求新增的第五个 Tab，**放在最后**。
     # 形态与「开发工具」同类 —— 只下载、不配置，登记表在 main.py 的 `_AGENT_CLIENTS`
     # （表驱动，key 从那里来；这里手写一份是为了让"扩表 = 必须同时改这张基线"可见）。
@@ -110,6 +115,20 @@ EXPECTED_MEMBERSHIP = {
     CAT_AGENT: {
         # —— 首批（2026-10-15 上半天）——
         "cursor", "zcode", "claude-code", "codex-cli", "qoderwork-cn",
+        # —— 2026-10-15 补：用户点名要的 opencode（21 万 star 的开源编程 Agent，
+        # 桌面端与终端版同发；旧的 opencode-ai/opencode 已归档）——
+        "opencode",
+        # —— 2026-10-15 第四批：用户看过候选清单后点名要接的 11 个。
+        # 前 9 个有实测直链；末两个（gemini-cli / aider）官方不发 Windows 安装包，
+        # 走 R21 的「官网下载」档。 ——
+        "openhands", "cherry-studio", "goose", "qwen-code", "crush",
+        "kiro", "jan", "openclaw", "hermes",
+        "gemini-cli", "aider",
+        # —— 2026-10-15 第五批：本地模型客户端与几家漏掉的 Agent（专项调研后接入）。
+        # 全部有实测直链（含 5 个滚动 latest 入口，版本位取服务端年月）。 ——
+        "ollama", "lm-studio", "gpt4all", "anything-llm", "lobehub",
+        "copilot-cli", "ima", "kilo-code", "wave-terminal", "msty",
+        "mistral-vibe", "kimi-work",
         # —— 第二批：编程 IDE / 编辑器 ——
         "trae", "trae-cn", "qoder", "codebuddy", "zed", "cline", "reasonix",
         # —— 第二批：大厂助手（含只能开官网的）——

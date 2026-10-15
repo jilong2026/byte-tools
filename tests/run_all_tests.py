@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,33 @@ def _gh_annotate(level: str, message: str, *, file: str | None = None) -> None:
     print(f"::{level}{props}::{_gh_esc(message)}", flush=True)
 
 TEST_GLOB = "bt_*_tests.py"
+
+# ---------------------------------------------------------------------------
+# 「真实配置不许被测试写」护栏
+# ---------------------------------------------------------------------------
+# 每个 bt_*_tests.py 都在 setUp 里把 main.CONFIG_DIR / CONFIG_FILE /
+# RUNNING_FILE 指向临时目录。漏掉其中任何一个**不会报错** —— 只会安静地往用户
+# 真实的 ~/.env-tools 里写。本项目已经栽过两次：
+#   · 2026-10-12 新增四个组件后，真实 config.json 里凭空多出
+#     kotlin / graalvm / rust / redis 四条下拉框选中项（见 bt_launch_tests.py
+#     里那段"只挪 CONFIG_DIR 不生效"的注释）
+#   · 2026-10-15 复查发现 ResolveLaunchVersionSemantics 至今只改 CONFIG_DIR，
+#     真实 config.json / running.json 仍在被写 —— 真实 config 的 active 表里
+#     `rocketmq: "5.3.1"` 就是它写的（磁盘上根本没有 rocketmq 的安装目录，
+#     而这个值与用例里硬编码的版本号逐字相同）
+#
+# 为什么护栏放在 runner 而不是 _btprelude：这是**跨进程**断言。子进程自己看不到
+# "我改了什么"，而 runner 在子进程之外，能对**每一个**套件生效 —— 包括刻意不用
+# _btprelude 的 bt_startup_tests；也不必用 atexit 改退出码那套把戏，run_one 的
+# 返回值天然就是门禁。
+#
+# 快照口径（刻意不是递归）：
+#   · 顶层**所有条目名** —— 漏了 CONFIG_DIR 的用例会在真目录下拉出
+#     jenkins-data 一类数据目录，条目名集合一变就咬住
+#   · 只对**普通文件**记 mtime + 大小 —— 目录的 mtime 会因为服务往 data 目录里
+#     写日志而变，而你完全可能在跑测试的同时开着 APP/服务，那种变化不是泄漏，
+#     记进护栏只会变成假红
+HOME_DIR_RE = r'^CONFIG_DIR\s*=\s*Path\.home\(\)\s*/\s*"([^"]+)"'
 
 # 绕开 PySide6 弹窗的关键环境变量：Qt 需要一个"无显示"的平台插件。
 # 各测试文件自己也会 setdefault 一份，这里统一给是为了让**本 runner 的子进程**
@@ -119,6 +147,62 @@ def discover(selected: list[str] | None) -> list[Path]:
     return sorted(Path(f) for f in glob.glob(str(TEST_DIR / TEST_GLOB)))
 
 
+def resolve_home_dir() -> Path:
+    """从 main.py 解析 CONFIG_DIR，不 import main（那要拉 PySide6）。
+
+    与 byte-tools.spec 的 `_app_version()` 同一套做法：spec 里只想要一串常量，
+    不 import 那个 GUI 模块。解析不到**必须直接炸**，不能静默返回一个猜的路径 ——
+    指向错误目录的护栏等于没有护栏，而"绿着的真空护栏"是本项目明确反对的
+    （见 DEVELOPMENT.md 里变异自检那几段）。
+    """
+    src = (REPO_ROOT / "main.py").read_text(encoding="utf-8", errors="replace")
+    m = re.search(HOME_DIR_RE, src, re.M)
+    if not m:
+        raise SystemExit(
+            "护栏解析不出 main.py 的 CONFIG_DIR（期望 `CONFIG_DIR = Path.home() / \"...\"`）——"
+            " 改了那行就同步 tests/run_all_tests.py 的 HOME_DIR_RE")
+    return Path.home() / m.group(1)
+
+
+def snapshot_home(d: Path) -> dict[str, tuple[str, int, int]]:
+    """快照顶层条目：{名字: (类型, mtime_ns, 大小)}。目录只记类型（见上方口径说明）。"""
+    snap: dict[str, tuple[str, int, int]] = {}
+    if not d.is_dir():
+        return snap
+    with os.scandir(d) as it:
+        for entry in it:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            snap[entry.name] = ("d", 0, 0) if is_dir else ("f", st.st_mtime_ns, st.st_size)
+    return snap
+
+
+def home_delta(before: dict, after: dict) -> list[str]:
+    """列出两次快照的差异，供护栏报错。空列表表示没被碰过。"""
+    out = []
+    for name in sorted(set(before) | set(after)):
+        b, a = before.get(name), after.get(name)
+        if b == a:
+            continue
+        if b is None:
+            out.append(f"新增 {name}")
+        elif a is None:
+            out.append(f"删除 {name}")
+        else:
+            why = []
+            if b[0] != a[0]:
+                why.append("类型变了")
+            if b[1] != a[1]:
+                why.append("mtime 变了")
+            if b[2] != a[2]:
+                why.append("大小变了")
+            out.append(f"改写 {name}（{'/'.join(why)}）")
+    return out
+
+
 def run_one(path: Path, python: str, verbose: bool) -> tuple[bool, str, float, int]:
     """跑单个测试文件。
 
@@ -149,7 +233,6 @@ def run_one(path: Path, python: str, verbose: bool) -> tuple[bool, str, float, i
     # "OK" 收尾即通过；unittest 的失败摘要一定带 FAILED 或一条 ERROR/FAIL: 头
     passed = proc.returncode == 0 and ("\nOK" in f"\n{out}" or out.rstrip().endswith("OK"))
 
-    import re
     m = re.search(r"Ran (\d+) test", out)
     count = int(m.group(1)) if m else 0
 
@@ -184,7 +267,9 @@ def main() -> int:
         return 0
 
     python = resolve_python()
+    home_dir = resolve_home_dir()
     print(f"解释器：{python}")
+    print(f"真实配置目录：{home_dir}（每个套件跑完都比一次，被改即判红）")
     print(f"待跑文件：{len(files)} 个\n")
 
     results = []
@@ -198,7 +283,19 @@ def main() -> int:
     for f in files:
         sys.stdout.write(f"  {f.name:<38} ")
         sys.stdout.flush()
+        before = snapshot_home(home_dir)
         ok, detail, elapsed, count = run_one(f, python, args.verbose)
+        delta = home_delta(before, snapshot_home(home_dir))
+        if delta:
+            ok = False
+            leaked = "\n".join(f"  {line}" for line in delta[:12])
+            detail = (
+                f"真实配置目录被这个套件改写了（{home_dir}）：\n{leaked}\n"
+                "  某个 setUp 的沙箱漏了 CONFIG_DIR / CONFIG_FILE / RUNNING_FILE 之一 ——"
+                " 后两个是 import 期从 CONFIG_DIR 拼出来的**模块常量**，只挪 CONFIG_DIR 不生效。\n"
+                "  如果你同时在跑 APP 或某个组件服务，先关掉再重跑一次确认。\n\n"
+                + detail
+            )
         total_tests += count
         results.append((f.name, ok, elapsed, count))
         if ok:

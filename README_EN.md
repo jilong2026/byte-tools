@@ -131,15 +131,15 @@ node -v
 
 ## Supported components
 
-**127 in total**: **61 installable end to end** + **66 download-only** (66 = 26 GUI tools + 40 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**161 in total**: **61 installable end to end** + **100 download-only** (100 = 36 GUI tools + 64 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
 | Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
 | Dev environment | 32 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq |
 | Dev software → Server components | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
-| Dev tools | 26 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman |
-| Agent clients | 40 | Cursor, ZCode, Claude Code, Codex CLI, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark |
+| Dev tools | 36 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman, Notepad++, Wireshark, GitKraken, SourceTree, Insomnia, Beekeeper Studio, Obsidian, Zettlr, Yaak, Vim (gVim) |
+| Agent clients | 64 | Cursor, ZCode, Claude Code, Codex CLI, opencode, OpenHands, Cherry Studio, Goose, Qwen Code, Crush, Kiro, Jan, OpenClaw, Hermes Agent, Gemini CLI, Aider, Ollama, LM Studio, GPT4All, AnythingLLM, LobeHub, GitHub Copilot CLI, ima (Tencent), Kilo Code, Wave Terminal, Msty Studio, Mistral Vibe, Kimi Work, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark |
 
 > **This tab has two tiers.** 34 of the 40 have a measured official direct link, so the card's main
 > button says **Download**. The other 6 (Windsurf (Devin), Claude Desktop, Google Antigravity,

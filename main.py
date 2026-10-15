@@ -1149,6 +1149,13 @@ def ensure_dir(path: Path) -> None:
 ARTIFACT_LABELS: Dict[str, str] = {
     "exe": "exe 安装器（走安装向导）",
     "zip": "zip 便携包（解压即用）",
+    # 2026-10-15：只下载类里有组件同时发"同一件事的两种形态"，光靠 exe/zip 区分不开 ——
+    # Goose / Qwen Code 都同时发**桌面端**与**终端版**，两个若都标成「zip 便携包」，
+    # 「下载 ▾」菜单里会出现两条一模一样的文案。给它俩一组说得清的标签。
+    "cli": "命令行版（解压后把可执行文件放进 PATH）",
+    "portable": "免安装便携版（exe，双击即用）",
+    # 2026-10-15 第五批：GitHub Copilot CLI 官方只发 .msi（外加一个 zip）。
+    "msi": "msi 安装包（走 Windows 安装向导）",
 }
 
 
@@ -6005,6 +6012,10 @@ COMPONENT_CATEGORY_OF = {
     "dbeaver": "开发工具", "heidisql": "开发工具", "bruno": "开发工具",
     "redisinsight": "开发工具", "ardm": "开发工具", "mongodb-compass": "开发工具",
     "pgadmin4": "开发工具", "mysql-workbench": "开发工具", "postman": "开发工具",
+    # 2026-10-15 第五批：开发者桌面工具（只下载）。表在 _DEVTOOLS 尾部，台账见 R20.7。
+    "notepad-plus-plus": "开发工具", "wireshark": "开发工具", "gitkraken": "开发工具",
+    "sourcetree": "开发工具", "insomnia": "开发工具", "beekeeper-studio": "开发工具",
+    "obsidian": "开发工具", "zettlr": "开发工具", "yaak": "开发工具", "gvim": "开发工具",
     # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
     # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
     "consul": CAT_SERVER, "zookeeper": CAT_SERVER,
@@ -6067,6 +6078,166 @@ _AGENT_CLIENTS: tuple = (
                   "codex-x86_64-pc-windows-msvc.exe", 333479728,
        ("zip", "https://github.com/openai/codex/releases/download/rust-v0.162.1/"
                "codex-x86_64-pc-windows-msvc.exe.zip", 164672399)),)),
+    ("opencode", "opencode", "exe",
+     "anomalyco（原 SST）的开源编程 Agent，**不只是 CLI**：同一次 release 同时发桌面端"
+     "与终端版，两个都在「下载 ▾」里。桌面端是 Electron 安装向导（双击走安装流程）；"
+     "终端版是 zip 便携包，解压得到 opencode.exe，**要自己放进 PATH 才能在终端里敲 "
+     "`opencode`**。GitHub 产物，下载走加速器优先。找仓库时注意：旧的 "
+     "`opencode-ai/opencode` 已归档、`sst/opencode` 也已 301 跳到 `anomalyco/opencode`。",
+     (("1.19.0", "https://github.com/anomalyco/opencode/releases/download/v1.19.0/"
+                 "opencode-desktop-win-x64.exe", 126382672,
+       ("cli", "https://github.com/anomalyco/opencode/releases/download/v1.19.0/"
+               "opencode-windows-x64.zip", 62173956)),)),
+    # ------------------------------------------------------------------
+    # 2026-10-15 第四批：用户看过候选清单后点名要接的 11 个。
+    # 每条 URL / 字节数都带 `byte-tools/1.2.1` UA **实测**（206 + 前四字节是 MZ/PK），
+    # 详见 DEVELOPMENT.md R20.5 末尾那张表 —— 与前三批同一条口径（R1 / R20.3）。
+    # ------------------------------------------------------------------
+    ("openhands", "OpenHands", "exe",
+     "All Hands AI 的开源自主编码 Agent（前身 OpenDevin），现在发的是带图形界面的"
+     "桌面版「Agent Canvas」。GitHub 产物，下载走加速器优先。",
+     (("1.27.1", "https://github.com/OpenHands/OpenHands/releases/download/v1.27.1/"
+                 "OpenHands-Agent-Canvas-Setup-1.27.1.exe", 140354744),)),
+    ("cherry-studio", "Cherry Studio", "exe",
+     "CherryHQ（北京团队）的多模型桌面客户端，国内装机量最大的那一批；支持 MCP、"
+     "知识库与 300+ 预设助手。官方同时发安装版与免安装便携版，两个都在「下载 ▾」里。",
+     (("2.1.6", "https://github.com/CherryHQ/cherry-studio/releases/download/v2.1.6/"
+                "Cherry-Studio-2.1.6-win-x64-setup.exe", 396037216,
+       ("portable", "https://github.com/CherryHQ/cherry-studio/releases/download/v2.1.6/"
+                    "Cherry-Studio-2.1.6-win-x64-portable.exe", 395662608)),)),
+    ("goose", "Goose", "zip",
+     "Block（现由 aaif-goose 维护）的开源通用 Agent：不只写代码，也能调研、写文档、"
+     "跑自动化，可接任意 LLM。同一次 release 同时发**桌面端**（本行，解压即用的"
+     "Electron 包）与**终端版**（见「下载 ▾」，解压后把 goose.exe 放进 PATH）。",
+     (("1.54.0", "https://github.com/aaif-goose/goose/releases/download/v1.54.0/"
+                 "Goose-win32-x64.zip", 247217050,
+       ("cli", "https://github.com/aaif-goose/goose/releases/download/v1.54.0/"
+               "goose-x86_64-pc-windows-msvc.zip", 77666256)),)),
+    ("qwen-code", "Qwen Code", "exe",
+     "阿里通义的开源编码 Agent（qwen-code 仓库）。**同一次发版同时出桌面端与终端版**，"
+     "两个都在「下载 ▾」里：桌面端是安装向导，终端版是 zip（解压后把可执行文件放进 PATH）。"
+     "官方 release 里还有 nightly / preview 标签，本行登记的是稳定版。",
+     (("0.25.1", "https://github.com/QwenLM/qwen-code/releases/download/desktop-v0.25.1/"
+                 "Qwen-Code-Desktop_0.25.1_x64-setup.exe", 52505536,
+       ("cli", "https://github.com/QwenLM/qwen-code/releases/download/v0.25.1/"
+               "qwen-code-win-x64.zip", 72012450)),)),
+    ("crush", "Crush", "zip",
+     "Charm（charmbracelet）的终端编码 Agent，Go 单文件、TUI 界面精致。"
+     "解压得到 crush.exe，**要自己放进 PATH 才能在终端里敲 `crush`**。"
+     "GitHub 产物，下载走加速器优先。",
+     (("0.98.1", "https://github.com/charmbracelet/crush/releases/download/v0.98.1/"
+                 "crush_0.98.1_Windows_x86_64.zip", 27319516),)),
+    ("kiro", "Kiro", "exe",
+     "AWS 的编码 IDE，主打**规格驱动**（先写 spec、再生成实现）。官方按版本号分目录发"
+     "签过名的安装器，版本位取路径里的 1.3.0（与官网下载页逐字一致）。"
+     "厂商自有 CDN 直发，无大陆镜像。",
+     (("1.3.0", "https://prod.download.desktop.kiro.dev/releases/stable/win32-x64/"
+                "signed/1.3.0/kiro-ide-1.3.0-stable-win32-x64.exe", 210208904),)),
+    ("jan", "Jan", "exe",
+     "Menlo 的开源本地优先 AI 助手，可接本地模型（配合 llama.cpp / Ollama）。"
+     "GitHub 产物，下载走加速器优先。",
+     (("0.8.6", "https://github.com/janhq/jan/releases/download/v0.8.6/"
+                "Jan_0.8.6_x64-setup.exe", 556441144),)),
+    ("openclaw", "OpenClaw", "exe",
+     "跑在你自己电脑上、把个人助手接到 WhatsApp / Telegram / Slack 的开源 Agent，"
+     "这一行是它的 **Windows 伴生端**（Companion）。官方只发滚动 latest 链接、"
+     "不带版本号，版本位按 R20.2 取服务端文件的 Last-Modified 年月 —— "
+     "**这不是软件版本号**。",
+     (("2026.10", "https://github.com/openclaw/openclaw-windows-node/releases/latest/"
+                  "download/OpenClawCompanion-Setup-x64.exe", 128746840),)),
+    ("hermes", "Hermes Agent", "exe",
+     "Nous Research 的个人 Agent（会按你的使用习惯自我调整）。官方 Windows 入口就是"
+     "这一个安装器，直链不带版本号，版本位按 R20.2 取服务端文件的 Last-Modified 年月 —— "
+     "**这不是软件版本号**。⚠ 实测这个安装器只有约 8 MB（多半是联网拉取组件的小体积"
+     "安装器），且服务端文件的 Last-Modified 停在 2026-08，装之前请自行确认。",
+     (("2026.08", "https://hermes-assets.nousresearch.com/Hermes-Setup.exe", 7946048),)),
+    # 下面两件是 `official_page_only`（R21）：官方**没有 Windows 可直接下载的安装包**
+    # （只有 npm / pip，或在终端里跑安装脚本），所以给「官网下载」入口。
+    # 空元组 () = 没有版本表，builder 据此自动置 official_page_only=True。
+    ("gemini-cli", "Gemini CLI", "exe",
+     "Google 的命令行编程 Agent。**官方不提供 Windows 安装包**：只能 `npm install -g "
+     "@google/gemini-cli`（实测它的 release 资产只有 bundle.zip 与 darwin 包，没有 win），"
+     "所以这一行只给官方安装说明页。",
+     ()),
+    ("aider", "Aider", "exe",
+     "老牌的终端结对编程 Agent，git 原生集成。**官方不提供安装包**：只能用 "
+     "`python -m pip install aider-install` 或 pipx 装（没有 exe / msi），"
+     "所以这一行只给官网。",
+     ()),
+    # ------------------------------------------------------------------
+    # 2026-10-15 第五批：本地模型客户端与几家漏掉的 Agent。
+    # 这一批的来源是"各 Tab 还缺哪些热门组件"的专项调研；URL / 字节数一律由我本人
+    # 带 `byte-tools/1.2.1` UA 实测（206 + 前四字节 MZ/PK/OLE），台账见 R20.7。
+    # ⚠ 本轮调研里被**排除**的：`warp`（我 4 次都取不到前四字节，验不出就登记不了）、
+    # `chatbox`（GitHub release 只有源码，网页直链没挖到）、`void`（项目已弃坑）、
+    # `iflow-cli`（官方已停运）、`roo-code`（官方公告将停运、并迁 Kilo）。
+    # ------------------------------------------------------------------
+    ("ollama", "Ollama", "exe",
+     "一条命令在本地跑大模型的运行时（也有桌面端）。**官方站点直链不带版本号**，"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月 —— 这不是软件版本号。"
+     "它同时是很多本地 Agent 的后端，装了它别的客户端才连得上本地模型。",
+     (("2026.10", "https://ollama.com/download/OllamaSetup.exe", 1581967176),)),
+    ("lm-studio", "LM Studio", "exe",
+     "图形化的本地模型客户端，下载模型、对话、起本地 OpenAI 兼容服务一条龙。"
+     "官方给的 `/download/latest/` 是滚动入口（实测 302 到带版本号的安装器），"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://lmstudio.ai/download/latest/win32/x64", 618785040),)),
+    ("gpt4all", "GPT4All", "exe",
+     "Nomic 的离线本地模型客户端，装上就能跑开源模型、不需要 API Key。"
+     "GitHub 产物，下载走加速器优先。",
+     (("3.10.0", "https://github.com/nomic-ai/gpt4all/releases/download/v3.10.0/"
+                "gpt4all-installer-win64-v3.10.0.exe", 744456856),)),
+    ("anything-llm", "AnythingLLM", "exe",
+     "本地的私有知识库 + Agent 桌面端：把文档喂进去做 RAG，再接模型回答。"
+     "它的安装包名**不带版本号**（`AnythingLLMDesktop.exe`），所以这个链接长期有效。"
+     "GitHub 产物，下载走加速器优先。",
+     (("1.18.0", "https://github.com/Mintplex-Labs/anything-llm/releases/download/v1.18.0/"
+                 "AnythingLLMDesktop.exe", 407381240),)),
+    ("lobehub", "LobeHub", "exe",
+     "LobeChat 的桌面端（仓库已从 `lobehub/lobe-chat` 更名为 `lobehub/lobehub`），"
+     "现代 UI 的多模型聊天/助手客户端，插件与助手市场是它的特色。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2.2.19", "https://github.com/lobehub/lobehub/releases/download/v2.2.19/"
+                 "LobeHub-2.2.19-setup.exe", 151357692),)),
+    ("copilot-cli", "GitHub Copilot CLI", "msi",
+     "GitHub 官方的命令行 Copilot Agent（终端里读改代码、跑命令）。"
+     "官方主推 **msi 安装包**。⚠ 它面向终端，不是双击即用的窗口程序。"
+     "GitHub 产物，下载走加速器优先。",
+     (("1.0.98", "https://github.com/github/copilot-cli/releases/download/v1.0.98/"
+                 "copilot-x64.msi", 95662080),)),
+    ("ima", "ima（腾讯）", "exe",
+     "腾讯的 AI 知识管家：把微信/文档/网页沉淀成个人知识库，再基于它问答与写作。"
+     "官方直链按版本目录发（实测 2.3.0_3717），无大陆镜像。",
+     (("2.3.0_3717", "https://ima-app.image.myqcloud.com/win/2.3.0_3717/"
+                     "ima.copilot_win_x64_1018_2.3.0_3717.exe", 205057816),)),
+    ("kilo-code", "Kilo Code", "exe",
+     "原 Roo Code 团队的 AI 编程客户端（Roo 已公告停运并迁到 Kilo），"
+     "桌面端 / IDE 插件 / 终端三种形态。官方走滚动 latest 路径、不带版本号，"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://autoupdate.desktop.anaconda.com/kilo-desktop/latest/latest/"
+                  "windows/x64/Kilo-Setup.exe", 410662216),)),
+    ("wave-terminal", "Wave Terminal", "exe",
+     "开源的现代终端（可内嵌图表、编辑器与 AI 助手）。"
+     "GitHub 产物，下载走加速器优先；同一次 release 也发 zip，按需挑。",
+     (("0.14.5", "https://github.com/wavetermdev/waveterm/releases/download/v0.14.5/"
+                 "Wave-win32-x64-0.14.5.exe", 163826544),)),
+    ("msty", "Msty Studio", "exe",
+     "隐私优先的本地 AI 工作台：本地/云端模型混用、多模型并排对比、知识库。"
+     "官方滚动 latest 直链、不带版本号，版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://next-assets.msty.studio/app/latest/win/MstyStudio_x64.exe",
+       226457032),)),
+    ("mistral-vibe", "Mistral Vibe", "cli",
+     "Mistral 官方的终端编码 Agent（Vibe 与其对话产品同名，这个是 CLI）。"
+     "解压得到可执行文件，**要自己放进 PATH 才能在终端里用**。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2.26.1", "https://github.com/mistralai/mistral-vibe/releases/download/v2.26.1/"
+                 "vibe-windows-x86_64-2.26.1.zip", 61496201),)),
+    ("kimi-work", "Kimi Work", "exe",
+     "月之暗面面向**知识工作**的桌面 Agent（与「Kimi」「Kimi Code」是三个不同客户端）。"
+     "官方给的是一个**滚动下载端点**，它 302 到当天的版本化文件，所以登记端点而不是落点。"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://appsupport.kimi.ai/api/app/pkg/latest/windows/download",
+       438668088),)),
     ("qoderwork-cn", "QoderWork CN", "exe",
      "Qoder 的办公 Agent 中文版。**官方只发一个滚动 latest 链接**（试过按版本目录取，404），"
      "所以版本位写的是实测当天服务端文件的 Last-Modified 年月 —— 与「微信开发者工具」"
@@ -6365,6 +6536,40 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "claude-code": "Claude Code：Anthropic 的命令行编程 Agent，在终端里读改代码、跑命令。"
                    "Windows 官方发 zip（解压得到 claude.exe）——它是 CLI，不是 GUI 安装器。",
     "codex-cli": "Codex CLI：OpenAI 的命令行编程 Agent，Windows 官方发单文件 exe。",
+    "opencode": "opencode：anomalyco（原 SST）的开源编程 Agent，桌面端与终端版都发。",
+    "openhands": "OpenHands：All Hands AI 的开源自主编码 Agent（前身 OpenDevin）。",
+    "cherry-studio": "Cherry Studio：CherryHQ 的多模型桌面客户端，支持 MCP 与知识库。",
+    "goose": "Goose：Block 的开源通用 Agent，能写代码也能调研/写文档/跑自动化。",
+    "qwen-code": "Qwen Code：阿里通义的开源编码 Agent，桌面端与终端版都发。",
+    "crush": "Crush：Charm 的终端编码 Agent，Go 单文件、TUI 界面精致。",
+    "kiro": "Kiro：AWS 的编码 IDE，主打规格驱动（spec-driven）开发。",
+    "jan": "Jan：开源的本地优先 AI 助手，可接本地模型。",
+    "openclaw": "OpenClaw：跑在你自己电脑上的开源个人 Agent，可接聊天软件。",
+    "hermes": "Hermes Agent：Nous Research 的个人 Agent，会随使用习惯自我调整。",
+    "gemini-cli": "Gemini CLI：Google 的命令行编程 Agent（官方只提供 npm 安装）。",
+    "aider": "Aider：老牌的终端结对编程 Agent，git 原生集成（官方只提供 pip 安装）。",
+    "ollama": "Ollama：一条命令在本地跑大模型的运行时，很多本地 Agent 的后端。",
+    "lm-studio": "LM Studio：图形化本地模型客户端，下载模型/对话/起本地 API 服务。",
+    "gpt4all": "GPT4All：离线运行的本地模型桌面客户端，不需要 API Key。",
+    "anything-llm": "AnythingLLM：本地私有知识库 + Agent 桌面端（文档喂进去做 RAG）。",
+    "lobehub": "LobeHub：LobeChat 的桌面端，多模型聊天/助手客户端。",
+    "copilot-cli": "GitHub Copilot CLI：GitHub 官方的命令行 Copilot Agent。",
+    "ima": "ima（腾讯）：腾讯的 AI 知识管家，把资料沉淀成个人知识库再问答。",
+    "kilo-code": "Kilo Code：原 Roo Code 团队的 AI 编程客户端（桌面/插件/终端）。",
+    "wave-terminal": "Wave Terminal：开源的现代终端，可内嵌图表、编辑器与 AI 助手。",
+    "msty": "Msty Studio：隐私优先的本地 AI 工作台，本地与云端模型混用。",
+    "mistral-vibe": "Mistral Vibe：Mistral 官方的终端编码 Agent。",
+    "kimi-work": "Kimi Work：月之暗面面向知识工作的桌面 Agent。",
+    "notepad-plus-plus": "Notepad++：最普及的轻量代码/文本编辑器。",
+    "wireshark": "Wireshark：抓包与协议分析的事实标准。",
+    "gitkraken": "GitKraken：图形化 Git 客户端，协作与冲突处理做得细。",
+    "sourcetree": "SourceTree：Atlassian 官方的免费 Git GUI。",
+    "insomnia": "Insomnia：Kong 家的 API 调试客户端（REST / GraphQL / gRPC）。",
+    "beekeeper-studio": "Beekeeper Studio：开源 SQL 客户端，界面清爽、支持各家数据库。",
+    "obsidian": "Obsidian：本地 Markdown 知识库，笔记以纯文件存在你自己的目录。",
+    "zettlr": "Zettlr：面向学术写作的 Markdown 编辑器（引用管理、卡片笔记）。",
+    "yaak": "Yaak：离线优先的 API 客户端，数据存本地。",
+    "gvim": "Vim (gVim)：Vim 的 Windows 图形版，带菜单与鼠标支持。",
     "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
     "trae": "Trae：字节跳动的 AI 编程 IDE（国际版）。整库理解、多文件改写、Builder 模式从需求直出工程。",
     "trae-cn": "Trae CN：Trae 的中国大陆版。功能与界面同国际版，独立站点、国内直连不需要科学上网。",
@@ -6657,6 +6862,40 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "zcode": "https://zcode.z.ai/",                           # CN   智谱官方站，国内直连
     "claude-code": "https://www.anthropic.com/claude-code",   # INT
     "codex-cli": "https://openai.com/codex/",                 # INT  403 按 UA 反爬，浏览器可正常打开
+    "opencode": "https://opencode.ai/download",               # INT  下载入口页（R21.5 要入口不要品牌首页）
+    "openhands": "https://github.com/OpenHands/OpenHands/releases",  # INT  官方只在这里发 Windows 安装器
+    "cherry-studio": "https://www.cherry-ai.com/",            # CN   CherryHQ 官方站（下载页同域）
+    "goose": "https://block.github.io/goose/",                # INT  官方文档站，首页给各平台下载入口
+    "qwen-code": "https://github.com/QwenLM/qwen-code/releases",  # CN  官方 release 页（桌面端与 CLI 都在这）
+    "crush": "https://github.com/charmbracelet/crush/releases",   # INT
+    "kiro": "https://kiro.dev/downloads/",                    # INT  官方下载页（实测 1.3.0 与本工具登记一致）
+    "jan": "https://jan.ai/",                                 # INT  官网首页即下载入口
+    "openclaw": "https://docs.openclaw.ai/install",           # INT  安装说明（Windows 伴生端入口）
+    "hermes": "https://hermes-agent.nousresearch.com/desktop",  # INT 官方桌面端页，Windows 按钮就指向本工具登记的直链
+    "gemini-cli": "https://geminicli.com/docs/get-started/installation/",  # INT 官方安装说明（只有 npm）
+    "aider": "https://aider.chat/docs/install.html",          # INT 官方安装说明（只有 pip/pipx）
+    "ollama": "https://ollama.com/download",                  # INT 官方下载页（Windows 安装器）
+    "lm-studio": "https://lmstudio.ai/download",              # INT 官方下载页
+    "gpt4all": "https://www.nomic.ai/gpt4all",                # INT Nomic 官方产品页
+    "anything-llm": "https://anythingllm.com/",               # INT 官网首页即下载入口
+    "lobehub": "https://lobehub.com/",                        # INT 官网（桌面端下载入口同页）
+    "copilot-cli": "https://github.com/github/copilot-cli/releases",  # INT 只在 GitHub 发版
+    "ima": "https://ima.qq.com/",                             # CN  腾讯官方站
+    "kilo-code": "https://kilo.ai/install",                   # INT 官方安装页
+    "wave-terminal": "https://www.waveterm.dev/",             # INT 官网（首页给下载入口）
+    "msty": "https://msty.app/",                              # INT 官网
+    "mistral-vibe": "https://github.com/mistralai/mistral-vibe/releases",  # INT 只在 GitHub 发版
+    "kimi-work": "https://www.kimi.com/products/kimi-work",   # CN  月之暗面官方产品页
+    "notepad-plus-plus": "https://notepad-plus-plus.org/downloads/",  # INT 官网下载页
+    "wireshark": "https://www.wireshark.org/download.html",   # INT 官网下载页
+    "gitkraken": "https://www.gitkraken.com/download",        # INT 官网下载页
+    "sourcetree": "https://www.sourcetreeapp.com/",           # INT 官网（下载入口同页）
+    "insomnia": "https://insomnia.rest/download",             # INT 官网下载页
+    "beekeeper-studio": "https://www.beekeeperstudio.io/get", # INT 官网下载页
+    "obsidian": "https://obsidian.md/download",               # INT 官网下载页
+    "zettlr": "https://www.zettlr.com/download",              # INT 官网下载页
+    "yaak": "https://yaak.app/download",                      # INT 官网下载页
+    "gvim": "https://www.vim.org/download.php",               # INT 官网下载页（Win 版入口）
     "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
     "trae": "https://www.trae.ai/",                           # INT  国际站
     "trae-cn": "https://www.trae.cn/",                        # CN   大陆站
@@ -6879,6 +7118,63 @@ COMPONENT_USAGE: Dict[str, str] = {
                    "⚠ 它面向终端，不是双击即用的窗口程序。",
     "codex-cli": "单文件 exe，放进 PATH 或直接用完整路径跑；首次运行会让你登录。"
                  "⚠ 同样是终端工具。",
+    "opencode": "两种形态按需挑：**桌面端**（exe 安装向导）装完双击即用；**终端版**"
+                "（zip 便携包）解压后把 opencode.exe 放进 PATH，再到项目目录里敲 `opencode`。"
+                "首次使用会让你配置模型提供方与 API Key。",
+    "openhands": "装完启动，跟着引导接一个模型（可填各家 API Key 或本地模型）。"
+                 "它是自主型 Agent：给它一个任务，它自己读代码、改文件、跑命令。",
+    "cherry-studio": "装完先到「设置 → 模型服务」里填一家的 API Key（它不绑定厂商），"
+                     "之后就能多模型对话、传文档建知识库。免安装便携版解压即可双击运行。",
+    "goose": "桌面端装完启动即用，首次会让你选模型提供方；终端版则把 goose.exe 放进 PATH，"
+             "在项目目录里敲 `goose`。",
+    "qwen-code": "桌面端装完启动登录即可；终端版解压后把可执行文件放进 PATH，"
+                 "在项目目录里敲 `qwen`。需要先准备一个通义千问（DashScope）的 API Key。",
+    "crush": "解压后把 crush.exe 放进 PATH（或直接用完整路径跑），在项目目录里敲 `crush`。"
+             "首次运行会让你填模型 API Key。⚠ 它面向终端，不是双击即用的窗口程序。",
+    "kiro": "装完启动登录 AWS Builder ID / 组织账号。它是 IDE，按它引导先写规格再生成实现。",
+    "jan": "装完启动，在「设置 → 模型」里选一个已下载的本地模型（或填 API Key）。"
+           "想跑本地模型要另外准备模型文件。",
+    "openclaw": "装完启动，按官方引导把它接到你的聊天软件（WhatsApp / Telegram / Slack）"
+                "并配置模型。它主要在后台按你的指令干活。",
+    "hermes": "装完启动，按引导配置模型提供方。它会记录你的使用习惯并自我调整。"
+              "⚠ 官方只发这一个滚动链接的安装器，本工具无法替它标出版本号。",
+    "gemini-cli": "**本工具不代下**：官方只提供 npm 安装，点「官网下载」看官方说明，"
+                  "在终端里执行 `npm install -g @google/gemini-cli` 即可。",
+    "aider": "**本工具不代下**：官方只提供 pip / pipx 安装，点「官网下载」看官方说明。"
+             "装完在项目目录里敲 `aider`，首次会让你选模型与填 API Key。",
+    "ollama": "装完即用：`ollama run <模型名>` 会自动把模型拉下来再对话。"
+              "它同时会在本地起一个 OpenAI 兼容服务（默认 127.0.0.1:11434），"
+              "别的客户端（LM Studio 之外的那些）可以直接连它。",
+    "lm-studio": "装完启动，在左侧搜索并下载模型（首次会比较大），选中后即可对话；"
+                 "「Developer」页能起一个本地 API 服务给别的程序用。",
+    "gpt4all": "装完启动，先在「Models」里下载一个模型文件，再回到对话页即可用。"
+               "全程离线，不需要任何 API Key。",
+    "anything-llm": "装完启动，先选一个模型提供方（本地或云端），再新建工作区把文档/网页"
+                    "喂进去即可基于它问答。",
+    "lobehub": "装完启动，到「设置」里填一家模型服务的 API Key（它不绑定厂商）即可对话。",
+    "copilot-cli": "装完后在终端里敲 `copilot`（或 `gh copilot`）使用，首次会让你登录 GitHub 账号。"
+                   "⚠ 它是终端工具，不是双击即用的窗口程序。",
+    "ima": "装完启动登录微信/QQ 账号，跟着引导把资料导入知识库，之后就能基于它问答与写作。",
+    "kilo-code": "桌面端装完启动登录即可；它也能作为 VS Code / JetBrains 插件安装"
+                 "（那种形态不在本工具范围内）。",
+    "wave-terminal": "装完启动即用，首次会让你选一个 shell。它默认会上报匿名使用数据，"
+                     "不想要就去设置里关掉。",
+    "msty": "装完启动，在界面里选本地模型或填云端 API Key；它主打本地模型与知识库。",
+    "mistral-vibe": "解压后把可执行文件放进 PATH（或直接用完整路径跑），在项目目录里启动。"
+                    "首次会让你配置 Mistral 的 API Key。⚠ 它面向终端。",
+    "kimi-work": "装完启动登录 Kimi 账号，跟着引导建知识库、接自己的资料。",
+    "notepad-plus-plus": "双击安装器按向导装完即用。装的时候注意**不要**勾选它捆绑的"
+                         "语言包之外的附加项（安装器里可取消）。",
+    "wireshark": "装 Wireshark 会一并装 Npcap 抓包驱动（安装向导里有这一步）。"
+                 "⚠ 抓包需要管理员权限，且只在你有授权的网络上使用。",
+    "gitkraken": "双击安装器装完即用，首次会让你登录 GitKraken 账号（免费档够个人用）。",
+    "sourcetree": "双击安装器装完即用；首次启动会要求登录 Atlassian 账号（免费）。",
+    "insomnia": "双击安装器装完即用。它默认把数据放本地，也可登录账号同步。",
+    "beekeeper-studio": "双击安装器装完即用，建连接时填各数据库的连接串即可。",
+    "obsidian": "双击安装器装完即用，第一次让你**选一个本地文件夹当仓库**（笔记就是里面的 .md 文件）。",
+    "zettlr": "双击安装器装完即用，第一次让你选工作目录（笔记同样是纯 Markdown 文件）。",
+    "yaak": "双击安装器装完即用，数据默认存本地、可导出。",
+    "gvim": "双击安装器装完即用（会一并装命令行版 vim）。配置文件是 `~/_vimrc`。",
     "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
     "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
     "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",
@@ -7167,6 +7463,61 @@ _DEVTOOLS: tuple = (
      "字节核对就没数了。旧版本会被官方清理（11.50.0 实测 404 且 `Content-Length: 0`），"
      "所以下拉框里的版本数不会像别家那样攒很多。",
      (("12.32.0", "https://dl.pstmn.io/download/version/12.32.0/win64", 212922848),)),
+    # ------------------------------------------------------------------
+    # 2026-10-15 第五批：开发者桌面工具（只下载）。来源同 Agent 那批的专项调研，
+    # URL / 字节数由我本人带 `byte-tools/1.2.1` UA 实测（206 + 前四字节 MZ）。
+    # 台账见 DEVELOPMENT.md R20.7。
+    # ⚠ 本轮被**排除**的：`httpie-desktop`（调研给的 tag 是错的，实际 release 只到
+    # v2023.3.x，测出 404）、`notepad++` 之外的编辑器里拿不到可靠直链的若干家
+    # （typora / HxD / FileZilla / Charles 直链要么超时要么走 JS 页），清单在 R20.7。
+    # ------------------------------------------------------------------
+    ("notepad-plus-plus", "Notepad++", "exe",
+     "最普及的轻量代码/文本编辑器。官方同时发安装器与 7z 便携包，本工具只登记安装器。"
+     "GitHub 产物，下载走加速器优先。",
+     (("8.9.8.1", "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/"
+                 "v8.9.8.1/npp.8.9.8.1.Installer.x64.exe", 6963432),)),
+    ("wireshark", "Wireshark", "exe",
+     "抓包与协议分析的事实标准。官方按 `1.as.dl.wireshark.org/win64/` 分平台目录发版。",
+     (("4.6.9", "https://1.as.dl.wireshark.org/win64/Wireshark-4.6.9-x64.exe", 97931232),)),
+    ("gitkraken", "GitKraken", "exe",
+     "图形化 Git 客户端，团队协作与冲突处理做得比较细。官方只给一个**稳定别名**"
+     "（`GitKrakenSetup.exe`，不带版本号），所以版本位取服务端文件的 Last-Modified 年月 —— "
+     "这不是软件版本号。",
+     (("2026.10", "https://release.gitkraken.com/windows/GitKrakenSetup.exe", 411656624),)),
+    ("sourcetree", "SourceTree", "exe",
+     "Atlassian 官方的 Git GUI，免费。官方 GA 目录按版本号命名。",
+     (("3.4.20", "https://product-downloads.atlassian.com/software/sourcetree/windows/ga/"
+                 "SourceTreeSetup-3.4.20.exe", 25350096),)),
+    ("insomnia", "Insomnia", "exe",
+     "Kong 家的 API 调试客户端（REST / GraphQL / gRPC）。"
+     "⚠ 它的 release tag 形如 `core@13.3.1`（与版本号不同形），所以这里写的是裸版本号。"
+     "GitHub 产物，下载走加速器优先。",
+     (("13.3.1", "https://github.com/Kong/insomnia/releases/download/core%4013.3.1/"
+                 "Insomnia.Core-13.3.1.exe", 617933504),)),
+    ("beekeeper-studio", "Beekeeper Studio", "exe",
+     "开源的 SQL 客户端，界面清爽、支持各家数据库。GitHub 产物，走加速器优先。",
+     (("6.1.6", "https://github.com/beekeeper-studio/beekeeper-studio/releases/download/"
+                "v6.1.6/Beekeeper-Studio-Setup-6.1.6.exe", 255855152),)),
+    ("obsidian", "Obsidian", "exe",
+     "本地 Markdown 知识库（笔记以纯文件存在你自己的目录里）。"
+     "产物挂在 `obsidian-releases` 仓库（主程序闭源）。GitHub 产物，走加速器优先。",
+     (("1.14.4", "https://github.com/obsidianmd/obsidian-releases/releases/download/"
+                 "v1.14.4/Obsidian-1.14.4.exe", 341331008),)),
+    ("zettlr", "Zettlr", "exe",
+     "面向学术写作的 Markdown 编辑器（引用管理、Zettelkasten 卡片笔记）。"
+     "GitHub 产物，下载走加速器优先。",
+     (("4.8.0", "https://github.com/Zettlr/Zettlr/releases/download/v4.8.0/"
+                "Zettlr-4.8.0-x64.exe", 157306080),)),
+    ("yaak", "Yaak", "exe",
+     "离线优先的 API 客户端（Tauri 写的，轻快、数据存本地）。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2026.9.0", "https://github.com/mountain-loop/yaak/releases/download/v2026.9.0/"
+                   "Yaak_2026.9.0_x64-setup.exe", 45674440),)),
+    ("gvim", "Vim (gVim)", "exe",
+     "Vim 的 Windows 图形版（带菜单与鼠标支持）。仓库 `vim/vim-win32-installer` 是官方"
+     "Windows 构建地。GitHub 产物，下载走加速器优先。",
+     (("9.2.1192", "https://github.com/vim/vim-win32-installer/releases/download/"
+                   "v9.2.1192/gvim_9.2.1192_x64.exe", 12401328),)),
 )
 
 
@@ -15604,7 +15955,12 @@ class CardColumnLayout(QVBoxLayout):
         if idx != -1:
             return idx
         for n, row in enumerate(self.row_widgets):
-            lay = row.layout() if row is not None else None
+            if row is None:
+                continue
+            # 行有**两种形态**：Tab 里是 `QWidget#cardRow`，统一结果面板里是
+            # **无宿主的 QHBoxLayout**（2026-10-15，见 R2.6 —— 那是不 reparent
+            # 卡片、跳过整条 QSS polish 的关键）。两种都得能钻进去找。
+            lay = row.layout() if isinstance(row, QWidget) else row
             if lay is not None and lay.indexOf(widget) != -1:
                 return n
         return -1
@@ -19016,7 +19372,8 @@ class MainWindow(QMainWindow):
     def _relayout_results(self) -> None:
         """统一结果面板：保留分类小标题，在各自标题下面重建卡片行。
 
-        行与浏览 Tab 是同一套 cardRow（`_make_rows` 造的），所以格子等宽。
+        行用 `_make_layout_rows` 造的**无宿主 QHBoxLayout**（2026-10-15，见 R2.6）——
+        网格、等宽、占位格的算法与浏览 Tab 完全一致，只是行不再是控件。
         **列数恒取浏览列数**（2026-10-10 用户改的口径：「搜索组件时如果只有一个组件
         也要以网格显示，现在变成列表了」）：命中 1 个也是 3 个格子里占 1 个，
         另外两格补透明占位控件 —— 少补一格，`addWidget(card, 1)` 就会把那张卡拉成
@@ -19032,9 +19389,12 @@ class MainWindow(QMainWindow):
         columns = max(1, self._card_columns())
         # 分块必须在搬家**之前**算完：setParent 会把卡片显式隐藏，先搬再算就排空
         chunks_per_group = [chunk_visible(group, columns) for _, group in sections]
-        # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走
+        # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走。
+        # ⚠ **父级已经是宿主时一个字都别动**：`setParent(当前父级)` 实测仍约
+        # 5 ms/张（Qt 照样重跑 inheritStyle → QSS polish），115 张就是 ~0.6 s。
+        # 行改成无宿主布局之后卡片本来就一直挂在宿主上，这个判断直接省掉那 0.6 s。
         for card in cards:
-            if self.results_content.isAncestorOf(card):
+            if card.parent() is not self.results_content:
                 card.setParent(self.results_content)
         # 只摘行、留标题：结果面板是"标题 + 行"交错的结构，全清会把标题一起删掉
         self._drop_rows(self.results_layout, only_rows=True)
@@ -19043,9 +19403,9 @@ class MainWindow(QMainWindow):
             pos = self.results_layout.indexOf(header)
             if pos < 0:
                 continue
-            for k, row in enumerate(self._make_rows(self.results_content, chunks,
-                                                    pad_to=columns)):
-                self.results_layout.insertWidget(pos + 1 + k, row)
+            for k, row in enumerate(self._make_layout_rows(self.results_content, chunks,
+                                                           pad_to=columns)):
+                self.results_layout.insertLayout(pos + 1 + k, row)
                 rows.append(row)
         self.results_layout.row_widgets = rows
         self._tab_rows[RESULTS_KEY] = rows
@@ -19078,18 +19438,32 @@ class MainWindow(QMainWindow):
     def _drop_rows(self, layout, only_rows: bool = False) -> None:
         """摘掉 layout 里的条目并销毁（`_fill_rows` 与结果面板重排共用）。
 
-        入参 only_rows: bool  True → 只摘 objectName 为 "cardRow" 的行控件，
-             分类小标题与末尾 stretch 原样留下。结果面板是「标题 + 行 + 标题 + 行」
-             的交错结构，整清一次会把分类标题一起 deleteLater。
+        入参 only_rows: bool  True → 只摘「行」：Tab 里是 objectName 为 "cardRow"
+             的**行控件**，统一结果面板里是**无宿主的 QHBoxLayout**（见 R2.6）。
+             分类小标题与末尾 stretch 原样留下。
         """
         i = 0
         while i < layout.count():
             item = layout.itemAt(i)
             w = item.widget()
-            if only_rows and (w is None or w.objectName() != "cardRow"):
+            sub = item.layout()
+            is_row = (w is not None and w.objectName() == "cardRow") or sub is not None
+            if only_rows and not is_row:
                 i += 1
                 continue
             layout.takeAt(i)
+            if sub is not None:
+                # 无宿主行布局：把里面的条目逐个摘出来再丢掉空布局。
+                # 卡片**留在宿主里不动**（父级不变正是这么省下来的），由调用方
+                # 决定是送回 Tab 还是重新排进新行；占位格是临时控件，随行一起销毁。
+                while sub.count():
+                    inner = sub.takeAt(0)
+                    filler = inner.widget()
+                    if filler is not None and not any(filler is c for c in self.cards):
+                        filler.hide()
+                        filler.deleteLater()
+                sub.deleteLater()
+                continue
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
@@ -19137,6 +19511,43 @@ class MainWindow(QMainWindow):
             # show() 会顺着子控件往下走，把行里的卡片一起带出来。
             row.show()
             rows.append(row)
+        return rows
+
+    def _make_layout_rows(self, host, chunks, pad_to: int = 0) -> list:
+        """统一结果面板专用：造**无宿主的 QHBoxLayout** 当行（2026-10-15，见 R2.6）。
+
+        为什么不沿用 `_make_rows` 的 `QWidget#cardRow`：`QLayout::addChildWidget`
+        是把控件 reparent 到**布局的 `parentWidget()`** —— 行是个 QWidget 时，
+        卡片的父级就变成那个新建的行，而父级一变 Qt 就得对该卡**整棵子树**重跑一遍
+        样式解析（实测约 5 ms/张，115 张就是 0.6 s）。无宿主布局的 `parentWidget()`
+        正好是外层容器本身，于是卡片**父级不变**，整条 QSS polish 路径被跳过。
+        实测同一份 115 张卡：行控件 1001 ms → 无宿主布局 **3.5 ms**。
+
+        别把 Tab 也换过来：Tab 的行是 `QWidget`，`_reveal_running_tabs` 那一族逻辑
+        与一批像素断言都按 `findChildren` / `objectName()=="cardRow"` 认行，
+        而搜索结果面板是唯一"每次按键都要整页重排"的地方 —— 收益只在这里，
+        风险也只摊在这里。
+
+        入参 host: QWidget  占位格控件的挂载点（行布局自己没有宿主，子控件得有）。
+        """
+        rows: list = []
+        for row_cards in chunks:
+            row_lay = QHBoxLayout()
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(CARD_ROW_SPACING)
+            for card in row_cards:
+                row_lay.addWidget(card, 1)     # 同一行的格子等分宽度
+                # 卡片从 Tab 那边搬过来时 setParent 会把它显式隐藏，进格子后放出来一次；
+                # 本来就在结果面板里的卡片（连续改搜索词）这一步是无副作用的。
+                card.show()
+            if pad_to and len(row_cards) < pad_to:
+                for _ in range(pad_to - len(row_cards)):
+                    filler = QWidget(host)
+                    filler.setObjectName("cardRowFiller")
+                    filler.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    row_lay.addWidget(filler, 1)
+                    filler.show()
+            rows.append(row_lay)
         return rows
 
     def resizeEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
@@ -19588,16 +19999,25 @@ class MainWindow(QMainWindow):
         # 所以"重复搜索、清空再搜"拿到的已经是干净状态。
         # 清空输入要回到浏览态时才真复位，而且只在确实处于搜索态时复位一次：
         # 浏览态下按退格把最后一个字符删掉，不该重排 85 张卡。
-        if not q:
-            if self._in_search():
-                self._restore_browse()
-            self.search_hint.setText("")
-            self.search_hint.setProperty("empty", "false")
-            self.search_hint.style().unpolish(self.search_hint)
-            self.search_hint.style().polish(self.search_hint)
-            return
+        # 重建期间关掉重绘（2026-10-15 性能修复）：一次重建要让几十上百张卡搬家、
+        # 销毁旧行、再建新行，而本函数是**同步**的 —— 回到事件循环之前根本不会重绘，
+        # 开着只让 Qt 在每个中间态白算一遍布局与绘制。实测省掉约 1/3 的总耗时。
+        # 必须 try/finally：异常时也要把重绘还回去，否则窗口从此不再刷新
+        # （那是比"慢"更难排查的故障）。
+        self.setUpdatesEnabled(False)
+        try:
+            if not q:
+                if self._in_search():
+                    self._restore_browse()
+                self.search_hint.setText("")
+                self.search_hint.setProperty("empty", "false")
+                self.search_hint.style().unpolish(self.search_hint)
+                self.search_hint.style().polish(self.search_hint)
+                return
 
-        self._build_unified(q)
+            self._build_unified(q)
+        finally:
+            self.setUpdatesEnabled(True)
 
     def _in_search(self) -> bool:
         """结果面板是否正盖着四个 Tab（`top_stack` 第 1 页 = 统一搜索结果）。
@@ -19708,7 +20128,10 @@ class MainWindow(QMainWindow):
         所以搜索结果的卡片宽度与浏览时一致。列数取 min(命中数, 浏览列数)，由
         `_relayout_results` 统一算 —— 命中 1 个就是 1 列，命中 5 个就是 3 列。
         """
-        self._clear_results_layout()
+        # send_home=False：命中的卡片**留在结果面板宿主上**，别先送回 Tab 再搬回来。
+        # 搬两次家 = 每张卡两轮 QSS 重算，而这一次清空本来只是为了把旧行拆掉。
+        # 退出搜索（`_restore_browse`）才需要真的送回各自 Tab。
+        self._clear_results_layout(send_home=False)
         # 先按分类归好组：列数要按**总命中数**算，而它得等这一轮扫完才知道
         groups: list = []
         order: dict = {}
@@ -19716,6 +20139,10 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             comp = card.component
             if not component_matches(comp, q):
+                # 只隐藏、**不送回 Tab**（2026-10-15）：搜索期间每一次"退出命中"都搬一次家
+                # 就是每张卡一轮 QSS 重算，逐字输入时最贵（实测 'c'→'cu' 这一下要 0.7 s）。
+                # 这些卡就留在结果面板宿主上藏着，退出搜索时由
+                # `_clear_results_layout(send_home=True)` 一次扫干净（见那里）。
                 card.setVisible(False)
                 continue
             cat = comp.category
@@ -19732,9 +20159,13 @@ class MainWindow(QMainWindow):
             header.setObjectName("resultCatHeader")
             self.results_layout.addWidget(header)
             for card in cards:
-                # 先挂到结果面板宿主上（不进外层布局），具体排进哪个格子由
-                # _relayout_results 决定；setParent 会显式隐藏，随后要放出来
-                card.setParent(self.results_content)
+                # 这里**刻意只设可见性、不设父级**（2026-10-15 性能修复）：
+                # 下面 `relayout_cards(RESULTS_KEY)` 里 `_relayout_results` 会把
+                # 这批卡收回到 `results_content` 再排进行里，在这里先 setParent
+                # 一遍等于每张卡多搬一次家。而**搬到同一个父级也不便宜** ——
+                # 实测 `card.setParent(同父)` 仍会触发 Qt 对该卡整棵子树重跑一遍
+                # QSS 解析，约 5 ms/张；115 张就是 ~0.6 s（真机实测，见
+                # DEVELOPMENT.md 的搜索性能一节）。
                 card.setVisible(True)
             sections.append((header, cards))
         self.results_layout.addStretch(1)
@@ -19771,32 +20202,55 @@ class MainWindow(QMainWindow):
         if home is not None:
             card.setParent(home)      # 卡片稍后由 _restore_browse 重排归位
 
-    def _clear_results_layout(self) -> None:
+    def _clear_results_layout(self, send_home: bool = True) -> None:
         """清空统一结果面板里的所有条目（分类小标题、卡片行）。
 
-        卡片不在这里销毁：它们只是被摘出布局并回到自己 Tab 的容器，
-        随后由 _restore_browse 统一重排。
+        卡片**不在这里销毁**：它们只是被摘出布局。去哪由 `send_home` 决定 ——
+        退出搜索时回各自 Tab 的容器；**连续搜索时原地留在宿主里**。
+        留在原地是这次性能修复的一半：下一次重排把它们放进新行时父级没变，
+        Qt 就不必重跑那棵子树的 QSS 解析（见 R2.6 与 `_make_layout_rows`）。
+
+        入参 send_home: bool  True → 卡片回所属 Tab（退出搜索）；
+                             False → 卡片留在 `results_content` 上（继续搜索）。
         """
         self._result_sections = []
         self.results_layout.row_widgets = []
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             w = item.widget()
+            sub = item.layout()
+            if sub is not None:
+                # 无宿主行布局：逐个摘出条目，再丢掉空布局。
+                # 卡片按 send_home 决定去向；占位格是临时控件，随行一起销毁。
+                while sub.count():
+                    child = sub.takeAt(0).widget()
+                    if child is None:
+                        continue
+                    if any(child is card for card in self.cards):
+                        if send_home:
+                            self._send_card_home(child)
+                    else:
+                        child.hide()
+                        child.deleteLater()
+                sub.deleteLater()
+                continue
             if w is not None:
                 if w.objectName() == "cardRow":
-                    # 行里住着卡片：先把它们送回各自 Tab 的容器，再销毁空行 ——
-                    # 直接 deleteLater 会把行内的卡片一起带走。
+                    # Tab 的行控件（结果面板已改用无宿主布局，这里保留兜底）：
+                    # 先把卡片送回各自 Tab，再销毁空行 —— 直接 deleteLater
+                    # 会把行内的卡片一起带走。
                     lay = w.layout()
                     if lay is not None:
                         while lay.count():
                             child = lay.takeAt(0).widget()
-                            if child is not None:
+                            if child is not None and send_home:
                                 self._send_card_home(child)
                     w.hide()
                     w.deleteLater()
                     continue
                 if any(w is card for card in self.cards):
-                    self._send_card_home(w)
+                    if send_home:
+                        self._send_card_home(w)
                     continue
                 # deleteLater 是**异步**的：takeAt 之后布局不再管它，但 widget 的
                 # parent 还挂在 results_content 上、几何也没变，在 deferred delete
@@ -19809,6 +20263,17 @@ class MainWindow(QMainWindow):
             sp = item.spacerItem()
             if sp is not None:
                 del sp
+
+        if send_home:
+            # 收尾扫一遍"不属于任何一行、但父级还是宿主"的卡片。
+            # 搜索期间它们被刻意留在宿主上（只隐藏不搬家，省掉每张一轮 QSS 重算），
+            # 于是布局里已经找不到它们 —— 上面那圈"拆行"只会走到"行里的卡"。
+            # 漏掉这一步的后果很实在：结果面板是 `top_stack` 的隐藏页，卡挂在那儿
+            # 等于浏览态下**凭空少一批卡片**（2026-10-15 自查实测到：清空后仍有 115 张
+            # 卡留在 results_content 上）。
+            for card in self.cards:
+                if card.parent() is self.results_content:
+                    self._send_card_home(card)
 
     def _home_wrap_of(self, card):
         """这张卡片所属 Tab 的容器（搜索结束要按它归位）。"""

@@ -4925,9 +4925,21 @@ class ResolveLaunchVersionSemantics(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self._cfg = main.CONFIG_DIR
+        # 三个都要挪。`CONFIG_FILE` / `RUNNING_FILE` 是 **import 期**从 CONFIG_DIR
+        # 拼出来的模块常量，只挪 CONFIG_DIR 对它们不生效 —— 而本类的用例会调
+        # `save_active_version()` 与 `save_running_map()`，漏掉就是往用户真实的
+        # `~/.env-tools/` 里写。2026-10-15 实测的现状：真实 config 的 active 表里
+        # `rocketmq: "5.3.1"` 就是这里写的（磁盘上根本没有 rocketmq 的安装目录，
+        # 而这个版本号与用例里硬编码的那个逐字相同）。
+        # 同一文件的 StartFlow.setUp 早就踩过同一个坑，写法照抄那里。
+        # 排查入口：`tests/run_all_tests.py` 现在会对每个套件比一遍真实配置目录。
+        self._cfg = (main.CONFIG_DIR, main.CONFIG_FILE, main.RUNNING_FILE)
         main.CONFIG_DIR = Path(self.tmp.name)
-        self.addCleanup(setattr, main, "CONFIG_DIR", self._cfg)
+        main.CONFIG_FILE = main.CONFIG_DIR / "config.json"
+        main.RUNNING_FILE = main.CONFIG_DIR / "running.json"
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._cfg[0])
+        self.addCleanup(setattr, main, "CONFIG_FILE", self._cfg[1])
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._cfg[2])
 
     def _comp_with_dirs(self, key, dirs):
         """造一个"磁盘上装着若干版本"的组件，并桩掉 installed_dirs。"""

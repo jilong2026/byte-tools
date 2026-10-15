@@ -127,25 +127,25 @@ node -v
 
 ## 支持的组件
 
-共 **127 个**：**61 个可一键装配** + **66 个只提供官方安装包下载**（66 = 26 个 GUI 工具 + 40 个 Agent 客户端；61 个里有 15 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
+共 **161 个**：**61 个可一键装配** + **100 个只提供官方安装包下载**（100 = 36 个 GUI 工具 + 64 个 Agent 客户端；61 个里有 15 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
 | 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
 | 服务端组件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
 | 开发环境 | 32 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant |
-| 开发工具 | 26 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman |
-| Agent客户端 | 40 | Cursor、ZCode、Claude Code、Codex CLI、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火 |
+| 开发工具 | 36 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim) |
+| Agent客户端 | 64 | Cursor、ZCode、Claude Code、Codex CLI、opencode、OpenHands、Cherry Studio、Goose、Qwen Code、Crush、Kiro、Jan、OpenClaw、Hermes Agent、Gemini CLI、Aider、Ollama、LM Studio、GPT4All、AnythingLLM、LobeHub、GitHub Copilot CLI、ima（腾讯）、Kilo Code、Wave Terminal、Msty Studio、Mistral Vibe、Kimi Work、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火 |
 
-> **Agent客户端这一 Tab 有两档**：40 个里 **34 个**有实测过的官方直链，卡片主按钮是「下载」；
-> 另 **6 个**（Windsurf (Devin)、Claude 桌面版、Google Antigravity、Google Gemini、秘塔AI搜索、
-> 讯飞星火）官方没有可登记的稳定直链，主按钮是**「官网下载」**——点一下在浏览器里打开它的官网，
+> **Agent客户端这一 Tab 有两档**：64 个里 **56 个**有实测过的官方直链，卡片主按钮是「下载」；
+> 另 **8 个**（Windsurf (Devin)、Claude 桌面版、Google Antigravity、Google Gemini、秘塔AI搜索、
+> 讯飞星火、Gemini CLI、Aider）官方没有可登记的稳定直链，主按钮是**「官网下载」**——点一下在浏览器里打开它的官网，
 > 你自己在那里下。**两档都不代下、不代装、不代跑安装器。**
 
 > **五个 Tab 各自按什么分？**「一键启停」按**能力**分（这个工具能不能替你一键起停）；
 > 「服务端组件」与「开发环境」按**装在哪**分 —— 前者装在服务器/集群上、命令行操作，
-> 后者跑在你这台开发机上；「开发工具」按**形态**分 —— 26 个全是带图形界面的软件；
-> 「Agent客户端」按**品类**分 —— 全是 AI 客户端，其中 34 个有直链可下、6 个只能去官网下。
+> 后者跑在你这台开发机上；「开发工具」按**形态**分 —— 36 个全是带图形界面的软件；
+> 「Agent客户端」按**品类**分 —— 全是 AI 客户端，其中 56 个有直链可下、8 个只能去官网下。
 > 排这个顺序是为了让最常问的那个问题「我是装服务器还是装本机」能一眼对上。
 
 > 想调整归类：普通组件改 `main.py` 里 `COMPONENT_CATEGORY_OF` 的一行即可；「一键启停」那一页不用登记——组件进了启动白名单 `LAUNCH_OF` 就自动出现在那里，退出来就自动回到原分类。

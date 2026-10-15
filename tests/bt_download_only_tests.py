@@ -147,7 +147,7 @@ class TabStructure(unittest.TestCase):
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
     def test_visible_component_count_is_127(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 26 只下载 + 40 Agent客户端）。
+        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 36 只下载 + 64 Agent客户端）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
@@ -155,11 +155,15 @@ class TabStructure(unittest.TestCase):
         → 83（B3/B5 与并发那批）→ 85（B7 的 ant / jmeter）→ 86（B4 补的 minio）
         → 87（Dart）→ 92（2026-10-15 新增「Agent客户端」首批 5 个）
         → 120（2026-10-15 第二批 28 个 Agent 客户端，含 5 个只有「官网下载」的）
-        → **127（2026-10-15 第三批大厂助手 7 个，含 1 个只有「官网下载」的）**。
+        → 127（2026-10-15 第三批大厂助手 7 个，含 1 个只有「官网下载」的）
+        → 128（同日补 opencode，它有实测直链，不是「官网下载」那一档）
+        → 139（同日第四批 11 个：9 个有实测直链 + gemini-cli / aider 两个只有官网入口）
+        → **161（同日第五批 22 个：12 个 Agent + 10 个开发工具，全部有实测直链）**。
+        方法名里的 127 是历史名，不改 —— 改名的收益抵不上一次全仓库检索。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 127)
-        self.assertEqual(len(self.components), 128, "127 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 161)
+        self.assertEqual(len(self.components), 162, "161 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -1214,7 +1218,22 @@ class ArtifactMenu(_EnvSandbox):
                    "qianwen-portal-cdn.tongyi.com",        # tongyi-qianwen：按版本号分目录
                    "lingma-ide.oss-rg-china-mainland.aliyuncs.com",  # lingma：阿里 OSS
                    "xiaoyan-desktop.cdn.bcebos.com",       # ernie：百度 BOS
-                   "sfile.chatglm.cn")           # chatglm：智谱文件站
+                   "sfile.chatglm.cn",           # chatglm：智谱文件站
+                   # 2026-10-15 第四批「Agent客户端」，域名逐个 range + 前四字节实测过
+                   # （前 7 个都是 GitHub 产物，走已成名的加速器域名；这两个是厂商自有 CDN）：
+                   "prod.download.desktop.kiro.dev",  # kiro：按版本号分目录、带签名（实测 1.3.0）
+                   "hermes-assets.nousresearch.com",  # hermes：滚动直链，无版本号（取 Last-Modified 年月）
+                   # 2026-10-15 第五批（12 个 Agent + 10 个开发工具）：同样逐个实测过。
+                   # 其中 13 个是 GitHub 产物（走已成名的加速器域名），下面是 9 个厂商自有域名：
+                   "ollama.com",                 # ollama：官方站直链（滚动，不带版本号）
+                   "lmstudio.ai",                # lm-studio：/download/latest/ 302 到版本化安装器
+                   "ima-app.image.myqcloud.com",  # ima（腾讯）：按版本目录直发
+                   "autoupdate.desktop.anaconda.com",  # kilo-code：滚动 latest 路径
+                   "next-assets.msty.studio",    # msty：滚动 latest 直链
+                   "appsupport.kimi.ai",         # kimi-work：滚动下载端点，302 到版本化文件
+                   "1.as.dl.wireshark.org",      # wireshark：官方按平台分目录（win64/）
+                   "release.gitkraken.com",      # gitkraken：稳定别名 GitKrakenSetup.exe
+                   "product-downloads.atlassian.com")  # sourcetree：Atlassian GA 目录
         for comp in main.build_components():
             if not comp.download_only:
                 continue

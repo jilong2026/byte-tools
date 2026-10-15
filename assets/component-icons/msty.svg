@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" fill-rule="evenodd" clip-rule="evenodd" image-rendering="optimizeQuality" shape-rendering="geometricPrecision" text-rendering="geometricPrecision" viewBox="0 0 7824 8527">
+  <defs>
+    <linearGradient id="a" x1="2092.43" x2="5733.89" y1="469.174" y2="1703.58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#198fe1"/>
+      <stop offset="1" stop-color="#97fcfb"/>
+    </linearGradient>
+    <linearGradient id="b" x1="1965.87" x2="5857.77" y1="440.437" y2="4363.47" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#198fe1"/>
+      <stop offset="1" stop-color="#97fcfb"/>
+    </linearGradient>
+    <linearGradient id="c" x1="5782.68" x2="2040.94" y1="8021.27" y2="5168.21" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#198fe1"/>
+      <stop offset="1" stop-color="#143f93"/>
+    </linearGradient>
+    <linearGradient id="d" x1="2658.21" x2="1480.32" y1="5746.82" y2="3251.45" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#198fe1"/>
+      <stop offset="1" stop-color="#143f93"/>
+    </linearGradient>
+    <linearGradient id="e" x1="6962.23" x2="4546.54" y1="5423.6" y2="3574.71" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#198fe1"/>
+      <stop offset="1" stop-color="#143f93"/>
+    </linearGradient>
+    <linearGradient id="f" x1="3630.63" x2="2384.56" y1="8288.38" y2="4906.18" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#198fe1"/>
+      <stop offset="1" stop-color="#143f93"/>
+    </linearGradient>
+  </defs>
+  <path fill-rule="nonzero" d="M0 1751 3912 0l3912 1751v4517L3912 8527 0 6268z"/>
+  <path fill="url(#a)" d="M5709 1077 3912 274l-1795 801c857 392 1744 801 1795 825 50-23 940-430 1797-822z"/>
+  <path fill="url(#b)" d="m5970 1193-2058 946-2062-946-1623 709 3685 1710 3685-1705z"/>
+  <path fill="url(#c)" d="M2103 4930v1418c294 170 1718 920 1809 973 61-35 728-349 1246-648v247l-1246 648-1809-973v626l1809 1044 1808-1044V5828l-1808 901-1300-608v-247c525 303 1237 571 1300 608 91-52 1515-732 1808-901v-655l-1808 894-1809-889z"/>
+  <path fill="url(#d)" d="M227 3538v2599l1662 960V4558c983 498 1971 983 2023 1013V3601L227 1902z"/>
+  <path fill="url(#e)" d="M7597 6137V1903L3912 3602v1970c52-30 1044-522 2023-1021v2546z"/>
+  <path fill="url(#f)" d="M2103 4930v1418c294 170 1718 920 1809 973v-592l-1300-608v-247c525 303 1237 571 1300 608v-663zm0 1665v626l1809 1044v-697z"/>
+</svg>
