@@ -79,6 +79,12 @@ env:
   # 本机复现：`PYTHONIOENCODING=cp1252 python -u tests/run_all_tests.py`
   # 会打出完全一样的 UnicodeEncodeError。设成 utf-8 后 CI 与开发机表现一致。
   PYTHONIOENCODING: utf-8
+  # 测试里大量用 `subprocess` 起 bash / cmd 跑仓库里的一键脚本，而 Windows runner
+  # 默认是 C 区域 —— C 区域下 `printf` 里那些中文字面量会被降级成 `?`，
+  # 于是脚本写出的正文与测试里的中文期望值对不上（bt_gitee_sync_tests 就是这么红的：
+  # 正文里找不到 `GitHub Release：`）。给整条 job 一个 UTF-8 区域，子进程一起生效。
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
   # PyInstaller 最低版本：spec 中使用了 5.0+ 引入的 hooksconfig 参数
   PYINSTALLER_MIN_VERSION: '6.0'
   # pip 主源：官方 PyPI。runner 在境外（Azure），到 pypi.org 是就近 CDN；
@@ -162,12 +168,16 @@ jobs:
         id: guards
         continue-on-error: true          # 先让它跑完并留下证据，红了在末尾统一置红
         run: |
+          # pwsh 默认按 CP1252 解码原生命令的 stdout，会把中文变成 `?` ——
+          # 上一次就是这么把失败信息糊掉的，所以先钉住控制台编码。
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           python -u tests/run_all_tests.py *>&1 | Tee-Object -FilePath guards.log
           exit $LASTEXITCODE
 
       - name: 护栏结果写进 Step Summary（匿名可读）
         if: always()
         run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $mark = if ('${{ steps.guards.outcome }}' -eq 'success') { '✅ 全绿' } else { '❌ 失败' }
           "## 护栏：$mark（outcome=${{ steps.guards.outcome }})" |
             Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
