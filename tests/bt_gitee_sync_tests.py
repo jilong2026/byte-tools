@@ -288,7 +288,14 @@ class SyncScriptTest(unittest.TestCase):
         # 正文是给终端用户看的：不能写「Gitee 侧不挂大二进制」这种工程内部话，
         # 因为本机 .bat 传过产物之后这句话就变成假的（2026-09-29 真实演练时发现）
         self.assertNotIn("不挂大二进制", body)
-        self.assertIn("GitHub Release：", body)
+        # ⚠ 临时诊断（2026-10-15）：CI 上这里红，且报错里正文的中文全是 `?`。
+        # 本机复跑（含 LC_ALL=C）都过，所以先把"服务端收到的到底是哪些字节"钉在
+        # 失败消息里 —— 只有成功/失败都看到真身，才分得清是**脚本产出就错了**
+        # 还是**只在这一条消息的展示上糊了**。定位完就删。
+        self.assertIn("GitHub Release：", body,
+                      "诊断 body=…{}\n  hex[:160]={}\n  LANG/LANGUAGE={!r}/{!r}".format(
+                          repr(body[:300]), body[:160].encode("utf-8", "backslashreplace").hex(),
+                          os.environ.get("LANG"), os.environ.get("LANGUAGE")))
 
     def test_404_on_tags_lookup_is_not_an_error(self):
         # 真实 Gitee 返回 200 + null（见 new 场景），仓库不存在才 404；两种都要能走到「创建」

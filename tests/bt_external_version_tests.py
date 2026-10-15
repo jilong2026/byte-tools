@@ -1440,13 +1440,18 @@ class WorkspaceMachineFixTests(ExternalSandbox):
         self.assertTrue(main.load_machine_fix_map(), "前提：先有一笔 machine_fix")
 
         ext = self.make_home("maven-3.9.2-ext", "mvn.cmd")
-        main.switch_to_external_version(
+        # ⚠ 临时诊断（2026-10-15）：CI 上这条红在"接管没被登记"，而本机必过。
+        # 把 switch 的返回值（ok/verdict/error/steps）钉进失败消息 —— 它直接说明
+        # 是从哪一步早退的。定位完就删。
+        _res = main.switch_to_external_version(
             comp, self.dv(ext, "3.9.2", "path:HKLM"),
             confirm_machine=lambda plan: True, log=lambda m: None)
         self.assertEqual(main.load_machine_fix_map(), {},
                          "接管前必须把 machine_fix 还掉，否则两次快照叠加、还原回不到原样")
         self.assertEqual(main.load_takeover_map().get("maven", {}).get("version"),
-                         "3.9.2")
+                         "3.9.2",
+                         f"诊断 switch 返回={_res!r}  takeover_map={main.load_takeover_map()!r} "
+                         f"hklm={dict(self.hklm)!r}")
         # 反向：把这个接管也还掉，系统 Path 必须逐字节回到最初
         main.revert_external_version(comp, log=lambda m: None)
         self.assertEqual(self.hklm["Path"], (before_path, before_type),

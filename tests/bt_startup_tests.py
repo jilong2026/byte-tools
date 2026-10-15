@@ -40,6 +40,25 @@ print("CHILD_OK", main.CURRENT_OS, main.MACHINE, main.IS_ARM)
 """.format(repo=REPO_ROOT)
 
 
+def _expected_release() -> str:
+    """本机**应当**得到的 RELEASE —— 由标准库自己那张表算出来。
+
+    为什么不写死 `{"10", "11", "post11"}`：GitHub 的 `windows-latest` 是
+    **Windows Server 2025**，它的 RELEASE 是 `2025Server`
+    （在 `platform._WIN32_SERVER_RELEASES` 里）。写死客户端那三个值，会在 runner 上
+    **无条件红**，而产品代码一点问题都没有 —— 2026-10-15 的 CI 就是这么红的。
+
+    这张表本来就是标准库的判据（本文件里那条
+    `test_release_is_the_same_the_stdlib_table_gives` 已经在用它），
+    所以"算出来应当是什么"只有这一个正确来源，不该在别处再抄一份常量。
+    """
+    v = sys.getwindowsversion()
+    intversion = (v.major, v.minor, v.build)
+    is_client = getattr(v, "product_type", 1) == 1
+    table = platform._WIN32_CLIENT_RELEASES if is_client else platform._WIN32_SERVER_RELEASES
+    return next((r for ver, r in table if ver <= intversion), "")
+
+
 def _wmi_warm(timeout_sec: int = 10) -> bool:
     """有界判断本机 WMI 现在能不能答话（daemon 线程 + 超时，绝不把测试拖挂）。"""
     import threading
@@ -144,7 +163,9 @@ class PackagingEntryNoWmi(unittest.TestCase):
         self.mod.disable_wmi_lookup()
         got = self._win32_ver_bounded()
         self.assertIsNotNone(got, "标准库退路没走通")
-        self.assertIn(got[0], {"10", "11", "post11"}, f"PyInstaller 的判据要的是大版本，实际 {got}")
+        self.assertTrue(got[0], f"RELEASE 算出来是空的：{got}")
+        self.assertEqual(got[0], _expected_release(),
+                         f"RELEASE 与标准库那张表不一致（got={got!r}）")
 
     def test_release_is_the_same_the_stdlib_table_gives(self):
         """不许自己编版本号：换掉 WMI 后的答案必须与标准库那张表算出来的一致。"""
@@ -224,8 +245,9 @@ class PackagingChildProcessesNoWmi(unittest.TestCase):
         self.assertIn("WMI_FAILS_FAST", out,
                       f"子进程里 WMI 查询必须立刻失败，实际：{out!r}")
         line = [l for l in out.splitlines() if l.startswith("RELEASE")]
-        self.assertTrue(line and line[0].split()[1] in {"10", "11", "post11"},
-                        f"版本号仍要算得出来，实际：{out!r}")
+        self.assertTrue(line, f"子进程没打出 RELEASE：{out!r}")
+        self.assertEqual(line[0].split()[1], _expected_release(),
+                         f"版本号仍要算得出来且与标准库一致，实际：{out!r}")
         self.assertLess(float(line[0].split()[2]), 5.0,
                         "子进程算版本号不该等 WMI")
 

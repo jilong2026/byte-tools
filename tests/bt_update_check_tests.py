@@ -609,7 +609,11 @@ class ChipStateMachine(unittest.TestCase):
         self.assertEqual(called, [], "点击下载时不该弹目录选择框")
         self.assertTrue(started.get("started"), f"没真的开始下载：{started}")
         self.assertIn("9.9.9", started["dest"])
-        self.assertEqual(Path(started["dest"]).parent,
+        # 两侧都 `.resolve()` 再比：Windows 上 `tempfile.mkdtemp()` 可能给的是
+        # **8.3 短名**（GitHub runner 的 TEMP 就是 `C:\Users\RUNNER~1\…`），
+        # 而产品侧那条路径要保持原样；两者指向同一个目录，不做规范化就是假红
+        # （2026-10-15 CI 上正是这么红的：RUNNER~1 ≠ runneradmin）。
+        self.assertEqual(Path(started["dest"]).parent.resolve(),
                          (Path(self._tmp.name) / "dl").resolve(),
                          "要落在用户上次记住的目录里")
 
