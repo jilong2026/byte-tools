@@ -322,6 +322,7 @@ byte-tools/
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
 | `artifacts` | list[DownloadArtifact] | 仅「开发工具」用：同一个版本的多种产物（exe 安装器 / zip 便携包），各自带 URL 列表与官方声明字节数。**不要把它和 `url_list_map` 混用** —— 后者是同一个文件的多镜像，前者是两个不同的文件 |
 | `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（一键启停 / 开发环境 / 开发软件 / 开发工具；2026-10-14 起「一键启停」排第一）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
+| `official_url` | str \| None | 详情页那个可点击官网链接的 href（2026-10-14 新增）。**不在构造处手写**：`build_components()` 末尾按 `COMPONENT_OFFICIAL_URLS[comp.key]` 统一赋值，漏登记即 KeyError。该表 88 条均为人工逐条核实，口径是"有中国大陆官网入口的优先用（含独立 CN 域名与同域名中文路径），否则用真实国际官网首页"。**绝不可从下载 URL 推导** —— 推导会产出 `api.adoptium.net`、`artifacts.elastic.co`、`github.com` 这类非官网域名，详见 DEVELOPMENT.md 规则 R19 |
 
 方法：
 - `install_dir(version)` → 该版本的解压安装目录 `CONFIG_DIR/<key>/<key>-<version>`（`main.py:203`）；**这个 `<key>-<version>` 命名是多版本模型的唯一契约**，反解靠模块函数 `version_from_install_dir()`

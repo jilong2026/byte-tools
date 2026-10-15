@@ -213,11 +213,147 @@ class Rendering(unittest.TestCase):
         self.assertIn("还没有写说明", html)
 
     def test_official_home_is_last_url_host(self):
-        """官方地址取**末位** URL 的域名：首位是镜像，写成"官方地址"就是误导。"""
-        jdk = next(c for c in main.build_components() if c.key == "jdk")
-        self.assertEqual(main.comp_download_host(jdk), "api.adoptium.net")
-        py = next(c for c in main.build_components() if c.key == "python")
-        self.assertEqual(main.comp_download_host(py), "www.python.org")
+        """旧的 comp_download_host 已随官网登记表一起移除（2026-10-14）。
+
+        它从**下载 URL** 推导"官方地址"，而推导结果绝大多数根本不是官网 ——
+        实测 88 个组件里只有 7 个推得对，39 个推成 github.com 仓库页、
+        31 个推成 CDN/下载服务器、docker 直接推不出来。详情页改用人工核实的
+        COMPONENT_OFFICIAL_URLS 之后它再无调用者，连同这条用例一并删掉。
+
+        替代它的护栏在 OfficialUrlRegistry 里。
+        """
+        self.assertFalse(hasattr(main, "comp_download_host"),
+                         "comp_download_host 已移除，不该复活："
+                         "从下载 URL 推导官网域名会产出 api.adoptium.net 这类假官网")
+
+
+class OfficialUrlRegistry(unittest.TestCase):
+    """R19 · 官网登记表必须与组件清单严格对齐，且取值合法。
+
+    这 88 条是人工逐条核实过的事实（2026-10-14 逐条 HTTP 验证），它们同时是
+    「承重墙」：详情页那行字直接把它当 href 用，填错就是给用户一个假官网。
+    所以对齐性与合法性都在这里钉死，漏登记即红 —— 与 COMPONENT_SUMMARY 同一套做法。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.comps = main.build_components()
+        cls.keys = {c.key for c in cls.comps}
+
+    def test_registry_covers_every_component(self):
+        missing = sorted(c.key for c in self.comps
+                         if c.key not in main.COMPONENT_OFFICIAL_URLS)
+        self.assertEqual(missing, [],
+                         f"COMPONENT_OFFICIAL_URLS 缺 key（接新组件时必须补一条）: {missing}")
+
+    def test_no_orphan_keys(self):
+        orphan = sorted(set(main.COMPONENT_OFFICIAL_URLS) - self.keys)
+        self.assertEqual(orphan, [], f"登记表里这些 key 已无对应组件: {orphan}")
+
+    def test_assigned_to_every_component(self):
+        """赋值接缝不能断 —— 漏了这一行，详情页那行字就整行消失（静默失败）。"""
+        for c in self.comps:
+            self.assertEqual(
+                c.official_url, main.COMPONENT_OFFICIAL_URLS[c.key],
+                f"{c.key}: comp.official_url 与登记表不一致（build_components 末尾的赋值断了）")
+
+    def test_all_urls_are_https(self):
+        """必须是 https。http 链接在现在的浏览器里会被标成不安全，且多半能升 https。"""
+        bad = {k: u for k, u in main.COMPONENT_OFFICIAL_URLS.items()
+               if not u.startswith("https://")}
+        self.assertEqual(bad, {}, f"这些不是 https 开头: {bad}")
+
+    def test_urls_have_no_whitespace_and_have_host(self):
+        """URL 里带空格/换行会让 href 截断；没有 host 说明写错了。"""
+        for k, u in main.COMPONENT_OFFICIAL_URLS.items():
+            self.assertEqual(u.strip(), u, f"{k}: URL 首尾有空白 —— {u!r}")
+            self.assertNotIn(" ", u, f"{k}: URL 里有空格 —— {u!r}")
+            self.assertTrue(main._url_netloc(u),
+                            f"{k}: 切不出域名，写法可能有问题 —— {u!r}")
+
+    def test_link_text_comes_from_the_same_url_as_the_href(self):
+        """链接文字里的域名必须是从 href 那个 URL 切出来的。
+
+        早先的写法是「文字显示下载域名、跳转却是官网」，于是详情页上会出现
+        "写着 archive.apache.org、点进去是 apache.org"。这里钉住文字与 href
+        同源：文字里的 netloc 必须是 href 的 netloc。
+        """
+        for key, url in main.COMPONENT_OFFICIAL_URLS.items():
+            text_domain = main._url_netloc(url)
+            self.assertIn(text_domain, url,
+                          f"{key}: 文字域名 {text_domain} 不来自 href {url}")
+
+    def test_known_cn_entries_use_their_china_entry(self):
+        """钉住几条最容易被"顺手改回国际站"的大陆入口。
+
+        口径是用户 2026-10-14 拍板的乙档：有大陆官网（含同域名中文路径）就用
+        大陆的。这些是最容易被误改的几条，所以显式点名。
+        """
+        expected = {
+            "go": "golang.google.cn",              # Google 大陆官方域名
+            "navicat": "navicat.com.cn",           # Navicat 中国版官网
+            "apifox": "apifox.cn",
+            "apipost": "apipost.cn",
+            "hbuilderx": "dcloud.io",
+            "wechat-devtools": "weixin.qq.com",
+            "node": "nodejs.org",
+            "vscode": "code.visualstudio.com",
+            "visual-studio": "visualstudio.microsoft.com",
+            "dotnet-sdk": "dotnet.microsoft.com",
+            "kubectl": "kubernetes.io",
+            "powershell": "learn.microsoft.com",
+        }
+        for key, host in expected.items():
+            with self.subTest(key=key):
+                netloc = main._url_netloc(main.COMPONENT_OFFICIAL_URLS[key])
+                # 用"等于或以 .host 结尾"而不是严格相等：官网带 www. / developers.
+                # 这类前缀很常见（www.apipost.cn、developers.weixin.qq.com），
+                # 严格相等会让测试在无意义的子域名差异上变红，反而招致被人改断言。
+                self.assertTrue(
+                    netloc == host or netloc.endswith("." + host),
+                    f"{key}: 大陆/中文入口被改掉了（期望域名 {host}，实际 {netloc}）")
+
+    def test_download_hosts_are_not_registered_as_official(self):
+        """登记表里不许出现 CDN / 下载服务器域名。
+
+        这正是旧实现（从下载 URL 推导域名）产出的那批东西：api.adoptium.net、
+        artifacts.elastic.co、aka.ms、edgedl.me.gvt1.com、fastdl.mongodb.org…
+        把它们当官网写上去，用户点进去拿到的是一个下载页而不是项目主页。
+        """
+        cdn_like = ("api.adoptium.net", "archive.apache.org", "dlcdn.apache.org",
+                    "artifacts.elastic.co", "aka.ms", "edgedl.me.gvt1.com",
+                    "fastdl.mongodb.org", "get.enterprisedb.com", "dl.k8s.io",
+                    "get.jenkins.io", "services.gradle.org", "releases.hashicorp.com",
+                    "static.rust-lang.org", "repo.anaconda.com", "get.helm.sh",
+                    "dotnetcli.azureedge.net", "storage.googleapis.com",
+                    "dl.pstmn.io", "ftp.postgresql.org", "download.jetbrains.com",
+                    "update.code.visualstudio.com", "downloads.mongodb.com",
+                    "download.eclipse.org", "download.navicat.com", "servicewechat.com",
+                    "download.dcloud.io", "cdn.apifox.com", "cdn.mysql.com")
+        offenders = {k: u for k, u in main.COMPONENT_OFFICIAL_URLS.items()
+                     if any(c in u for c in cdn_like)}
+        self.assertEqual(offenders, {},
+                         f"这些是下载服务器不是官网，别登记进来: {offenders}")
+
+    def test_detail_dialog_renders_a_clickable_link(self):
+        """详情页那行字必须真的是可点的超链接，且文字与 href 同源。"""
+        qapp()
+        comp = next(c for c in self.comps if c.key == "navicat")
+        dlg = main.ComponentDetailDialog(comp, [("它是什么", "测试")])
+        self.addCleanup(dlg.deleteLater)
+        labels = dlg.findChildren(main.QLabel)
+        link = None
+        for lb in labels:
+            if lb.openExternalLinks() and "<a href=" in lb.text():
+                link = lb
+                break
+        self.assertIsNotNone(link, "详情页没有可点击的官网链接")
+        text = link.text()
+        self.assertIn(comp.official_url, text, "href 与登记表不一致")
+        self.assertIn(main._url_netloc(comp.official_url), text,
+                      "链接文字里没有域名")
+        self.assertIn(comp.display_name, text,
+                      "链接文字里没有项目名（用户要求「项目名 · 域名」）")
 
 
 class DetailButtonWiring(unittest.TestCase):

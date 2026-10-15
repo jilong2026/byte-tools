@@ -35,6 +35,7 @@
 - [规则 R16：像素裁字只能在真实渲染下判](#规则-r16像素裁字只能在真实渲染下判offscreen-的度量会把你带偏)
 - [规则 R17：组件详情弹窗](#规则-r17组件详情弹窗2026-10-12)
 - [规则 R18：冷启动预算——建卡不许逐个扫 PATH](#规则-r18冷启动预算建卡不许逐个扫-path2026-10-13)
+- [规则 R19：官网地址必须人工登记，不许从下载 URL 推导](#规则-r19官网地址必须人工登记不许从下载-url-推导2026-10-14)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -2151,3 +2152,48 @@ offscreen 没有系统中文字体的回退链，Qt 换了一个宽得多的替�
   N=87 时就是 0.9s。要扫就批量化（一次 scandir 建索引，查表 O(1)）。
 - 冷启动回归门槛：`python -X importtime` 之外，建窗（`MainWindow()` 构造）
   超过 **1.5s** 必须先 profile 再合并，不许"再等等优化"。
+
+---
+
+## 规则 R19：官网地址必须人工登记，不许从下载 URL 推导（2026-10-14）
+
+### R19.1 背景：推导出来的东西根本不是官网
+
+详情页一直有一行"官方地址 / 官方下载"，原先由 `comp_download_host(comp)` 从
+组件的**下载 URL** 里切域名。2026-10-14 实测 88 个组件的推导结果：
+
+| 推导出的域名类型 | 数量 | 例子 |
+|---|---|---|
+| `github.com`（仓库页，不是官网） | 39 | git / redis / minio / caddy / fd |
+| CDN / 下载服务器 | 31 | `api.adoptium.net`、`artifacts.elastic.co`、`aka.ms`、`edgedl.me.gvt1.com`、`fastdl.mongodb.org` |
+| Apache 归档站 | 10 | `archive.apache.org`（该是 `kafka.apache.org`） |
+| 压根推不出来 | 1 | docker |
+| **确实是官网** | **7** | nginx.org / python.org / nodejs.org / go.dev / gradle.org / sqlite.org / apipost.cn |
+
+也就是说那行字**有 81/88 是错的**。写"官方地址"却给用户一个下载服务器，
+比不写更糟。
+
+### R19.2 做法
+
+- `COMPONENT_OFFICIAL_URLS`（`main.py`）单点登记 88 条，每条带核实依据注释
+  （`CN` = 大陆入口、`INT` = 国际官网、`403` = 站点有反爬但域名有效）。
+- `build_components()` 末尾统一赋值 `comp.official_url`，**漏登记直接 KeyError**。
+- 取值口径（用户 2026-10-14 拍板，乙档）：
+  1. 有中国大陆官网入口的优先用 —— 含两种形态：**独立 CN 域名**
+     （`golang.google.cn` / `navicat.com.cn` / `apifox.cn` / `dcloud.io` /
+     `developers.weixin.qq.com`）与**同域名中文路径**
+     （`nodejs.org/zh-cn`、`jetbrains.com/zh-cn`、`visualstudio.microsoft.com/zh-hans`、
+     `code.visualstudio.com/docs/?locale=zh-cn`、`learn.microsoft.com/zh-cn/powershell/`、
+     `kubernetes.io/zh-cn/…`）；
+  2. 没有中文入口的，用该项目**真实国际官网首页**。
+- 链接文字与 href **必须同源**：文字里的域名用 `_url_netloc(href)` 现切，
+  不另写一份字符串。早先"文字显示下载域名、跳转却是官网"的写法已废弃。
+
+### R19.3 红线
+
+- **不许再写"从 URL 推导官网"的逻辑**。`comp_download_host()` 已连同它的两条
+  用例一起删除。
+- 登记表里出现 CDN / 下载服务器域名即为错，`tests/bt_component_detail_tests.py`
+  的 `test_download_hosts_are_not_registered_as_official` 会拦。
+- 这 88 条是人工核实的事实，**项目改名换域名后会悄悄过期**。接新组件时必须在
+  `COMPONENT_OFFICIAL_URLS` 补一条（漏登记即测试变红），不是可选项。

@@ -1481,6 +1481,10 @@ class Component:
     # 与 data_note 的分工：这条回答"它是什么、我要不要装"，data_note 回答
     # "它的数据落在哪、删版本会不会丢数据"。两者读者时机不同，不合并。
     summary: str = ""
+    # 官方网址（2026-10-14 新增）：可选中国大陆区域官网链接。
+    # 优先用 CN URL，没有则用第一个可下载 URL 解析出的官方域名。
+    # 由 build_components() 末尾按 COMPONENT_OFFICIAL_URLS 统一赋值。
+    official_url: Optional[str] = None
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -6194,6 +6198,147 @@ def _render_icon_file(path: Optional[Path], px: int) -> Optional["QPixmap"]:
 
 
 # ---------------------------------------------------------------------------
+# 「官网」：详情对话框里那个可点击链接的真源（R19 · 2026-10-14 用户要求）
+# ---------------------------------------------------------------------------
+# 为什么必须是**手写的一张表**，不能像原先那样从下载 URL 里推导域名：
+# 推导出来的东西根本不是官网。实测 88 个组件，能靠推导得到真官网的只有 7 个；
+# 39 个推成 github.com（那是仓库页不是官网）、31 个推成 CDN/下载服务器
+# （api.adoptium.net、artifacts.elastic.co、aka.ms、edgedl.me.gvt1.com…）、
+# 10 个推成 archive.apache.org（该是 kafka.apache.org）、docker 干脆推不出来。
+# 而详情里那行字写的就是"官方地址"，写错了比不写更糟，所以逐条人工核实。
+#
+# 取值口径（用户 2026-10-14 拍板，取"乙档"）：
+#   1) 有**中国大陆区域的官网入口**的优先用 —— 包括两种形态：
+#      a) 独立的 CN 域名：golang.google.cn / navicat.com.cn / apifox.cn …
+#      b) 同一域名下的中文路径：nodejs.org/zh-cn、jetbrains.com/zh-cn 这一类
+#   2) 没有中文入口的，用该项目的**真实国际官网首页**。
+#
+# 下面每条后面的注释是**核实依据**（2026-10-14 逐条 HTTP 验证过能打开）：
+#   CN  = 命中第 1 条口径，用的是中文入口
+#   INT = 无中文入口，用的是国际官网首页
+#   403 = 站点有反爬，脚本直接请求会被拒，但域名本身有效（人工浏览器可开）
+#
+# ⚠ 这 88 条是**人工核实的事实**，项目改名换域名后会悄悄过期。护栏在
+#   tests/bt_component_detail_tests.py：漏登记即测试变红，接新组件时补一条。
+
+COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
+    # ---- 语言运行时 / 编译工具 ----
+    "jdk": "https://adoptium.net/",                    # INT Eclipse Adoptium 官网（Temurin 的发行方）
+    "python": "https://www.python.org/",               # INT
+    "node": "https://nodejs.org/zh-cn",                # CN  官方文档站自带中文路径
+    "go": "https://golang.google.cn/",                  # CN  Google 为大陆单独运营的官方域名
+    "rust": "https://www.rust-lang.org/",              # INT
+    "bun": "https://bun.sh/",                          # INT
+    "deno": "https://deno.com/",                       # INT
+    "dart": "https://dart.dev/",                       # INT
+    "kotlin": "https://kotlinlang.org/",               # INT
+    "graalvm": "https://www.graalvm.org/",             # INT
+    "dotnet-sdk": "https://dotnet.microsoft.com/zh-cn/download/dotnet",  # CN  微软自带 zh-cn 路径
+    "ninja": "https://ninja-build.org/",               # INT
+    "cmake": "https://cmake.org/",                     # INT
+    "protoc": "https://protobuf.dev/",                  # INT  Protobuf 官网（编译器随 SDK 分发）
+    "sqlite": "https://www.sqlite.org/",               # INT
+    "erlang": "https://www.erlang.org/",               # INT
+    "duckdb": "https://duckdb.org/",                   # INT
+
+    # ---- 构建 / 依赖 / 版本控制 ----
+    "maven": "https://maven.apache.org/",              # INT  各 Apache 子项目各有自己的主页，不是 archive.apache.org
+    "gradle": "https://gradle.org/",                   # INT  不是 services.gradle.org（那是下载站）
+    "ant": "https://ant.apache.org/",                  # INT
+    "jmeter": "https://jmeter.apache.org/",            # INT
+    "conda": "https://docs.conda.io/en/latest/miniconda.html",  # INT  docs.conda.io 没有 zh-cn（实测 404）
+    "pnpm": "https://pnpm.io/",                        # INT
+    "git": "https://git-scm.com/",                     # INT  不是 github.com
+    "powershell": "https://learn.microsoft.com/zh-cn/powershell/",  # CN  MS Learn 自带 zh-cn
+
+    # ---- Web / 应用服务器 / 网关 ----
+    "nginx": "https://nginx.org/",                     # INT
+    "tomcat": "https://tomcat.apache.org/",            # INT
+    "caddy": "https://caddyserver.com/",               # INT
+    "traefik": "https://traefik.io/",                  # INT
+    "consul": "https://developer.hashicorp.com/consul",  # INT  HashiCorp 文档站
+
+    # ---- 容器 / 编排 ----
+    "docker": "https://www.docker.com/",               # INT  原先从下载 URL 推不出任何域名
+    "docker-compose": "https://docs.docker.com/compose/",  # INT  官网文档的 Compose 章节
+    "kubectl": "https://kubernetes.io/zh-cn/docs/reference/kubectl/",  # CN  K8s 官方文档自带 zh-cn
+    "helm": "https://helm.sh/",                        # INT
+    "k9s": "https://k9scli.io/",                       # INT
+
+    # ---- 数据库 ----
+    "mysql": "https://www.mysql.com/",                 # INT  403 反爬，浏览器可正常打开
+    "mongodb": "https://www.mongodb.com/",             # INT
+    "postgresql": "https://www.postgresql.org/",       # INT  不是 get.enterprisedb.com（那是下载站）
+    "redis": "https://redis.io/",                      # INT
+    "etcd": "https://etcd.io/",                        # INT
+    "nats-server": "https://nats.io/",                 # INT
+    "minio": "https://min.io/",                        # INT
+
+    # ---- 消息队列 ----
+    "kafka": "https://kafka.apache.org/",              # INT
+    "rocketmq": "https://rocketmq.apache.org/",        # INT
+    "pulsar": "https://pulsar.apache.org/",            # INT
+    "rabbitmq": "https://www.rabbitmq.com/",           # INT
+    "activemq": "https://activemq.apache.org/",        # INT
+    "nacos": "https://nacos.io/",                      # INT
+    "seata": "https://seata.apache.org/",              # INT
+    "zookeeper": "https://zookeeper.apache.org/",      # INT
+
+    # ---- 搜索 / 观测 / 安全 ----
+    "elasticsearch": "https://www.elastic.co/elasticsearch",  # INT
+    "trivy": "https://trivy.dev/",                     # INT  Aqua Security 出品，trivy.dev 是当前官网
+
+    # ---- CI ----
+    "jenkins": "https://www.jenkins.io/",              # INT  不是 get.jenkins.io（那是下载站）
+
+    # ---- 命令行小工具（上游只维护仓库，没有独立官网）----
+    "uv": "https://docs.astral.sh/uv/",                # INT
+    "jq": "https://jqlang.github.io/jq/",              # INT
+    "ripgrep": "https://github.com/BurntSushi/ripgrep",   # INT  作者已弃用 ripgrep.rs，仓库即官网
+    "fd": "https://github.com/sharkdp/fd",             # INT
+    "bat": "https://github.com/sharkdp/bat",           # INT
+    "eza": "https://eza.rocks/",                       # INT
+    "zoxide": "https://github.com/ajeetdsouza/zoxide",  # INT
+    "fzf": "https://github.com/junegunn/fzf",          # INT
+    "yq": "https://github.com/mikefarah/yq",           # INT
+
+    # ---- JetBrains 系（统一指向官网产品页，不是 download.jetbrains.com）----
+    "idea": "https://www.jetbrains.com/idea/",         # INT
+    "pycharm": "https://www.jetbrains.com/pycharm/",   # INT
+    "clion": "https://www.jetbrains.com/clion/",       # INT
+    "webstorm": "https://www.jetbrains.com/webstorm/", # INT
+    "goland": "https://www.jetbrains.com/goland/",     # INT
+    "datagrip": "https://www.jetbrains.com/datagrip/", # INT
+
+    # ---- 其它 IDE / 编辑器 ----
+    "vscode": "https://code.visualstudio.com/docs/?locale=zh-cn",  # CN  站点用 ?locale= 而不是 /zh-cn（实测 /zh-cn 是 404）
+    "eclipse": "https://www.eclipse.org/downloads/",   # INT
+    "android-studio": "https://developer.android.com/studio",  # INT  该域名在部分网络下不可达，但官网确为此处
+    "visual-studio": "https://visualstudio.microsoft.com/zh-hans/",  # CN  微软自带 zh-hans 路径
+    "hbuilderx": "https://www.dcloud.io/hbuilderx.html",  # CN  DCloud（国内公司）官网
+    "wechat-devtools": "https://developers.weixin.qq.com/miniprogram/dev/devtools/download.html",  # CN  微信官方
+
+    # ---- 数据库 / API 客户端工具 ----
+    "navicat": "https://www.navicat.com.cn/",          # CN  Navicat 中国版官网（海外版是 navicat.com）
+    "dbeaver": "https://dbeaver.io/",                   # INT
+    "heidisql": "https://www.heidisql.com/",           # INT
+    "mysql-workbench": "https://www.mysql.com/products/workbench/",  # INT  403 反爬，域名有效
+    "pgadmin4": "https://www.pgadmin.org/",            # INT
+    "mongodb-compass": "https://www.mongodb.com/products/compass",  # INT
+    "redisinsight": "https://redis.io/insight/",       # INT
+    "dbx": "https://github.com/t8y2/dbx",              # INT  个人项目，仓库即官网
+    "ardm": "https://github.com/qishibo/AnotherRedisDesktopManager",  # INT  个人项目，仓库即官网
+    "windterm": "https://github.com/KingToolbox/WindTerm",  # INT  个人项目，仓库即官网
+
+    # ---- API 调试 / 接口管理 ----
+    "apipost": "https://www.apipost.cn/",              # CN  国产工具，原生中文站
+    "apifox": "https://apifox.cn/",                    # CN  国产工具，原生中文站
+    "bruno": "https://www.usebruno.com/",              # INT
+    "postman": "https://www.postman.com/",             # INT
+}
+
+
+# ---------------------------------------------------------------------------
 # 「怎么用」：详情对话框第二段的文案真源（2026-10-12 用户要求详情"简洁且专业"）
 # ---------------------------------------------------------------------------
 # 写法纪律：20–45 字；动词开头，给能直接敲的命令或能直接点的按钮；
@@ -8736,6 +8881,12 @@ def build_components() -> List[Component]:
         # 一句话说明（详情对话框用）。漏登记直接 KeyError —— 与 category 同一套
         # 「少一套平行实现就少一处会坏的地方」的做法，逼每个组件都有一句话。
         comp.summary = COMPONENT_SUMMARY[comp.key]
+        # 官网链接（详情对话框那个可点击行用，2026-10-14 用户要求）。
+        # 同样用登记表 + 漏登记即 KeyError 的做法，理由与上面一致：
+        # 这 88 条是人工核实的事实，一旦有人"顺手"改成下载域名（那不是官网）
+        # 就等于把错误写进了承重墙 —— 但那种改动会留下痕迹、且有护栏可拦，
+        # 远好过在 88 个地方各写一份推导逻辑。
+        comp.official_url = COMPONENT_OFFICIAL_URLS[comp.key]
     return components
 
 
@@ -17482,13 +17633,26 @@ class ComponentDetailDialog(QDialog):
         head.setFont(QFont("", 14, QFont.Bold))
         v.addWidget(head)
 
-        # 官方地址一行：从已登记的 URL 提取 host，不新写任何事实。
-        home = comp_download_host(comp)
-        if home:
-            addr = QLabel(f"官方下载 / 文档：{home}")
+        # 官网一行（2026-10-14 用户要求"所有组件的详情页都加可点击官网链接，
+        # 有中国大陆官网的用大陆的，没有的用原本官网"）。
+        # 取值全部来自 COMPONENT_OFFICIAL_URLS（人工逐条核实），**不再从下载 URL
+        # 推导域名** —— 推导出来的是 api.adoptium.net / artifacts.elastic.co 这类
+        # 下载服务器，写成"官网"是误导。
+        #
+        # 链接文字与 href **必须同源**：早先的写法是文字显示下载域名、跳转却是官网，
+        # 于是出现"写着 archive.apache.org、点进去是 apache.org"。文字里的域名
+        # 直接从 URL 切出来，不另写一份字符串，两者就不可能对不上。
+        official = comp.official_url
+        if official:
+            domain = _url_netloc(official)
+            addr = QLabel(
+                f'官网：<a href="{official}">{_escape_html(comp.display_name)} · '
+                f'{_escape_html(domain)}</a>')
+            addr.setOpenExternalLinks(True)      # 点击直接走系统浏览器，不在软件内开
             addr.setObjectName("detailHome")
             addr.setStyleSheet("color:#7a8ea3;font-size:11px;")
-            addr.setToolTip("详情里的命令与地址均来自登记表；下载仍走卡片上的按钮。")
+            addr.setToolTip(f"{official}\n点击用系统浏览器打开官方网站；"
+                            f"组件本体请用卡片上的「安装 / 下载」按钮。")
             v.addWidget(addr)
 
         body = QTextEdit(self)
@@ -17568,31 +17732,41 @@ class ComponentDetailDialog(QDialog):
         return "".join(parts) or "<div>这个组件还没有写说明。</div>"
 
 
-def comp_download_host(comp) -> str:
-    """从组件第一个可下载 URL 提取“官方地址”域名。取不到返回空串。"""
+def _url_netloc(url: str) -> str:
+    """从 URL 里切出域名（netloc），给详情页那个链接当文字用。
+
+    入参：
+      url：完整 URL，如 "https://www.navicat.com.cn/"。
+    返回：
+      域名，如 "www.navicat.com.cn"；切不出来返回空串。
+
+    为什么单独抽一个函数：链接文字与 href 必须同源。早期写法是文字写下载域名、
+    跳转写官网地址，两份字符串各写一遍，必然会出现"写着 A 点进去是 B"。
+    现在文字里的域名是从 href 那个 URL 现切出来的，结构上不可能对不上。
+    """
     try:
-        cv = comp.versions[0]
-        urls = cv.urls_for_current()
-        # 取**末位官网**而不是首位镜像：详情行叫“官方地址”，给用户看的就是
-        # 官方域名（api.adoptium.net / python.org 这类），首位是清华/南大镜像，
-        # 写上去会让用户误以为官网是镜像站。
-        first = urls[-1] if urls else None
+        import urllib.parse as _up
+        return _up.urlsplit(url).netloc
     except Exception:
         return ""
-    if not first:
-        return ""
-    import urllib.parse as _up
-    try:
-        netloc = _up.urlsplit(first).netloc
-    except Exception:
-        return ""
-    # 加速器/镜像的 URL 剥掉代理前缀，露出真实官方域名（纯展示，不影响下载）
-    for prefix in ("gh-proxy.com/", "ghfast.top/", "ghproxy.net/"):
-        if first.startswith("https://" + prefix):
-            inner = first[len("https://" + prefix):]
-            inner = inner.split("/", 3)[2] if inner.count("/") >= 2 else inner
-            return inner
-    return netloc or ""
+
+
+def _escape_html(text: str) -> str:
+    """转义要插进 QLabel 富文本的片段（组件名里可能有 & 之类）。
+
+    与 ComponentDetailDialog._to_html 用的是同一个 html.escape（那里在函数体
+    里做局部导入），这里同样局部导入而不是提到模块级 —— 保持两处写法一致，
+    免得以后有人只改一处。
+    """
+    import html as _html
+    return _html.escape(str(text or ""))
+
+
+# 2026-10-14 移除了 comp_download_host()：它从组件的**下载 URL** 里推导"官方地址"
+# 域名，而推导结果绝大多数根本不是官网（api.adoptium.net、artifacts.elastic.co、
+# aka.ms、edgedl.me.gvt1.com 这类下载服务器，以及 39 个推成 github.com 仓库页）。
+# 详情页改用 COMPONENT_OFFICIAL_URLS 这张人工核实的表之后，它再无调用者，
+# 连同它在 tests/bt_component_detail_tests.py 里的两条用例一并移除。
 
 
 def _event_global_pos(ev):
