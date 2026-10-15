@@ -146,18 +146,20 @@ class TabStructure(unittest.TestCase):
         for key in DEFERRED_KEYS:
             self.assertNotIn(key, keys, f"{key} 的源没实测过就登记了")
 
-    def test_visible_component_count_is_92(self):
-        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 26 只下载 + 5 Agent客户端）。
+    def test_visible_component_count_is_127(self):
+        """**全仓库唯一一处**写死界面可见组件数的地方（61 全流程 + 26 只下载 + 40 Agent客户端）。
 
         其它套件的数字都改成从成员表派生，只有这里保留绝对值：
         加组件时必须在这里过一次手，逼着人确认"这个数字变了是有意为之"。
         2026-10-12 一路累加：47 → 49（protoc/uv）→ 58（B6a 九个只下载）→ 75（+pnpm/helm）
         → 83（B3/B5 与并发那批）→ 85（B7 的 ant / jmeter）→ 86（B4 补的 minio）
-        → 87（Dart）→ **92（2026-10-15 新增「Agent客户端」首批 5 个）**。
+        → 87（Dart）→ 92（2026-10-15 新增「Agent客户端」首批 5 个）
+        → 120（2026-10-15 第二批 28 个 Agent 客户端，含 5 个只有「官网下载」的）
+        → **127（2026-10-15 第三批大厂助手 7 个，含 1 个只有「官网下载」的）**。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 92)
-        self.assertEqual(len(self.components), 93, "92 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 127)
+        self.assertEqual(len(self.components), 128, "127 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -193,14 +195,64 @@ class CapabilityFlag(unittest.TestCase):
                              f"{comp.key} 只下载却走安装器模式 = 代用户跑安装程序")
 
     def test_every_download_only_component_has_windows_urls_to_download(self):
-        """卡片上「下载」要点得动：每个版本至少有一个 Windows 直链。"""
+        """卡片上「下载」要点得动：每个版本至少有一个 Windows 直链。
+
+        ⚠ 「官网下载」那一档（`official_page_only`）**没有版本表**，本文用不上它
+        —— 它的两条约束由下面 `WebFallback` 单独钉（必须登记了官网、且不挂版本表）。
+        """
         for comp in self.components:
             if not comp.download_only:
                 continue
+            if comp.official_page_only:
+                continue          # 见 docstring：走「官网下载」，没有版本可数
             self.assertTrue(comp.versions, f"{comp.key} 没有可选版本")
             for cv in comp.versions:
                 urls = cv.urls_for_current()   # 方法在 ComponentVersion 上，不在 Component 上
                 self.assertTrue(urls, f"{comp.key} {cv.version} 在当前平台没有 URL")
+
+
+class WebFallback(unittest.TestCase):
+    """「官网下载」那一档的硬约束（2026-10-15 新增，对应 R21）。
+
+    用户 2026-10-15 的要求：拿不到官方直链的组件**也要收进来**，卡片主按钮给一颗
+    「官网下载」，点了用 `QDesktopServices.openUrl()` 打开官网让用户自己下。
+    这条路径没有下载 URL 可校验，所以护栏改钉三件更基本的事 —— 少任何一件，
+    用户点下去要么打开空白页、要么看到一张自相矛盾的卡。
+    """
+
+    def setUp(self):
+        self.components = main.build_components()
+
+    def test_web_only_components_have_a_registered_official_url(self):
+        """按钮点开必须有个**真**地址 —— 没登记的话 on_open_official_page_clicked 只会报错。"""
+        for comp in self.components:
+            if not comp.official_page_only:
+                continue
+            self.assertTrue(
+                comp.official_url,
+                f"{comp.key} 标了官网下载却没登记官网地址（COMPONENT_OFFICIAL_URLS 漏了），"
+                f"按钮点开是空的")
+            self.assertTrue(
+                comp.official_url.startswith("https://"),
+                f"{comp.key} 的官网地址不是 https：{comp.official_url}")
+
+    def test_web_only_components_have_no_version_table(self):
+        """自相矛盾的两件事不许同时成立：既然有可直接下载的版本，就不该走官网下载。"""
+        for comp in self.components:
+            if not comp.official_page_only:
+                continue
+            self.assertEqual(
+                comp.versions, [],
+                f"{comp.key} 标了官网下载，却还挂着版本表 "
+                f"{[cv.version for cv in comp.versions]} —— 要么给直链、要么走官网，别两头占")
+
+    def test_web_only_implies_download_only(self):
+        """官网下载是**只下载**的弱化档，不许出现在会写环境变量的组件上。"""
+        for comp in self.components:
+            if comp.official_page_only:
+                self.assertTrue(
+                    comp.download_only,
+                    f"{comp.key} 标了官网下载却不是只下载型 —— official_page_only 只对只下载型有意义")
 
     def test_github_assets_put_the_accelerator_first_and_the_bare_url_last(self):
         """GitHub 产物（DBX / WindTerm）本机实测裸地址连不上，加速器必须排在前面。"""
@@ -1137,7 +1189,32 @@ class ArtifactMenu(_EnvSandbox):
                    # （拿 HTTP 206 + Content-Range 确认总字节数，见各行的实测数字）：
                    "api2.cursor.sh",             # cursor：golden 链，按主.次版本号取
                    "cdn-zcode.z.ai",             # zcode：按版本号分目录的官方 CDN
-                   "download.qoder.com")         # qoderwork-cn：滚动 latest（官方无版本目录）
+                   "download.qoder.com",         # qoderwork-cn / qoder：滚动 latest
+                   # 2026-10-15 第二批「Agent客户端」，域名逐个 range 实测过
+                   # （全部拿 HTTP 200/206 + 前四字节 `MZ` 确认是可执行的 PE）：
+                   "lf-cdn.trae.ai",             # trae：按构建号分目录
+                   "lf-cdn.trae.com.cn",         # trae-cn：大陆独立构建
+                   "down.marvis.qq.com",         # marvis：腾讯自有 CDN
+                   "dtapp-pub.dingtalk.com",     # wukong：URL 必须带渠道号后缀
+                   "ydschool-video.nosdn.127.net",   # lobsterai：网易 NOS
+                   "autoglm.aminer.cn",          # autoclaw：智谱国内发版站
+                   "dumate-app-public.bj.bcebos.com",  # dumate：百度 BOS
+                   "get.microsoft.com",          # chatgpt：微软商店引导安装器
+                   "appsupport.moonshot.cn",     # kimi：滚动端点，302 到带版本号的文件
+                   "code.kimi.com",              # kimi-code：302 到 cdn.kimi.com
+                   "filecdn.minimax.chat",       # minimax：直链带空格（%20）
+                   "chat.stepfun.com",           # stepfun：滚动端点，307 到当天有效的签名链
+                   "sedown.qihucdn.com",         # nano-ai：360 自有 CDN
+                   "static-us-img.skywork.ai",   # tiangong：昆仑万维
+                   "download.codebuddy.cn",      # codebuddy / workbuddy：同站两个包
+                   "download.deepseek.com",      # deepseek-harness：滚动 dsh-latest
+                   # 2026-10-15 第三批（大厂中文助手），同样 range + `MZ`/`PK` 实测过：
+                   "lf-flow-web-cdn.doubao.com", # doubao：官方签名 zip（`PK`）
+                   "cdn-hybrid-prod.hunyuan.tencent.com",  # yuanbao：腾讯混元 CDN
+                   "qianwen-portal-cdn.tongyi.com",        # tongyi-qianwen：按版本号分目录
+                   "lingma-ide.oss-rg-china-mainland.aliyuncs.com",  # lingma：阿里 OSS
+                   "xiaoyan-desktop.cdn.bcebos.com",       # ernie：百度 BOS
+                   "sfile.chatglm.cn")           # chatglm：智谱文件站
         for comp in main.build_components():
             if not comp.download_only:
                 continue

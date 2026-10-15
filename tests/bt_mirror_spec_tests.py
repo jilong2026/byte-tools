@@ -117,6 +117,10 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
     #     实测清华 `rustup/dist/<日期>/…msi` 404（它只镜像 tar.xz）、中科大整个
     #     rustup 目录 404、腾讯云回 ChunkedEncodingError。所以它是"1 镜像 + 官方末位"，
     #     不是漏配源。
+    #   2026-10-15 第三批 `lingma`：`is_mainland()` 命中它是因为官方域名里含 **aliyuncs.com**
+    #     （`MAINLAND_MARKERS` 里的 `"aliyun"` 是子串匹配，本意是覆盖 mirrors.aliyun.com）。
+    #     该地址确实是阿里云内地 OSS 上的官方包、内地可直连，判"1 个大陆源"结果是**对的**，
+    #     按"恰好 1 源"登记即可（末位断言另见 OFFICIAL_IS_MAINLAND_MARKED）。
     SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2,
                                "rust": 1,
                                # 2026-10-12 B6a：pgAdmin 只有南大一家镜像肯放 pgadmin4
@@ -127,7 +131,8 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                # （清华/阿里/南大/北外/腾讯/中科大的 apache 目录对这两个
                                #  都是 404 —— 它们只同步最新版，而 1.10.18 / 5.6.3 已不是），
                                # 末位 archive.apache.org 属官方。
-                               "ant": 1, "jmeter": 1}
+                               "ant": 1, "jmeter": 1,
+                               "lingma": 1}
 
     # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具，
     # 以及 2026-10-10 第二批的 apipost / apifox / hbuilderx / android-studio / visual-studio / navicat。
@@ -166,10 +171,34 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                # 另两条 CN 域名也在这张表里：is_mainland() 认的是**镜像站**标记，
                                # 不是"域名在国内" —— cdn-zcode.z.ai / download.qoder.com 是厂商
                                # 自己的 CDN，不是可复用的镜像源。
-                               "cursor", "zcode", "qoderwork-cn"}
+                               "cursor", "zcode", "qoderwork-cn",
+                               # 2026-10-15 第二批「Agent客户端」：这批几乎全是各家官网 /
+                               # 厂商自有 CDN 直发，没有任何可复用的大陆镜像源。逐个实测过
+                               # （200/206 + `MZ` 魔数），见 bt_download_only_tests 的域名白名单。
+                               # 其中 trae/trae-cn 是字节自家 CDN、download.codebuddy.cn 是
+                               # 腾讯自家 CDN、dumate 走百度 BOS —— 都算 0 源，因为
+                               # is_mainland() 认的是**镜像站**标记，不是"域名在国内"。
+                               "trae", "trae-cn", "qoder", "marvis", "wukong",
+                               "lobsterai", "autoclaw", "dumate", "chatgpt",
+                               "kimi", "kimi-code", "minimax", "stepfun", "nano-ai",
+                               "tiangong", "codebuddy", "workbuddy", "deepseek-harness",
+                               # 第三批大厂中文助手：同样是官方/CDN 直发、无大陆镜像。
+                               # （`lingma` 不在这里 —— 它的官方源就在阿里云内地 OSS 上，
+                               # 被判成"1 个大陆源"，登记在 SINGLE_SOURCE_EXCEPTION。）
+                               "doubao", "yuanbao", "tongyi-qianwen",
+                               "ernie", "chatglm"}
+    # 「官网下载」型（`official_page_only`，R21）：**连直链都没有**，版本表是空的，
+    # 上面 test_counts 直接 `continue` 跳过。但它们仍必须在本套件点名，否则会从
+    # OfficialIsLast.test_no_component_escapes_this_table 的后门溜过去。
+    WEB_ONLY = {"metaso", "windsurf", "claude", "antigravity", "gemini", "xinghuo"}
 
     def test_counts(self):
         for key, comp in COMPS.items():
+            if not comp.versions:
+                # 「官网下载」型（official_page_only）：官方没有可直链的安装包，
+                # 也就没有"源"可数 —— 它连版本表都是空的，取 versions[0] 会 IndexError。
+                # 这类组件同样要进 OFFICIAL_ONLY_EXCEPTION 点名（见上面那张表的说明）。
+                continue
             lst = comp.versions[0].urls_for_current()
             if not lst:
                 continue          # docker/rabbitmq 在 Windows 不发静态包，属正常
@@ -186,7 +215,18 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                 self.assertGreaterEqual(len(cn), 2,
                                         f"{key} Windows 只有 {len(cn)} 个大陆源：{lst}")
             last = lst[-1]
+            if key in OFFICIAL_IS_MAINLAND_MARKED:
+                # 「官方源本身就落在大陆 CDN 上」：这条检查靠 `is_mainland(官方) == False`
+                # 来认官方，对这类组件失效（详见该名单的定义处）。
+                continue
             self.assertFalse(is_mainland(last), f"{key} 末位不是官方源：{last}")
+
+
+# 官方安装包**本身**就放在带大陆标记的域名上（于是 `is_mainland()` 认不出它是官方源）。
+# 目前只有 lingma：它的唯一官方地址在阿里云内地 OSS（`…aliyuncs.com`），域名里的
+# `aliyun` 命中 `MAINLAND_MARKERS`，`OfficialIsLast` 与末位断言都会误判。
+# 点名列出而不是让断言"自动跳过"，是要逼以后遇到同类组件时来这里登记一句。
+OFFICIAL_IS_MAINLAND_MARKED = {"lingma"}
 
 
 class OfficialIsLast(unittest.TestCase):
@@ -274,10 +314,14 @@ class OfficialIsLast(unittest.TestCase):
         但这两组都要**点名**，加组件时得来这里登记一句，而不是让检查自动跳过它。
         """
         # GitHub 产物、末位天然是裸 github.com（前面挂着加速器）→ 走常规检查，
-        # 只是要在这里点名。2026-10-15 加入 claude-code / codex-cli（同 dbx / windterm 一类）。
-        github_assets = {"dbx", "windterm", "claude-code", "codex-cli"}
+        # 只是要在这里点名。2026-10-15 加入 claude-code / codex-cli（同 dbx / windterm 一类）；
+        # 同日第二批又加了 openworker / orkas / zed / cline / reasonix（同样 GitHub 发行）。
+        github_assets = {"dbx", "windterm", "claude-code", "codex-cli",
+                         "openworker", "orkas", "zed", "cline", "reasonix"}
         accounted = (set(self.OFFICIAL_HOST)
                      | WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION
+                     | WindowsDefaultMustHaveTwoMainlandSources.WEB_ONLY
+                     | OFFICIAL_IS_MAINLAND_MARKED
                      | github_assets)
         escaped = sorted(set(COMPS) - accounted)
         self.assertEqual(escaped, [], f"这些组件既没进官方域名表也没登记豁免：{escaped}")
@@ -475,6 +519,10 @@ class UrlsForCurrentStillWorks(unittest.TestCase):
         for key, comp in COMPS.items():
             if key in ("docker", "rabbitmq"):
                 continue      # Windows 无静态包 / 依赖 Erlang，属登记例外
+            if not comp.versions:
+                # 「官网下载」型（official_page_only）：没有版本表，也就没有 URL 可返回。
+                # 它的"能不能下载"由 bt_download_only_tests.WebFallback 负责。
+                continue
             self.assertTrue(comp.versions[0].urls_for_current(),
                             f"{key} 在本机没有可用下载地址")
 
@@ -574,6 +622,8 @@ class MirrorSpeedOrder(unittest.TestCase):
         for key, comp in COMPS.items():
             if key in ("docker", "rabbitmq"):
                 continue
+            if not comp.versions:
+                continue      # official_page_only：没有源可排（见上面两条同类 skip）
             try:
                 lst = comp.versions[0].urls_for_current()
             except Exception as exc:

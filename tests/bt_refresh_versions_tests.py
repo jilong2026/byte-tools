@@ -83,6 +83,12 @@ class RefreshVersionsFlow(unittest.TestCase):
         fake = {}
         for card in self.win.cards:
             key = card.component.key
+            if not card.component.versions:
+                # 「官网下载」型组件（official_page_only，R21）**没有版本表**，也就永远
+                # 没有可抓的清单 —— 生产里 FETCHERS 根本不会登记它们。这里不登记，
+                # 否则 `_cached_versions_from` 拿到空列表会判"没缓存"而每轮都重派 worker，
+                # 与"缓存新鲜就一个线程都不起"这条断言假冲突。
+                continue
             if key == FAIL_KEY:
                 def _raise():
                     raise RuntimeError("simulated upstream failure")
@@ -144,8 +150,11 @@ class RefreshVersionsFlow(unittest.TestCase):
             "应打印失败组件的降级日志",
         )
 
-        # 其余所有组件：set_versions 被调用（在线列表覆盖内置清单）
-        ok_keys = {c.component.key for c in self.win.cards if c.component.key != FAIL_KEY}
+        # 其余所有组件：set_versions 被调用（在线列表覆盖内置清单）。
+        # 排除 FAIL_KEY，以及**没有版本表**的组件（official_page_only）：它们没有 fetcher，
+        # 抓取流程压根不会碰它们（见 setUp 里注册假 fetcher 时的同一条跳过）。
+        ok_keys = {c.component.key for c in self.win.cards
+                   if c.component.key != FAIL_KEY and c.component.versions}
         self.assertEqual(set(self.set_versions_calls), ok_keys)
 
     def test_workers_are_staggered_not_burst(self):
@@ -229,6 +238,11 @@ class VersionListCache(unittest.TestCase):
         fake = {}
         for card in self.win.cards:
             key = card.component.key
+            if not card.component.versions:
+                # 同 RefreshVersionsFlow.setUp：没有版本表的组件（official_page_only，
+                # R21）生产里不会登记 fetcher，这里也不登记 —— 否则空清单永远"缓存不命中"，
+                # "缓存新鲜就零派发"那条断言会假红。
+                continue
             fake[key] = (lambda c: (lambda: list(c.component.versions)))(card)
         main.FETCHERS = fake
         self._fake_fetchers = fake

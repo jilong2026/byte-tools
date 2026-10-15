@@ -20,18 +20,20 @@ have={f.stem for f in d.iterdir()}; print('有图标', sum(c.key in have for c i
 print('缺:', [c.key for c in cs if c.key not in have])"
 ```
 
-## 覆盖率（2026-10-14 实测：88 / 88）
+## 覆盖率（2026-10-15 实测：128 / 128）
 
-88 = 87 个界面可见组件 + 隐藏的 `erlang`，**现在每一个都有图标**。
+128 = 127 个界面可见组件 + 隐藏的 `erlang`，**现在每一个都有图标**。
 
-其中 **85 个是各项目官网/官方仓库的真实标识**；剩下 **3 个用「白底黑字组件名」兜底** ——
-因为穷举确认**项目自己就没有图形标识**：
+其中 **124 个是各项目官网/官方仓库的真实标识**；剩下 **4 个用「白底黑字组件名」兜底** ——
+三个（ninja / ripgrep / yq）是穷举确认**项目自己就没有图形标识**，
+第四个（xinghuo）**有**官方标识、但只有 32×32（放大会糊）：
 
 | 组件 | 兜底文字 | 为什么判定"确实没有" |
 |---|---|---|
 | `ninja` | `Ninja` | 官网两页 HTML 零图形引用；三个仓库 + wiki 都 0 图；**官方的 `ninja.exe` 里只有 MANIFEST、无 ICON 资源**；组织头像是 GitHub 自动生成的 identicon |
 | `ripgrep` | `ripgrep` | 仓库 0 图、README 0 个 `<img>`；作者发布页上唯一的图是**终端截图**；**官方的 `rg.exe` 里无 ICON 资源** |
 | `yq` | `yq` | 仓库 0 图、README 0 个 `<img>`；release 附件只有二进制与 checksum；**官方的 `yq.exe` 连 `.rsrc` 段都没有**；GitBook 文档站那个字母 "Y" 是平台自动生成的字母头像，不采用 |
+| `xinghuo` | `讯飞星火` | **与上三个不同：它是有官方标识的，只是拿不到够大的位图。** `xinghuo.xfyun.cn/spark-icon.ico` 是 8 层 32×32 的 ICO、`favicon.ico` 最大也只到 32×32，官网下载页只有这一处图标引用（无 apple-touch-icon、无 og:image）；Simple Icons 的 `icons/iflytek.svg` 在 @latest / @15 / unpkg 三处全 404；`www.xfyun.cn` / `static.xfyun.cn` / `res.xfyun.cn` 分别回 HTML / 502 / 连不上。图标槽位是 32px 渲染，32×32 的源放大后更糊 —— 按项目既有做法用名称文字图兜底。**哪天官方放出 ≥128px 的标识就换回真图标** |
 
 **判"确实没有"的依据不只是"我搜不到"**：这三个项目的**官方 Windows 二进制自己都不带图标资源**
 （用 PE 资源目录遍历确认：`rg.exe` / `ninja.exe` 的 `.rsrc` 只有 MANIFEST，`yq.exe` 无 `.rsrc`）。
@@ -132,7 +134,7 @@ WebStorm 黄、GoLand 绿、DataGrip 紫）。
 不是 HTML 网页、SVG 能被 `QSvgRenderer` 解析、PNG 是真 PNG 且 ≥48px、
 文件名对应真实组件 key、渲染尺寸不超过 32px 槽位、宽高比不极端（横幅会在 32px 下糊成
 一条线）、DPR 必须排在 `painter.end()` 之后、任意两个组件的图标不得内容完全相同
-（除上面三对白名单）、**88 个组件一个都不许缺图标**，且三张名称兜底图必须确实是
+（除白名单里的那几对）、**128 个组件一个都不许缺图标**，且四张名称兜底图必须确实是
 白底、且带上足够多的黑色文字（防生成参数被改坏成一片空白）。
 
 ## 取图与复核流程（下次补图标照此走）

@@ -480,7 +480,7 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 **92 个可见组件**归入且仅归入五个 Tab（93 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **127 个可见组件**归入且仅归入五个 Tab（128 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
 | 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
@@ -2291,8 +2291,86 @@ URL 与字节数**一律带 `byte-tools/1.2.1` UA 实测**（R1 的口径）。�
 
 - `tests/bt_download_only_tests.py`：`TabStructure`（顺序 + 成员 + **最后一个必须是它**）、
   `CapabilityFlag`（`DOWNLOAD_ONLY_KEYS` 是「开发工具」∪「Agent客户端」的**并集**）、
-  `test_visible_component_count_is_92`（全仓库唯一写死可见组件数的地方）。
+  `test_visible_component_count_is_127`（全仓库唯一写死可见组件数的地方）。
 - `tests/bt_component_category_tests.py`：`EXPECTED_MEMBERSHIP[CAT_AGENT]` 与
   `test_tab_order_is_exactly_launch_server_env_tool_agent`。
 - `tests/bt_mirror_spec_tests.py`：R20.2 第 3 条的两张名单。
 - `tests/bt_icon_assets_tests.py`：接新组件必须同时补图标（缺图标即红）。
+
+### R20.5 第二批与第三批（2026-10-15 同一天扩到 40 个）
+
+用户当天补了一句口径：「**把能做的都做了、全都接进来；拿不到下载方式的就做一个
+『官网下载』按钮**」。于是这一 Tab 从 5 个扩到 **40 个**（34 有直链 + 6 只有官网入口），
+并为此新增规则 **R21**（「官网下载」那一档）。
+
+**这 40 个是怎么来的**：分三批调研（国产大厂助手 / 中文创业公司 / 国际编程 IDE），
+每条 URL 都用 `byte-tools/1.2.1` 实测过 —— 不只是 `curl -I` 看 200，还要
+**`Range: bytes=0-3` 读出前四字节确认是 `MZ` 或 `PK`**（镜像测试只看状态码，
+挡不住"200 + 一张错误页"）。几个值得记住的坑：
+
+| 现象 | 真相 | 处理 |
+|---|---|---|
+| Trae / CodeBuddy / WorkBuddy 的下载页 `<a>` 里没有 exe | 地址由 JS 运行时拼装 | 找它们的**版本接口**（`api.trae.cn/icube/…/version/<产品>/latest`、`www.codebuddy.cn/v2/update?platform=…`）拿到真 URL |
+| 豆包版本接口里有**两个**版本字段 | `data.version`=1.49.10（2025-03 的老包）而 `data.newest_version`=2.32.4 | 取 `newest_version`，并在 `data_note` 里写明另一个字段是老的 |
+| ChatGLM 的下载页没链接 | 配置接口 `operation-api/config/operation_data?tag=clientConfig` 给 `winUrl` | 从配置接口取 |
+| 阶跃 AI 的 307 落点带签名 | `X-Tos-Expires=86400`，**一天后失效** | 登记**端点**而不是落点（`chat.stepfun.com/api/desktopversion/windows/latest`），下载侧会跟 307 |
+| Kimi / DeepSeek Harness / 纳米 AI 的直链不带版本号 | 官方只发滚动 latest | 按 R20.2 第 3 条取服务端 `Last-Modified` 年月，`data_note` 写明"不是软件版本号" |
+| Claude 桌面的旧 GCS 直链还能 200 | 那个桶的 `RELEASES` 末条是 **0.14.10 / 2025-10-29** —— 早就冻结了 | **不登记**（拿它当最新版是错的），改走 R21 官网入口 |
+| Windsurf 的直链带发版 hash | `…/stable/<hash>/DevinUserSetup-x64-<v>.exe`，新版一发旧目录就没了 | 同上，走 R21 |
+| Antigravity / Gemini 的官网 | DNS 能解析、TCP 连不上（大陆不可达） | 登记官网入口，`data_note` 写明"取决于你的网络环境" |
+| 讯飞星火的官方图标只有 32×32 | `spark-icon.ico` / `favicon.ico` 最大都到 32；Simple Icons 未收录讯飞 | 图太小放大必糊 → 按既有做法用**名称文字图兜底**，并登记在 `IconCoverage.NAME_TEXT_FALLBACK`（附穷举过程） |
+| 通义灵码的官方源在 `…aliyuncs.com` | `is_mainland()` 的 `"aliyun"` 是子串匹配，把它判成"1 个大陆源" | 结果是**对的**（确实是阿里云内地 OSS），登记进 `SINGLE_SOURCE_EXCEPTION`，末位断言另见模块级 `OFFICIAL_IS_MAINLAND_MARKED` |
+
+**新组件必须同时补的四处**（少一处就有套件变红）：`_AGENT_CLIENTS` 一行、
+三张登记表（`COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`）、
+一个图标、以及 `EXPECTED_MEMBERSHIP[CAT_AGENT]` 与
+`test_visible_component_count_is_127` 这两个常量。
+
+## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
+
+### R21.1 规则描述
+
+用户在接第二批 Agent 客户端时给了新口径：**"如果拿不到下载方式的就做一个『官网下载』
+按钮，用户点击时就直接打开浏览器自行去官网下载，主要把这些组件都接进来"**。
+
+即：一个组件**官方没有可直接下载的安装包直链**（只给网页入口 / 要真机抓包 / 只能用
+npm・pip・插件装）时，**不是**从表里删掉、也不是放一张点不动的空卡片，而是给一颗
+**「官网下载」**按钮 —— 点一下 `QDesktopServices.openUrl()` 打开它的官网，由用户自己下。
+
+这不是"降级"或"兜底失败"，而是这类组件**应有**的形态：本工具的价值是"集中列出、一键找到
+官方入口"，代不代下是第二位。
+
+### R21.2 硬约束（缺一条就是 bug）
+
+1. **`official_page_only` 是 `download_only` 的子集，不是并列档**。置上它的卡片仍必须是
+   `download_only=True`（否则会走安装链去写注册表 / PATH）。二者关系由
+   `bt_download_only_tests.WebFallback.test_web_only_implies_download_only` 钉死。
+2. **必须同时有 `official_url`**（R19 那张**人工登记**的表），否则按钮点开是个空页面。
+   由 `WebFallback.test_web_only_components_have_a_registered_official_url` 钉死。
+   没登记时 `on_open_official_page_clicked()` 报错而**不是** `openUrl("")`。
+3. **版本表为空**：表驱动里把这一行写成**空元组** `()` 即可 —— builder 用
+   `official_page_only=not rows` 自动判定，**不需要**另写 `Component(...)`。
+   由 `WebFallback.test_web_only_components_have_no_version_table` 钉死。
+   （空版本表 → `bt_mirror_spec_tests.test_counts` 要 `continue` 跳过，否则 `versions[0]` 越界。）
+4. **文案要说清"本工具不代下、不代装、不代跑安装器"** —— 否则用户以为点了就开始下。
+   tooltip 同 R13：把 `data_note`（"这软件干嘛的、数据落在哪"）拼在提示里。
+5. **官网必须是"下载入口"而非"品牌首页"**：能给下载页就给下载页（如 `…/download`），
+   给不了才给首页。这条是人工判断，写进 `COMPONENT_OFFICIAL_URLS` 时顺手写准。
+
+### R21.3 复用而非新造
+
+- 卡片那**一颗**主按钮仍是 `self.btn_install`（属性名不改）—— `_sync_action_buttons`、
+  布局与一批用例都按它找。分支只是多一层：
+  `download_only → official_page_only ? 「官网下载」: 「下载/下载 ▾」`。
+- 槽位是**独立**的 `on_open_official_page_clicked()`，**不复用** `on_download_clicked` ——
+  后者的收尾是问目录、起 `DownloadWorker`；共用一个槽位等于给"顺手在这里加一行代下"留门。
+- 只有 Windows 之外的平台、或直链失效时，`download_only` 那一档才用
+  `unsupported_platform_hint`；`official_page_only` 与平台无关（任何平台都点开浏览器）。
+
+### R21.4 护栏
+
+- `tests/bt_download_only_tests.py`：`WebFallback` 三条（有官网 / 无版本表 / 蕴含 download_only）；
+  `test_every_download_only_component_has_windows_urls_to_download` 开头 `if comp.official_page_only: continue`。
+- `tests/bt_mirror_spec_tests.py`：`test_counts` 开头 `if not comp.versions: continue`。
+- 新接这类组件仍须补 `COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`
+  三张登记表 **+ 一个图标**（`bt_icon_assets_tests` 缺图标即红）。

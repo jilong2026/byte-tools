@@ -262,6 +262,17 @@ class IconCoverage(unittest.TestCase):
               "GitBook 文档站（mikefarah.gitbook.io/yq）能取到一个字母 \"Y\" 的图标，"
               "但 GitBook 对未设自定义图标的空间会**自动生成字母头像**，"
               "无法确认它是作者设定的标识，故不采用（宁缺勿错）。",
+        # 2026-10-15（第二批 Agent 客户端）：这一条与前三个**不同** —— 讯飞星火
+        # **有**官方标识，只是拿不到够大的位图。
+        "xinghuo": "讯飞星火的官方标识只有 32×32：`xinghuo.xfyun.cn/spark-icon.ico` "
+                   "是 8 个图层的 32×32 ICO，`xinghuo.xfyun.cn/favicon.ico` 最大也只到 "
+                   "32×32，官网下载页只有这一处图标引用（无 apple-touch-icon、无 og:image）。"
+                   "护栏要求 PNG 短边 ≥48px（放大必糊），且图标槽位是 32px 渲染 —— "
+                   "32×32 的源放大后更糊，所以按项目既有做法用名称文字图兜底。"
+                   "另核：Simple Icons 的 `icons/iflytek.svg` 在 @latest / @15 / unpkg "
+                   "三处全 404（该库未收录讯飞），`www.xfyun.cn` / `static.xfyun.cn` / "
+                   "`res.xfyun.cn` 的 favicon 分别回 HTML / 502 / 连不上。"
+                   "**哪天官方放出了 ≥128px 的标识，请删掉这一条并换回真图标。**",
     }
 
     # 已查遍以下来源（每条都实际试过，不是没试）：
@@ -404,6 +415,10 @@ class NoDuplicatedAssets(unittest.TestCase):
         frozenset({"mysql", "mysql-workbench"}): "MySQL Workbench 的官方图标就是 MySQL 标识",
         frozenset({"mongodb", "mongodb-compass"}): "MongoDB Compass 同上",
         frozenset({"redis", "redisinsight"}): "RedisInsight 同上",
+        # 2026-10-15：同一家的「CLI / 桌面版」两件，官方用同一个标识，
+        # 都取自 Simple Icons 的同一条目（Claude / OpenAI），不是为了省事复制粘贴。
+        frozenset({"claude", "claude-code"}): "Claude 桌面版与 Claude Code 是同一个 Claude 标识",
+        frozenset({"chatgpt", "codex-cli"}): "ChatGPT 与 Codex CLI 都是 OpenAI 的标识",
     }
 
     def test_no_two_components_share_the_same_icon_bytes(self):

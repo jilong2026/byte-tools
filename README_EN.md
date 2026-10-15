@@ -131,7 +131,7 @@ node -v
 
 ## Supported components
 
-**92 in total**: **61 installable end to end** + **31 download-only** (31 = 26 GUI tools + 5 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**127 in total**: **61 installable end to end** + **66 download-only** (66 = 26 GUI tools + 40 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
@@ -139,7 +139,13 @@ node -v
 | Dev environment | 32 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq |
 | Dev software → Server components | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
 | Dev tools | 26 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman |
-| Agent clients | 5 | Cursor, ZCode, Claude Code, Codex CLI, QoderWork CN |
+| Agent clients | 40 | Cursor, ZCode, Claude Code, Codex CLI, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark |
+
+> **This tab has two tiers.** 34 of the 40 have a measured official direct link, so the card's main
+> button says **Download**. The other 6 (Windsurf (Devin), Claude Desktop, Google Antigravity,
+> Google Gemini, Metaso, iFlytek Spark) have no stable link we could register, so the button says
+> **"Open official site"** — it opens the vendor's download page in your browser and you download
+> there. **Neither tier downloads, installs, or runs an installer for you.**
 
 > To regroup: edit the one line per component in `COMPONENT_CATEGORY_OF` in `main.py`. The Start-stop tab needs no registration — membership is derived from the launch whitelist `LAUNCH_OF`.
 

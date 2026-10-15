@@ -1474,6 +1474,19 @@ class Component:
     # 置上这个位之后，build_components() 末尾会连带把 multi_version 置 False，
     # 于是角标（条件就是 multi_version）自动不创建；其余短路点见 ComponentCard 各方法开头。
     download_only: bool = False
+    # 「只下载」里更弱的一档（2026-10-15 用户要求）：**官方没有可直接下载的安装包**，
+    # 或我们没能拿到可直链的地址（只给滚动入口 / 要真机抓包 / 只能 npm・pip・插件装）。
+    # 置上它之后，卡片主按钮不写「下载」而写**「官网下载」**：点一下用
+    # `QDesktopServices.openUrl()` 打开 `official_url`，由用户自己在官网下载。
+    #
+    # 用户 2026-10-15 的原话是"如果拿不到下载方式的就做一个『官网下载』按钮，
+    # 用户点击时就直接打开浏览器自行去官网下载"——目的是**先把组件都收进来**，
+    # 不给个空卡片。所以这条不是"降级"，是这类组件**应有**的形态。
+    #
+    # 约束：置上它必须同时有 `official_url`（否则按钮点开是空的），由
+    # `bt_download_only_tests.WebFallback` 的两条用例钉住；版本表通常为空
+    # （表里那一行的版本行写成空元组即可，见 `_download_only_components`）。
+    official_page_only: bool = False
     # 一句话说清"这个组件是干嘛的"（2026-10-12 用户要求：详情功能）。
     # 由 build_components() 末尾按 COMPONENT_SUMMARY 统一赋值，不在构造处手写
     # —— 与 category / launch 同一套"单一真源"做法。
@@ -6060,6 +6073,183 @@ _AGENT_CLIENTS: tuple = (
      "同一套做法，不是软件版本号；装完以程序里的「关于」为准。",
      (("2026.09", "https://download.qoder.com/qoder-work/releases/latest/"
                   "QoderWork-Setup-x64.exe", 253672408),)),
+    ("trae", "Trae", "exe",
+     "字节跳动的 AI 编程 IDE（国际版，站点 trae.ai）。官方 CDN 按**构建号**分目录"
+     "（…/stable/2.3.91093/…），软件自己的版本号是另一套（实测 3.6.2）—— 版本位取软件"
+     "版本号，装完以「关于」为准。国内访问 trae.ai 会绕远，想直连请看「Trae CN」。",
+     (("3.6.2", "https://lf-cdn.trae.ai/obj/trae-ai-sg/pkg/app/releases/stable/2.3.91093/"
+                "win32/TRAE-Setup-x64.exe", 437637152),)),
+    ("trae-cn", "Trae CN", "exe",
+     "字节跳动 AI 编程 IDE 的**中国大陆版**：独立站点 trae.cn、独立安装包（TRAE_CN-Setup），"
+     "国内直连不需要科学上网。**与国际版是两个不同的构建**（版本号也不同步），别混装。",
+     (("3.4.3", "https://lf-cdn.trae.com.cn/obj/trae-com-cn/pkg/app/releases/stable/2.3.92182/"
+                "win32/TRAE_CN-Setup-x64.exe", 478058944),)),
+    ("qoder", "Qoder IDE", "exe",
+     "阿里的 AI 编程 IDE「Qoder」（**与「QoderWork CN」是两个产品**：那个是办公 Agent，"
+     "这个才是写代码的 IDE）。官方只发滚动 latest，版本位取官方发行说明里的版本号（实测 1.32.0）。",
+     (("1.32.0", "https://download.qoder.com/release/latest/QoderIDESetup-x64.exe", 207181792),)),
+    ("marvis", "Marvis（腾讯）", "exe",
+     "腾讯的 AI 桌面助手「马维斯」。官方分发链按渠道号分目录、文件名自带版本（实测 1.0.0.44）。"
+     "安装包只有 8 MB 出头 —— 它是个轻客户端，能力与内容多在服务端。",
+     (("1.0.0.44", "https://down.marvis.qq.com/marvis_install/channelsup/"
+                   "marvis_4100100002_1.0.0.44_x64_6373.exe", 8669224),)),
+    ("wukong", "悟空（钉钉）", "exe",
+     "钉钉（阿里）的企业级 AI 工作平台「悟空」。它的下载 URL **结尾必须带渠道号**"
+     "（实测 _chl260506.exe 可取，去掉渠道号直接 404），版本位取文件名里的 0.9.61。",
+     (("0.9.61", "https://dtapp-pub.dingtalk.com/dingtalk-desktop/dingtalk-real-personal/release/"
+                 "windows/chl_installer/Wukong_0.9.61-26060905_x64-setup_chl260506.exe", 281106680),)),
+    ("lobsterai", "LobsterAI（有道）", "exe",
+     "网易有道的桌面 AI 助手「LobsterAI（龙虾）」。官方客户端清单接口只给最新一版，"
+     "版本位取官方清单里的日期号（实测 2026.10.13）。",
+     (("2026.10.13", "https://ydschool-video.nosdn.127.net/"
+                     "1791811631995LobsterAI-Setup-x64-2026.10.13-official.exe", 346796264),)),
+    ("autoclaw", "AutoClaw（智谱）", "exe",
+     "智谱的桌面 Agent「AutoClaw（澳龙）」。官方按 latest.yml 发版：国内站在 autoglm.aminer.cn"
+     "（实测 2.1.0），海外站另发 2.1.1。这里登记的是**国内站**的包。",
+     (("2.1.0", "https://autoglm.aminer.cn/zwork/updates/production/official/win32-x64/"
+                "AutoClaw-2.1.0-x64-cn.exe", 222287304),)),
+    ("dumate", "百度搭子 DuMate", "exe",
+     "百度的桌面 AI 智能体「DuMate」（**与文心一言是两回事**）。官方直链文件名固定写 latest、"
+     "站点不暴露版本号，版本位按 R20 取实测当天服务端文件的 Last-Modified 年月 —— 不是软件版本号。",
+     (("2026.10", "https://dumate-app-public.bj.bcebos.com/release-info/win-artifacts/"
+                  "Dumate-win-setup-x64-latest.exe", 737054752),)),
+    ("openworker", "OpenWorker", "exe",
+     "吴恩达（Andrew Ng）团队的开源 AI 办公 Agent。GitHub 产物，下载走加速器优先。"
+     "同一次 release 还发了 msi，列在「下载 ▾」里让你挑。",
+     (("0.3.1", "https://github.com/andrewyng/openworker/releases/download/v0.3.1/"
+                "OpenWorker-windows-setup.exe", 65364059,
+       ("msi", "https://github.com/andrewyng/openworker/releases/download/v0.3.1/"
+               "OpenWorker-windows.msi", 77747177)),)),
+    ("orkas", "Orkas", "exe",
+     "开源的本地优先 AI 桌面应用：指挥官模型调度子代理，直接驱动你本机已装的编程 CLI"
+     "（Claude Code / Codex / OpenCode 等）。GitHub 产物，走加速器优先；官网 orkas.ai。"
+     "release tag 是日期形态（v2026.10.1），版本位取包里的 1.8.0。",
+     (("1.8.0", "https://github.com/Orkas-AI/Orkas/releases/download/v2026.10.1/"
+                "Orkas.Setup.1.8.0.exe", 393954328),)),
+    ("zed", "Zed", "exe",
+     "Zed Industries 的高性能协作式代码编辑器（Rust 写的），内置 AI 编辑与多人协作。"
+     "GitHub 产物，走加速器优先；Windows 版官方发单文件 exe。",
+     (("1.24.2", "https://github.com/zed-industries/zed/releases/download/v1.24.2/"
+                 "Zed-x86_64.exe", 84235440),)),
+    ("cline", "Cline", "exe",
+     "开源自主编程 Agent，最初是 VS Code 插件，2026-10 起也发独立 Windows 桌面端。"
+     "GitHub 产物，走加速器优先；另可用 VS Code 扩展或 npm 安装。",
+     (("0.0.46", "https://github.com/cline/cline/releases/download/desktop-v0.0.46/"
+                 "Cline_0.0.46_x64-setup.exe", 103528744),)),
+    ("chatgpt", "ChatGPT", "exe",
+     "OpenAI 的 ChatGPT 桌面客户端。**官方 Windows 分发走微软商店**（chatgpt.com 在大陆不可达），"
+     "这里给的就是微软商店的**引导安装器**（约 800 KB，跑完由商店下载主体）—— 实测 813,088 字节。"
+     "商店不暴露版本号，版本位按 R20 写实测月份，不是软件版本号。",
+     (("2026.10", "https://get.microsoft.com/installer/download/9PLM9XGG6VKS", 813088),)),
+    ("kimi", "Kimi", "exe",
+     "月之暗面的 Kimi 桌面客户端。官方给的是**滚动下载端点**（…/api/app/pkg/latest/windows/"
+     "download，302 到带版本号的文件），登记端点而不是 302 之后那条 —— 后者换个版本就没了。"
+     "版本位取实测那天重定向到的文件名里的 3.2.16。",
+     (("3.2.16", "https://appsupport.moonshot.cn/api/app/pkg/latest/windows/download", 438668088),)),
+    ("kimi-code", "Kimi Code", "exe",
+     "月之暗面的**编程 Agent 桌面端**（与 Kimi 助手是两个客户端）。官方下载地址会 302 到 "
+     "cdn.kimi.com，站点不暴露版本号，版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://code.kimi.com/kimi-code/desktop/download/KimiCode-win-x64.exe",
+       123131600),)),
+    ("minimax", "MiniMax Code", "exe",
+     "MiniMax 的桌面 Agent「MiniMax Code」。官方直链带空格、已编码（%20），版本位取文件名里的 3.1.1。",
+     (("3.1.1", "https://filecdn.minimax.chat/public/minimax-agent-prod/release/"
+                "MiniMax%20Code%20Setup%203.1.1.exe", 581010136),)),
+    ("stepfun", "阶跃AI 桌面伙伴", "exe",
+     "阶跃星辰的桌面 AI 助手。官方给的是**滚动版本端点**（…/api/desktopversion/windows/latest），"
+     "它会 307 到一条**一天就过期的签名直链** —— 所以只能登记端点，登记签名链明天就是死链。"
+     "版本位取实测那天 307 落点文件名里的 1.0.5_716。",
+     (("1.0.5_716", "https://chat.stepfun.com/api/desktopversion/windows/latest", 308306472),)),
+    ("nano-ai", "纳米AI（360）", "exe",
+     "360 的桌面 AI 助手「纳米AI搜索」。官方直链固定不带版本号，版本位按 R20 取服务端文件的 "
+     "Last-Modified 年月（该包实测已数月未更新）。",
+     (("2026.06", "https://sedown.qihucdn.com/se/360namiai_setup_x64.exe", 296555144),)),
+    ("tiangong", "天工 AI（昆仑万维）", "exe",
+     "昆仑万维的桌面智能体「天工 / Skywork」。官方按版本号发目录（skywork-desktop_2.5.0_"
+     "x64-setup.exe），版本位取文件名里的 2.5.0。",
+     (("2.5.0", "https://static-us-img.skywork.ai/desktop-package/"
+                "skywork-desktop_2.5.0_x64-setup.exe", 49231352),)),
+    ("codebuddy", "腾讯 CodeBuddy", "exe",
+     "腾讯的 AI 编程 IDE「CodeBuddy」。官方有版本接口（www.codebuddy.cn/v2/update?platform="
+     "ide-win32-x64-user），版本位取实测那天的 4.12.2.41207131。同站的 WorkBuddy 是它的办公版。",
+     (("4.12.2.41207131", "https://download.codebuddy.cn/aiide/win32-x64-user/"
+                          "CodeBuddy-win32-x64-user-4.12.2.41207131-425ab70e-cn.exe", 164626336),)),
+    ("workbuddy", "WorkBuddy", "exe",
+     "腾讯 CodeBuddy 团队出的**办公 Agent**（与 CodeBuddy IDE 同站不同包）。版本接口 "
+     "?platform=workbuddy-win32-x64-user，版本位取实测那天的 5.8.2.41111488。",
+     (("5.8.2.41111488", "https://download.codebuddy.cn/workbuddy/saas/win32-x64-user/"
+                         "WorkBuddy-win32-x64-user-5.8.2.41111488-b8f6c953.exe", 441172480),)),
+    ("deepseek-harness", "DeepSeek Harness", "exe",
+     "DeepSeek 官方的桌面 Agent「DeepSeek Harness」。官方直链写死 dsh-latest、不带版本号，"
+     "版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.09", "https://download.deepseek.com/desktop/dsh-latest-windows-x64.exe",
+       289313640),)),
+    ("reasonix", "Reasonix", "exe",
+     "开源的 DeepSeek 编程 Agent「Reasonix Studio」。GitHub 产物，走加速器优先；"
+     "release tag 是 studio-v2.41.0 形态，版本位取 2.41.0。",
+     (("2.41.0", "https://github.com/esengine/DeepSeek-Reasonix/releases/download/"
+                 "studio-v2.41.0/ReasonixStudio-windows-amd64-installer.exe", 127480752),)),
+    ("doubao", "豆包", "zip",
+     "字节跳动的桌面 AI 助手「豆包」。官方发**签名 zip**（解压得到安装器）；版本接口 "
+     "`…/samantha/desktop/get_latest_version?platform=win` 里 `newest_version` 才是最新版"
+     "（实测 2.32.4 —— 另一个字段 `version` 是 1.49.10 的老包，已实测它的 Last-Modified 停在 "
+     "2025-03，别拿它当最新版）。",
+     (("2.32.4", "https://lf-flow-web-cdn.doubao.com/obj/flow-doubao/doubao_pc/2.32.4/"
+                 "Doubao_win_X64_2.32.4-signed.zip", 950867262),)),
+    ("yuanbao", "腾讯元宝", "exe",
+     "腾讯的桌面 AI 助手「腾讯元宝」，底层是混元大模型。官方直链按渠道号拼装、**不带版本号**，"
+     "版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.08", "https://cdn-hybrid-prod.hunyuan.tencent.com/Desktop/business/channels/"
+                  "yuanbao_7001_x64.exe", 54353464),)),
+    ("tongyi-qianwen", "通义千问", "exe",
+     "阿里「千问」的 PC 客户端。官方按版本号发目录（…/native/app/2.3.2/win32/x64/…），"
+     "版本位取路径与文件名里的 2.3.2。",
+     (("2.3.2", "https://qianwen-portal-cdn.tongyi.com/native/app/2.3.2/win32/x64/"
+                "qwenclient_setup_2.3.2.2603032250.exe", 104342072),)),
+    ("lingma", "通义灵码", "exe",
+     "阿里的 AI 编程助手「通义灵码」（**与「通义千问」是两个产品**：这个是写代码用的）。"
+     "官方直链写 release/latest、不带版本号，版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.08", "https://lingma-ide.oss-rg-china-mainland.aliyuncs.com/release/latest/"
+                  "LingmaSetup-x64.exe", 165879464),)),
+    ("ernie", "文心（文小言）", "exe",
+     "百度的桌面 AI 助手（文心一言 / 文小言）。官方直链不带版本号，版本位按 R20 取服务端文件的 "
+     "Last-Modified 年月。**与「百度搭子 DuMate」是两个产品**，那个是独立的桌面智能体。",
+     (("2026.09", "https://xiaoyan-desktop.cdn.bcebos.com/wenxin_setup.exe", 240738256),)),
+    ("chatglm", "智谱清言", "exe",
+     "智谱的桌面 AI 助手「智谱清言」。官方配置接口（chatglm.cn/chatglm/operation-api/config/"
+     "operation_data?tag=clientConfig）给出 winUrl，版本位取文件名里的 2.0.6。",
+     (("2.0.6", "https://sfile.chatglm.cn/apk/xinyu/windows/chatglm_2.0.6_win32_x64.exe",
+       109101416),)),
+    # 下面几件是 `official_page_only`（R21）：官方没有可登记的稳定直链，卡片给「官网下载」。
+    # 空元组 () = 没有版本表，builder 据此自动置 official_page_only=True。
+    ("xinghuo", "讯飞星火", "exe",
+     "科大讯飞的桌面 AI 助手「讯飞星火」。官网页是 JS SPA、下载 chunk 对脚本一律 404，"
+     "配置接口需登录，**没有可登记的直链** —— 只给官网入口。",
+     ()),
+    ("metaso", "秘塔AI搜索", "exe",
+     "秘塔科技的 AI 搜索/写作桌面端。**官方只上架 Microsoft Store，官网只给网页版与手机端**"
+     "（下载页实测无 .exe；版本接口 401），所以只给官网入口。",
+     ()),
+    ("windsurf", "Windsurf (Devin)", "exe",
+     "Cognition 的 AI 编程 IDE，**现已更名升级为 Devin Desktop**（windsurf.com 现在 308 跳到 "
+     "devin.ai）。它的官方安装包地址按**发版 hash 分目录**（…/stable/<hash>/DevinUserSetup-x64-"
+     "<版本>.exe），新版一发旧目录就没了，登记直链等于登记一条会过期的死链 —— 所以本工具"
+     "只给官网入口，去官网点一下即可。",
+     ()),
+    ("claude", "Claude 桌面版", "exe",
+     "Anthropic 的 Claude 桌面客户端。**官方对大陆区域做了限制**：下载入口 302 到 "
+     "app-unavailable-in-region。旧直链（storage.googleapis.com/…/nest-win-x64/Claude-Setup-"
+     "x64.exe）实测仍可取，但那个桶已**冻结在 2025-10-29 的 0.14.10**（同目录 RELEASES 清单"
+     "末条即 0.14.10），拿它当「最新版」是错的 —— 所以这里只给官网入口，去官网下当前版。",
+     ()),
+    ("antigravity", "Google Antigravity", "exe",
+     "Google 的 Agent 优先编程 IDE。**antigravity.google 在大陆不可达**（DNS 能解析、TCP 连不上），"
+     "下载直链也拿不到 —— 所以只给官网入口，能不能下取决于你的网络环境。",
+     ()),
+    ("gemini", "Google Gemini", "exe",
+     "Google 的 Gemini 桌面客户端。**gemini.google 在大陆不可达**，下载直链同样拿不到 —— "
+     "只给官网入口，能不能下取决于你的网络环境。",
+     ()),
 )
 COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})
 
@@ -6176,6 +6366,44 @@ COMPONENT_SUMMARY: Dict[str, str] = {
                    "Windows 官方发 zip（解压得到 claude.exe）——它是 CLI，不是 GUI 安装器。",
     "codex-cli": "Codex CLI：OpenAI 的命令行编程 Agent，Windows 官方发单文件 exe。",
     "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
+    "trae": "Trae：字节跳动的 AI 编程 IDE（国际版）。整库理解、多文件改写、Builder 模式从需求直出工程。",
+    "trae-cn": "Trae CN：Trae 的中国大陆版。功能与界面同国际版，独立站点、国内直连不需要科学上网。",
+    "windsurf": "Windsurf (Devin)：Cognition 的 AI 编程 IDE，现已更名升级为 Devin Desktop。"
+                "主打 Cascade 智能体式改代码；本工具只给官网入口（见卡片说明）。",
+    "claude": "Claude 桌面版：Anthropic 的 Claude 桌面客户端。可对接本地文件与 MCP 扩展；"
+              "官方限制大陆区域，本工具只给官网入口（见卡片说明）。",
+    "qoder": "Qoder IDE：阿里的 AI 编程 IDE。整库理解、Agent 式改代码、行内补全；"
+             "与「QoderWork CN」不是一个产品（那个偏办公）。",
+    "marvis": "Marvis（马维斯）：腾讯的 AI 桌面助手，偏日常问答与轻办公。安装包很小，能力多在服务端。",
+    "wukong": "悟空：钉钉（阿里）的企业级 AI 工作平台桌面端，面向团队办公与钉钉生态。",
+    "lobsterai": "LobsterAI（龙虾）：网易有道的桌面 AI 助手，主打日常任务与内容处理。",
+    "autoclaw": "AutoClaw（澳龙）：智谱的桌面 Agent，接 GLM 系列模型，面向自动化办公与浏览任务。",
+    "dumate": "百度搭子 DuMate：百度的桌面 AI 智能体，独立于文心一言 App。",
+    "openworker": "OpenWorker：吴恩达团队开源的 AI 办公 Agent，可自主拆解并执行桌面办公任务。",
+    "orkas": "Orkas：开源的本地优先 AI 桌面应用。指挥官模型调度子代理，直接驱动本机已装的编程 CLI。",
+    "zed": "Zed：Rust 写的高性能协作式代码编辑器，内置 AI 编辑与多人实时协作。",
+    "cline": "Cline：开源自主编程 Agent。原本是 VS Code 插件，现在也有独立 Windows 桌面端。",
+    "chatgpt": "ChatGPT：OpenAI 的桌面客户端。Windows 官方走微软商店分发（本工具给商店引导安装器）。",
+    "antigravity": "Google Antigravity：Google 的 Agent 优先编程 IDE。官方站在大陆不可达，只给官网入口。",
+    "gemini": "Google Gemini：Google 的 Gemini 桌面客户端。官方站在大陆不可达，只给官网入口。",
+    "kimi": "Kimi：月之暗面的桌面智能助手。长文本理解与联网搜索是它的强项。",
+    "kimi-code": "Kimi Code：月之暗面的编程 Agent 桌面端，与 Kimi 助手是两个独立客户端。",
+    "minimax": "MiniMax Code：MiniMax 的桌面 Agent，接自家大模型做自动化任务。",
+    "stepfun": "阶跃AI 桌面伙伴：阶跃星辰的桌面 AI 助手，接 Step 系列多模态模型。",
+    "nano-ai": "纳米AI：360 的桌面 AI 助手，主打搜索问答与文档处理。",
+    "tiangong": "天工 AI：昆仑万维的桌面智能体（Skywork），面向办公与内容生成。",
+    "codebuddy": "腾讯 CodeBuddy：腾讯的 AI 编程 IDE，深度集成腾讯云开发链路。",
+    "workbuddy": "WorkBuddy：腾讯 CodeBuddy 团队出的办公 Agent，偏日常办公与文档任务。",
+    "deepseek-harness": "DeepSeek Harness：DeepSeek 官方的桌面 Agent，把模型能力包成本地可用的智能体。",
+    "reasonix": "Reasonix：开源编程 Agent（基于 DeepSeek），本地跑代码、按任务改工程。",
+    "metaso": "秘塔AI搜索：秘塔科技的 AI 搜索与写作桌面端。官方只上架微软商店，本工具只给官网入口。",
+    "doubao": "豆包：字节跳动的桌面 AI 助手。问答、写作、多模态与联网搜索都在一处。",
+    "yuanbao": "腾讯元宝：腾讯的桌面 AI 助手，底层是混元大模型，接微信生态。",
+    "tongyi-qianwen": "通义千问：阿里「千问」的 PC 客户端，面向日常问答、写作与文档处理。",
+    "lingma": "通义灵码：阿里的 AI 编程助手，IDE 里补全与对话改代码。",
+    "ernie": "文心（文小言）：百度的桌面 AI 助手。与「百度搭子 DuMate」是两个产品。",
+    "chatglm": "智谱清言：智谱的桌面 AI 助手，接 GLM 系列模型。",
+    "xinghuo": "讯飞星火：科大讯飞的桌面 AI 助手。官方未提供可登记的下载直链，只给官网入口。",
     "erlang": "Erlang/OTP 运行时。RabbitMQ 的必需前置（本工具按需自动安装）；不单独出现在界面上。",
 }
 
@@ -6430,7 +6658,41 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "claude-code": "https://www.anthropic.com/claude-code",   # INT
     "codex-cli": "https://openai.com/codex/",                 # INT  403 按 UA 反爬，浏览器可正常打开
     "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
-
+    "trae": "https://www.trae.ai/",                           # INT  国际站
+    "trae-cn": "https://www.trae.cn/",                        # CN   大陆站
+    "windsurf": "https://devin.ai/download",                  # INT  windsurf.com 已 308 跳 devin.ai
+    "claude": "https://claude.com/download",                  # INT  官方下载页（大陆区域受限）
+    "qoder": "https://qoder.com/",                            # INT  Qoder 主站（IDE）
+    "marvis": "https://marvis.qq.com/",                       # CN
+    "wukong": "https://wukong.dingtalk.com/",                 # CN
+    "lobsterai": "https://lobsterai.youdao.com/",             # CN
+    "autoclaw": "https://autoclaw.zhipuai.cn/",               # CN
+    "dumate": "https://www.dumate.cn/",                       # CN
+    "openworker": "https://openworker.com/",                  # INT
+    "orkas": "https://orkas.ai/",                             # INT  仓库 README 里登记的官网
+    "zed": "https://zed.dev/",                                # INT
+    "cline": "https://cline.bot/",                            # INT
+    "chatgpt": "https://chatgpt.com/",                        # INT  大陆不可达；下载走微软商店（见卡片）
+    "antigravity": "https://antigravity.google/",             # INT  大陆不可达
+    "gemini": "https://gemini.google/desktop/",               # INT  大陆不可达
+    "kimi": "https://www.kimi.com/",                          # CN
+    "kimi-code": "https://www.kimi.com/code",                 # CN
+    "minimax": "https://www.minimax.cn/",                     # CN
+    "stepfun": "https://www.stepfun.com/",                    # CN
+    "nano-ai": "https://www.n.cn/",                           # CN  360 出品
+    "tiangong": "https://www.tiangong.cn/",                   # CN
+    "codebuddy": "https://www.codebuddy.cn/ide/",             # CN
+    "workbuddy": "https://www.workbuddy.cn/",                 # CN
+    "deepseek-harness": "https://www.deepseek.com/zh/harness/",  # CN
+    "reasonix": "https://reasonix.io/",                       # INT  个人开源项目，站点即官网
+    "metaso": "https://metaso.cn/",                           # CN  只有官网入口（见卡片）
+    "doubao": "https://www.doubao.com/",                      # CN
+    "yuanbao": "https://yuanbao.tencent.com/",                # CN
+    "tongyi-qianwen": "https://www.qianwen.com/",             # CN
+    "lingma": "https://lingma.aliyun.com/",                   # CN
+    "ernie": "https://wenxiaoyan.com/pc",                     # CN  文心/文小言 PC 页
+    "chatglm": "https://chatglm.cn/",                         # CN
+    "xinghuo": "https://xinghuo.xfyun.cn/desktop-app-download",  # CN  只有官网入口
     # ---- API 调试 / 接口管理 ----
     "apipost": "https://www.apipost.cn/",              # CN  国产工具，原生中文站
     "apifox": "https://apifox.cn/",                    # CN  国产工具，原生中文站
@@ -6618,6 +6880,42 @@ COMPONENT_USAGE: Dict[str, str] = {
     "codex-cli": "单文件 exe，放进 PATH 或直接用完整路径跑；首次运行会让你登录。"
                  "⚠ 同样是终端工具。",
     "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
+    "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
+    "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",
+    "qoder": "装完启动登录阿里账号，打开项目目录后即可对话改代码；它是 IDE，写代码用这一个。",
+    "marvis": "装完启动登录微信/QQ 账号即可用；以问答与轻办公为主。",
+    "wukong": "装完启动用钉钉扫码登录；团队协作与办公任务都从它的工作台进。",
+    "lobsterai": "装完启动登录有道账号；按它的任务面板发起日常任务即可。",
+    "autoclaw": "装完启动登录智谱账号；它是自动化 Agent，给目标它会自己拆步骤执行。",
+    "dumate": "装完启动登录百度账号；给一句需求它自己规划并执行桌面任务。",
+    "openworker": "装完启动配好模型 API Key；然后给一句办公任务，它自己拆解执行。",
+    "orkas": "装完启动配自己的模型 Key；它用你本机已装的编程 CLI 干活，先确保那些 CLI 可用。",
+    "zed": "解压/装完双击即用；打开项目目录，Ctrl+Enter 唤起 AI 编辑面板。",
+    "cline": "装完启动在设置里填模型 API Key，再打开项目目录即可开始。"
+             "也可以改用 VS Code 扩展版。",
+    "chatgpt": "双击这个引导安装器，它会从微软商店把 ChatGPT 主体装上；之后开始菜单启动。",
+    "windsurf": "点「官网下载」会打开官方下载页，在页面里点一次下载即可（官方直链会随发版失效）。",
+    "claude": "点「官网下载」会打开官方下载页；注意该页面按区域限制，大陆网络可能打不开。",
+    "antigravity": "点「官网下载」会打开官网；该站在大陆不可达，需自备可访问的网络环境。",
+    "gemini": "点「官网下载」会打开官网；该站在大陆不可达，需自备可访问的网络环境。",
+    "kimi": "装完启动登录 Kimi 账号；长文档直接丢进对话框，或让它联网查资料再总结。",
+    "kimi-code": "装完启动登录月之暗面账号，打开项目目录即可开始编程。它面向写代码，不是聊天助手。",
+    "minimax": "装完启动登录 MiniMax 账号；给一句任务它会自己拆步骤执行。",
+    "stepfun": "装完启动登录阶跃账号；支持图片/文档输入，按界面引导建任务即可。",
+    "nano-ai": "装完启动登录 360 账号；搜索问答与文档处理都在同一个对话框里。",
+    "tiangong": "装完启动登录昆仑万维账号；办公与内容生成任务直接下指令即可。",
+    "codebuddy": "装完启动登录腾讯账号，打开项目目录后即可对话改代码；写作与调试在同一窗口。",
+    "workbuddy": "装完启动登录腾讯账号；按它的任务面板下发办公任务即可。",
+    "deepseek-harness": "装完启动配 DeepSeek API Key；然后给任务，它在本机执行。",
+    "reasonix": "装完启动配 DeepSeek Key（或用本地模型）；打开代码目录即可对话改工程。",
+    "metaso": "点「官网下载」会打开官网；Windows 版只在微软商店，按页面引导去商店装。",
+    "doubao": "解压后跑安装器；启动登录字节账号即可对话，长文档与图片都能直接丢进去。",
+    "yuanbao": "装完启动微信扫码登录；问答、读长文、生成内容都在同一个对话框里。",
+    "tongyi-qianwen": "装完启动登录阿里账号；文档、图片、表格都能丢进去让它处理。",
+    "lingma": "装完在 IDE 里登录阿里云账号；写代码时补全与对话都在侧边栏。",
+    "ernie": "装完启动登录百度账号；问答与写作直接在对话框里下指令。",
+    "chatglm": "装完启动登录智谱账号；问答、文档解读与画图都从对话框进。",
+    "xinghuo": "点「官网下载」会打开官网下载页，在页面里点一次下载即可。",
     "erlang": "RabbitMQ 缺它时本工具自动装它，无需手动使用。",
 }
 
@@ -6917,6 +7215,10 @@ def _download_only_components(table: tuple) -> List["Component"]:
             version_probe=False,
             versions=versions,
             download_only=True,
+            # 版本行为空 = 官方没有可直接下载的安装包地址（只给网页入口 / 只能包管理器装）
+            # → 卡片主按钮改成「官网下载」，点开浏览器由用户自己去下（见 R21 与
+            # ComponentCard.on_open_official_page_clicked）。
+            official_page_only=not rows,
             unsupported_platform_hint="当前只登记了实测过的 Windows 官方直链；"
                                       "macOS / Linux 官方也有包，但未按 R1 实测，暂不提供",
             data_note=note,
@@ -15490,19 +15792,31 @@ class ComponentCard(QFrame):
         # on_download_clicked。不改属性名是因为 _sync_action_buttons、布局与一批用例
         # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
         if self.component.download_only:
-            # 有两种产物可选时按钮写成「下载 ▾」：不点就不知道有得挑，而选错一次
-            # 是重下 1.5 GB。▾ 只是提示"这里会弹菜单"，真正的挑选在 on_download_clicked 里。
-            multi = any(len(cv.artifacts) > 1 for cv in self.component.versions)
-            self.btn_install.setText("下载 ▾" if multi else "下载")
-            tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
-            if multi:
-                tip += "\n这个版本官方同时提供 exe 安装器与 zip 便携包，点了会让你选（带体积）"
-            if self.component.data_note:
-                # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
-                # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
-                tip += "\n" + self.component.data_note
-            self.btn_install.setToolTip(tip)
-            self.btn_install.clicked.connect(self.on_download_clicked)
+            if self.component.official_page_only:
+                # 更弱的一档：没有可直链的安装包 → 给「官网下载」，点开浏览器自己去下。
+                # 文案要说清"本工具不代下不代装"，否则用户会以为点了就开始下。
+                self.btn_install.setText("官网下载")
+                tip = ("这个组件官方没有可直接下载的安装包链接（只给网页入口 / 需要用包管理器装）——"
+                       "点一下会在浏览器里打开它的官网，请在那里自行下载安装。"
+                       "本工具不代下、不代装、不代跑安装程序")
+                if self.component.data_note:
+                    tip += "\n" + self.component.data_note
+                self.btn_install.setToolTip(tip)
+                self.btn_install.clicked.connect(self.on_open_official_page_clicked)
+            else:
+                # 有两种产物可选时按钮写成「下载 ▾」：不点就不知道有得挑，而选错一次
+                # 是重下 1.5 GB。▾ 只是提示"这里会弹菜单"，真正的挑选在 on_download_clicked 里。
+                multi = any(len(cv.artifacts) > 1 for cv in self.component.versions)
+                self.btn_install.setText("下载 ▾" if multi else "下载")
+                tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
+                if multi:
+                    tip += "\n这个版本官方同时提供 exe 安装器与 zip 便携包，点了会让你选（带体积）"
+                if self.component.data_note:
+                    # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
+                    # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
+                    tip += "\n" + self.component.data_note
+                self.btn_install.setToolTip(tip)
+                self.btn_install.clicked.connect(self.on_download_clicked)
         else:
             self.btn_install.clicked.connect(self.on_install_clicked)
         actions.addWidget(self.btn_install)
@@ -17158,6 +17472,24 @@ class ComponentCard(QFrame):
         self.worker.start()
 
     # ------------------------------------------------------------------
+    def on_open_official_page_clicked(self) -> None:
+        """「官网下载」那颗按钮：打开组件官网，由用户自己在那里下载。
+
+        适用于 `official_page_only` 的组件 —— 官方没有可直接下载的安装包地址
+        （只给网页入口 / 要真机抓包 / 只能用 npm・pip・插件装）。用户 2026-10-15 的要求：
+        与其因为"拿不到直链"就不放这张卡，不如给一颗「官网下载」，点开浏览器自己去下。
+
+        URL 取 `official_url`（R19 那张**人工登记**的表），不从下载地址推导 ——
+        与 R19 同一条纪律。没登记就报错而不是打开空页面（护栏已保证这类组件必有登记）。
+        """
+        url = self.component.official_url
+        if not url:
+            self._log("error", f"{self.component.display_name} 没有登记官网地址，打不开。")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self._log("info", f"已在浏览器打开 {self.component.display_name} 的官网：{url}"
+                          "（本工具不代下、不代装，去官网自己下）")
+
     def on_download_clicked(self) -> None:
         """「开发工具」那颗「下载」：把官方安装包下到用户挑的目录，到此为止。
 

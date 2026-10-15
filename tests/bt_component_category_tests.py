@@ -105,7 +105,24 @@ EXPECTED_MEMBERSHIP = {
     # 「Agent客户端」：2026-10-15 用户要求新增的第五个 Tab，**放在最后**。
     # 形态与「开发工具」同类 —— 只下载、不配置，登记表在 main.py 的 `_AGENT_CLIENTS`
     # （表驱动，key 从那里来；这里手写一份是为了让"扩表 = 必须同时改这张基线"可见）。
-    CAT_AGENT: {"cursor", "zcode", "claude-code", "codex-cli", "qoderwork-cn"},
+    # 2026-10-15 第二批：用户要求"把能做的都做了、全都接进来"，拿不到直链的给「官网下载」
+    # （R21），于是从 5 个扩到 33 个 —— 其中 28 个有实测直链，5 个（末行）是 official_page_only。
+    CAT_AGENT: {
+        # —— 首批（2026-10-15 上半天）——
+        "cursor", "zcode", "claude-code", "codex-cli", "qoderwork-cn",
+        # —— 第二批：编程 IDE / 编辑器 ——
+        "trae", "trae-cn", "qoder", "codebuddy", "zed", "cline", "reasonix",
+        # —— 第二批：大厂助手（含只能开官网的）——
+        "chatgpt", "claude", "gemini", "antigravity", "windsurf",
+        "marvis", "wukong",
+        # —— 第二批：中文创业公司 ——
+        "kimi", "kimi-code", "minimax", "stepfun", "nano-ai", "tiangong",
+        "deepseek-harness", "metaso",
+        # —— 第二批：大厂中文助手 ——
+        "doubao", "yuanbao", "tongyi-qianwen", "lingma", "ernie", "chatglm", "xinghuo",
+        # —— 第二批：办公 Agent / 开源 ——
+        "lobsterai", "autoclaw", "dumate", "openworker", "orkas", "workbuddy",
+    },
 }
 
 ALL_KEYS = {k for group in EXPECTED_MEMBERSHIP.values() for k in group}
