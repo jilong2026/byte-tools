@@ -70,6 +70,15 @@ permissions:
 env:
   # Python 版本：PySide6 6.6+ 要求 3.9+，3.12 LTS 稳定且 PyInstaller 6.x 完美支持
   PYTHON_VERSION: '3.12'
+  # **必须显式指定，否则 windows-latest 上护栏 1 秒即红**（2026-10-15 查明）：
+  # Windows runner 是 en-US 区域，Python 往**管道**写 stdout 时按 ANSI 代码页
+  # （cp1252）编码，而本项目的输出几乎全是中文 —— `run_all_tests.py` 第一句
+  # `print(f"解释器：{python}")` 就抛 UnicodeEncodeError，脚本立刻退出 1。
+  # 症状极像"测试挂了"：step 只跑 1 秒、日志要 admin 才下得到、注解只有
+  # "Process completed with exit code 1"。
+  # 本机复现：`PYTHONIOENCODING=cp1252 python -u tests/run_all_tests.py`
+  # 会打出完全一样的 UnicodeEncodeError。设成 utf-8 后 CI 与开发机表现一致。
+  PYTHONIOENCODING: utf-8
   # PyInstaller 最低版本：spec 中使用了 5.0+ 引入的 hooksconfig 参数
   PYINSTALLER_MIN_VERSION: '6.0'
   # pip 主源：官方 PyPI。runner 在境外（Azure），到 pypi.org 是就近 CDN；
