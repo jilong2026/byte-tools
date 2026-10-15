@@ -100,7 +100,7 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
 
 ## Getting started in 30 seconds
 
-1. Open the tool. Four tabs (Dev environment / Dev software / Dev tools / Start-stop) list every component; each card's top-right corner is its **current state**:
+1. Open the tool. Five tabs (Start-stop / Server components / Dev environment / Dev tools / Agent clients) list every component; each card's top-right corner is its **current state**:
 
    | State | Meaning |
    |---|---|
@@ -131,14 +131,21 @@ node -v
 
 ## Supported components
 
-**87 in total**: **61 installable end to end** + **26 download-only** (those 26 are GUI tools; 16 of the 63 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**182 in total**: **80 installable end to end** + **102 download-only** (102 = 38 GUI tools + 64 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
-| Dev environment | 32 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq |
-| Dev software | 14 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, NATS Server, Caddy, Traefik, Apache JMeter |
-| Dev tools | 26 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman |
-| Start-stop | 15 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO |
+| Start-stop | 16 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO |
+| Dev environment | 42 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq, Apache Ant, Elixir, Scala CLI, Bazelisk, Just, Task, Oxlint, Biome, Nushell, Starship, GitHub CLI |
+| Server components | 22 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, Caddy, Traefik, Apache JMeter, Terraform, OpenTofu, Argo CD CLI, Prometheus, VictoriaMetrics, k6, Pulumi, Istio CLI, Talos Linux CLI |
+| Dev tools | 38 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman, Notepad++, Wireshark, GitKraken, SourceTree, Insomnia, Beekeeper Studio, Obsidian, Zettlr, Yaak, Vim (gVim), CC-Switch, CodexAppManager |
+| Agent clients | 64 | Cursor, ZCode, Claude Code, Codex CLI, opencode, OpenHands, Cherry Studio, Goose, Qwen Code, Crush, Kiro, Jan, OpenClaw, Hermes Agent, Gemini CLI, Aider, Ollama, LM Studio, GPT4All, AnythingLLM, LobeHub, GitHub Copilot CLI, ima (Tencent), Kilo Code, Wave Terminal, Msty Studio, Mistral Vibe, Kimi Work, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark |
+
+> **This tab has two tiers.** 34 of the 40 have a measured official direct link, so the card's main
+> button says **Download**. The other 6 (Windsurf (Devin), Claude Desktop, Google Antigravity,
+> Google Gemini, Metaso, iFlytek Spark) have no stable link we could register, so the button says
+> **"Open official site"** — it opens the vendor's download page in your browser and you download
+> there. **Neither tier downloads, installs, or runs an installer for you.**
 
 > To regroup: edit the one line per component in `COMPONENT_CATEGORY_OF` in `main.py`. The Start-stop tab needs no registration — membership is derived from the launch whitelist `LAUNCH_OF`.
 
@@ -351,7 +358,7 @@ Both branches first record the original text and keep "↩ Restore my previous s
 - **Windows**: newly opened command prompts / PowerShell windows read the new value; already-open windows must be restarted. After **every** write (user-level and elevated system-level alike) the tool notifies Explorer by name (`Shell_TrayWnd`) so it rebuilds its own environment immediately — terminals started from the Start menu, taskbar or desktop therefore see the new value within about a second.
 - **If it still does not change, the host process is stale**: Windows *copies* the environment block into new processes. IDEs and any long-lived process (including terminals they spawn) still carry the block from their own start time, so opening more tabs inside them never helps. After a switch the log names "terminal windows that were already open before this switch" (pid + start time) so you can close exactly those; windows flagged "elevated" cannot receive our notification and must be closed entirely.
 - **Multi-version switches are bound by the same rule**: the tool syncs the new value to itself immediately, but already-open terminals and IDEs do not see it. Terminals need a full window close; IDEs (IntelliJ IDEA / Eclipse / VS Code …) need a restart, and creating a new terminal tab inside the IDE is sometimes still not enough. **Windows Terminal likewise**: its new tabs and windows inherit the environment block captured at its process start — closing a tab is not a restart, even though a fresh PowerShell banner makes it look like one. The log line "already-open terminals and IDEs must be restarted to see the new values" is exactly this.
-- **When in doubt, press "🖥 Terminal"（开验证终端） in the title bar**: that window uses the environment the system computes for new processes, so checking there is equivalent to checking in a brand-new terminal.
+- **When in doubt, open a brand-new terminal yourself**: Windows **copies** the environment block into each new process, so a freshly opened PowerShell / cmd window reads whatever is currently in effect. Already-open windows (including terminals spawned inside an IDE, and new Windows Terminal tabs) still hold the block they started with.
 - **`where java` may still hit Oracle's javapath first**: Oracle's Java auto-update inserts `C:\Program Files\Common Files\Oracle\Java\javapath` into the **system** `PATH`, and ours is written to the **user** variable, which sorts after the system segment. Then even with `JAVA_HOME` pointing at our installation, plain `java -version` reports the javapath build. See "How to verify" below; the fix is removing that javapath entry from the system `PATH` (needs administrative rights).
 - **macOS / Linux**: `source ~/.zshrc` (or `~/.bashrc` / `~/.bash_profile` / `~/.profile`), or just reopen the terminal.
 
@@ -389,9 +396,9 @@ Delete an install directory by hand, or interrupt an uninstall, and `PATH` can k
 | Area | What is there |
 |---|---|
 | Title bar (left) | Icon + app name + **version chip**. The chip is also a status light: plain = not checked yet; `⟳ v1.2.1 checking` = check in flight; `v1.2.1 up to date` = latest; `↓ v1.2.2 update available` (amber) = newer release exists, **one click downloads it**; `↓ 37%` = downloading; `? v1.2.1 unknown` (grey, dashed) = the check failed and the tooltip says why. **The version number is always visible** — that is the first thing needed when reporting a problem |
-| Title bar (right) | "★ GitHub" opens the repository · "⟳ Refresh versions" bypasses the cache and re-fetches live lists · "🧹 Clean PATH"（清理残留 PATH） clears dead entries · "🖥 Terminal"（开验证终端） opens a window with the environment the system computes for new processes · "♥" supports the author · minimise / maximise / close |
+| Title bar (right) | "★ GitHub" opens the repository · "⟳ Refresh versions" bypasses the cache and re-fetches live lists · "🧹 Clean PATH"（清理残留 PATH） clears dead entries · "♥" supports the author · minimise / maximise / close |
 | Search bar | Component search (fuzzy over names and keys, showing "matched N / 85"); while searching, the tabs collapse and hits are grouped by category with small headings; clearing restores everything. Next to it: "▦ Grid / ☰ List" and "📋 Log" |
-| Cards | Four tabs (counts in titles). Each card: name, status capsule (hover for the full text), searchable version dropdown (green tick = installed), action buttons (Install / Switch / Uninstall; plus Start / Stop and Console or Page for services; download-only tools show just Download), gradient progress bar. Cards re-flow into columns with window width |
+| Cards | Five tabs (counts in titles). Each card: name, status capsule (hover for the full text), searchable version dropdown (green tick = installed), action buttons (Install / Switch / Uninstall; plus Start / Stop and Console or Page for services; download-only tools show just Download), gradient progress bar. Cards re-flow into columns with window width |
 | Log overlay | Collapsed by default over the card area; "📋 Log" expands it, warn/error auto-opens it and puts an unread counter on the button. Four levels (info grey, ok green, warn orange, error red), Chinese throughout, including mirror switching and failover narration |
 | Status bar | System info, the **clickable working directory**, component count. The version is not here — it is the chip |
 
@@ -667,7 +674,7 @@ No. 11 mainland mirrors + 3 GitHub accelerators run mainland-first with failover
 No. For multi-version components uninstall removes only the selected version's directory and its own `PATH` entries; other versions' directories, variables and entries are untouched, and `XXX_HOME` is cleared only when it pointed at the deleted version. If that was the active version, the UI switches to the highest remaining one and the log says so (`active version switched automatically to …`). A version that is not on disk has no green tick and "Uninstall" is disabled.
 
 **Q13. I switched the active version but `java -version` still shows the old one?**
-Press **"🖥 Terminal"（开验证终端）** in the title bar first: that window uses the environment the system computes for new processes, i.e. what any brand-new terminal should show. If it is right and your old window is wrong, that window predates the switch. Work through these three:
+Open a **brand-new** PowerShell / cmd window yourself first: Windows **copies** the environment block into each new process, so a freshly opened window shows whatever is currently in effect. If it is right and your old window is wrong, that window predates the switch. Work through these three:
 
 1. **The window was not restarted**: a switch only affects new processes. Close terminal windows entirely; restart IDEs (IDEA / Eclipse / VS Code) completely. After a successful switch the log names "terminal windows already open before this switch" (pid + start time) — close exactly those; windows marked "elevated" cannot receive our notification and must be closed by hand. Note that Windows Terminal's new tabs and windows inherit its process' stale environment — **closing a tab is not a restart**.
 2. **Oracle's javapath wins**: if the system `PATH` contains `C:\Program Files\Common Files\Oracle\Java\javapath`, it precedes user entries, so bare `java` runs that build. `where java` (first line) proves it; `%JAVA_HOME%\bin\java -version` bypasses `PATH` and confirms our copy is fine.

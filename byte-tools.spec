@@ -10,16 +10,14 @@ PyInstaller spec file for ByteTools.
     dist/ByteTools                     # Linux 单可执行文件
     dist/ByteTools.app                 # macOS .app bundle
 
-启动画面分两段：
-  ① PyInstaller Splash（assets/splash.png）—— bootloader 解压阶段就显示，覆盖
+启动画面：
+  ① PyInstaller Splash（assets/splash.png）—— bootloader 解压阶段显示，覆盖
      onefile "解压 ~119MB" 的空白期（正是用户抱怨的"几十秒打不开"那一段）。
+     **已移除**（2026-10-13）：Splash 基于 Tk/Tcl，会导致启动时出现空 Tkinter 窗口。
   ② 应用内 SplashScreen —— 解压完成、Python 起来后分帧建卡时显示
      "正在加载组件 N/87…" 动态进度。
 
-⚠ 2026-10-13 二次攻坚（推翻上一轮"不可用"结论）：上一轮失败的原因是
-把 tkinter 放进了 excludes 再手工补文件 —— 钩子根本不触发，逐个补是无底洞。
-正确做法：**保留 tkinter（不进 excludes）**，让 PyInstaller 官方 tkinter 钩子
-一次性收齐 _tkinter + _tk_data + tcl86t.dll / tk86t.dll。代价是包体多 ~2MB。
+⚠ 2026-10-13：移除 PyInstaller Splash 后打包体积减少约 2MB（不再包含 _tkinter + tcl/tk）。
 """
 import sys
 from pathlib import Path
@@ -58,15 +56,17 @@ hidden_imports = [
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
+    # SVG 图标渲染（main.py 用 QSvgRenderer 画 assets/component-icons/*.svg）。
+    # 漏掉这一条的后果不是报错，是**静默退化**：PyInstaller 不收 Qt6Svg.dll，
+    # 打包后 `from PySide6.QtSvg import QSvgRenderer` 直接 ImportError，
+    # 图标全部退回分类色块，而源码运行一切正常 —— 只在发布后才暴露。
+    "PySide6.QtSvg",
     # requests 依赖
     "requests",
     "urllib3",
     "charset_normalizer",
     "certifi",
     "idna",
-    # 2026-10-13：splash 的 Tcl/Tk 运行时靠 _tkinter 的钩子收集，但 main.py
-    # 不 import tkinter，静态分析不会收 —— 必须 hiddenimports 显式点名。
-    "_tkinter",
 ]
 
 # 2026-10-13 二次攻坚：**保留 tkinter**（不进 excludes），让 PyInstaller 官方
@@ -88,9 +88,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 不需要的大模块。⚠ tkinter **不在排除列表**：PyInstaller splash 的引导
-        # 画面跑在 Tcl/Tk 里（见文件头注释），排除它 splash 就报
-        # "could not find requirement _tk_data\..."。
+        # 不需要的大模块。
         "test",
         "unittest",
         "PySide6.QtNetwork",
@@ -109,19 +107,6 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data)
 
 # ---------------------------------------------------------------------------
-# Splash：bootloader 解压阶段显示的启动画面（onefile 必备，见文件头注释）
-# ---------------------------------------------------------------------------
-splash = Splash(
-    str(SPEC_DIR / "assets" / "splash.png"),
-    binaries=a.binaries,
-    datas=a.datas,
-    text_pos=(10, 230),
-    text_size=10,
-    text_color="rgba(255,255,255,150)",
-    always_on_top=False,
-)
-
-# ---------------------------------------------------------------------------
 # EXE（onefile 模式：exclude_binaries=False，二进制打包进单个 exe）
 # ---------------------------------------------------------------------------
 exe = EXE(
@@ -129,14 +114,13 @@ exe = EXE(
     a.scripts,
     a.binaries,
     a.datas,
-    splash,
-    [],
+    [],  # 移除 splash screen（2026-10-13 用户反馈 Tkinter 弹窗问题）
     name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,            # UPX 压缩减小体积，减少杀软扫描与磁盘 IO 时间
-    upx_exclude=[        # 排除已知与 UPX 不兼容的 DLL（PySide6/Qt 官方建议）
+    upx=True,            # UPX 压缩减小体积
+    upx_exclude=[        # 排除已知与 UPX 不兼容的 DLL
         "Qt6*.dll",
         "Qt6*.pyd",
         "PySide6",

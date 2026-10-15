@@ -76,12 +76,12 @@
 ## 亮点
 
 - **一份代码三平台**：自动判断系统与 CPU 架构（Apple Silicon 下 JDK 走 aarch64、Node 走 arm64）。
-- **61 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
+- **80 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
 - **26 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
-- **15 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、etcd、Consul、Apache ZooKeeper 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
+- **16 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
 - **前置运行时自动就位**：需要 JDK 的组件（Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata）在本机没有 JDK 或版本太低时，点「启动」会先自动下载安装一个够用的 JDK 再继续；RabbitMQ 需要的 Erlang/OTP 同理（按 RabbitMQ 版本自动配 27.x / 26.x）。用户不需要自己准备任何前置依赖，也不用手改文件。
 - **国内镜像优先 + 多源故障转移**：内置 11 家大陆镜像基址与 3 个 GitHub 加速器，按"大陆源在前 → 逐个换源 → 末位回退官网"走，全程中文日志，**无需手动改 URL**（少数组件只有官网一个源，见[平台支持与例外](#平台支持与例外)）。
-- **多版本并存 + 生效版本切换**：61 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
+- **多版本并存 + 生效版本切换**：80 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
 - **接管你自己装的那一份 + 一键还原**：机器上原有、放在本工具目录之外的 JDK / Maven / Node 等也能被扫描出来设为生效版本（扫描只读，逐个真跑版本命令确认）。动你的系统设置之前先存原文快照，改动后可按原文逐字还原。五道硬规则（原文快照 / 最小编辑 / 关键条目校验 / 复验 / 可还原）缺一不执行。
 - **卸载只删你选中的那个版本**：同组件其它版本的目录、环境变量、`PATH` 条目一概不碰；删掉的正是生效版本时会自动重排。另有标题栏「🧹 清理残留 PATH」清掉指向本工具目录但已不存在的死条目。
 - **检查更新，但不替换自己**：标题栏那颗版本号兼任状态灯（六种状态见[界面导览](#界面导览)）。发现新版点一下就直接下到你选的目录，**不会改名或覆盖正在运行的程序**，也不上传任何用户信息。
@@ -89,20 +89,20 @@
 - **动态版本清单 + 24 小时缓存**：启动后从各家官方 API / 索引拉最新版本，拉到的清单落盘缓存一天（省 GitHub 的匿名额度），拉不到就安静回退内置清单，离线也能用。
 - **搜索与过滤**：87 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
 - **环境变量写入不用 `setx`**：Windows 用 `winreg` 直写注册表（`setx` 有 1024 字符截断），按单条目增删 `PATH`，写完点名通知资源管理器；macOS / Linux 写入带标记的 shell 配置块，幂等更新。
-- **界面**：无边框自定义窗口、卡片按窗口宽度自动分列（可切「▦ 网格 / ☰ 列表」）、渐变进度条、状态胶囊标签、彩色分级中文日志（浮层可收起，出 warn / error 自动弹开并挂未读条数）、窗口图标在任务栏与 Alt+Tab 可见、记住上次每个组件选中的版本。
+- **界面**：无边框自定义窗口、卡片按窗口宽度自动分列（可切「▦ 网格 / ☰ 列表」）、渐变进度条、状态胶囊标签、彩色分级中文日志（浮层可收起，**不会自己弹出来**——出现 warn / error 只在「📋 日志」按钮上挂一个未读条数）、窗口图标在任务栏与 Alt+Tab 可见、记住上次每个组件选中的版本。
 - **平台不支持时会说清楚**：有 2 个组件在 Windows 上没有可用的免安装形态（`Docker`、`Pulsar`），卡片上会写明原因并给替代做法，**不会**先装一个跑不起来的东西再让你自己猜。
 
 ---
 
 ## 30 秒上手
 
-1. 打开工具，四个 Tab 页（开发环境 / 开发软件 / 开发工具 / 一键启停）列出全部组件，每张卡片右上角是**当前状态**：
+1. 打开工具，五个 Tab 页（一键启停 / 服务端组件 / 开发环境 / 开发工具 / Agent客户端）列出全部组件，每张卡片右上角是**当前状态**：
 
    | 状态 | 含义 |
    |---|---|
    | 🟢 `✓ 已配置（PATH）· openjdk version "17.0.10"` | 系统已能找到，无需再装（末尾的版本号是后台异步探测补上的） |
    | 🟠 `● 已下载，未配置` | 本地已有安装包，但环境变量还没设 |
-   | 🟢 `● 已装 2 个版本 · 生效 21（21、17）` | 61 个可装配组件都用这套标签：括号内是磁盘上已装的版本（新→旧），`生效 21` 是当前生效版本 |
+   | 🟢 `● 已装 2 个版本 · 生效 21（21、17）` | 80 个可装配组件都用这套标签：括号内是磁盘上已装的版本（新→旧），`生效 21` 是当前生效版本 |
    | 🟠 `● 已装 2 个版本 · 均未生效（21、17）` | 装了版本，但系统的 `XXX_HOME` / `PATH` 没指向其中任何一个 |
    | 🔴 `○ 未安装` | 一个版本都没装 |
 
@@ -127,14 +127,26 @@ node -v
 
 ## 支持的组件
 
-共 **87 个**：**61 个可一键装配** + **26 个只提供官方安装包下载**（那 26 个是 GUI 工具；61 个里有 15 个还额外支持一键启停）。界面按四个 Tab 分组，Tab 标题自带数量：
+共 **182 个**：**80 个可一键装配** + **102 个只提供官方安装包下载**（102 = 38 个 GUI 工具 + 64 个 Agent 客户端；80 个里有 16 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
-| 开发环境 | 32 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant |
-| 开发软件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
-| 开发工具 | 26 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman |
-| 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
+| 一键启停 | 16 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO |
+| 服务端组件 | 22 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、Caddy、Traefik、Apache JMeter、Terraform、OpenTofu、Argo CD CLI、Prometheus、VictoriaMetrics、k6、Pulumi、Istio CLI、Talos Linux CLI |
+| 开发环境 | 42 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant、Elixir、Scala CLI、Bazelisk、Just、Task、Oxlint、Biome、Nushell、Starship、GitHub CLI |
+| 开发工具 | 38 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim)、CC-Switch、CodexAppManager |
+| Agent客户端 | 64 | Cursor、ZCode、Claude Code、Codex CLI、opencode、OpenHands、Cherry Studio、Goose、Qwen Code、Crush、Kiro、Jan、OpenClaw、Hermes Agent、Gemini CLI、Aider、Ollama、LM Studio、GPT4All、AnythingLLM、LobeHub、GitHub Copilot CLI、ima（腾讯）、Kilo Code、Wave Terminal、Msty Studio、Mistral Vibe、Kimi Work、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火 |
+
+> **Agent客户端这一 Tab 有两档**：64 个里 **56 个**有实测过的官方直链，卡片主按钮是「下载」；
+> 另 **8 个**（Windsurf (Devin)、Claude 桌面版、Google Antigravity、Google Gemini、秘塔AI搜索、
+> 讯飞星火、Gemini CLI、Aider）官方没有可登记的稳定直链，主按钮是**「官网下载」**——点一下在浏览器里打开它的官网，
+> 你自己在那里下。**两档都不代下、不代装、不代跑安装器。**
+
+> **五个 Tab 各自按什么分？**「一键启停」按**能力**分（这个工具能不能替你一键起停）；
+> 「服务端组件」与「开发环境」按**装在哪**分 —— 前者装在服务器/集群上、命令行操作，
+> 后者跑在你这台开发机上；「开发工具」按**形态**分 —— 36 个全是带图形界面的软件；
+> 「Agent客户端」按**品类**分 —— 全是 AI 客户端，其中 56 个有直链可下、8 个只能去官网下。
+> 排这个顺序是为了让最常问的那个问题「我是装服务器还是装本机」能一眼对上。
 
 > 想调整归类：普通组件改 `main.py` 里 `COMPONENT_CATEGORY_OF` 的一行即可；「一键启停」那一页不用登记——组件进了启动白名单 `LAUNCH_OF` 就自动出现在那里，退出来就自动回到原分类。
 
@@ -304,7 +316,7 @@ node -v
 
 ### 同一组件装多个版本，切换「生效版本」
 
-61 个可装配组件全都支持多版本并存（只下载的 26 个磁盘上不落东西，不在这一类），每个版本一个目录：`~/.env-tools/<组件>/<组件>-<版本>/`（例如 `jdk-21` 与 `jdk-17` 并存）。界面上的「生效版本」指明"系统现在实际在用哪一个"。
+80 个可装配组件全都支持多版本并存（只下载的 100 个磁盘上不落东西，不在这一类），每个版本一个目录：`~/.env-tools/<组件>/<组件>-<版本>/`（例如 `jdk-21` 与 `jdk-17` 并存）。界面上的「生效版本」指明"系统现在实际在用哪一个"。
 
 - **绿色对勾 = 磁盘上已装**。带勾的版本可以直接点「卸载」；没勾的点了也没东西可删，所以「卸载」是灰的。
 - **已装版本一定会出现在下拉框里**。在线清单会更新，某个版本可能已被挪出清单但你磁盘上还装着——这时下拉框会按版本号大小把它补回原位并带上绿勾；否则这种版本既选不中、也切不了、还卸不掉，只能手工删目录。补录对所有可装配组件一视同仁（2026-10-06 起）——原先只给多版本组件补，jenkins / nacos 这类照样会遇到「清单里没有、磁盘上装着」。
@@ -338,7 +350,7 @@ node -v
 工具按**抢命令的那条写在哪一段**分别处理，能自己解决就自己解决：
 
 - **写在用户变量里**（只是排在我们前面）：把本工具那条让到用户变量最前，再复验一次——**不弹权限窗口**。
-- **写在系统变量里**：弹确认框逐条列出要改什么，同意后才请求管理员权限，**只在系统 `PATH` 最前插入**本工具这个版本的目录，**原有条目一条不删**（你自己装的那份仍留在系统变量里，只是排到后面）；改完复验，通过才算成功。写完同样会**点名通知资源管理器**——提权改动是助手子进程写的注册表，主程序不补这一声，你会看到"注册表已经对了、软件里的验证终端也是新的，可你自己新开的终端还是旧版本"。
+- **写在系统变量里**：弹确认框逐条列出要改什么，同意后才请求管理员权限，**只在系统 `PATH` 最前插入**本工具这个版本的目录，**原有条目一条不删**（你自己装的那份仍留在系统变量里，只是排到后面）；改完复验，通过才算成功。写完同样会**点名通知资源管理器**——提权改动是助手子进程写的注册表，主程序不补这一声，你会看到"注册表已经对了、你自己新开的终端还是旧版本"。
 - **两边都找不到**：**不弹权限窗口**，如实说明为什么本工具不接手（病灶不在 `PATH` 这两段里，改系统变量也未必对症）。
 
 两种情况都先把改动前的原文存下来，卡片上常驻「↩ 还原到我之前的设置」可一键写回（还原同样是系统级改动，写完也会通知一次资源管理器，否则"还原之后新开的终端"还会命中被还原掉的那个版本）。另外，**切换下一个版本、或卸载这个版本之前，本工具都会先把系统变量还原**，所以系统 `PATH` 里不会留下指向旧目录、或指向已被删目录的残条。你在确认框或 UAC 窗口上点"否"，一律按"未做任何改动"处理。
@@ -348,7 +360,7 @@ node -v
 - **Windows**：新开命令行 / PowerShell 窗口就能读到新值；已打开的窗口需要重启。本工具每次写完后（用户变量、以及提权写的系统变量都算）会**点名通知资源管理器**（`Shell_TrayWnd`）让它立刻重建自己那份环境，所以从开始栏 / 任务栏 / 桌面新开的终端 1 秒内就是新值。
 - **还不变就一定是"宿主进程"旧**：Windows 是把环境块**复制**给新进程的。IDE 和任何常驻程序（它们内部再开终端）揣的还是自己启动那一刻的环境，从它们里面开的终端重开多少次都不会变。切换后日志会点名"比这次切换更早、还开着的终端窗口"（含 pid 与启动时间），照着关掉整个窗口即可；标了「管理员窗口」的那种，本工具的通知进不去，只能整窗关掉重开。
 - **多版本切换同样受这一条约束**：切换生效版本时本工具会立刻把新值同步给自己，但**已经开着的终端和 IDE 看不到这次改动**——终端要重开窗口，IDE（IntelliJ IDEA / Eclipse / VS Code 等）要整个重启，只在 IDE 里新建一个终端标签有时仍然不够。**Windows Terminal 同理**：它的新标签页、新窗口都继承进程启动时那份环境块，要的是把整个 Windows Terminal 关掉重开，不是新开一个标签——新标签页里 PowerShell 会重新打印版权横幅，看着像新窗口，环境其实还是宿主那份旧的。日志结尾那句"已开着的终端与 IDE 需重开才会读到新值"就是这个意思。
-- **拿不准就点标题栏「🖥 开验证终端」**：那个窗口用的是系统为新进程合成的环境，在里面查版本就等于在一个全新终端里查。
+- **拿不准就自己新开一个终端**：Windows 是把环境块**复制**给新进程的，所以**全新打开**的 PowerShell / cmd 窗口读到的就是当前生效的那份环境；已经开着的窗口（包括 IDE 内部开的终端、Windows Terminal 的新标签页）读到的仍是它们启动时那份旧的。
 - **`where java` 可能仍然先命中 Oracle 的 javapath**：Oracle 的 Java 自动更新会在**系统** `PATH` 里插一条 `C:\Program Files\Common Files\Oracle\Java\javapath`，而本工具写的是**用户**变量，用户条目排在系统条目之后。这种情况下即使 `JAVA_HOME` 已经指到我们装的版本，直接敲 `java -version` 报的仍是 javapath 那份。确认办法见下面「怎么验证装的是哪一份」；确认修法是把系统 `PATH` 里那条 javapath 删掉（需要管理员权限改系统环境变量）。
 - **macOS / Linux**：`source ~/.zshrc`（或 `~/.bashrc` / `~/.bash_profile` / `~/.profile`），或直接重开终端。
 
@@ -386,10 +398,10 @@ where java
 | 位置 | 内容 |
 |---|---|
 | 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.1 检查中` = 正在查；`v1.2.1 最新` = 已是最新；`↓ v1.2.2 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.1 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
-| 标题栏（右） | 「★ GitHub」打开仓库 · 「⟳ 刷新版本」绕过缓存强制重抓在线清单 · 「🧹 清理残留 PATH」清死条目 · 「🖥 开验证终端」用系统为新进程合成的环境开一个命令行 · 「♥」支持作者 · 最小化 / 最大化 / 关闭 |
+| 标题栏（右） | 「★ GitHub」打开仓库 · 「⟳ 刷新版本」绕过缓存强制重抓在线清单 · 「🧹 清理残留 PATH」清死条目 · 「♥」支持作者 · 最小化 / 最大化 / 关闭 |
 | 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 87 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
 | 卡片区 | 四个横向 Tab（标题带数量）。每张卡片：名称、状态标签（悬停看完整说明）、版本下拉（可搜索，磁盘已装的带绿勾）、操作按钮（安装 / 切换 / 卸载，可启停的还有启动 / 停止 / 控制台或访问页，只下载的只有下载）、渐变进度条。卡片按窗口宽度自动分列 |
-| 日志浮层 | 默认收起、浮在卡片区下方；点「📋 日志」展开，出现 warn / error 会自动弹开并在按钮上挂未读条数。四色分级（info 灰、ok 绿、warn 橙、error 红），全程中文（含镜像切换与故障转移过程） |
+| 日志浮层 | 默认收起、浮在卡片区下方；点「📋 日志」展开、再点收起。**不会自动弹开**——出现 warn / error 时只在按钮上挂未读条数（`📋 日志 (N)`），想看才点。浮层里可「导出诊断」（诊断报告 + 本次会话日志，反馈问题时附上它）。四色分级（info 灰、ok 绿、warn 橙、error 红），全程中文（含镜像切换与故障转移过程） |
 | 底部状态栏 | 系统信息、**可点开的工作目录**（点一下在资源管理器里打开）、组件计数。版本号不在这里，在标题栏那颗 chip |
 
 检查更新的三条承诺（`DEVELOPMENT.md` 规则 R12）：
@@ -669,7 +681,7 @@ Windows：默认写的就是**用户级**变量，通常不需要管理员权限
 不会。多版本组件的卸载只删下拉框选中的那一个版本目录和它自己的 `PATH` 条目，其它版本的目录、环境变量与条目都不动；`XXX_HOME` 只有在正指向被删版本时才会被清掉。如果删掉的正是生效版本，界面会自动把生效版本切到剩余里版本号最高的那个并在日志里说明（`生效版本已自动切到 …`）。想删的版本没在磁盘上时，下拉框里它前面没有绿色对勾、「卸载」按钮也是灰的。
 
 **Q13. 切换生效版本后，命令行里的 `java -version` 还是旧版本？**
-先点标题栏的 **「🖥 开验证终端」**：那个窗口用的是系统为新进程现算的环境，里面查到的版本就是任何全新终端应当看到的版本。这里对了、你原来那个窗口不对，就说明那个窗口比这次切换更早。按这三步查：
+先**自己新开一个** PowerShell / cmd 窗口：Windows 是把环境块**复制**给新进程的，全新打开的窗口读到的就是当前生效的那份环境。这里对了、你原来那个窗口不对，就说明那个窗口比这次切换更早。按这三步查：
 
 1. **窗口没重开**：切换只影响新开进程。已开着的终端要关窗重开，IDE（IDEA / Eclipse / VS Code）要整个重启。切换成功后日志会自动点名"比这次切换更早、还开着的终端窗口"（给出 pid 和启动时间），照着那个 pid 关窗口即可；标了「管理员窗口」的那种，本工具的通知进不去，只能整窗关掉重开。注意 Windows Terminal 的新标签页 / 新窗口继承的是宿主进程那份旧环境，**只关标签页不算重开**。
 2. **被 Oracle 的 javapath 抢先**：系统 `PATH` 里若有 `C:\Program Files\Common Files\Oracle\Java\javapath`，它排在用户变量之前，直接敲 `java` 用的仍是它那份。用 `where java` 看第一行落在哪个目录即可判定，`%JAVA_HOME%\bin\java -version` 可绕开 `PATH` 验证我们这份没问题。
@@ -703,7 +715,8 @@ byte-tools/
 ├── MIRROR_REPORT.md            # 镜像源实测报告
 ├── docs/                       # 需求模板、组件接入经验、真机测试报告
 ├── tools/                      # 实测 / 取证 / 性能脚本（不是运行时依赖）
-├── bt_*_tests.py               # 离线回归用例（十余套，全部不联网）
+├── tests/                      # 离线回归用例（20 套，全部不联网）+ 前置 _btprelude.py 与 runner
+├── artifacts/                  # 一次性产物（演练结果转储、采集日志）。不是源码，别当证据库
 ├── 同步Gitee产物.bat / .sh     # 本机与 CI 的 Gitee 同步脚本
 ├── .github/workflows/release.yml   # 三平台自动构建 + 发布（含 Gitee 同步）
 ├── assets/                     # 图标、界面截图、收款码

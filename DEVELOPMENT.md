@@ -35,6 +35,8 @@
 - [规则 R16：像素裁字只能在真实渲染下判](#规则-r16像素裁字只能在真实渲染下判offscreen-的度量会把你带偏)
 - [规则 R17：组件详情弹窗](#规则-r17组件详情弹窗2026-10-12)
 - [规则 R18：冷启动预算——建卡不许逐个扫 PATH](#规则-r18冷启动预算建卡不许逐个扫-path2026-10-13)
+- [规则 R19：官网地址必须人工登记，不许从下载 URL 推导](#规则-r19官网地址必须人工登记不许从下载-url-推导2026-10-14)
+- [规则 R20：「Agent客户端」是第五个只下载的 Tab](#规则-r20agent客户端是第五个只下载的-tab2026-10-15)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -478,19 +480,58 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 49 个可见组件归入且仅归入四个 Tab，分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **182 个可见组件**归入且仅归入五个 Tab（183 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
-| 分类 | 判定标准 | 组件（10 / 6 / 17 / 10） |
+| 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
-| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | jdk、python、node、go、bun、conda、git、maven、gradle、powershell |
-| **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | mysql、mongodb、postgresql、pulsar、docker、kubectl |
-| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | idea、pycharm、clion、webstorm、goland、datagrip、vscode、dbx、windterm、wechat-devtools、eclipse、apipost、apifox、hbuilderx、android-studio、visual-studio、navicat |
-| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | jenkins、nacos、activemq、rocketmq、nginx、kafka、tomcat、elasticsearch、rabbitmq、seata |
+| **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | activemq、consul、elasticsearch、etcd、jenkins、kafka、minio、nacos、nginx、rabbitmq、redis、rocketmq、seata、tomcat、zookeeper |
+| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码，**跑在本机开发机上** | ant、bat、bun、cmake、conda、dart、deno、dotnet-sdk、duckdb、eza、fd、fzf、git、go、graalvm、gradle、jdk、jq、kotlin、maven、ninja、node、pnpm、powershell、protoc、python、ripgrep、rust、sqlite、uv、yq、zoxide（+ 隐藏的 erlang） |
+| **服务端组件** | 装在**服务器 / 集群**上、命令行操作的后台服务与运维组件（数据库 / 消息队列 / 网关 / 容器与编排 / K8s 运维）—— 原名「开发软件」，2026-10-14 改名 | caddy、docker、docker-compose、helm、jmeter、k9s、kubectl、mongodb、mysql、nats-server、postgresql、pulsar、traefik、trivy |
+| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | android-studio、apifox、apipost、ardm、bruno、clion、datagrip、dbeaver、dbx、eclipse、goland、hbuilderx、heidisql、idea、mongodb-compass、mysql-workbench、navicat、pgadmin4、postman、pycharm、redisinsight、visual-studio、vscode、webstorm,wechat-devtools、windterm |
+| **Agent客户端** | 与「开发工具」**同类**（`download_only`，只下载不配置），单列一个 Tab 是因为它既不是开发环境也不是工具 —— AI 编程 / 办公 Agent 的桌面端与 CLI 发行包。成员由 `_AGENT_CLIENTS` 那张表派生（见 R13 与 R20） | cursor、zcode、claude-code、codex-cli、qoderwork-cn |
 
-边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
-（「一键启停」固定是**最后一个** Tab：它是本工具最能干活的一组，埋在中间等于藏起来。2026-10-08 用户要求它紧贴「其它软件」；2026-10-10「其它软件」被取消，护栏改写成"必须是最后一个"。）
-（2026-10-10 取消「其它软件」Tab：它只剩 docker、kubectl 两张卡，用户要求并进「开发软件」。注意 `group_components()` 给每个分类都建空列表、建 Tab 的循环**不跳过空组** —— 只挪成员而不从 `COMPONENT_CATEGORIES` 删名字，界面上会多出一个「其它软件（0）」空白页。）
-（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；Nginx 与 Tomcat 同理，本地跑起来当 Web / 反向代理依赖，属开发软件。）
+**Tab 顺序 = `COMPONENT_CATEGORIES` 的顺序**：
+
+```
+一键启停 → 服务端组件 → 开发环境 → 开发工具 → Agent客户端
+```
+
+顺序改过三次，都由用户指定：
+- **2026-10-14**「一键启停」提到**第一个**（原先固定最后一个）—— 它是本工具最能干活的一组长，
+  不许被埋在中间。
+- **2026-10-14**「开发软件」改名「服务端组件」并提到**第二位**。
+- **2026-10-15** 新增**第五个**「Agent客户端」，用户明确要求**放最后**。
+
+后者为什么排第二：它与「开发环境」的界线是**东西跑在哪** —— 服务端组件装在服务器/集群上，
+开发环境跑在你自己这台机器上。用户装东西时先问的就是"装服务器还是装本机"，
+这个顺序直接对应那个问题。
+
+`bt_component_category_tests` 里 `test_launch_tab_is_the_first_one`、
+`test_server_tab_is_the_second_one`、`test_tab_order_is_exactly_launch_server_env_tool`
+三条把整个顺序钉死。顺序断言换过三次方向（2026-10-08"紧贴「其它软件」"→
+10-10"必须是最后一个"→ 10-14"必须是第一个"+整体序列），**意图始终是"这一组不许被埋没"**。
+
+> **分类名请用 `CAT_LAUNCH` / `CAT_SERVER` / `CAT_ENV` / `CAT_TOOL` 四个常量，不要写裸字符串。**
+> 这四个名字原先散落在 main.py 二十几处、tests 四个文件、六份文档里，改一次名要动 51 处。
+> 其中一处尤其危险：`ComponentCard._render_icon` 的**分类色块**映射是拿分类名当键的，
+> 键对不上**不会报错**，只会安静地落进兜底灰色，整个 Tab 的无图标组件一起变灰块。
+> 现在那里也改用常量，并有 `test_color_map_keys_still_match_the_categories` 盯着。
+
+> **上面这份名单与数字是 2026-10-14 的快照，且只作示例** —— 组件加得很快（2026-10-10 还是 43 个，
+> 四天后就 87 个）。**权威值一律现算**，别照抄本文：
+> `.venv/Scripts/python.exe -c "import _btprelude,main;cs=main.build_components();import collections;print(len(cs), collections.Counter(c.category for c in cs))"`
+> 分类的**真源**始终是 `COMPONENT_CATEGORY_OF` + `LAUNCH_KEYS`（见 R2.3），不是这张表。
+
+边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**是装在本机还是装在服务器上** → 装本机则开发环境，装服务器则服务端组件。
+
+> 改名的理由（原「开发软件」为什么不行）：那个名字**太空**——"软件"是万金油，四个 Tab 里
+> 唯一一个不描述功能的；而且它和隔壁「开发工具」在中文里近乎同义词，用户根本分不清界线。
+> 「服务端组件」只说一件确凿的事：**这 14 个全是装在服务器上、命令行操作的，没有一个是 GUI**，
+> 正好和「开发工具」（26 个全是 IDE / GUI 客户端）形成清晰对照。
+
+（2026-10-10 取消「其它软件」Tab：它只剩 docker、kubectl 两张卡，用户要求并进服务端组件。注意 `group_components()` 给每个分类都建空列表、建 Tab 的循环**不跳过空组** —— 只挪成员而不从 `COMPONENT_CATEGORIES` 删名字，界面上会多出一个「其它软件（0）」空白页。）
+（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；kubectl 虽然操作的是集群，但它是**本地命令行客户端**，按"装在哪"判属服务端组件。）
+（例：Tomcat / Nginx / Jenkins 这类需要跑起来给项目用的服务属**一键启停** —— 能一键起停优先于性质，见上。）
 
 ### R2.2 适用范围
 
@@ -504,12 +545,19 @@ tmp.replace(self.dest)
 可启停那一组**由 `LAUNCH_KEYS` 派生**，不在分类表里重复登记。
 
 ```python
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "一键启停", "其它软件")   # Tab 顺序即此顺序
+# 分类名一律用常量，不写裸字符串（见 R2.1 的说明）
+CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL = "一键启停", "服务端组件", "开发环境", "开发工具"
+
+COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL, CAT_AGENT)   # Tab 顺序即此顺序
 COMPONENT_CATEGORY_OF = {
     ...
-    "foo": "开发软件",          # 新增组件在这里加一行（它接进 LAUNCH_OF 后会自动进「一键启停」）
+    "foo": CAT_SERVER,        # 新增组件在这里加一行（它接进 LAUNCH_OF 后会自动进「一键启停」）
 }
 ```
+
+> `COMPONENT_CATEGORIES` 这行是**代码片段示意**，不是当前值。Tab 顺序 2026-10-14 调整过两次，
+> 权威值看 `main.COMPONENT_CATEGORIES`，或在测试里用
+> `test_tab_order_is_exactly_launch_server_env_tool` 核对。
 
 `build_components()` 末尾统一执行
 `comp.category = "一键启停" if comp.key in LAUNCH_KEYS else COMPONENT_CATEGORY_OF[comp.key]`——
@@ -519,7 +567,7 @@ COMPONENT_CATEGORY_OF = {
 **不要**在各 `Component(...)` 构造处手写 `category=`，也**不要**给 `.get(key, 默认值)` 兜底：
 （上一段已写明不许 `.get` 兜底）漏登记必须 KeyError 炸出来，静默归到某个分类会让新组件"消失"在错误的 Tab 里。
 
-`MainWindow.cards` 必须保持**全量平铺**（49 项，跨 Tab 收集）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
+`MainWindow.cards` 必须保持**全量平铺**（当前 87 项，跨 Tab 收集；数字会随组件增减而变，别写死）：刷新版本、读写配置、关窗前等探测线程都遍历它，分组只改变卡片的父布局。
 
 Tab 条固定在**顶部横向**（`setTabPosition(QTabWidget.North)`），标题格式为 `f"{分类名}（{数量}）"`，
 数量由 `group_components()` 的结果现算——**不要写死数字**，否则增删组件后标题会与真实卡片数不符。
@@ -543,9 +591,23 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 底部日志区已**移出 `QSplitter` 的 3:2 分配**，改成浮层（同 parent + `raise_()`，几何随 resize 跟随），
 展开时**遮住**最下面一行格子而不是把网格压扁。选浮层的理由：它不在 `body` 的布局里，`show/hide` 不触发
 重排 ⇒ 列数与行数只由窗口宽度决定，开关日志不会让格子忽大忽小，也省掉"挤压式折叠"的二次 relayout。
-触发规则：**只有 `warn` / `error` 才自动弹开**并挂未读条数（写在 `📋 日志 (N)` 按钮文字里，不新增控件）；
-下载/安装这类常规进度不弹（进度条已在卡片上，每来一条都弹会把用户正在操作的那张卡盖住）。
-未读数只在"弹开前是收起的"时才累加；手动打开即清零且**不自动收起**；自动弹开的那个静默 8 秒后自愈收起。
+触发规则（**2026-10-14 用户要求改写**）：**日志浮层永不自动弹开、也永不自动收起**。
+`warn` / `error` 只累加未读数并写在 `📋 日志 (N)` 按钮文字里（不新增控件），
+用户想看点一下按钮；再点一次收起。手动打开即视为已读，未读清零。
+
+> **旧策略与它为什么失败**（别再改回去）：原先是"只有 warn/error 才自动弹开 + 静默
+> `LOG_AUTO_HIDE_MS = 8000` 后自愈收起"，并配一个"启动后 `LOG_AUTO_POP_DELAY_MS = 10000`
+> 内不自动弹"的静默期。那个静默期只挡住启动**头 10 秒**，而一轮版本抓取要 **30~40 秒**，
+> 于是第 12 / 25 / 35 秒到达的告警（GitHub 限流、各组件抓取失败）全都晚于 10 秒，照弹不误。
+> 表现上像随机 —— 网络快时失败来得早被挡住、看着正常；网络慢或撞限流时失败来得晚就弹，
+> 于是用户报告"偶尔还是会自己打开"。
+>
+> 现在整套基础设施已删除：模块级常量 `LOG_AUTO_HIDE_MS` / `LOG_AUTO_POP_DELAY_MS`、
+> 方法 `_log_autopop_allowed()` / `_on_log_auto_hide()`、窗口属性 `_log_auto_hide` /
+> `_log_user_open` / `_startup_mono`。**一个都不许复活**——那个 bug 的成因正是
+> "一个听起来合理的静默期其实盖不住真正的时长"。
+> 护栏用例：`bt_install_safety_tests.LogOverlayNeverAutoPops`（6 条，含"连发 50 条告警
+> 也不许弹"与"这一整套符号必须不存在"的反向断言）。
 
 ### R2.4 新增 / 调整组件分类 checklist
 
@@ -578,7 +640,7 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
 - **全组件搜索的呈现方式**：搜索时收起四个 Tab（`QStackedWidget#topStack` 切到统一结果页 `QScrollArea#resultsArea`），
   把所有命中的组件**按分类归并到同一个滚动列表**（每个分类前插一个 `QLabel#resultCatHeader` 小标题），一眼看全、不用切页；
   清空搜索词后 `QStackedWidget` 切回 Tab 浏览态、卡片各自归位、Tab 标题恢复 `分类（总数）`。
-  右侧 `#searchHint` 仍显示"匹配 N / 49 个组件"（0 命中转警示红）。数字一律现算
+  右侧 `#searchHint` 仍显示"匹配 N / 87 个组件"（0 命中转警示红）。数字一律现算（别写死，组件数在涨）
 - 这正是"全组件搜索、而不是只搜某个 table 内"的要求：结果跨三个分类，统一归并展示
 - 新增组件**不需要**为搜索做任何登记：卡片建好就自动可搜。改匹配规则要同步 `bt_search_and_newcmp_tests.py`
 - 外观约定：输入框不直接描边，而是套一层胶囊外壳 `#searchShell`（放大镜 + 输入框同属一块白底圆角），
@@ -586,6 +648,90 @@ Tab 内的卡片排成**按宽度重排的网格**（2026-10-08），不再是�
   改外壳的 `focused` 属性并 `unpolish/polish` 重刷样式（QSS 的 `:focus` 选不到父级控件）。
   放大镜与清空按钮图标都用 `QPainter` 现画，不加图片资源；清空按钮用 `QLineEdit.TrailingPosition`
   的 QAction 代替内置清除按钮，以保证跨平台观感一致、颜色可控
+
+### R2.6 搜索卡顿的真因：搬家会触发 QSS 重算（2026-10-15 实测）
+
+用户报"左上角搜索响应太慢"。**先测再改**，实测口径是造一个真窗口（offscreen）、
+让 128 张卡都在，然后按真实交互序列打点。最终结果：
+
+| 场景（128 组件，命中数见括注） | 原始 | 现在 |
+|---|---|---|
+| 搜索态之间 `a` → `e`（各百余命中） | 4288 ms | **213 ms** |
+| `e` → `i` | 3648 ms | **158 ms** |
+| 输入 `a` 后改成 `zzzz`（→0 命中） | 1285 ms | **18 ms** |
+| 逐字敲 `cursor` 小计（84→3→1） | 3978 ms | 2387 ms |
+| 浏览态 → 搜 `a`（进入搜索，115 命中） | 2331 ms | 757 ms |
+| 清空回浏览（退出搜索） | 1447 ms | 1442 ms |
+
+**打字过程中改词**快了一个数量级（20 倍上下）——这正是用户抱怨的那件事。
+剩下两个大数字是**进入/退出搜索那一次性**的：一百多张卡整体搬一次家，各约 0.7 s / 1.4 s，
+那是 Qt 给每张卡重算样式的硬成本（见下）；要再压就得把浏览 Tab 的行也换成无宿主布局，
+而浏览态的像素断言与 `_reveal_running_tabs` 都按 `cardRow` 找行，风险另算。
+
+**真因不是"逻辑重"，是 Qt 的样式重算。**三组对照实验（同一个 `_apply_search('a')`）：
+
+| 改动 | 耗时 | 说明 |
+|---|---|---|
+| 基线 | 2449 ms | |
+| 套 `setUpdatesEnabled(False)` | 1622 ms | 只省掉重绘那部分，约 1/3 |
+| **临时代码里摘掉窗口样式表** | **339 ms** | **7.2 倍** —— 82% 的时间是 QSS |
+
+`theme.QSS` 挂在**窗口**上（`main.py` 的 `_apply_theme`），里面有 `#card` 这条规则；
+于是**每搬一次家**（`setParent` / `layout.addWidget` 把卡片换父级）都会让
+`QStyleSheetStyle` 把该卡**整棵子树**重新解析一遍样式。
+
+一条特别反直觉、也最该记住的实测：
+
+> **搬到"同一个父级"也不便宜。** `card.setParent(卡片当前父级)` 实测仍约 **5 ms/张**，
+> 因为 Qt 照样走一遍 `inheritStyle` → 重新 polish。115 张就是 ~0.6 s。
+> 所以"顺手再 setParent 一次确保正确"是纯粹的净损失，不是无操作。
+
+### 由此得出的四条实现约定
+
+1. **搜索结果的行用无宿主的 `QHBoxLayout`，不是 `QWidget#cardRow`**（`_make_layout_rows`）。
+   `QLayout::addChildWidget` 把控件 reparent 到**布局的 `parentWidget()`** ——
+   行是 `QWidget` 时卡片父级变成那个新行，而布局的 `parentWidget()` 就是容器本身，
+   **卡片父级不变**，整条 polish 路径被跳过。实测同一份 115 张卡：
+
+   | `_make_rows` 的做法 | 耗时 |
+   |---|---|
+   | 行控件 `QWidget#cardRow` | 1001 ms |
+   | 行是 `QHBoxLayout` | **3.5 ms** |
+
+   代价：行没有 `objectName` 了，`_drop_rows` / `_clear_results_layout` /
+   `CardColumnLayout.indexOf` 三处都要认「行也可能是布局」。**Tab 的行不动**
+   （浏览态的 `findChildren` / 像素断言 / `_reveal_running_tabs` 都按行控件写）。
+
+2. **搜索期间一张卡都不许"搬家"**：不再是命中项就只 `setVisible(False)`，
+   **不要**顺手送回 Tab。逐字输入时这最贵 —— 实测 `'c' → 'cu'`（84→3 命中）
+   光是送回这 81 张卡就要 **0.7 s**。它们留在结果面板宿主上藏着，退出搜索时一次扫干净。
+
+3. **退出搜索时那记扫尾不能省**（`_clear_results_layout(send_home=True)` 末尾按
+   `card.parent() is self.results_content` 全量扫一遍）。搜索期间留下的卡片**不属于任何一行**，
+   而"拆行"那圈只走到"行里的卡"—— 漏掉这步的后果是**清空搜索后卡片凭空少一批**：
+   结果面板是 `top_stack` 的隐藏页，卡挂在那儿 = 浏览态里消失。
+   2026-10-15 自查时实测到清空后仍有 **115 张**卡留在 `results_content` 上（自动化用例全绿、
+   只有专门写脚本按"卡片的父级是谁"点数才看得出）。判据脚本见下方"自查"一句。
+
+4. **重建期间关重绘**（`setUpdatesEnabled(False)`，`try/finally` 兜底 —— 异常也必须还回去，
+   否则窗口从此不再刷新），以及**删掉 `_build_unified` 里那句多余的
+   "先把命中的卡挂到 `results_content`"**（`_relayout_results` 紧接着会做同一件事）。
+
+**自查这类"卡片搬家"改动的最小手段**（比看用例红绿可靠）：
+起一个真窗口，按 `'a' → 'zzzz' → ''` 这类序列打完，然后数
+`sum(1 for c in win.cards if c.parent() is win.results_content)` ——
+**清空之后它必须是 0**；搜索态下它是"刻意的非零"（就是第 2 条省下来的那批）。
+
+**这条 286 倍的收益已经在 2026-10-15 落地**（用户看过数据后拍板"现在就改"）。
+改完同步了两处按"行是控件"写的测试断言：`bt_grid_layout_tests` 的
+`_row_cards` / `_row_cells`（现在三种行形态都认）与 `bt_search_and_newcmp_tests._result_widgets`
+（遇到 `item.layout()` 也要钻进去收卡片）；`CardColumnLayout.indexOf` 同样加了布局行分支
+（`_reveal_running_tabs` 那一族按它判归属，漏了会静默失效）。
+
+另外两条**试过但否掉**的方案，别再走一遍：把窗口样式表整段摘掉再挂回（恢复那一次
+`setStyleSheet(QSS)` 本身要 681 ms，净赚只有 18%）；以及"防抖"（`textChanged` 后延时再搜）——
+`bt_search_and_newcmp_tests` 有一批用例是 `search_box.setText(...)` 之后**立刻**断言的，
+加防抖会成批变红，且会改变"同步出结果"这个既有语义。
 
 ---
 
@@ -749,20 +895,25 @@ UIPI 挡着我们的 `WM_SETTINGCHANGE`，环境块还是登录时那一份）�
 这条信息只能以 **info** 级输出——它是附加说明，写成 warn 会让"复验通过"的用例凭空多一条告警。
 扫描失败绝不影响切换本身（`_apply_active` 仍返回 True）。护栏用例：`StaleTerminalNotice`（7 条）。
 
-### R3.13 必须提供"必然干净的环境"验证入口
+### R3.13 不提供"验证终端"入口，让用户用系统自己的新终端验证
 
-R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对了没有"。顶栏 `btn_clean_terminal`
-（「🖥 开验证终端」）用 `EnvManager.composed_env()` 现算的那份环境块起一个 `cmd.exe`
-（`open_clean_console(env)`，`CREATE_NEW_CONSOLE`），这个窗口里的版本号就是任何全新终端应当看到的版本。
-
-三条硬约束：
-- **拿不到合成环境就不许开**（`composed_env()` 返回空 ⇒ 只写 warn 并给出原地刷新的 PowerShell 命令）。
-  退化成用本进程 `os.environ` 开出来的窗口，验证价值为零，还会给出错误结论。
-- 开不了（`Popen` 抛异常）要 `error` 级说明，不许静默。
-- `open_clean_console()` 是唯一副作用接缝；有一条用例真桩 `subprocess.Popen` 钉住
-  `env` 与 `creationflags` 两个参数名——写错了只有用户点下去才会炸。
-
-护栏用例：`CleanTerminalWindow`（8 条）。
+> **2026-10-14 用户取消本节原先要求的功能。** 原先是顶栏 `btn_clean_terminal`（「🖥 开验证终端」）
+> 用 `EnvManager.composed_env()` 现算的环境块起一个 `cmd.exe`，理由是"给一个必然干净的窗口才有结论"。
+> 现按用户要求移除，连同 `open_clean_console()`、`_on_clean_terminal_clicked()` 与护栏用例
+> `CleanTerminalWindow` 一并删除。原因有二：
+>
+> 1. **标题栏只留"每天都会用"的动作**。这一颗属于"出问题时才用"，常年占着最宽的位置却不点。
+> 2. **那条能力是可替代的**：Windows 把环境块**复制**给新进程，用户**自己新开的**
+>    PowerShell / cmd 窗口拿到的就是系统现算的那份环境，与工具开的窗口等价。
+>    所以取消的是"替用户开"这个动作，不是"能不能验证"。
+>
+> 配套保留：`_log_verification_hint` / `stale_shell_lines`（R3.12）仍然把"比这次切换更早、
+> 还开着的终端"点名到 pid，日志里也仍然给出原地刷新 PATH 的 PowerShell 命令。
+> **回归护栏**：`bt_feedback_tests.DiagnosticsExport.test_export_button_is_wired` 里有一条
+> 反向断言钉住 `btn_clean_terminal` / `btn_diagnostics` 不许复活。
+>
+> 若将来要重新加回来：能力本身没丢，从 git 历史取回 `open_clean_console()` 即可；
+> 但**必须先量标题栏预算**（见下一段），并且不要把它做成唯一入口。
 
 **加标题栏按钮要重量最窄窗口**：标题栏（标题 + 按钮 + 窗口控制）实测需要 ~992 像素，
 而窗口最小宽原本只有 880 —— 布局早就在挤压标题文字，多一个按钮后开始把
@@ -770,6 +921,12 @@ R3.12 只能告诉用户"哪些窗口是旧的"，回答不了"那到底切对�
 并给四个文字按钮设 `QSizePolicy.Fixed`。`test_title_bar_buttons_are_not_clipped_at_minimum_width`
 钉住这条；注意 `QLabel.setMinimumWidth(0)` 和 `QSizePolicy.Fixed` **都挡不住**总宽不足时
 布局的挤压（实测仍裁字），唯一有效的是把窗口最小宽抬到实际需要的值。
+
+> 量预算的工具：`tools/bt_titlebar_budget.py`（它显式 `pop("QT_QPA_PLATFORM")` 走真实平台）。
+> **2026-10-14 移除「开验证终端」「导出诊断」两颗按钮后，实测整行只需 580 像素**
+> （chip 最长文案「↓ v1.10.0 待更新」占 111），1000 这一档余量充足。
+> 该脚本的 `NAMES` 元组里还留着已删的两个按钮名 —— 无害（找不到就 `continue`），
+> 但下次动它时顺手清掉。
 
 ### R3.14 两个一键脚本都不许为 WMI 阻塞用户
 
@@ -1165,7 +1322,10 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R5.2 适用范围
 
-- `LAUNCH_KEYS` 里的组件。当前为 `{"jenkins", "activemq", "nacos"}`。
+- `LAUNCH_KEYS` 里的组件。**不手写清单**：真源是 `main.py` 的 `LAUNCH_OF`，
+  `LAUNCH_KEYS = set(LAUNCH_OF)` 由它派生（`bt_launch_tests.py` 会把实际集合钉死）。
+  此处曾写死 `{"jenkins", "activemq", "nacos"}` 并长期漂移到落后 12 个组件 ——
+  手抄的第二份白名单必然对不上。
 - 不在白名单的组件不得出现启动按钮，也不得被 `ServiceManager` 写入登记
   （`build_components()` 末尾 `comp.launch = LAUNCH_OF.get(comp.key)`，不在登记表就是 `None`）。
 
@@ -1266,7 +1426,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ### R5.6 护栏用例
 
-`bt_launch_tests.py`（133 条，全离线，不真起中间件）盯住：
+`bt_launch_tests.py`（全离线，不真起中间件；用例数以 `.venv/Scripts/python.exe -u tests/run_all_tests.py` 的输出为准——数字写在文档里只会漂移，实测曾长期停在 133 而实际已 257）盯住：
 `LaunchSpecTable`（白名单恰为 `{jenkins, activemq, nacos}`、三平台命令非空、白名单外无 launch、
 `test_min_java_major_is_none_until_measured` 钉住"未实测不许填数字"、`test_plan_two_fields_default_to_plan_one_behaviour`
 钉住"计划二新字段的默认值就是计划一既有行为"）、`RunningMap`（含旧格式记录缺 `ports` 的加载侧归一）、
@@ -1608,7 +1768,7 @@ README / README_EN / CODE_WIKI 里的产物名同步改掉。**改名是跨文�
 
 ### R12.4 用例
 
-`bt_update_check_tests.py`（23 条，全离线：`check_for_update(fetch=...)` 是可注入接缝，
+`bt_update_check_tests.py`（全离线，用例数以 `run_all_tests.py` 输出为准：`check_for_update(fetch=...)` 是可注入接缝，
 测试不联网）：响应解析与拒绝形状、无产物 Release、数值版本比较、两时代产物挑选、
 24 小时频控、同版本只提示一次、失败静默位、加速器兜底、隐私线、
 chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R12.5 那五条：
@@ -2112,3 +2272,531 @@ offscreen 没有系统中文字体的回退链，Qt 换了一个宽得多的替�
   N=87 时就是 0.9s。要扫就批量化（一次 scandir 建索引，查表 O(1)）。
 - 冷启动回归门槛：`python -X importtime` 之外，建窗（`MainWindow()` 构造）
   超过 **1.5s** 必须先 profile 再合并，不许"再等等优化"。
+
+---
+
+## 规则 R19：官网地址必须人工登记，不许从下载 URL 推导（2026-10-14）
+
+### R19.1 背景：推导出来的东西根本不是官网
+
+详情页一直有一行"官方地址 / 官方下载"，原先由 `comp_download_host(comp)` 从
+组件的**下载 URL** 里切域名。2026-10-14 实测 88 个组件的推导结果：
+
+| 推导出的域名类型 | 数量 | 例子 |
+|---|---|---|
+| `github.com`（仓库页，不是官网） | 39 | git / redis / minio / caddy / fd |
+| CDN / 下载服务器 | 31 | `api.adoptium.net`、`artifacts.elastic.co`、`aka.ms`、`edgedl.me.gvt1.com`、`fastdl.mongodb.org` |
+| Apache 归档站 | 10 | `archive.apache.org`（该是 `kafka.apache.org`） |
+| 压根推不出来 | 1 | docker |
+| **确实是官网** | **7** | nginx.org / python.org / nodejs.org / go.dev / gradle.org / sqlite.org / apipost.cn |
+
+也就是说那行字**有 81/88 是错的**。写"官方地址"却给用户一个下载服务器，
+比不写更糟。
+
+### R19.2 做法
+
+- `COMPONENT_OFFICIAL_URLS`（`main.py`）单点登记 88 条，每条带核实依据注释
+  （`CN` = 大陆入口、`INT` = 国际官网、`403` = 站点有反爬但域名有效）。
+- `build_components()` 末尾统一赋值 `comp.official_url`，**漏登记直接 KeyError**。
+- 取值口径（用户 2026-10-14 拍板，乙档）：
+  1. 有中国大陆官网入口的优先用 —— 含两种形态：**独立 CN 域名**
+     （`golang.google.cn` / `navicat.com.cn` / `apifox.cn` / `dcloud.io` /
+     `developers.weixin.qq.com`）与**同域名中文路径**
+     （`nodejs.org/zh-cn`、`jetbrains.com/zh-cn`、`visualstudio.microsoft.com/zh-hans`、
+     `code.visualstudio.com/docs/?locale=zh-cn`、`learn.microsoft.com/zh-cn/powershell/`、
+     `kubernetes.io/zh-cn/…`）；
+  2. 没有中文入口的，用该项目**真实国际官网首页**。
+- 链接文字与 href **必须同源**：文字里的域名用 `_url_netloc(href)` 现切，
+  不另写一份字符串。早先"文字显示下载域名、跳转却是官网"的写法已废弃。
+
+### R19.3 红线
+
+- **不许再写"从 URL 推导官网"的逻辑**。`comp_download_host()` 已连同它的两条
+  用例一起删除。
+- 登记表里出现 CDN / 下载服务器域名即为错，`tests/bt_component_detail_tests.py`
+  的 `test_download_hosts_are_not_registered_as_official` 会拦。
+- 这 88 条是人工核实的事实，**项目改名换域名后会悄悄过期**。接新组件时必须在
+  `COMPONENT_OFFICIAL_URLS` 补一条（漏登记即测试变红），不是可选项。
+
+---
+
+## 规则 R20：「Agent客户端」是第五个只下载的 Tab（2026-10-15）
+
+### R20.1 规则描述
+
+用户 2026-10-15 要求：**在 Tab 末尾新增一个「Agent客户端」**，把 AI 编程 / 办公 Agent 的
+桌面端与 CLI 发行包做成组件，"图标、详情、下载链接一律按现有组件的流程来"。
+
+- **位置**：必须是**最后一个** Tab（用户原话"table 放在最后"）。插到中间即为违约。
+- **形态**：与「开发工具」**同类** —— `download_only=True`，卡片只有「版本下拉 + 下载」，
+  不解压、不配环境变量、不扫盘、不代跑安装器（R13 的八个短路点原样适用）。
+- **成员真源**：`main.py` 的 `_AGENT_CLIENTS` 那张表（表驱动，与 `_DEVTOOLS` 同行格式、
+  共用 `_download_only_components()` 生成器）。分类由
+  `COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})` 自动喂进去。
+
+### R20.2 三条硬约束
+
+1. **表驱动，不许手写 Component(...)**：两张只下载表共用一个 builder。抄十几遍必然漏一处，
+   而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+   接一个新客户端 = 只改 `_AGENT_CLIENTS` 一行 + 补三张登记表
+   （`COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`，见 R19）——
+   **漏登记直接 KeyError 或测试变红**，这是刻意的。
+2. **版本位：拿不到版本列表就退而求其次，但不许编**。这批产品多数**只发滚动 latest**，
+   官方没有"列历史版本"的接口（用户 2026-10-15 明确"只要能下载就好"）。取值顺序：
+   ① 官方给的版本号（如 Cursor 的 golden 链按 `主.次` 发版）；
+   ② 直链路径里的版本号（如 ZCode 的 `/releases/3.15.3/`）；
+   ③ **实在没有就取服务端文件的 `Last-Modified` 年月**（先例：`wechat-devtools` 的 `2026.09`），
+   并在 `data_note` 里写明"这不是软件版本号"。
+3. **几乎没有大陆镜像 → 必须走 R1.5 例外登记**。这批全是各家官网 / 厂商自有 CDN 直发。
+   `bt_mirror_spec_tests.WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION`
+   里必须点名（否则"≥2 个大陆源"那条会红）；**GitHub 产物的**（`claude-code` / `codex-cli`）
+   不在这张表里 —— `_gh_accelerated()` 会给它们挂 3 个加速器，而**加速器算大陆源**，
+   它们走常规检查、登记在 `test_no_component_escapes_this_table` 的 `github_assets`。
+   ⚠ 注意 `is_mainland()` 认的是**镜像站**标记，不是"域名在国内"：
+   `cdn-zcode.z.ai` / `download.qoder.com` 是厂商自己的 CDN，仍算 0 源。
+
+### R20.3 实测口径与首批登记
+
+URL 与字节数**一律带 `byte-tools/1.2.1` UA 实测**（R1 的口径）。首批 5 个（用
+`Content-Range` 拿总体积，不整包下载）：
+
+| key | 显示名 | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|
+| `cursor` | Cursor | 3.24 | 215,228,800 | `api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/<主.次>` |
+| `zcode` | ZCode | 3.15.3 | 181,367,144 | `cdn-zcode.z.ai/zcode/electron/releases/3.15.3/windows-x64/…` |
+| `claude-code` | Claude Code | 2.1.300 | 121,043,936 | GitHub Releases（加速器优先） |
+| `codex-cli` | Codex CLI | 0.162.1 | 333,479,728 | GitHub Releases（另发 zip，164,672,399） |
+| `qoderwork-cn` | QoderWork CN | 2026.09 | 253,672,408 | `download.qoder.com/…/latest/…`（滚动，版本位取 Last-Modified 年月） |
+
+**CLI ≠ GUI，`data_note` 要写清**：Claude Code / Codex CLI 是终端工具，下载解压后要自己
+配 PATH 并登录授权 —— 卡片说明里必须点明"不是双击即用的窗口程序"，否则用户会以为是装了个失败的应用。
+
+### R20.4 护栏
+
+- `tests/bt_download_only_tests.py`：`TabStructure`（顺序 + 成员 + **最后一个必须是它**）、
+  `CapabilityFlag`（`DOWNLOAD_ONLY_KEYS` 是「开发工具」∪「Agent客户端」的**并集**）、
+  `test_visible_component_count_is_127`（全仓库唯一写死可见组件数的地方）。
+- `tests/bt_component_category_tests.py`：`EXPECTED_MEMBERSHIP[CAT_AGENT]` 与
+  `test_tab_order_is_exactly_launch_server_env_tool_agent`。
+- `tests/bt_mirror_spec_tests.py`：R20.2 第 3 条的两张名单。
+- `tests/bt_icon_assets_tests.py`：接新组件必须同时补图标（缺图标即红）。
+
+### R20.5 第二批与第三批（2026-10-15 同一天扩到 40 个）
+
+用户当天补了一句口径：「**把能做的都做了、全都接进来；拿不到下载方式的就做一个
+『官网下载』按钮**」。于是这一 Tab 从 5 个扩到 **40 个**（34 有直链 + 6 只有官网入口），
+并为此新增规则 **R21**（「官网下载」那一档）。
+
+**这 40 个是怎么来的**：分三批调研（国产大厂助手 / 中文创业公司 / 国际编程 IDE），
+每条 URL 都用 `byte-tools/1.2.1` 实测过 —— 不只是 `curl -I` 看 200，还要
+**`Range: bytes=0-3` 读出前四字节确认是 `MZ` 或 `PK`**（镜像测试只看状态码，
+挡不住"200 + 一张错误页"）。几个值得记住的坑：
+
+| 现象 | 真相 | 处理 |
+|---|---|---|
+| Trae / CodeBuddy / WorkBuddy 的下载页 `<a>` 里没有 exe | 地址由 JS 运行时拼装 | 找它们的**版本接口**（`api.trae.cn/icube/…/version/<产品>/latest`、`www.codebuddy.cn/v2/update?platform=…`）拿到真 URL |
+| 豆包版本接口里有**两个**版本字段 | `data.version`=1.49.10（2025-03 的老包）而 `data.newest_version`=2.32.4 | 取 `newest_version`，并在 `data_note` 里写明另一个字段是老的 |
+| ChatGLM 的下载页没链接 | 配置接口 `operation-api/config/operation_data?tag=clientConfig` 给 `winUrl` | 从配置接口取 |
+| 阶跃 AI 的 307 落点带签名 | `X-Tos-Expires=86400`，**一天后失效** | 登记**端点**而不是落点（`chat.stepfun.com/api/desktopversion/windows/latest`），下载侧会跟 307 |
+| Kimi / DeepSeek Harness / 纳米 AI 的直链不带版本号 | 官方只发滚动 latest | 按 R20.2 第 3 条取服务端 `Last-Modified` 年月，`data_note` 写明"不是软件版本号" |
+| Claude 桌面的旧 GCS 直链还能 200 | 那个桶的 `RELEASES` 末条是 **0.14.10 / 2025-10-29** —— 早就冻结了 | **不登记**（拿它当最新版是错的），改走 R21 官网入口 |
+| Windsurf 的直链带发版 hash | `…/stable/<hash>/DevinUserSetup-x64-<v>.exe`，新版一发旧目录就没了 | 同上，走 R21 |
+| Antigravity / Gemini 的官网 | DNS 能解析、TCP 连不上（大陆不可达） | 登记官网入口，`data_note` 写明"取决于你的网络环境" |
+| 讯飞星火的官方图标只有 32×32 | `spark-icon.ico` / `favicon.ico` 最大都到 32；Simple Icons 未收录讯飞 | 图太小放大必糊 → 按既有做法用**名称文字图兜底**，并登记在 `IconCoverage.NAME_TEXT_FALLBACK`（附穷举过程） |
+| 通义灵码的官方源在 `…aliyuncs.com` | `is_mainland()` 的 `"aliyun"` 是子串匹配，把它判成"1 个大陆源" | 结果是**对的**（确实是阿里云内地 OSS），登记进 `SINGLE_SOURCE_EXCEPTION`，末位断言另见模块级 `OFFICIAL_IS_MAINLAND_MARKED` |
+
+**新组件必须同时补的四处**（少一处就有套件变红）：`_AGENT_CLIENTS` 一行、
+三张登记表（`COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`）、
+一个图标、以及 `EXPECTED_MEMBERSHIP[CAT_AGENT]` 与
+`test_visible_component_count_is_127` 这两个常量。
+
+**2026-10-15 又补了一个 `opencode`**（用户点名要的，当时 40 个里没有它）：21 万 star 的
+开源编程 Agent，**同一次 release 同时发桌面端安装器与终端版便携包**，所以它是本项目第一个
+"一行两个产物都登记"的 Agent 组件 —— 主产物写桌面端 exe，终端版 zip 放进第 4 项，
+卡片上就是「下载 ▾」菜单（同 `codex-cli` 的写法）。版本位取 release tag 的数字
+（`v1.19.0` → `1.19.0`），它是 GitHub 产物所以**不进** `OFFICIAL_ONLY_EXCEPTION`、
+而是登记进 `bt_mirror_spec_tests.test_no_component_escapes_this_table` 的 `github_assets`。
+找仓库时的坑：`opencode-ai/opencode` 已 archived（那是 Go 老版）、
+`sst/opencode` 也已 301 跳到 `anomalyco/opencode` —— 别照着"opencode 是 SST 的"去登记旧仓库。
+图标取自 Simple Icons 的 `opencode` 条目（该条目 `source` 指的就是
+`anomalyco/opencode` 仓库里的 `packages/identity/mark.svg`，不是旧版的标）。
+
+### R20.6 第四批：候选清单里用户点名的 11 个（2026-10-15）
+
+用户看到"还有哪些热门的没接进来"的候选清单后，勾了 7 个我已实测过的 + OpenClaw / Hermes
++ 两个只能走「官网下载」的。**同一天这一 Tab 从 41 到 52**（44 有直链 + 8 只有官网入口）。
+
+| key | 显示名 | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|
+| `openhands` | OpenHands | 1.27.1 | 140,354,744 | GitHub Releases（`Agent-Canvas-Setup-*.exe`） |
+| `cherry-studio` | Cherry Studio | 2.1.6 | 396,037,216 / 便携 395,662,608 | GitHub Releases |
+| `goose` | Goose | 1.54.0 | 247,217,050 / CLI 77,666,256 | GitHub Releases（桌面 + CLI 同发） |
+| `qwen-code` | Qwen Code | 0.25.1 | 52,505,536 / CLI 72,012,450 | GitHub Releases（tag 是 `desktop-v0.25.1`） |
+| `crush` | Crush | 0.98.1 | 27,319,516 | GitHub Releases |
+| `kiro` | Kiro | 1.3.0 | 210,208,904 | `prod.download.desktop.kiro.dev`（厂商 CDN、带签名） |
+| `jan` | Jan | 0.8.6 | 556,441,144 | GitHub Releases |
+| `openclaw` | OpenClaw | 2026.10 | 128,746,840 | GitHub `releases/latest/download/`（滚动，无版本号） |
+| `hermes` | Hermes Agent | 2026.08 | 7,946,048 | `hermes-assets.nousresearch.com`（滚动，无版本号） |
+| `gemini-cli` | Gemini CLI | —（空版本表） | — | **无 Windows 安装包**，只有 npm → 走 R21「官网下载」 |
+| `aider` | Aider | —（空版本表） | — | **无安装包**，只有 pip/pipx → 走 R21「官网下载」 |
+
+**这一批踩到/确认的几件事**（都影响后面接组件）：
+
+1. **`ARTIFACT_LABELS` 多了一组 `cli` / `portable`**。原因是 Goose 与 Qwen Code 都
+   "桌面端 + 终端版"同发，而两个若都标 `zip`，「下载 ▾」里会出现**两条一模一样的文案**。
+   加标签键是安全的：全项目取标签都走 `ARTIFACT_LABELS.get(fmt, fmt)`。
+2. **`bt_download_only_tests` 有一份"产物域名白名单"**（`test_every_artifact_url_is_a_measured_host`）——
+   每个**新域名**都要在那里点名，包括「下载 ▾」里备选产物那条。这一批只多了两个非 GitHub 域名
+   （kiro / hermes）；其余 7 个走 GitHub，加速器域名早已在白名单里。
+3. **否定结论要穷举**：`gemini-cli` 的 release 资产实测只有 `gemini-cli-bundle.zip` +
+   两个 darwin 包（10.7 万 star 的项目**不发 Windows 包**）；`aider` 官方装法只有 pip/pipx。
+   这两条都不是"我没找到"，是把 `releases/expanded_assets/<tag>` 列完确认的。
+4. **Hermes 的产物可疑，已在 `data_note` 里写明**：官方页面那个 Windows 按钮指向的安装器
+   实测只有 **7.9 MB**、服务端 `Last-Modified` 停在 2026-08。多半是"联网拉取组件的小体积安装器"，
+   但没验证过，所以文案里**不替它下结论**，只写实测数字并提示"装之前请自行确认"。
+   它的图标是 Hermes 桌面页自己声明的 `<link rel="icon" sizes="48x48">`（
+   `/marketing-static/assets/hermes-agent/icon.png`），是**产品自己的标**；不是
+   nousresearch.com 首页那个 180×180 的插图版（那张在 32px 槽里会糊）。
+   ⚠ Simple Icons 里那个 `hermes` **不是它** —— 那是爱马仕，别取错。
+5. **Kiro 与官网逐字对齐**：`kiro.dev/downloads/` 页面上的 Windows 链接就是本工具登记的那条
+   （含 `1.3.0` 版本目录），所以版本位不是猜的。
+
+### R20.7 第五批：一次"各 Tab 还缺什么"的专项调研（2026-10-15）
+
+用户问"各个 Tab 还有哪些热门组件没接入"，于是按 Tab 分头调研（服务端/运维、开发环境、
+开发工具、Agent 客户端各一个子 agent），**每条直链都由我本人再用 `byte-tools/1.2.1` UA
+复测一遍**（206 + 前四字节 `MZ`/`PK`/OLE + `Content-Range` 取字节）才写进表 ——
+子 agent 的结论只当线索，不当数据。这一批落地 **22 个**（Agent 12 + 开发工具 10），
+两个 Tab 的计数同步为 64 / 36。
+
+**Agent 客户端（+12，全部有实测直链）**
+
+| key | 显示名 | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|
+| `ollama` | Ollama | 2026.10 | 1,581,967,176 | `ollama.com/download/OllamaSetup.exe`（滚动，无版本号） |
+| `lm-studio` | LM Studio | 2026.10 | 618,785,040 | `lmstudio.ai/download/latest/win32/x64`（302 到版本化安装器） |
+| `gpt4all` | GPT4All | 3.10.0 | 744,456,856 | GitHub Releases |
+| `anything-llm` | AnythingLLM | 1.18.0 | 407,381,240 | GitHub Releases（资产名不带版本号） |
+| `lobehub` | LobeHub | 2.2.19 | 151,357,692 | GitHub Releases（仓库已改名 `lobehub/lobehub`） |
+| `copilot-cli` | GitHub Copilot CLI | 1.0.98 | 95,662,080 | GitHub Releases（主推 msi） |
+| `ima` | ima（腾讯） | 2.3.0_3717 | 205,057,816 | `ima-app.image.myqcloud.com`（按版本目录） |
+| `kilo-code` | Kilo Code | 2026.10 | 410,662,216 | `autoupdate.desktop.anaconda.com`（滚动 latest） |
+| `wave-terminal` | Wave Terminal | 0.14.5 | 163,826,544 | GitHub Releases |
+| `msty` | Msty Studio | 2026.10 | 226,457,032 | `next-assets.msty.studio`（滚动 latest） |
+| `mistral-vibe` | Mistral Vibe | 2.26.1 | 61,496,201 | GitHub Releases（CLI zip） |
+| `kimi-work` | Kimi Work | 2026.10 | 438,668,088 | `appsupport.kimi.ai`（滚动端点，302 到版本化文件） |
+
+**开发工具（+10）**：Notepad++ 8.9.8.1 / Wireshark 4.6.9 / GitKraken 2026.10（稳定别名）/
+SourceTree 3.4.20 / Insomnia 13.3.1 / Beekeeper Studio 6.1.6 / Obsidian 1.14.4 /
+Zettlr 4.8.0 / Yaak 2026.9.0 / Vim (gVim) 9.2.1192。
+
+**这一批抓到的坑（下次直接照抄）**
+
+1. **`/releases/latest/download/<带版本号的资产名>` 是错的写法**。调研报告里有几条这么给
+   （Notepad++ / VSCodium / gVim），而 `latest` 会随时间指向新 tag，资产名里的版本号却不跟着变 ——
+   登记进去就是个定时炸弹。一律换成**带具体 tag 的** `/releases/download/<tag>/<资产>`，
+   而且 tag 与版本号**不同形**的要注意：Insomnia 是 `core%4013.3.1`（`@` 要转义成 `%40`）、
+   Ollama 是 `v0.40.5`、Copilot CLI 是 `v1.0.98`。
+2. **`ARTIFACT_LABELS` 又加了一档 `msi`**（Copilot CLI 官方主推 msi）。
+3. **图标别串品牌**：Simple Icons 的 `hermes` 是爱马仕、`mistral` 不存在（要 `mistralai`）；
+   同家的两个组件共用一张标时必须**逐字节相同**并进 `ALLOWED_SHARED`（本批是 `kimi`/`kimi-work`，
+   我第一版从 CDN 现取导致与仓库里那份不一致，`test_the_allowed_shared_pairs_still_exist`
+   当场报"不再共用"—— 正确做法是 `cp` 仓库里已有那份）。
+4. **msty 没有 PNG/SVG 的站点图标**（`/favicon.ico` 只有 16/32px，短边 <48 被护栏拒），
+   用它 `/brands/studio.svg`（官方 Studio 品牌标）兜住。
+
+**这一批我判定"不能接"的（附原因，供以后复核）**
+
+| 组件 | 原因 |
+|---|---|
+| `warp` | 直链存在（`releases.warp.dev/stable/v<日期>.stable_00/WarpSetup.exe`，206），但**我 4 次都取不到前四字节** —— 验不出就登记不了（只有版本化目录，没有稳定入口） |
+| `httpie-desktop` | 调研给的 tag `2025.2.0` 实测 **404**；该仓库 release 实际只到 `v2023.3.x`，资产名也对不上 |
+| `chatbox` | GitHub Release **只有源码**，官网直链没挖到 |
+| `void` | 项目已声明弃坑（GitHub deprecated，release 无资产） |
+| `iflow-cli` / `roo-code` | 官方已停运 / 公告将停运（roo 迁 Kilo） |
+| 只上微软商店的一批（`quark` / `perplexity` / `xiaoyi` / `lingguang` / `devtoys`） | 官方只发 msix / 商店分发，没有可直接下载的独立 exe |
+
+**当时还剩下的那批（现已由 R20.8 接掉其中 19 个）**：本批只落了"只下载"类的两个 Tab，
+「开发环境 / 服务端组件」的候选留到了下一排 —— 它们要额外做两件事：① 写进 `_CLI_TOOLS`
+（GitHub 托管的能自动配抓取器，厂商 CDN 的**要另写版本抓取器**）；② 用
+`tools/bt_archive_layout_audit.py` 逐个验证归档布局（`path_subdir` 写错会让"装好了但 PATH 里没东西"）。
+
+### R20.8 第六批：「开发环境 / 服务端组件」里"解压即用"的 19 个（2026-10-15）
+
+用户问"一键启停、服务端组件、开发环境，没有需要新增的组件吗" —— 于是把 R20.7 里
+留给下一排的那批做了。**只收"解压即用"形态**（单二进制 exe 或 zip），
+`installer_mode` 与 tar.gz / 7z 的都没收（前者要静默安装参数，后者本工具不解）。
+
+| key | 显示名 | Tab | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|---|
+| `terraform` | Terraform | 服务端 | 1.13.4 | 30,962,506 | `releases.hashicorp.com`（**唯一非 GitHub 的那个**） |
+| `opentofu` | OpenTofu | 服务端 | 1.12.8 | 35,485,271 | GitHub Releases |
+| `argocd` | Argo CD CLI | 服务端 | 3.5.5 | 252,547,072 | GitHub Releases（裸 exe） |
+| `prometheus` | Prometheus | 服务端 | 3.15.0 | 114,650,144 | GitHub Releases |
+| `victoriametrics` | VictoriaMetrics | 服务端 | 1.154.0 | 7,488,593 | GitHub Releases |
+| `k6` | k6 | 服务端 | 2.3.0 | 31,706,650 | GitHub Releases |
+| `pulumi` | Pulumi | 服务端 | 3.268.0 | 117,108,545 | GitHub Releases |
+| `istioctl` | Istio CLI | 服务端 | 1.31.1 | 31,244,552 | GitHub Releases |
+| `talosctl` | Talos Linux CLI | 服务端 | 1.11.0 | 94,281,216 | GitHub Releases（裸 exe） |
+| `elixir` | Elixir | 开发环境 | 1.20.4 | 8,658,381 | GitHub Releases |
+| `scala-cli` | Scala CLI | 开发环境 | 1.18.0 | 43,050,388 | GitHub Releases |
+| `bazelisk` | Bazelisk | 开发环境 | 1.29.0 | 10,502,144 | GitHub Releases（裸 exe） |
+| `just` | Just | 开发环境 | 1.59.0 | 2,292,448 | GitHub Releases |
+| `task` | Task | 开发环境 | 3.54.0 | 17,023,230 | GitHub Releases |
+| `oxlint` | Oxlint | 开发环境 | 1.88.0 | 5,762,811 | GitHub Releases |
+| `biome` | Biome | 开发环境 | 2.5.15 | 79,007,744 | GitHub Releases（裸 exe） |
+| `nushell` | Nushell | 开发环境 | 0.116.1 | 60,864,303 | GitHub Releases |
+| `starship` | Starship | 开发环境 | 1.26.0 | 4,758,038 | GitHub Releases |
+| `gh` | GitHub CLI | 开发环境 | 2.102.0 | 15,512,013 | GitHub Releases |
+
+**这一批的方法论（可装配类通用，下次照抄）**
+
+1. **`path_subdir` 先用 `""` 起手**，因为两条既有逻辑合起来覆盖了绝大多数归档：
+   `extract_archive` 末尾会把"根上只有一个目录且没有散文件"塌成安装根，
+   而 `exec_path_in_home` 会依次试 `path_subdir` → `bin` → `Scripts` → `condabin` → 根。
+2. **但一定要跑 `tools/bt_archive_layout_audit.py` 终审**。我先按 `""` 登记，
+   审计当场报出 5 个问题，全是"声明与归档不符"：
+   - **BAD（exe 在子目录，要显式写 subdir）**：`pulumi` → `bin`、`elixir` → `bin`、`gh` → `bin`
+   - **FAIL（归档里根本没有我登记的那个 exe 名）**：`victoriametrics` 实际叫
+     `victoria-metrics-windows-amd64-prod.exe`、`oxlint` 实际叫
+     `oxlint-x86_64-pc-windows-msvc.exe`
+   `pulumi` 那次还栽了个跟头：先写 `subdir="pulumi/bin"`，审计报"PATH 指的
+   `pulumi/pulumi/bin`"—— 因为塌了一层之后根已经是 `pulumi/`，所以只能写 `bin`。
+3. **zip 里的二进制名是改不了的**：`install_binary` 的"按 exec_name 改名"只对
+   **单文件形态**（exe/war/裸文件）生效；zip 解压出来的文件保持官方名。
+   所以 `victoriametrics` / `oxlint` 的 `exec_name` 只能是那一长串官方名 ——
+   功能没问题（探测/PATH 都按它找），只是用户敲的命令会长；要短名得自己复制一份改名。
+4. **单文件 exe 的 SKIP 是正常的**：`argocd` / `talosctl` / `bazelisk` / `biome` 审计报
+   SKIP（单二进制没有可随机读的清单），这类靠装完自检 `verify_bin_dir` 兜。
+5. **`delta` 撤掉了**：它没有官方图形标识（仓库里只有终端截图），而 Simple Icons 的
+   `delta` 是**三角洲航空**的标（还是横幅，护栏本身也会拒）。宁缺勿错，不接。
+
+**镜像登记的新姿势**：可装配的 GitHub 组件登记进 `OFFICIAL_HOST`（值 `github.com`，
+与 `deno`/`ripgrep` 同列），**不是** `github_assets`（那张是只下载类的）；
+`terraform` 是唯一"官方单源、零大陆镜像"的，进 `OFFICIAL_ONLY_EXCEPTION`。
+
+**仍未接（候选还在，方式同上）**：grafana / loki / jaeger / alertmanager / otelcol（多半要 tar.gz
+或厂商 CDN 抓取器）、rclone / mariadb / influxdb / cockroachdb / nomad（厂商 CDN）、
+gitea / gitlab-runner / nexus（厂商 CDN、且是**服务**不是 CLI）、
+minikube / kind / k3d / kustomize / stern / nerdctl / velero / kubeseal / mkcert / sops / restic /
+terragrunt / act（GitHub，多数也能接）、zig / julia / php / nim / groovy / tinygo / v / nasm /
+clojure / jj / lazygit / aria2 / hyperfine / dust / duf / scc / miller（语言与效率 CLI）。
+本批只挑了我能一次验完的 19 个。
+
+### R20.9 nats-server 接进「一键启停」（2026-10-16）
+
+「一键启停」从 15 个扩到 **16 个**：新增 `nats-server`（NATS Server，消息/流服务）。
+它是**第一个**从「服务端组件」挪过来的组件 —— 进了 `LAUNCH_OF` 就自动归到「一键启停」
+（`group_components()` 按 `LAUNCH_KEYS` 归类），所以 `EXPECTED_MEMBERSHIP` 里
+CAT_SERVER 少一个、CAT_LAUNCH 多一个。（`caddy` / `traefik` 仍未接，原因见下。）
+
+**当天在 %TEMP% 跑真进程实测出来的四条事实**（规格里逐条写了引用）：
+
+1. 归档是「单顶层目录 + nats-server.exe」（条目只有 LICENSE / README / nats-server.exe）
+   ⇒ 解压塌层后 `path_subdir=""` 正确 —— 与 `bt_archive_layout_audit` 的结论一致。
+2. `-p <端口>` 能改口 ⇒ `port_writeback="cli_flag"`，不碰配置文件。
+3. ⚠ **只给 `-sd <dir>` 不够**：实测数据目录根本不会被创建 —— NATS 只在启用 JetStream
+   时才落盘。必须 `-js -sd <dir>` 一起给，才会建出 `<dir>/jetstream/`。
+   **这条是纯实测得来的，凭直觉写会得到一个"看起来配了数据目录、其实什么都没存"的规格。**
+4. `nats-server.exe` 自己就是监听进程（不是包装器）⇒ `stop_kind="pid"`，
+   `terminate()` 后端口随即释放（实测 4224 从"在听"变"不在听"）。
+
+没有网页控制台：4222 讲的是 NATS 协议（不带 `-m` 时连监控口都没有），
+所以 `console_path` / `health_path` 都是 None、判活只看端口 —— 与 redis 同一档。
+
+**`caddy` / `traefik` 为什么仍没接**：两者都能跑（单二进制），但
+① caddy 的默认 80/443 在 Windows 上会撞 http.sys（本项目 nginx 就是因此特意用 8888），
+要另定端口策略；② traefik 的 dashboard 在 8080、与 jwt/jenkins 那一簇口的避让关系要逐个核；
+③ 两者的"优雅停"要区分 `caddy stop`（走 admin API）与按 PID；**都必须在真机上把
+「起 → 端口整簇在听 → 停 → 端口释放」跑一遍才算数**（R5/R14 的口径）。
+`prometheus` / `victoriametrics` 同理（单二进制、9090/8428，但要先定配置文件从哪来）。
+这四个是下一批的自然候选，方法同本节。
+
+## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
+
+### R21.1 规则描述
+
+用户在接第二批 Agent 客户端时给了新口径：**"如果拿不到下载方式的就做一个『官网下载』
+按钮，用户点击时就直接打开浏览器自行去官网下载，主要把这些组件都接进来"**。
+
+即：一个组件**官方没有可直接下载的安装包直链**（只给网页入口 / 要真机抓包 / 只能用
+npm・pip・插件装）时，**不是**从表里删掉、也不是放一张点不动的空卡片，而是给一颗
+**「官网下载」**按钮 —— 点一下 `QDesktopServices.openUrl()` 打开它的官网，由用户自己下。
+
+这不是"降级"或"兜底失败"，而是这类组件**应有**的形态：本工具的价值是"集中列出、一键找到
+官方入口"，代不代下是第二位。
+
+### R21.2 硬约束（缺一条就是 bug）
+
+1. **`official_page_only` 是 `download_only` 的子集，不是并列档**。置上它的卡片仍必须是
+   `download_only=True`（否则会走安装链去写注册表 / PATH）。二者关系由
+   `bt_download_only_tests.WebFallback.test_web_only_implies_download_only` 钉死。
+2. **必须同时有 `official_url`**（R19 那张**人工登记**的表），否则按钮点开是个空页面。
+   由 `WebFallback.test_web_only_components_have_a_registered_official_url` 钉死。
+   没登记时 `on_open_official_page_clicked()` 报错而**不是** `openUrl("")`。
+3. **版本表为空**：表驱动里把这一行写成**空元组** `()` 即可 —— builder 用
+   `official_page_only=not rows` 自动判定，**不需要**另写 `Component(...)`。
+   由 `WebFallback.test_web_only_components_have_no_version_table` 钉死。
+   （空版本表 → `bt_mirror_spec_tests.test_counts` 要 `continue` 跳过，否则 `versions[0]` 越界。）
+4. **文案要说清"本工具不代下、不代装、不代跑安装器"** —— 否则用户以为点了就开始下。
+   tooltip 同 R13：把 `data_note`（"这软件干嘛的、数据落在哪"）拼在提示里。
+5. **官网必须是"下载入口"而非"品牌首页"**：能给下载页就给下载页（如 `…/download`），
+   给不了才给首页。这条是人工判断，写进 `COMPONENT_OFFICIAL_URLS` 时顺手写准。
+
+### R21.3 复用而非新造
+
+- 卡片那**一颗**主按钮仍是 `self.btn_install`（属性名不改）—— `_sync_action_buttons`、
+  布局与一批用例都按它找。分支只是多一层：
+  `download_only → official_page_only ? 「官网下载」: 「下载/下载 ▾」`。
+- 槽位是**独立**的 `on_open_official_page_clicked()`，**不复用** `on_download_clicked` ——
+  后者的收尾是问目录、起 `DownloadWorker`；共用一个槽位等于给"顺手在这里加一行代下"留门。
+- 只有 Windows 之外的平台、或直链失效时，`download_only` 那一档才用
+  `unsupported_platform_hint`；`official_page_only` 与平台无关（任何平台都点开浏览器）。
+
+### R21.4 护栏
+
+- `tests/bt_download_only_tests.py`：`WebFallback` 三条（有官网 / 无版本表 / 蕴含 download_only）；
+  `test_every_download_only_component_has_windows_urls_to_download` 开头 `if comp.official_page_only: continue`。
+- `tests/bt_mirror_spec_tests.py`：`test_counts` 开头 `if not comp.versions: continue`。
+- 新接这类组件仍须补 `COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`
+  三张登记表 **+ 一个图标**（`bt_icon_assets_tests` 缺图标即红）。
+
+## 规则 R22：每个 Tab 内的卡片按显示名 a→z 排（2026-10-15）
+
+### R22.1 规则描述
+
+用户要求："对我们软件内各个 table 下的组件做个字母 a-z 顺序排序"。
+
+落点在**唯一一处**：`main.group_components()` 分组完，每个 Tab 内 `lst.sort(_tab_sort_key)`。
+不逐张表手工调顺序 —— 那样接一个新组件就要想"该插在哪一行"，而人一定会插错。
+
+### R22.2 排序键的三个决定（都别随手改）
+
+1. **排显示名，不排 key**。界面上给用户看的是显示名；按 key 排会出现
+   "`百度搭子 DuMate` 排进 D 段、`文心` 排进 E 段"这种念不出来的错位
+   （key 是 `dumate` / `ernie`）。反过来，按显示名排时英文名与汉语拼音大体同序。
+2. **`casefold()` 忽略大小写**，于是 `DBX` 与 `DBeaver` 按 `dbx` / `dbeaver` 相邻，
+   而不是把大写全排到小写前面。
+3. **显示名开头的标点先剥掉**（`.NET SDK` → `net sdk`）。`.` 的码位(0x2E)比所有字母小，
+   不剥就永远排第一；而用户念它是"点 NET"，预期落在 N 段。
+
+### R22.3 中文名怎么排（这是刻意选的，不是漏了）
+
+中文没有"字母"，`casefold()` 之后按**码位**比较、**自然全部落在英文名之后**
+（码位 U+4E00 以上远大于 `z`）。这是刻意选的：
+
+- 用户要的是"念得出字母的排在前、a→z"；硬把中文混进字母序里，只会让英文段也被割碎。
+- 按**拼音**排需要额外引一张拼音表（每个中文名一条），那是一份新的登记负担与新的
+  失败模式（漏登记就悄悄排错位）。**要做就得单独立一条规则**，不在 R22 里顺手加。
+
+当前效果：Agent客户端 Tab = 英文名 a→z（AutoClaw → Zed）→ 之后是中文名（码位序）。
+
+### R22.4 护栏
+
+- `tests/bt_component_category_tests.py`：
+  `test_every_tab_is_sorted_a_to_z_by_display_name`（逐 Tab 断排序键单调不降，
+  **并且**断"至少有一个 Tab 的顺序不同于 `build_components()` 的书写顺序"——
+  否则这条用例分不清"排序生效了"和"没排也恰好有序"）、
+  `test_alphabetical_sort_ignores_leading_punctuation`（`.NET SDK` 必须夹在
+  Miniconda 与 Ninja 之间）。
+- 顺带说明为什么 `test_grouping_preserves_order_and_covers_every_tab` **不用改**：
+  它断的是 **Tab 之间**的顺序（等于 `COMPONENT_CATEGORIES`）与成员集合，
+  组内顺序不归它管。
+
+## 规则 R23：网格多余的**行高**必须落到布局末尾的 stretch 上（2026-10-15）
+
+### R23.1 规则描述
+
+卡片是网格排列的，**同一行的卡片会被 `QGridLayout` 拉成等高**。凡是"内容比别人少"
+的卡片，就多出一段高度。这段高度必须有明确去处：
+
+> **每张卡的 root 布局末尾都必须有一个 `addStretch(1)`。**
+
+`_build_ui()` 末尾那一行是**无条件**的。少了它，那段高度会被布局按策略分给**能纵向
+长大的控件**，而带背景色的 QLabel（`statusLabel` / `multiVersionBadge`）首当其冲 ——
+用户看到的就是同一行里"颜色方块一个大、一个紧凑"。
+
+### R23.2 这个缺陷真实发生过两次，第二次才修对
+
+| 时间 | 症状 | 当时怎么处理的 | 为什么没修净 |
+|---|---|---|---|
+| 2026-10-10 | JDK / Python 卡的**「可多版本」角标**被拉成大盒子，同行的 Maven 是紧凑胶囊 | 加了 `root.addStretch(1)` | **加错了地方** —— 写进了 `_build_external_section()` 的末尾，也就是**只有那 7 个外部接管组件**（jdk / python / node / go / maven / gradle / bun）才有 |
+| 2026-10-15 | Ant / bat 卡的**状态标签**（「○ 未安装」「● 已装 …」）被拉成空白大色块 | 把那一行挪到 `_build_ui()` 末尾，**所有卡片无条件都有** | —— |
+
+**为什么隔了 5 天才露出来**：旧顺序下恰好没有排出"高矮混排"的一行（Maven 那次和
+JDK / Python 同排，而那两张**都在白名单里**，本来就有 stretch）。2026-10-15 给 Tab
+加了 a→z 排序（R22）后，高卡（Maven 238px）与矮卡（Ant / bat 178px）排进同一行，
+缺陷立刻变成肉眼可见。**排序只是触发器，缺陷本身一直都在。**
+
+### R23.3 护栏，以及"永真式"的教训
+
+`tests/bt_grid_layout_tests.py::BadgeNeverStretchesVertically`：
+
+- `test_badge_height_is_its_size_hint_not_the_leftover_space` —— 用 `jdk`（白名单内）
+  当短卡片。**这条永远钉不住 2026-10-15 那个缺陷**，因为 jdk 自己就有 stretch。
+- `test_status_label_is_not_stretched_when_a_row_mate_is_taller` —— 用 `ant`
+  （**白名单外**）当短卡片，并且**显式断言**
+  `assertFalse(supports_external_takeover(short.component))`：
+  哪天有人把对照组换成白名单内的 key，这条会直接红，而不是悄悄退化成永真式。
+
+**实测确认有牙**：把这条用例拿到修复前的代码上跑，红在
+`AssertionError: 264 != 12`（statusLabel 被拉到 264px，它自己的 sizeHint 只有 12）。
+写"防拉伸"这类用例时，**必须同时断言"这一行真的有多余空间"**
+（`short.height() > short.sizeHint().height()`），否则控件没被拉高时它会假绿。
+
+### R23.4 不要顺手改的：状态标签的**横向**裁字是有意为之
+
+`status_label` 的 `setMinimumWidth(1)` + 不换行 = 超宽部分被**裁掉**，全量原文在
+tooltip 里（源码注释写了理由：不同机器字体/缩放不同，不压掉最小宽会把格子撑开）。
+这是刻意的，看到长状态文字在卡片右边缘被切断**不要去加省略号**。
+
+## 规则 R24：Windows 上中文**不许走命令行 argv**（2026-10-15）
+
+### R24.1 规则描述
+
+Windows 上原生命令行的 `argv` 会按**系统 ANSI 代码页**（`GetACP()`）被 CRT 转一次码：
+
+| 系统 ANSI 代码页 | 中文的命运 |
+|---|---|
+| **65001**（UTF-8） | 无损 —— 维护者本机正是这个，所以**本地永远看不出问题** |
+| **1252**（英文 Windows / GitHub runner） | 全部变成 `?`（不可映射） |
+| **936**（常见中文 Windows） | 变成 GBK 字节，对方按 UTF-8 读就是乱码 |
+
+所以：**任何可能含非 ASCII 的内容，都不要作为命令行参数传给原生 exe**（`curl`、`git`、
+`python.exe`…）。要传就**走文件**或**走 stdin**。
+
+同一条根因的两种表现，2026-10-15 一天内各踩一次：
+
+1. **stdout 编码**：CI 上 `python -u tests/run_all_tests.py` 只跑 1 秒就红 ——
+   runner 是 en-US，Python 往**管道**写 stdout 按 cp1252 编码，项目输出几乎全是中文，
+   第一句 `print("解释器：…")` 就抛 `UnicodeEncodeError`。修：workflow 顶层
+   `PYTHONIOENCODING: utf-8`。
+2. **argv 编码**：`同步Gitee产物.sh` 里 `curl -F "body=<正文>"` 把整段中文送上命令行，
+   runner 上正文全变 `?`（本机 CP65001 恰好无损）。修：正文落临时文件，
+   用 `-F "body=<文件"` 让 curl 读文件当字段值。
+
+### R24.2 为什么这两个都特别难发现
+
+**维护者本机是 CP65001（UTF-8），两类问题在本地都不会复现**，而 CI 是 CP1252。
+并且第二类连"换个 locale 复跑"都验不出来 —— `LC_ALL=C` 也照样过（转码发生在
+cmdline→CRT 那一层，与 shell 的 locale 无关）。
+
+**本机的两个验伪手段**（都在 CI 上真红过之后才补的）：
+- 查环境：`ctypes.windll.kernel32.GetACP()` 在本机是 65001，runner 上是 1252。
+- 静态对账：`bt_gitee_sync_tests.test_release_body_never_travels_through_the_command_line`
+  断"脚本里不许出现把正文插值进 `-F` 取值的写法"，并要求落盘那一行存在。
+  **本机改不了 `GetACP`，所以跑一遍验不出转码；只有静态断言钉得住。**
+  （写这条时它立刻抓到我自己解释性注释里写的那句字面量 —— 注释里别再抄那个写法。）
+
+### R24.3 顺带记两条脚手架事实
+
+- GitHub 的 `windows-latest` 是 **Windows Server 2025**，`platform.win32_ver()[0]`
+  是 `2025Server`。断言"版本号必须是 10/11"这类**写死客户端 Windows** 的期望会在
+  runner 上无条件红（`bt_startup_tests` 就是这么红的）。正确做法是用标准库自己的
+  `platform._WIN32_{CLIENT,SERVER}_RELEASES` 表算期望值 —— 见该文件新增的
+  `_expected_release()`。
+- runner 的 `TEMP` 是 **8.3 短名**（`C:\Users\RUNNER~1\…`），而 `Path.resolve()`
+  给的是长名。**比路径要么两边都 `resolve()`**（`bt_update_check_tests`），
+  **要么就别依赖宿主机上恰好存在的目录**（`bt_external_version_tests` 里那个
+  `path_effective_check` 是按真实文件系统找命令的，夹具必须自己造出"压住命令的那个目录"，
+  不能指望宿主机装了 `E:\soft\maven\…`）。

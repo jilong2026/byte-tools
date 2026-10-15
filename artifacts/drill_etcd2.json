@@ -1,0 +1,135 @@
+[
+  {
+    "key": "etcd",
+    "phase": "audit",
+    "check": "installed_versions",
+    "ok": true,
+    "detail": "磁盘上未安装"
+  },
+  {
+    "key": "etcd",
+    "phase": "audit",
+    "check": "has_download_url",
+    "ok": true,
+    "detail": "4 个源，首选 https://ghfast.top/https://github.com/etcd-io/etcd/releases/download/v3.7.2/etcd-v3.7.2-wi"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "download",
+    "ok": true,
+    "detail": "etcd-3.7.2.zip 23.4 MB 6.8s"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "install_downloaded",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\etcd\\etcd-3.7.2 0.4s"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "exec_path_in_home",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\etcd\\etcd-3.7.2\\etcd.exe"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "apply_active_version",
+    "ok": true,
+    "detail": "PATH 已收敛为生效版本这一条：C:\\Users\\E5430\\.env-tools\\etcd\\etcd-3.7.2；当前进程已同步；已开着的终端与 IDE 需重开才会读到新值（Windows 若装了 Oracle javapath，个别命令仍可能被它抢先）"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "env_var_points_here",
+    "ok": true,
+    "detail": "该组件无 *_HOME（只进 PATH）"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "path_entry_persisted",
+    "ok": true,
+    "detail": "已在 HKCU Path 中：C:\\Users\\E5430\\.env-tools\\etcd\\etcd-3.7.2"
+  },
+  {
+    "key": "etcd",
+    "phase": "install",
+    "check": "path_visible_in_composed_env",
+    "ok": true,
+    "detail": "合成 PATH 命中=C:\\Users\\E5430\\.env-tools\\etcd\\etcd-3.7.2"
+  },
+  {
+    "key": "etcd",
+    "phase": "verify",
+    "check": "runs_in_host_env",
+    "ok": true,
+    "detail": "rc=0 out=etcd Version: 3.7.2"
+  },
+  {
+    "key": "etcd",
+    "phase": "verify",
+    "check": "found_in_clean_env_path",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\etcd\\etcd-3.7.2\\etcd.exe"
+  },
+  {
+    "key": "etcd",
+    "phase": "verify",
+    "check": "runs_in_clean_env",
+    "ok": true,
+    "detail": "rc=0 out=etcd Version: 3.7.2"
+  },
+  {
+    "key": "etcd",
+    "phase": "verify",
+    "check": "detect_says_installed",
+    "ok": true,
+    "detail": "installed=True source=PATH home= version="
+  },
+  {
+    "key": "etcd",
+    "phase": "launch",
+    "check": "start",
+    "ok": true,
+    "detail": "console=http://127.0.0.1:2379（）"
+  },
+  {
+    "key": "etcd",
+    "phase": "launch",
+    "check": "all_ports_listening",
+    "ok": true,
+    "detail": "监听中=[2379, 2380] 期望=[2379, 2380]"
+  },
+  {
+    "key": "etcd",
+    "phase": "launch",
+    "check": "access_page_opens",
+    "ok": true,
+    "detail": "GET http://127.0.0.1:50614/page/etcd → 200（2395 字节）"
+  },
+  {
+    "key": "etcd",
+    "phase": "launch",
+    "check": "access_page_says_running",
+    "ok": true,
+    "detail": "http://127.0.0.1:50614/page/etcd 的正文里没有「正在运行」"
+  },
+  {
+    "key": "etcd",
+    "phase": "launch",
+    "check": "stop",
+    "ok": true,
+    "detail": "已强制结束并释放端口。"
+  },
+  {
+    "key": "etcd",
+    "phase": "launch",
+    "check": "ports_released",
+    "ok": true,
+    "detail": "仍在听=[]"
+  }
+]

@@ -183,3 +183,24 @@ live_*.json
 .bench_*.py
 .*.bak_mutation
 .check_anchors.py
+
+# 2026-10-14 补：图标采集 / 可视化核对 / 冒烟脚本这一类开发期手写的一次性脚本。
+# 上面那批是按用途逐个点名的，每来一个新名字就要再补一行 —— 改成按命名收敛：
+# 根目录下以点开头的 .py 一律是开发期脚本（正式文件从不以点开头）。
+# assets/ 下仍有正式资源，不受这条影响（那条只匹配仓库根）。
+/.*.py
+
+# 采集脚本的失败输出。内容是控制台日志（例如「✓ deno.svg (57KB)」/
+# 「成功：1/23 失败：22」），不是证据文件；真正的结论在脚本与文档里。
+# 2026-10-14 与 drill_*.json 一起归进 artifacts/（见那里的 README）。
+/artifacts/download_logs.txt
+/artifacts/library_logs.txt
+/artifacts/official_logs.txt
+/artifacts/*.log
+
+# 一次性脚本的落位（2026-10-14 从仓库根扫进来的 31 个 `.` 前缀草稿）。
+# 它们原本靠 `/.*.py` 在根目录隐身，一移出根目录就会冒出来，所以单独忽略这个目录。
+# 用 `/*` 而不是整个目录：git 无法重新包含一个"父目录已被排除"的文件，
+# 而 README 必须能提交 —— 那个文件夹需要一句"这是什么"，否则下一个人会当成正式工具。
+/tools/oneoff/*
+!/tools/oneoff/README.md

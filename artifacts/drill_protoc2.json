@@ -1,0 +1,58 @@
+[
+  {
+    "key": "protoc",
+    "phase": "audit",
+    "check": "installed_versions",
+    "ok": true,
+    "detail": "36.2(protoc-36.2)"
+  },
+  {
+    "key": "protoc",
+    "phase": "audit",
+    "check": "has_download_url",
+    "ok": true,
+    "detail": "5 个源，首选 https://registry.npmmirror.com/-/binary/protobuf/v36.2/protoc-36.2-win64.zip"
+  },
+  {
+    "key": "protoc",
+    "phase": "install",
+    "check": "already_installed",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\protoc\\protoc-36.2"
+  },
+  {
+    "key": "protoc",
+    "phase": "install",
+    "check": "reapply_active",
+    "ok": true,
+    "detail": "PATH 已收敛为生效版本这一条：C:\\Users\\E5430\\.env-tools\\protoc\\protoc-36.2\\bin；当前进程已同步；已开着的终端与 IDE 需重开才会读到新值（Windows 若装了 Oracle javapath，个别命令仍可能被它抢先）"
+  },
+  {
+    "key": "protoc",
+    "phase": "verify",
+    "check": "runs_in_host_env",
+    "ok": true,
+    "detail": "rc=0 out=libprotoc 36.2"
+  },
+  {
+    "key": "protoc",
+    "phase": "verify",
+    "check": "found_in_clean_env_path",
+    "ok": true,
+    "detail": "C:\\Users\\E5430\\.env-tools\\protoc\\protoc-36.2\\bin\\protoc.exe"
+  },
+  {
+    "key": "protoc",
+    "phase": "verify",
+    "check": "runs_in_clean_env",
+    "ok": true,
+    "detail": "rc=0 out=libprotoc 36.2"
+  },
+  {
+    "key": "protoc",
+    "phase": "verify",
+    "check": "detect_says_installed",
+    "ok": true,
+    "detail": "installed=True source=PATH home= version="
+  }
+]

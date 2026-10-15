@@ -29,8 +29,8 @@ import main  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 NAMES = ("titleText", "btn_version", "btn_github", "btn_refresh",
-         "btn_cleanup_path", "btn_clean_terminal", "btn_donate",
-         "btn_min", "btn_max", "btn_close")
+         "btn_cleanup_path", "btn_clean_terminal", "btn_diagnostics",
+         "btn_donate", "btn_min", "btn_max", "btn_close")
 
 # chip 按状态变出来的全部文案，最长的一条决定预算
 CHIP_TEXTS = [

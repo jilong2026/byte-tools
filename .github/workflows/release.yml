@@ -42,6 +42,15 @@ on:
     # 仅 v 开头的版本号 tag 触发，避免任意分支推送误触发
     tags:
       - 'v*'
+    # 2026-10-14 新增：dev 分支的普通推送也跑护栏测试。
+    # 此前唯一触发点是打 tag，而 tag 是发版动作 —— 也就是说 834 条用例在
+    # 整个开发周期里**一次都不会自动跑过**。test job 只需要 3~5 分钟，
+    # 换"改坏了当场就红"，这笔账非常划算。
+    branches:
+      - 'dev'
+      - 'master'
+  # PR 也跑：不用等推上去才发现自己打坏了护栏。
+  pull_request:
   # 手动触发：用于补同步历史 tag —— 例如 Gitee 侧网络失败导致产物缺失，
   # 而 GitHub Release 已经是好的。填写 tag_name 后只跑 Gitee 同步任务，
   # 不重新构建，直接复用 GitHub Release 上已有的产物。
@@ -61,6 +70,21 @@ permissions:
 env:
   # Python 版本：PySide6 6.6+ 要求 3.9+，3.12 LTS 稳定且 PyInstaller 6.x 完美支持
   PYTHON_VERSION: '3.12'
+  # **必须显式指定，否则 windows-latest 上护栏 1 秒即红**（2026-10-15 查明）：
+  # Windows runner 是 en-US 区域，Python 往**管道**写 stdout 时按 ANSI 代码页
+  # （cp1252）编码，而本项目的输出几乎全是中文 —— `run_all_tests.py` 第一句
+  # `print(f"解释器：{python}")` 就抛 UnicodeEncodeError，脚本立刻退出 1。
+  # 症状极像"测试挂了"：step 只跑 1 秒、日志要 admin 才下得到、注解只有
+  # "Process completed with exit code 1"。
+  # 本机复现：`PYTHONIOENCODING=cp1252 python -u tests/run_all_tests.py`
+  # 会打出完全一样的 UnicodeEncodeError。设成 utf-8 后 CI 与开发机表现一致。
+  PYTHONIOENCODING: utf-8
+  # 测试里大量用 `subprocess` 起 bash / cmd 跑仓库里的一键脚本，而 Windows runner
+  # 默认是 C 区域 —— C 区域下 `printf` 里那些中文字面量会被降级成 `?`，
+  # 于是脚本写出的正文与测试里的中文期望值对不上（bt_gitee_sync_tests 就是这么红的：
+  # 正文里找不到 `GitHub Release：`）。给整条 job 一个 UTF-8 区域，子进程一起生效。
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
   # PyInstaller 最低版本：spec 中使用了 5.0+ 引入的 hooksconfig 参数
   PYINSTALLER_MIN_VERSION: '6.0'
   # pip 主源：官方 PyPI。runner 在境外（Azure），到 pypi.org 是就近 CDN；
@@ -78,16 +102,116 @@ env:
   GITEE_REPO: byte-tools
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 护栏测试门禁（2026-10-14 新增）
+  # ---------------------------------------------------------------------------
+  # 为什么必须有这个 job：bt_*_tests.py 不匹配任何默认发现机制的名字
+  # （unittest 要 test*.py、pytest 要 test_*.py / *_test.py），所以
+  # `unittest discover` 与 `pytest` 都是收集到 0 条。加之此前 CI 只有
+  # build 与 sync 两个 job —— 834 条用例在自动化流程里等于完全不存在。
+  # 现在由 run_all_tests.py 逐文件起子进程跑，build 必须 needs 本 job：
+  # 护栏红的包不许发出去。
+  test:
+    name: 护栏测试
+    # 手动补同步时不跑测试：那条路径只重建 Gitee 附件，产物早就在 GitHub 上了
+    if: github.event_name != 'workflow_dispatch'
+    # 2026-10-15 从 ubuntu-latest 换成 windows-latest。
+    # 原因：这套护栏**本来就是断言 Windows 行为的** —— 注册表写入、PATH/HOME 环境变量、
+    # .bat 一键脚本、`ByteTools.exe` / msi 产物名、DLL/链接器路径等等。
+    # 放 ubuntu 上跑会成批假红：实测 9 个套件失败，而失败原因全是
+    # "在非 Windows 上按平台取到的产物/URL 与写死的 Windows 期望不符"
+    # （`urls_for_current()` 返回 Linux 包、`archive_for_current()` 返回 zip 而非 msi、
+    # 更新检查拿到 `ByteTools-linux-x64` 而断言写的是 `ByteTools.exe`）。
+    # 本地 Windows 全绿、CI 全红，就是这个错配。
+    # 仓库是 public，Windows runner 的分钟数同样免费，换过来零成本；
+    # 而且 `bt_gitee_sync_tests.BatEndToEnd` 不再被 Skip（它要 cmd.exe），覆盖反而更多。
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # PySide6 在 Linux 上即使走 offscreen 平台插件也要这几个系统库：缺任何一个的表现是
+      # "Failed to create a QGuiApplication" / "could not load the Qt platform plugin"，
+      # 看起来像测试代码坏了，其实是 runner 缺依赖。
+      # 当前 runner 是 Windows（不需要这些库），保留成条件步骤是为了将来若切回 Linux
+      # 不用重新踩一遍；否则 `sudo apt-get` 在 Windows 上会直接把 job 打红。
+      - name: 装 Qt 运行所需的系统库（仅 Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3 \
+            libfontconfig1 libxrender1 libxi6 libxcb-cursor0
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip --retries 3 --timeout 60
+          python -m pip install -r requirements.txt
+
+      # 逐文件起子进程是这个 runner 存在的意义：各文件 monkey patch 的是
+      # 同一批模块级全局（main.setattr 有 168 处），同进程跑会互相污染；
+      # 而某个文件里 Qt 直接 abort 时（进程 127 退出、无 traceback）也
+      # 不会把整批用例一起带走。
+      #
+      # 2026-10-15：加「结果落进 Step Summary」这一圈。起因是 dev 分支从
+      # 2026-10-14 起**每次推送都红**，而 job 日志要 admin 权限才下得到
+      # （匿名 `/actions/jobs/<id>/logs` 回 403 "Must have admin rights"），
+      # 注解又只有一句 "Process completed with exit code 1" —— 完全没有线索。
+      # `$GITHUB_STEP_SUMMARY` 相反：它渲染在 **run 页面上，匿名就能看**。
+      # 所以这里把输出 tee 到文件，再用 always() 的步骤把尾巴贴进 summary。
+      - name: 跑全部护栏
+        id: guards
+        continue-on-error: true          # 先让它跑完并留下证据，红了在末尾统一置红
+        run: |
+          # pwsh 默认按 CP1252 解码原生命令的 stdout，会把中文变成 `?` ——
+          # 上一次就是这么把失败信息糊掉的，所以先钉住控制台编码。
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          python -u tests/run_all_tests.py *>&1 | Tee-Object -FilePath guards.log
+          exit $LASTEXITCODE
+
+      - name: 护栏结果写进 Step Summary（匿名可读）
+        if: always()
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $mark = if ('${{ steps.guards.outcome }}' -eq 'success') { '✅ 全绿' } else { '❌ 失败' }
+          "## 护栏：$mark（outcome=${{ steps.guards.outcome }})" |
+            Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if (Test-Path guards.log) {
+            '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            Get-Content guards.log -Tail 120 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            '（guards.log 不存在 —— 说明 python 那一步根本没跑起来）' |
+              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: 护栏有失败则置红
+        if: steps.guards.outcome != 'success'
+        run: |
+          Write-Error "护栏未通过（outcome=${{ steps.guards.outcome }}），详见上一步的 Step Summary"
+          exit 1
+
   build:
     name: 构建 ${{ matrix.platform_name }}
     # 手动补同步时不重新构建：产物已经在 GitHub Release 上了，重新打包纯属浪费
     #
-    # **显式 tag 白名单（2026-10-15 补到 master）**：master 上这一行原先只有
-    # `event != workflow_dispatch`，也就是**任何分支推送都会构建并发版** ——
-    # 下面的 `softprops/action-gh-release` 用的是 `github.ref_name`，往 master
-    # 推一次就会拿 "master" 当 tag 去建 Release。用户口径是"**只有执行 tag 命令才构建**"，
-    # dev 分支上早已修好（c56fe74），master 这份旧文件漏了，这里补齐。
+    # 2026-10-15 加**显式 tag 白名单**。此前这里只有 `event != workflow_dispatch`，
+    # 也就是说推 dev / master 也会进入本 job —— 之所以没误发版，纯属**副作用式保护**：
+    # 后面「校验 APP_VERSION 与 tag 一致」那步在分支推送时取到 `GITHUB_REF_NAME=dev`，
+    # 与 `APP_VERSION=1.2.1` 不等，于是 exit 1 把 job 打红，才没走到打包与发布。
+    # 那个闸门的本意是"防止版本号忘了改就发版"，不是"区分 tag 与分支"；
+    # 一旦有人放宽它、或 APP_VERSION 恰好写成 "dev"，分支推送就会真的建 draft、
+    # 并由 sync-to-gitee 取消草稿 + 同步 Gitee —— 即**误发版**。
+    # 现在把意图写成显式条件：**只有 v* tag 才构建**。
     if: github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
+    # 2026-10-14：发版前必须过护栏。tag 推送即发布，这条依赖保证测试红时
+    # 三个平台都不会被打包、也不会有 Release 被创建。
+    needs: test
     runs-on: ${{ matrix.runner }}
     # 兜底：单个平台 job 的最长运行时长，超时会被取消（默认 360 分钟太长，
     # 一卡就是 6 小时，且会让 needs: build 的 Gitee 同步 job 一直等）。
@@ -124,11 +248,11 @@ jobs:
             artifact_name: ByteTools-linux-x64
             artifact_extra: ''
             artifact_kind: linux
-          # Windows x64：单 exe（onefile + splash，双击运行）
+          # Windows x64：单 exe（onefile + splash，双击运行），另出 zip 分发备份
           - platform_name: Windows (x64)
             runner: windows-latest
             artifact_name: ByteTools.exe
-            artifact_extra: ''
+            artifact_extra: ByteTools-windows-x64.zip
             artifact_kind: windows
 
     steps:
@@ -245,14 +369,17 @@ jobs:
           echo "产物大小: $(du -sh ${{ matrix.artifact_name }} | cut -f1)"
         shell: bash
 
-      # 9. Windows 产物：onefile 单 exe，直接就是最终名
+      # 9. Windows 产物：onefile 单 exe 就是最终名，另压一份 zip 作分发备份
       #    $ErrorActionPreference='Stop' 让 PowerShell 命令出错时立即抛异常而非静默继续
-      - name: 校验 Windows 产物（单 exe）
+      - name: 准备 Windows 产物（.exe + .zip）
         if: matrix.artifact_kind == 'windows'
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not (Test-Path 'dist/ByteTools.exe')) { throw '产物未生成: dist/ByteTools.exe' }
+          Copy-Item dist/ByteTools.exe ${{ matrix.artifact_name }} -Force
+          Compress-Archive -Path dist/ByteTools.exe -DestinationPath ${{ matrix.artifact_extra }} -Force
           Write-Host "exe 大小: $((Get-Item dist/ByteTools.exe).Length) bytes"
+          Write-Host "zip 大小: $((Get-Item ${{ matrix.artifact_extra }}).Length) bytes"
         shell: pwsh
 
       # 10. 构造上传文件列表（Windows 平台同时上传 exe 和 zip，其他平台只上传主产物）

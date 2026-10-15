@@ -1,0 +1,730 @@
+"""全 24 组件镜像源配置的规格测试（离线断言，实测结论已写死在这里）。
+
+实测时间：2026-09-28，方法见 bt_cand.py / bt_cand2.py / bt_matrix.out：
+  GET + UA:byte-tools，读状态码、Content-Length 与首 4 字节魔数。
+  注意：不带 UA 时清华/北外/中科大一律 403，中科大 apache/* 曾被误判成假源；
+  带 UA 复测后 ustc 的 apache/* 与 jenkins、docker-ce 是真包，golang/* 只是 302 跳 dl.google.com。
+
+本机 WMI 服务卡死会让 platform.system() 永久阻塞，因此这里先把它 stub 掉，
+只影响测试进程，不改仓库代码。
+"""
+import os
+import sys
+import unittest
+
+import platform as _platform
+
+
+import _btprelude  # noqa: F401  必须早于 import main：打 WMI 桩 + offscreen + sys.path
+
+REPO_ROOT = str(_btprelude.REPO_ROOT)
+
+import main  # noqa: E402
+
+COMPS = {c.key: c for c in main.build_components()}
+
+
+def default_cv(key):
+    return COMPS[key].versions[0]
+
+
+def cv_urls(cv, os_key):
+    """某个版本在某个平台上的全部候选 URL（多源列表优先，否则单源）。"""
+    lst = list((cv.url_list_map or {}).get(os_key) or [])
+    if not lst:
+        single = (cv.url_map or {}).get(os_key)
+        if single:
+            lst = [single]
+    return lst
+
+
+def urls(key, os_key):
+    return cv_urls(default_cv(key), os_key)
+
+
+def all_urls(key):
+    """该组件所有版本、所有平台、所有模式的 URL 扁平表。"""
+    out = []
+    for cv in COMPS[key].versions:
+        for bucket in ((cv.url_list_map or {}), (cv.url_map or {})):
+            for value in bucket.values():
+                if isinstance(value, list):
+                    out.extend(value)
+                elif value:
+                    out.append(value)
+    return out
+
+
+# 实测「同步了当前版本」的大陆镜像域名（这些站对 apache/* 只保留最新版）
+FULL_HISTORY_HOSTS = ("repo.huaweicloud.com",)          # 华为云 repo 保留全量历史
+MAINLAND_MARKERS = ("huaweicloud", "aliyun", "tuna", "bfsu", "nju", "ustc",
+                    "sjtu", "npmmirror", "cloud.tencent", "daocloud",
+                    "ghproxy.net", "ghfast.top", "gh-proxy.com",
+                    # 2026-10-12：Rust 中文社区维护的 dist 镜像。实测与官方同字节数、
+                    # 206 + `\xd0\xcf`，16.9 MB/s（官方 15.5）
+                    "rsproxy.cn")
+
+
+def is_mainland(u: str) -> bool:
+    return any(m in u for m in MAINLAND_MARKERS)
+
+
+class DeadSourceMustNotAppear(unittest.TestCase):
+    """实测已死的源，一个都不许再出现在配置里。"""
+
+    DEAD_SUBSTRINGS = [
+        "ghproxy.com/",                  # 已停服（注意 ghproxy.net 是活的）
+        "gh.idayer.com",                 # 已停服
+        "mirrors.ustc.edu.cn/mongodb/",  # 404（不同步 fastdl 二进制树）
+        "repo.huaweicloud.com/anaconda/",  # 任意不存在文件都回 200（假镜像）
+        "mirrors.tuna.tsinghua.edu.cn/gradle/",   # 无 gradle 目录
+        "mirrors.tuna.tsinghua.edu.cn/golang/",   # 无 golang 目录
+        "mirrors.tuna.tsinghua.edu.cn/mongodb/",  # 只有 apt/yum
+        "mirrors.tuna.tsinghua.edu.cn/postgresql/",  # 无 postgresql 目录
+        "mirrors.tuna.tsinghua.edu.cn/elasticstack/",  # 只有 apt/yum
+        "mirrors.tuna.tsinghua.edu.cn/elasticsearch/",
+        "mirrors.aliyun.com/mongodb/", "mirrors.aliyun.com/elasticsearch/",
+        "mirrors.aliyun.com/gradle/",    # 404
+        "repo.huaweicloud.com/golang/", "mirrors.huaweicloud.com/golang/",  # 401
+        "repo.huaweicloud.com/mongodb/",  # 只有 C++ 源码包
+    ]
+
+    def test_no_dead_source_anywhere(self):
+        hits = []
+        for key in COMPS:
+            for u in all_urls(key):
+                for dead in self.DEAD_SUBSTRINGS:
+                    if dead in u:
+                        hits.append(f"{key}: {u}")
+        self.assertEqual(hits, [], "配置里仍有实测已死的源：\n" + "\n".join(hits))
+
+
+class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
+    """R1.1：默认版本的 Windows 源列表里，至少 2 个大陆源，官网在末位。"""
+
+    # 实测「全网无大陆镜像」/「默认清单离线构造」的组件，按 R1.1 走登记例外
+    #   kubectl：DaoCloud 反代是唯一大陆源
+    #   mongodb / postgresql：fastdl / EDB 无人镜像，只有官方源
+    #   jdk：2026-10-06 从 0 改成 2 —— 原注释写的是"默认清单不许联网，镜像要等
+    #     刷新版本时列目录才能拿到确切文件名"。这话对，但结论下得太早：
+    #     当时的做法是只留 api.adoptium.net，而它会 302 到 github.com，
+    #     本机实测 JDK 21/17 直接 ConnectTimeout（只有 8 通）——
+    #     也就是**离线状态下装 JDK 21 必然失败**，而 21 恰是最主流的版本。
+    #     改法：镜像目录结构是固定的（/<major>/jdk/<arch>/<os>/），
+    #     把实测采集到的确切文件名写进离线清单（_JDK_OFFLINE_FILES），
+    #     官方 API 退到末位兜底。现在南大 + 清华都可用，14.6 / 13.5 MB/s。
+    #   2026-10-12 补 rust=1：Rust 的 Windows MSI 只有 rsproxy 一个大陆镜像肯放 ——
+    #     实测清华 `rustup/dist/<日期>/…msi` 404（它只镜像 tar.xz）、中科大整个
+    #     rustup 目录 404、腾讯云回 ChunkedEncodingError。所以它是"1 镜像 + 官方末位"，
+    #     不是漏配源。
+    #   2026-10-15 第三批 `lingma`：`is_mainland()` 命中它是因为官方域名里含 **aliyuncs.com**
+    #     （`MAINLAND_MARKERS` 里的 `"aliyun"` 是子串匹配，本意是覆盖 mirrors.aliyun.com）。
+    #     该地址确实是阿里云内地 OSS 上的官方包、内地可直连，判"1 个大陆源"结果是**对的**，
+    #     按"恰好 1 源"登记即可（末位断言另见 OFFICIAL_IS_MAINLAND_MARKED）。
+    SINGLE_SOURCE_EXCEPTION = {"kubectl": 1, "mongodb": 0, "postgresql": 0, "jdk": 2,
+                               "rust": 1,
+                               # 2026-10-12 B6a：pgAdmin 只有南大一家镜像肯放 pgadmin4
+                               # （实测清华 `postgresql/pgadmin/` 404），
+                               # 且南大与官方同字节数、同 Last-Modified、还更快（29.1 vs 25.9）
+                               "pgadmin4": 1,
+                               # 2026-10-12 B7：Ant / JMeter 只有华为云 repo 一家镜像肯放
+                               # （清华/阿里/南大/北外/腾讯/中科大的 apache 目录对这两个
+                               #  都是 404 —— 它们只同步最新版，而 1.10.18 / 5.6.3 已不是），
+                               # 末位 archive.apache.org 属官方。
+                               "ant": 1, "jmeter": 1,
+                               "lingma": 1}
+
+    # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具，
+    # 以及 2026-10-10 第二批的 apipost / apifox / hbuilderx / android-studio / visual-studio / navicat。
+    # 依据 2026-10-10 实测（DEVELOPMENT.md R1.5）：华为云的 jetbrains 目录回 200 但只有 12KB HTML
+    # （正是本文件反复防的"200 + 小 HTML 应付缺失文件"那种假源）、南大 404；
+    # update.code.visualstudio.com 与 servicewechat.com 无人镜像。
+    # **注意本表的口径是"有没有第三方镜像站"，不是"服务器在不在大陆"**：
+    # dcloud / apipost / apifox 本来就是大陆 CDN（实测 7.4–8.6 MB/s），但它们不是镜像，
+    # `is_mainland()` 按镜像域名标记认，所以这里仍记 0 个大陆源。
+    # **DBX / WindTerm 不在这个表里** —— 它们是 GitHub 产物，三个加速器都算大陆源，天然满足本条。
+    # 这里断"大陆源恰好 0 个"而不是直接跳过：以后真找到可用镜像时，这条会红，
+    # 逼着人带着实测数据来改表，而不是悄悄多挂一个没验过的源。
+    OFFICIAL_ONLY_EXCEPTION = {"idea", "pycharm", "clion", "webstorm", "goland",
+                               "datagrip", "vscode", "wechat-devtools",
+                               "apipost", "apifox", "hbuilderx", "android-studio",
+                               "visual-studio", "navicat",
+                               # 2026-10-12：这四个实测大陆源为 0（官方域不在
+                               # MAINLAND_MARKERS 里）。以后谁真找到可用镜像，
+                               # 这条断言会红，逼他带实测数字来改表。
+                               "consul", "helm", "dotnet-sdk", "sqlite",
+                               # 2026-10-12 B6a：这几个的 GitHub 产物走加速器
+                               # （加速器算大陆源，所以不是 0 源，不该进这张豁免表）。
+                               # ⚠ pgadmin4 **不在这里** —— 它有南大镜像（实测与官方
+                               # 同字节数、同 Last-Modified，29.1 Mbps 还快过官方 25.9），
+                               # 属"恰好 1 个大陆源"，登记在 SINGLE_SOURCE_EXCEPTION。
+                               # ——只有 mongodb-compass / mysql-workbench / postman
+                               # 这三个纯官方直链的是 0 源。
+                               "mongodb-compass",
+                               "mysql-workbench", "postman",
+                               # 2026-10-15 「Agent客户端」：只有这几个是**纯官网/CDN 直发、
+                               # 没有任何大陆镜像**（R1.5 要求凑不出 2 个源时必须在这里点名，
+                               # 而不是靠"表里没写"悄悄跳过）。
+                               # ⚠ `claude-code` / `codex-cli` **不在这里** —— 它们是 GitHub
+                               # 产物，`_gh_accelerated()` 会给前面挂 3 个加速器，而加速器算
+                               # 大陆源（实测 3 个），所以走常规检查、登记在下面的 github_assets。
+                               # 另两条 CN 域名也在这张表里：is_mainland() 认的是**镜像站**标记，
+                               # 不是"域名在国内" —— cdn-zcode.z.ai / download.qoder.com 是厂商
+                               # 自己的 CDN，不是可复用的镜像源。
+                               "cursor", "zcode", "qoderwork-cn",
+                               # 2026-10-15 第二批「Agent客户端」：这批几乎全是各家官网 /
+                               # 厂商自有 CDN 直发，没有任何可复用的大陆镜像源。逐个实测过
+                               # （200/206 + `MZ` 魔数），见 bt_download_only_tests 的域名白名单。
+                               # 其中 trae/trae-cn 是字节自家 CDN、download.codebuddy.cn 是
+                               # 腾讯自家 CDN、dumate 走百度 BOS —— 都算 0 源，因为
+                               # is_mainland() 认的是**镜像站**标记，不是"域名在国内"。
+                               "trae", "trae-cn", "qoder", "marvis", "wukong",
+                               "lobsterai", "autoclaw", "dumate", "chatgpt",
+                               "kimi", "kimi-code", "minimax", "stepfun", "nano-ai",
+                               "tiangong", "codebuddy", "workbuddy", "deepseek-harness",
+                               # 第三批大厂中文助手：同样是官方/CDN 直发、无大陆镜像。
+                               # （`lingma` 不在这里 —— 它的官方源就在阿里云内地 OSS 上，
+                               # 被判成"1 个大陆源"，登记在 SINGLE_SOURCE_EXCEPTION。）
+                               # 2026-10-15 第四批里只有这两个是**厂商自有 CDN 直发**、
+                               # 没有可复用的大陆镜像：kiro 走 prod.download.desktop.kiro.dev、
+                               # hermes 走 hermes-assets.nousresearch.com。同批其余都在
+                               # GitHub（走加速器，算大陆源，登记在 github_assets）。
+                               "kiro", "hermes",
+                               # 2026-10-15 第六批：terraform 的产物在 HashiCorp 自家 CDN
+                               # （releases.hashicorp.com），实测**没有任何大陆镜像**，
+                               # 同批其余 18 个都在 GitHub（加速器算大陆源，见 OFFICIAL_HOST）。
+                               "terraform",
+                               # 2026-10-15 第五批里的 9 个非 GitHub 域名：全是官方
+                               # 站点 / 厂商 CDN 直发，逐个实测过（同批其余 13 个在 GitHub）。
+                               "ollama", "lm-studio", "ima", "kilo-code", "msty",
+                               "kimi-work", "wireshark", "gitkraken", "sourcetree",
+                               "doubao", "yuanbao", "tongyi-qianwen",
+                               "ernie", "chatglm"}
+    # 「官网下载」型（`official_page_only`，R21）：**连直链都没有**，版本表是空的，
+    # 上面 test_counts 直接 `continue` 跳过。但它们仍必须在本套件点名，否则会从
+    # OfficialIsLast.test_no_component_escapes_this_table 的后门溜过去。
+    WEB_ONLY = {"metaso", "windsurf", "claude", "antigravity", "gemini", "xinghuo",
+                # 2026-10-15 第四批：这两个官方**不发 Windows 安装包**（只有 npm / pip），
+                # 卡片给「官网下载」——实测过：gemini-cli 的 release 资产只有
+                # bundle.zip + 两个 darwin 包；aider 官方装法只有 pip/pipx。
+                "gemini-cli", "aider"}
+
+    def test_counts(self):
+        for key, comp in COMPS.items():
+            if not comp.versions:
+                # 「官网下载」型（official_page_only）：官方没有可直链的安装包，
+                # 也就没有"源"可数 —— 它连版本表都是空的，取 versions[0] 会 IndexError。
+                # 这类组件同样要进 OFFICIAL_ONLY_EXCEPTION 点名（见上面那张表的说明）。
+                continue
+            lst = comp.versions[0].urls_for_current()
+            if not lst:
+                continue          # docker/rabbitmq 在 Windows 不发静态包，属正常
+            cn = [u for u in lst if is_mainland(u)]
+            if key in self.OFFICIAL_ONLY_EXCEPTION:
+                self.assertEqual(len(cn), 0,
+                                 f"{key} 登记为「只有官方直链」，现在却出现了大陆源，"
+                                 f"要么是新镜像（带实测改表），要么是硬凑的假源：{lst}")
+                continue
+            if key in self.SINGLE_SOURCE_EXCEPTION:
+                expected = self.SINGLE_SOURCE_EXCEPTION[key]
+                self.assertEqual(len(cn), expected, f"{key} 例外源数量变了：{lst}")
+            else:
+                self.assertGreaterEqual(len(cn), 2,
+                                        f"{key} Windows 只有 {len(cn)} 个大陆源：{lst}")
+            last = lst[-1]
+            if key in OFFICIAL_IS_MAINLAND_MARKED:
+                # 「官方源本身就落在大陆 CDN 上」：这条检查靠 `is_mainland(官方) == False`
+                # 来认官方，对这类组件失效（详见该名单的定义处）。
+                continue
+            self.assertFalse(is_mainland(last), f"{key} 末位不是官方源：{last}")
+
+
+# 官方安装包**本身**就放在带大陆标记的域名上（于是 `is_mainland()` 认不出它是官方源）。
+# 目前只有 lingma：它的唯一官方地址在阿里云内地 OSS（`…aliyuncs.com`），域名里的
+# `aliyun` 命中 `MAINLAND_MARKERS`，`OfficialIsLast` 与末位断言都会误判。
+# 点名列出而不是让断言"自动跳过"，是要逼以后遇到同类组件时来这里登记一句。
+OFFICIAL_IS_MAINLAND_MARKED = {"lingma"}
+
+
+class OfficialIsLast(unittest.TestCase):
+    OFFICIAL_HOST = {
+        "maven": "archive.apache.org", "tomcat": "archive.apache.org",
+        "kafka": "archive.apache.org", "rocketmq": "archive.apache.org",
+        "pulsar": "archive.apache.org", "activemq": "archive.apache.org",
+        "gradle": "services.gradle.org", "go": "go.dev",
+        "jenkins": "get.jenkins.io", "python": "python.org",
+        "node": "nodejs.org", "git": "github.com", "conda": "repo.anaconda.com",
+        "mysql": "cdn.mysql.com", "jdk": "adoptium.net", "mongodb": "mongodb.org",
+        "postgresql": "enterprisedb.com", "kubectl": "dl.k8s.io",
+        "elasticsearch": "elastic.co", "nacos": "github.com", "rabbitmq": "github.com",
+        "seata": "archive.apache.org",
+        "bun": "github.com", "docker": "download.docker.com",
+        # 2026-10-10 补：这三个一直在配置里，却从没进过这张表 —— 上面那条
+        # `test_no_component_escapes_this_table` 一加上就暴露了。它们的末位其实是对的
+        # （实测 erlang/powershell 末位 github.com、nginx 末位 nginx.org），
+        # 漏的是检查，不是配置。
+        "erlang": "github.com", "powershell": "github.com", "nginx": "nginx.org",
+        # Eclipse 不在"只有官方直链"的豁免里：清华/阿里/华为四个源实测都回同一个
+        # 377,592,420 字节的 PK 包（官方 CDN 本机只有 25 KB/s，镜像 2.7–3.9 MB/s）。
+        "eclipse": "download.eclipse.org",
+        # 2026-10-12 新增四件。kotlin / graalvm / redis 都是 GitHub 产物，
+        # 末位天然是裸 github.com（前面三个加速器算大陆源，所以不进 0 源豁免）；
+        # rust 的官方站是 static.rust-lang.org（MSI 在带日期目录的路径下）。
+        "kotlin": "github.com", "graalvm": "github.com", "redis": "github.com",
+        "rust": "static.rust-lang.org",
+        # 2026-10-12 B1：protoc / uv 都是 GitHub 产物，末位裸 github.com。
+        # 两者都另有真大陆镜像（protoc 走 npmmirror、uv 走中科大 github-release 代理），
+        # 所以不进 0 源豁免。
+        "protoc": "github.com", "uv": "github.com",
+        # 2026-10-12 B3/B5：GitHub Releases 单二进制批，末位天然是裸 github.com；
+        # 前面三个加速器都在 MAINLAND_MARKERS 里，所以大陆源 ≥3，不进 0 源豁免。
+        # ripgrep 的 tag 实测**不带 v**（"15.2.0" 不是 "v15.2.0"），tag 模板已经钉住。
+        # 2026-10-15 第六批：这 18 个都是 GitHub 发行（加速器算大陆源，因此
+        # 不走任何例外表），末位天然是裸 github.com —— 与 deno/ripgrep 同列。
+        "opentofu": "github.com", "argocd": "github.com", "prometheus": "github.com",
+        "victoriametrics": "github.com", "k6": "github.com", "pulumi": "github.com",
+        "istioctl": "github.com", "talosctl": "github.com",
+        "elixir": "github.com", "scala-cli": "github.com", "bazelisk": "github.com",
+        "just": "github.com", "task": "github.com", "oxlint": "github.com",
+        "biome": "github.com", "nushell": "github.com", "starship": "github.com",
+        "gh": "github.com",
+        "deno": "github.com", "ninja": "github.com", "duckdb": "github.com",
+        "cmake": "github.com", "ripgrep": "github.com", "fd": "github.com",
+        "bat": "github.com", "eza": "github.com", "zoxide": "github.com",
+        "fzf": "github.com", "yq": "github.com", "etcd": "github.com",
+        "nats-server": "github.com", "caddy": "github.com",
+        "traefik": "github.com",
+        # 2026-10-12 另一路并发登记的：jq/k9s/trivy/docker-compose 是 GitHub 产物；
+        # consul / helm / dotnet-sdk / sqlite 的官方域各自不同，且**大陆源为 0**，
+        # 因此进 OFFICIAL_ONLY_EXCEPTION（见该类下方）。zookeeper 走 Apache 分发目录，
+        # 大陆源充足（8 家镜像）但不登记在这 —— 它在 HAS_USTC 那组。
+        "jq": "github.com", "k9s": "github.com", "trivy": "github.com",
+        "docker-compose": "github.com", "consul": "releases.hashicorp.com",
+        "helm": "get.helm.sh", "dotnet-sdk": "dotnetcli.azureedge.net",
+        "sqlite": "sqlite.org",
+        # 2026-10-12 B6a + 并发那批：只下载的九个客户端与 pnpm / zookeeper。
+        # 只下载的 GUI 基本都是官方直链，大陆源为 0 ⇒ 已在 OFFICIAL_ONLY_EXCEPTION 里。
+        "dbeaver": "github.com", "heidisql": "github.com", "bruno": "github.com",
+        "ardm": "github.com", "redisinsight": "github.com",
+        "mongodb-compass": "downloads.mongodb.com",
+        "pgadmin4": "ftp.postgresql.org", "mysql-workbench": "cdn.mysql.com",
+        "postman": "dl.pstmn.io", "pnpm": "github.com",
+        "zookeeper": "dlcdn.apache.org",
+        # 2026-10-12 B7：Ant / JMeter 走 Apache 归档（华为云 repo + archive 末位）
+        "ant": "archive.apache.org", "jmeter": "archive.apache.org",
+        # 2026-10-12 B4 补：minio 是 GitHub 产物（三个加速器在前、裸地址末位），
+        # 所以不进 0 源豁免。⚠ 它的官方域 dl.min.io 已全线 410（开源版归档），
+        # 登记的产物只挂在 release 资产上 —— 别照着别家的样子去拼 dl.min.io。
+        "minio": "github.com",
+        # Dart：官方 storage.googleapis.com 末位，南大 / 腾讯云镜像在前
+        #（镜像路径必须带 /flutter/ 一层，不带实测 404）。
+        "dart": "storage.googleapis.com",
+    }
+
+    def test_official_last(self):
+        for key, host in self.OFFICIAL_HOST.items():
+            for cv in COMPS[key].versions:
+                for os_key, lst in (cv.url_list_map or {}).items():
+                    if not lst:
+                        continue
+                    self.assertIn(host, lst[-1],
+                                  f"{key}/{cv.version}/{os_key} 末位应是 {host}，"
+                                  f"实际 {lst[-1]}")
+
+    def test_no_component_escapes_this_table(self):
+        """新组件不许靠"表里没写 = 不用查"悄悄逃过本条。
+
+        「开发工具」那批确实不在 OFFICIAL_HOST 里：十四个只有官方直链（见
+        `WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION`），
+        两个是 GitHub 产物、末位天然是 github.com，一个是 Eclipse（有真镜像，走常规检查）。
+        但这两组都要**点名**，加组件时得来这里登记一句，而不是让检查自动跳过它。
+        """
+        # GitHub 产物、末位天然是裸 github.com（前面挂着加速器）→ 走常规检查，
+        # 只是要在这里点名。2026-10-15 加入 claude-code / codex-cli（同 dbx / windterm 一类）；
+        # 同日第二批又加了 openworker / orkas / zed / cline / reasonix（同样 GitHub 发行），
+        # 之后补的 opencode 也是 GitHub 发行（桌面端 + 终端版两个产物）。
+        github_assets = {"dbx", "windterm", "claude-code", "codex-cli",
+                         "openworker", "orkas", "zed", "cline", "reasonix",
+                         "opencode",
+                         # 2026-10-15 第四批：这 7 个也全是 GitHub 发行（加速器算大陆源）
+                         "openhands", "cherry-studio", "goose", "qwen-code",
+                         "crush", "jan", "openclaw",
+                         # 2026-10-15 第五批：这 13 个同样是 GitHub 发行（其余 9 个是厂商自有域名，
+                         # 已登记在 OFFICIAL_ONLY_EXCEPTION）
+                         "gpt4all", "anything-llm", "lobehub", "copilot-cli",
+                         "wave-terminal", "mistral-vibe",
+                         "notepad-plus-plus", "insomnia", "beekeeper-studio",
+                         "obsidian", "zettlr", "yaak", "gvim",
+                         # 2026-10-16：CC-Switch / CodexAppManager（都是 GitHub 发行）
+                         "cc-switch", "codex-app-manager"}
+        accounted = (set(self.OFFICIAL_HOST)
+                     | WindowsDefaultMustHaveTwoMainlandSources.OFFICIAL_ONLY_EXCEPTION
+                     | WindowsDefaultMustHaveTwoMainlandSources.WEB_ONLY
+                     | OFFICIAL_IS_MAINLAND_MARKED
+                     | github_assets)
+        escaped = sorted(set(COMPS) - accounted)
+        self.assertEqual(escaped, [], f"这些组件既没进官方域名表也没登记豁免：{escaped}")
+        hidden = sorted(accounted - set(COMPS))
+        self.assertEqual(hidden, [], f"表里有已不存在的组件（死键）：{hidden}")
+
+
+class UstcMustBeUsedWhereMeasured(unittest.TestCase):
+    """2026-09-28 带 byte-tools UA 复测：ustc 的 apache/*（maven/tomcat/kafka/rocketmq/pulsar/
+    activemq/incubator-seata）、jenkins、docker-ce 都是真包（GET 回gzip/zip 魔数），必须作为额外
+    大陆源出现在这些组件的列表末位（镜像优先级最低，但仍在前于官网）。
+    ustc 的 golang/* 曾被判为"只是 302 跳 dl.google.com"，因而把 go 排除在外。
+
+    2026-10-06 复测推翻了这一条：`mirrors.ustc.edu.cn/golang/go1.24.6.windows-amd64.zip`
+    直接回 206、实收 3MB+、魔数是 zip —— 是真镜像，不是跳转。2026-09 那次大概是
+    撞上了它跳转的时机或探测没带 UA。go 从 NO_USTC 移到 HAS_USTC。"""
+
+    HAS_USTC = ("maven", "tomcat", "rocketmq", "pulsar", "activemq", "seata", "kafka",
+                "jenkins", "docker", "go")
+    NO_USTC = ("gradle", "node", "mysql", "bun", "elasticsearch", "mongodb")
+
+    def test_ustc_present_last_but_before_official(self):
+        for key in self.HAS_USTC:
+            lst = urls(key, "Windows") if key != "docker" else urls(key, "Linux")
+            idx = [i for i, u in enumerate(lst) if "mirrors.ustc.edu.cn" in u]
+            self.assertEqual(len(idx), 1, (key, lst))
+            self.assertNotEqual(idx[0], len(lst) - 1,
+                                f"{key} 的 ustc 不能是末位（末位必须是官网）：{lst[-1]}")
+
+    def test_new_ustc_sources_are_last_mirror(self):
+        # ustc 在这些组件的源列表里，且**不在末位**（末位必须是官网）。
+        #
+        # 2026-10-06 改动：这条原来是 assertEqual(index, len(lst) - 2)，
+        # 也就是把「ustc 必须是最后一个国内源」当契约钉死了。那钉的是 2026-09 的
+        # 速度顺序，不是设计意图 —— 源顺序改成按实测速度排之后（华为云 repo
+        # 实测 19-31 MB/s、ustc 2.9-13 MB/s），ustc 有时快过腾讯云/阿里云，
+        # 位置自然不再是倒数第二。
+        # 真正不能破的是"末位必须是官网兜底"，那是 R1 的核心；ustc 排第几是速度问题。
+        for key in ("maven", "tomcat", "rocketmq", "pulsar", "activemq", "seata",
+                    "kafka", "jenkins"):
+            with self.subTest(key=key):
+                lst = urls(key, "Windows")
+                idx = [i for i, u in enumerate(lst) if "ustc" in u]
+                self.assertEqual(len(idx), 1, (key, lst))
+                self.assertLess(idx[0], len(lst) - 1, f"{key} 的 ustc 占了末位（官网兜底没了）")
+
+    def test_ustc_absent_where_measured_dead(self):
+        for key in self.NO_USTC:
+            for u in all_urls(key):
+                self.assertNotIn("mirrors.ustc.edu.cn", u, key)
+
+
+class GitUnixSourceTarballMustNotBeOffered(unittest.TestCase):
+    """git 在 Linux/macOS 只能下到 git/git 的源码 tar.gz，解压后没有可执行文件（要自己编译）。
+
+    2026-09-28 决定：不再把它当下载源列出来（用户会下一个用不了的东西），
+    改为空列表 + unsupported_platform_hint 引导用发行版包管理器。
+    """
+
+    def test_git_offers_no_url_on_unix_platforms(self):
+        for os_key in ("Darwin", "Linux"):
+            for cv in COMPS["git"].versions:
+                self.assertFalse(cv_urls(cv, os_key),
+                                 f"git {cv.version}/{os_key} 仍在给源码包 URL")
+                self.assertFalse(main._git_urls(cv.version).get(os_key),
+                                 f"_git_urls({cv.version}) 仍返回 {os_key} 条目")
+
+    def test_git_unix_hint_points_to_package_manager(self):
+        hint = COMPS["git"].unsupported_platform_hint or ""
+        self.assertTrue(hint, "git 缺 unsupported_platform_hint")
+        self.assertTrue(any(k in hint for k in ("apt", "dnf", "yum", "brew")), hint)
+
+
+class MeasuredAssetNames(unittest.TestCase):
+    """今天实测纠正的文件名/路径。"""
+
+    def test_activemq_uses_apache_prefix(self):
+        # 6.x 也叫 apache-activemq-<v>-bin，不存在 activemq-apache-<v>-bin
+        for u in all_urls("activemq"):
+            self.assertNotIn("activemq-apache-", u)
+
+    def test_activemq_default_version_is_live(self):
+        self.assertEqual(default_cv("activemq").version, "6.3.2")
+
+    def test_seata_uses_huawei_apache_dist_and_tar_gz(self):
+        # GitHub release 从 v2.1.0 起资产数为 0，二进制只在 Apache dist
+        for u in urls("seata", "Windows"):
+            self.assertTrue("apache/incubator/seata" in u or "archive.apache.org" in u, u)
+            self.assertTrue(u.endswith(".tar.gz"), u)
+
+    def test_kafka_windows_is_tgz(self):
+        # Kafka 只发 tgz，从不发 zip
+        for u in all_urls("kafka"):
+            self.assertTrue(u.endswith(".tgz"), f"kafka 不发 zip：{u}")
+        self.assertEqual(default_cv("kafka").archive_map.get("Windows"), "tar.gz")
+
+    def test_rabbitmq_uses_rabbitmq_server_dir(self):
+        # 华为云真实目录是 /rabbitmq-server/v<ver>/，不是 /rabbitmq/
+        for u in urls("rabbitmq", "Linux")[:2]:
+            self.assertIn("/rabbitmq-server/v", u)
+
+    def test_rabbitmq_default_version_exists_upstream(self):
+        # 上游没有 4.0.0（4.0.x 从 v4.0.1 起）
+        self.assertNotIn(default_cv("rabbitmq").version, ("4.0.0", "3.13.7"))
+        self.assertEqual(default_cv("rabbitmq").version, "4.0.9")
+
+    def test_rabbitmq_windows_uses_the_windows_zip_not_the_unix_one(self):
+        # 2026-10-06 真机实测改正：Windows **有**官方 zip
+        # （rabbitmq-server-windows-<v>.zip，华为云两个子域都实测 200）。
+        # 原来这里断言「Windows 无源」——那是当时的**错误认知**：
+        # 于是装包时回退到 url_list_map 里的 generic-unix，
+        # 而那个包的 sbin/ 下全是**无扩展名脚本**（rabbitmq-server 而非 .bat），
+        # Windows 上根本跑不起来。实测装出来才发现，对不上产品登记的 .bat 命令。
+        # Erlang 依赖仍然存在，但那是**前置依赖**（PrereqSpec）要解决的事，
+        # 不再是「不下载 Windows 包」的理由。
+        got = urls("rabbitmq", "Windows")
+        self.assertTrue(got, "Windows 现在有官方 zip，不该再断言无源")
+        for u in got:
+            self.assertIn("rabbitmq-server-windows-", u)
+            self.assertNotIn("generic-unix", u,
+                             "装generic-unix 的话 sbin 下全是无扩展名脚本，Windows 跑不了")
+        # Erlang 前置依赖必须仍然登记着 —— 它是 zip 不自带的那部分
+        self.assertEqual(main.LAUNCH_OF["rabbitmq"].prereq.key, "erlang")
+
+    def test_elasticsearch_huawei_path_has_version_dir(self):
+        # 华为云布局是 /elasticsearch/<version>/<file>；缺版本目录段就是原代码 404 的根因
+        v = default_cv("elasticsearch").version
+        for u in urls("elasticsearch", "Windows"):
+            if "huaweicloud" in u:
+                self.assertIn(f"/elasticsearch/{v}/", u)
+            self.assertTrue(u.endswith(".zip"), u)
+
+    def test_mongodb_linux_name_has_distro_segment(self):
+        # fastdl 的 Linux 包名必须带发行版段，否则恒 403
+        for u in urls("mongodb", "Linux"):
+            if "fastdl" in u:
+                self.assertRegex(u, r"linux-x86_64-[a-z0-9]+-\d.*\.tgz$")
+
+    def test_mysql_default_windows_version_is_on_mirrors(self):
+        # 阿里/华为只同步到 8.0.28/8.0.29
+        self.assertEqual(default_cv("mysql").version, "8.0.28")
+
+    def test_mysql_linux_uses_glibc212_on_mirrors(self):
+        for u in urls("mysql", "Linux"):
+            if not u.startswith("https://cdn.mysql.com"):
+                self.assertIn("glibc2.12", u)
+
+    def test_mysql_darwin_lists_mirror_names_before_cdn(self):
+        # 官方 CDN 只挂最新版（8.0.28/8.0.29 的 macos14 实测恒 404），镜像站留着
+        # 老版本当年命名的包（8.0.28→macos11、8.0.29→macos12），所以 Darwin 必须
+        # 是"镜像在前的多源列表"，且带 macos11/macos12 候选名，官方 macos14 末位。
+        for cv in COMPS["mysql"].versions:
+            lst = cv_urls(cv, "Darwin")
+            self.assertGreaterEqual(len(lst), 4, (cv.version, lst))
+            self.assertTrue(
+                any(("macos11" in u or "macos12" in u) and is_mainland(u) for u in lst),
+                (cv.version, lst))
+            self.assertTrue(lst[-1].startswith("https://cdn.mysql.com"), lst[-1])
+            self.assertIn("macos14", lst[-1])
+            # 不能把只有镜像才有的老命名放在官方 CDN 上（那边一定 404）
+            self.assertTrue(all("macos14" in u for u in lst if u.startswith("https://cdn.mysql.com")), lst)
+
+    def test_git_windows_has_real_mirror_not_only_accelerator(self):
+        lst = urls("git", "Windows")
+        self.assertIn("git-for-windows", lst[0])
+        self.assertFalse(lst[0].startswith("https://gh"), lst[0])
+
+    def test_jenkins_default_version_is_on_all_mirrors(self):
+        # 镜像的 war-stable 只保留最近 4 条 LTS 线
+        self.assertEqual(default_cv("jenkins").version, "2.568.3")
+
+    def test_bun_default_version_has_windows_asset(self):
+        # 1.0.20/1.0.29/1.0.30 的 release 里没有 Windows 包
+        self.assertNotIn(default_cv("bun").version, ("1.0.30", "1.0.29", "1.0.20"))
+
+    def test_python_default_versions_have_embed(self):
+        # 3.10.14 / 3.9.19 是 security-only 发布，官方 ftp 里没有 embed 包
+        vers = [cv.version for cv in COMPS["python"].versions]
+        self.assertNotIn("3.10.14", vers)
+        self.assertNotIn("3.9.19", vers)
+
+    def test_kubectl_uses_daocloud_then_official(self):
+        lst = urls("kubectl", "Windows")
+        self.assertIn("files.m.daocloud.io", lst[0])
+        self.assertIn("dl.k8s.io", lst[-1])
+
+    def test_docker_keeps_ustc_and_has_five_mainland(self):
+        # ustc 的 docker-ce 是真镜像（75MB gzip），与 apache/* 行为不同
+        lst = urls("docker", "Linux")
+        self.assertGreaterEqual(len([u for u in lst if is_mainland(u)]), 5)
+
+
+class UrlsForCurrentStillWorks(unittest.TestCase):
+    def test_every_component_returns_on_windows(self):
+        for key, comp in COMPS.items():
+            if key in ("docker", "rabbitmq"):
+                continue      # Windows 无静态包 / 依赖 Erlang，属登记例外
+            if not comp.versions:
+                # 「官网下载」型（official_page_only）：没有版本表，也就没有 URL 可返回。
+                # 它的"能不能下载"由 bt_download_only_tests.WebFallback 负责。
+                continue
+            self.assertTrue(comp.versions[0].urls_for_current(),
+                            f"{key} 在本机没有可用下载地址")
+
+
+class MirrorSpeedOrder(unittest.TestCase):
+    """源顺序必须按 2026-10-06 实测速度排（不是按字母序、不是按历史遗留）。
+
+    为什么要有这条：源顺序是 R1「国内源优先 + 多源故障转移」里唯一影响**用户等待时长**
+    的环节。实测（Range 取样 4MB算吞吐，26 个组件共 117 个 URL）：
+
+        repo.huaweicloud.com         27.25 MB/s（14 个组件都最快，最高 30.8）
+        mirrors.cloud.tencent.com8.12 MB/s
+        registry.npmmirror.com       7.38 MB/s
+        tuna                         7.32 MB/s
+        bfsu                6.47 MB/s
+        nju                         6.42 MB/s
+        ustc                        6.23 MB/s
+        mirrors.huaweicloud.com      5.89 MB/s
+        aliyun                       0.35 MB/s（10 个组件全部垫底，比官网还慢）
+
+    阿里云慢到 0.35 MB/s 是最刺眼的：原顺序里它排在**第二位**，绝大多数用户第一个
+    吃到的就是它 —— 130MB 的 gradle 要 6 分钟，而华为云只要 4 秒。
+
+    这条护栏钉的是「同一个组件内，快源必须在慢源前面」这个相对关系，
+    不是绝对位置 —— 某个源被官方下线、或某家镜像临时抽风，位置该变就得变。
+    """
+
+    # 各组件**自己的**实测速度（MB/s），不是跨组件平均。
+    #
+    # 2026-10-06 第一版护栏写的是跨组件平均（tuna 7.32、bfsu 6.47…），
+    # 结果 7 个组件全红：maven 的 bfsu 实测 6.2、tuna 实测 5.8，按平均排才是对的。
+    # 教训：**平均速度不是排序依据** —— 每个镜像对每个组件的路径/冷热都不一样，
+    # 排序只能用"这个组件上这个源"的实测值。跨组件平均只能当参考。
+    # 数据来自 _source_bench.json（Range 取样 4MB）。
+    BY_COMPONENT = {
+        "maven":        {"repo.huaweicloud.com": 19.1, "mirrors.bfsu.edu.cn": 6.2,
+                          "mirrors.tuna.tsinghua.edu.cn": 5.8, "mirrors.cloud.tencent.com": 4.1,
+                          "mirrors.ustc.edu.cn": 2.9, "mirrors.nju.edu.cn": 2.6,
+                          "mirrors.aliyun.com": 0.3},
+        "tomcat":       {"repo.huaweicloud.com": 25.0, "mirrors.cloud.tencent.com": 11.4,
+                          "mirrors.tuna.tsinghua.edu.cn": 8.0, "mirrors.bfsu.edu.cn": 7.1,
+                          "mirrors.nju.edu.cn": 5.4, "mirrors.ustc.edu.cn": 2.8,
+                          "mirrors.aliyun.com": 0.4},
+        "kafka":        {"repo.huaweicloud.com": 28.6, "mirrors.tuna.tsinghua.edu.cn": 7.8,
+                          "mirrors.cloud.tencent.com": 7.5, "mirrors.bfsu.edu.cn": 6.6,
+                          "mirrors.nju.edu.cn": 6.2, "mirrors.ustc.edu.cn": 3.0,
+                          "mirrors.aliyun.com": 0.3},
+        "activemq":     {"repo.huaweicloud.com": 28.6, "mirrors.cloud.tencent.com": 11.4,
+                          "mirrors.bfsu.edu.cn": 9.1, "mirrors.nju.edu.cn": 8.3,
+                          "mirrors.tuna.tsinghua.edu.cn": 7.5, "mirrors.ustc.edu.cn": 3.7,
+                          "mirrors.aliyun.com": 0.3},
+        "pulsar":       {"repo.huaweicloud.com": 30.8, "mirrors.nju.edu.cn": 10.0,
+                          "mirrors.tuna.tsinghua.edu.cn": 7.5, "mirrors.cloud.tencent.com": 5.0,
+                          "mirrors.ustc.edu.cn": 3.2, "mirrors.bfsu.edu.cn": 2.7,
+                          "mirrors.aliyun.com": 0.3},
+        "rocketmq":     {"repo.huaweicloud.com": 30.8, "mirrors.cloud.tencent.com": 13.3,
+                          "mirrors.ustc.edu.cn": 12.5, "mirrors.bfsu.edu.cn": 8.5,
+                          "mirrors.tuna.tsinghua.edu.cn": 7.4, "mirrors.aliyun.com": 0.3},
+        "seata":        {"repo.huaweicloud.com": 28.6, "mirrors.nju.edu.cn": 9.8,
+                          "mirrors.huaweicloud.com": 7.4, "mirrors.tuna.tsinghua.edu.cn": 7.3,
+                          "mirrors.bfsu.edu.cn": 7.3, "mirrors.cloud.tencent.com": 6.7,
+                          "mirrors.ustc.edu.cn": 3.4, "mirrors.aliyun.com": 0.3},
+        "jenkins":      {"repo.huaweicloud.com": 26.7, "mirrors.ustc.edu.cn": 11.4,
+                          "mirrors.tuna.tsinghua.edu.cn": 8.0, "mirrors.cloud.tencent.com": 5.9,
+                          "mirrors.bfsu.edu.cn": 5.6, "mirrors.nju.edu.cn": 3.6,
+                          "mirrors.huaweicloud.com": 1.8, "mirrors.aliyun.com": 0.3},
+        "elasticsearch": {"repo.huaweicloud.com": 23.5, "mirrors.huaweicloud.com": 7.8},
+    }
+    COMPONENTS = tuple(BY_COMPONENT)
+
+    def _host(self, url: str) -> str:
+        return url.split("/")[2]
+
+    def test_faster_mirror_never_after_slower_one(self):
+        """同一组件内，快源必须在慢源前面（用该组件自己的实测值比）。"""
+        for key in self.COMPONENTS:
+            with self.subTest(key=key):
+                speeds = self.BY_COMPONENT[key]
+                lst = urls(key, "Windows")
+                idx = [(i, self._host(u)) for i, u in enumerate(lst)
+                       if self._host(u) in speeds]
+                self.assertGreaterEqual(len(idx), 2,
+                                        f"{key} 可比对的源只有 {len(idx)} 个，测不出顺序")
+                for (i1, h1), (i2, h2) in zip(idx, idx[1:]):
+                    self.assertGreaterEqual(
+                        speeds[h1], speeds[h2] - 0.5,
+                        f"{key} 的源顺序与实测速度相反：{h1}({speeds[h1]}) "
+                        f"排在 {h2}({speeds[h2]}) 后面")
+
+    def test_huaweicloud_repo_is_first_whenever_present(self):
+        """华为云 repo 在 14 个组件上都最快（27 MB/s），有它就必须排第一。
+
+        只对"repo 与其它国内源同时存在"的组件断言 —— 单一来源的组件（mongodb/postgresql）
+        排第几都一样。
+        """
+        hits = 0
+        for key, comp in COMPS.items():
+            if key in ("docker", "rabbitmq"):
+                continue
+            if not comp.versions:
+                continue      # official_page_only：没有源可排（见上面两条同类 skip）
+            try:
+                lst = comp.versions[0].urls_for_current()
+            except Exception as exc:
+                # 2026-10-14 修正：原先是 `except Exception: continue`，
+                # 于是"这个组件的源列表解析炸了"与"它压根不在断言范围内"
+                # 在报告上完全一样 —— 而本组用例要的正是"源顺序"这条事实，
+                # 解析失败时最该红。用 subTest 定位到具体组件再失败。
+                self.fail(f"{key} 的 urls_for_current() 抛了异常（源顺序无从校验）："
+                          f"{type(exc).__name__}: {exc}")
+            mainland = [u for u in lst if is_mainland(u)]
+            if not mainland or self._host(mainland[0]) != "repo.huaweicloud.com":
+                continue
+            self.assertEqual(self._host(mainland[0]), "repo.huaweicloud.com",
+                             f"{key} 的国内源首位不是最快的华为云：{mainland[0]}")
+            hits += 1
+        self.assertGreaterEqual(hits, 10,
+                                f"只有 {hits} 个组件以华为云打头，与实测（14 个）不符")
+
+    def test_no_source_list_starts_with_the_slowest_mirror(self):
+        """阿里云实测 0.35 MB/s垫底，谁把它放首位就是退回到 2026-09 的坏顺序。"""
+        for key in ("maven", "tomcat", "kafka", "activemq", "pulsar",
+                    "rocketmq", "seata", "jenkins", "elasticsearch"):
+            with self.subTest(key=key):
+                mainland = [u for u in urls(key, "Windows") if is_mainland(u)]
+                self.assertTrue(mainland, key)
+                self.assertNotEqual(self._host(mainland[0]), "mirrors.aliyun.com",
+                                    f"{key} 把最慢的阿里云放在了首位")
+
+
+class DaoCloudGithubProxyIsFirstForMeasuredComponents(unittest.TestCase):
+    """`files.m.daocloud.io` 对**个别** GitHub 产物是真镜像，不是加速器。
+
+    2026-10-12 实测：`files.m.daocloud.io/github.com/docker/compose/releases/download/
+    v5.6.0/docker-compose-windows-x86_64.exe` 回 **200 + `MZ` + Content-Length
+    33,352,192**（与 GitHub 上报的字节数逐位相同），老版本 v2.29.7 同样在树里
+    （3.5–7.0 Mbps）。同一条手法套到 npmmirror 上就是 404 —— 所以这张表
+    **逐个组件登记**，不并进 `_gh_accelerated` 的全局顺序里（那会影响所有走
+    加速器的组件，见 R1.5 末尾"一处已知偏差"）。
+    """
+
+    DAO_MEASURED = {"docker-compose"}
+
+    def test_measured_components_lead_with_daocloud(self):
+        comps = {c.key: c for c in main.build_components()}
+        for key in sorted(self.DAO_MEASURED):
+            with self.subTest(key):
+                urls = comps[key].versions[0].urls_for_current()
+                self.assertTrue(urls, f"{key} 没有可用源")
+                self.assertTrue(urls[0].startswith("https://files.m.daocloud.io/github.com/"),
+                                f"{key} 首位应是 DaoCloud 的 github 代理树，实测是 {urls[0]}")
+                self.assertIn("github.com/", urls[-1], f"{key} 末位必须是裸 GitHub")
+                self.assertNotIn("daocloud", urls[-1], f"{key} 末位必须是裸 GitHub")
+
+    def test_unmeasured_components_are_not_swept_in(self):
+        """没实测过的组件不许顺手沾这条源 —— 沾上就是"没有证据的配置"（R1.6）。"""
+        comps = {c.key: c for c in main.build_components()}
+        for key in ("helm", "sqlite", "jq", "trivy"):
+            with self.subTest(key):
+                urls = comps[key].versions[0].urls_for_current()
+                self.assertFalse(any("daocloud" in u for u in urls),
+                                 f"{key} 的源里出现了没实测过的 DaoCloud 地址")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

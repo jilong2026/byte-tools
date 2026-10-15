@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import json
+import ntpath
 import os
 import shutil
 import socket
@@ -39,6 +40,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import requests
+import threading
 
 # ---------------------------------------------------------------------------
 # PySide6 依赖
@@ -60,12 +62,19 @@ try:
         QCursor,
         QFont,
         QIcon,
+        QImage,
         QPainter,
         QPalette,
         QPen,
         QPixmap,
         QDesktopServices,
     )
+    # SVG 图标渲染。**不能用 QPixmap 读 SVG** —— QPixmap 只认栅格格式，
+    # 给它一个 .svg 会得到一张空图（isNull() 为真），于是全部图标静默退化
+    # 成分类色块。必须走 QtSvg 的 QSvgRenderer。
+    # 打包侧同步要求：byte-tools.spec 的 hidden_imports 要有 "PySide6.QtSvg"，
+    # 否则 PyInstaller 不会把 Qt6Svg.dll 收进去，打包后一样读不出 SVG。
+    from PySide6.QtSvg import QSvgRenderer
     from PySide6.QtCore import QUrl
     from PySide6.QtWidgets import (
         QApplication,
@@ -191,23 +200,245 @@ UPDATE_CHECK_INTERVAL_SEC = 24 * 3600      # 自动检查的频控：一天最�
 UPDATE_HTTP_TIMEOUT = 8.0                  # 后台线程也要有硬超时，不许挂在那儿
 
 
-def _version_parts(text: object):
-    """`v1.10.2` → (1, 10, 2)；读不出数字段返回 None（宁可不提示也不猜）。"""
-    s = str(text or "").strip().lstrip("vV")
-    if not s:
-        return None
-    parts = []
-    for chunk in s.split("."):
-        digits = ""
-        for ch in chunk:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        if not digits:
+class Version:
+    """版本号值对象：把"一段版本文字怎么变成可比较的数字"收在一处。
+
+    2026-10-14 新增。此前 `main.py` 里有**三套**互不相同的版本语义，
+    各自被用在不同地方，于是"版本号怎么比"这件事没有唯一答案：
+
+      · `_version_parts`  宽松抽取 + 严格识别（`jdk-21.0.5` → None）
+      · `_semver_key`      纯 int 语义，任一段不纯就整档作废 → (0,)
+      · `_version_key`     目录名口径（先剥 `jdk-` 前缀，非数字段补 0）
+
+    这三套**不能抹平成一种**，它们的分歧是承重的（详见 bt_version_tests.py
+    的模块 docstring 与 `KnownDivergences`）。所以这里不"统一口径"，
+    而是把这三种口径做成**具名的方法**，让每个老函数变成薄壳 ——
+    收敛的是"实现只有一份"，不是"语义只有一种"。
+
+    另有第四种职责刻意**不**并进来：`_extract_version_text` 是从命令输出里
+    **抽取**版本号（解析），与比较无关，它产出的字符串再交给本类。
+
+    可哈希（实现了 __hash__/__eq__），能进 set 与 dict 键。
+    """
+
+    __slots__ = ("text", "parts", "prerelease", "_strict", "_dir")
+
+    def __init__(self, text: str, parts: Tuple[int, ...], prerelease: bool) -> None:
+        self.text = text
+        self.parts = parts
+        self.prerelease = prerelease
+        self._strict: Optional[Tuple[int, ...]] = None
+        self._dir: Optional[Tuple[int, ...]] = None
+
+    # -- 构造 --------------------------------------------------------
+    @classmethod
+    def parse(cls, text: object) -> Optional["Version"]:
+        """按**宽松抽取 + 严格识别**口径解析一个版本号。
+
+        入参 text: 版本号文字，可带 v/V 前缀（GitHub tag 就是 v1.2.3）
+        返回:      Version 实例；读不出数字段时返回 None
+
+        规则：剥掉开头的 v/V → 按 "." 切段 → 每段取**开头连续数字**，
+        某段一个数字都没有就整个作废（返回 None）。数字之后若还有字符
+        （`-beta`、`rc1` 这类后缀），记为 prerelease=True 但**不影响 parts** ——
+        这正是 `_version_parts("21.0.4-beta") == (21, 0, 4)` 的由来。
+        """
+        s = str(text or "").strip().lstrip("vV")
+        if not s:
             return None
-        parts.append(int(digits))
-    return tuple(parts)
+        parts: List[int] = []
+        prerelease = False
+        for chunk in s.split("."):
+            digits = ""
+            rest = ""
+            for i, ch in enumerate(chunk):
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    rest = chunk[i:]
+                    break
+            if not digits:
+                return None                      # 这一段不是版本号的形状
+            parts.append(int(digits))
+            if rest:
+                prerelease = True
+        return cls(str(text or ""), tuple(parts), prerelease)
+
+    @classmethod
+    def from_install_dir(cls, dir_name: object) -> "Version":
+        """按**安装目录名**口径解析（`jdk-21.0.5` → 21.0.5）。
+
+        入参 dir_name: 安装目录名，如 "jdk-21.0.5"、"maven-3.10.0"
+        返回:          Version 实例；剥不出数字段时 parts 为空元组
+
+        与 parse 的两处不同，都是被目录命名逼出来的：
+          · 先剥掉第一个 "-" 之前的部分 —— 那是组件 key，不是版本
+          · 非数字段**补 0** 而不是判废 —— `3.12.1rc1` 这种目录仍要能参与排序
+        """
+        s = str(dir_name or "")
+        tail = s.split("-", 1)[1] if "-" in s else s
+        out: List[int] = []
+        for chunk in tail.split("."):
+            out.append(int(chunk) if chunk.isdigit() else 0)
+        return cls(s, tuple(out), False)
+
+    # -- 三种口径 ----------------------------------------------------
+    @property
+    def strict_key(self) -> Tuple[int, ...]:
+        """严格档：逐段 `int()`，任一段不纯就整档作废 → `(0,)`。
+
+        这是 `_semver_key` 的原语义，**别当成 bug 改掉**：它让
+        `21.0.4-beta` / `3.12.1rc1` / `v1.10.2` 统统变成 `(0,)`，
+        于是在降序排序里一律沉底 —— "预发布版不该被当成更新"就靠它实现。
+        改成宽松档的话，用户会看到"检测到新版本 21.0.4-beta"。
+
+        注意 `int("0_1") == 1`：带下划线的段（如 `1.0.0_1`）在这一档会被
+        完整接受，而宽松档只取到 0。这个分歧是纯 Python 巧合，先钉住。
+        """
+        if self._strict is None:
+            try:
+                self._strict = tuple(int(x) for x in self.text.split("."))
+            except (ValueError, AttributeError, TypeError):
+                self._strict = (0,)
+        return self._strict
+
+    @property
+    def dir_key(self) -> Tuple[int, ...]:
+        """目录名档：`from_install_dir` 算出的数字段（非数字补 0）。"""
+        if self._dir is None:
+            self._dir = tuple(int(c) if c.isdigit() else 0
+                              for c in self._text_tail().split("."))
+        return self._dir
+
+    def _text_tail(self) -> str:
+        s = self.text
+        return s.split("-", 1)[1] if "-" in s else s
+
+    # -- 比较 --------------------------------------------------------
+    def is_newer_than(self, other: object) -> bool:
+        """self 是否比 other 新。任一边读不出数字段一律 False（宁可不提示也不猜）。
+
+        入参 other: 另一个 Version，或可被 parse 的版本文字
+        """
+        if isinstance(other, Version):
+            b = Version.parse(other.text)
+        else:
+            b = Version.parse(other)
+        a = Version.parse(self.text)
+        if a is None or b is None:
+            return False
+        return _pad_compare(a.parts, b.parts) > 0
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self.parts == other.parts and self.text == other.text
+
+    def __hash__(self) -> int:
+        return hash((self.text, self.parts))
+
+    def __repr__(self) -> str:
+        return f"Version({self.text!r}, parts={self.parts}, pre={self.prerelease})"
+
+    # -- 老函数的薄壳 ------------------------------------------------
+    @staticmethod
+    def legacy_parts(text: object) -> Optional[Tuple[int, ...]]:
+        """`_version_parts` 的等价物。"""
+        v = Version.parse(text)
+        return v.parts if v is not None else None
+
+    @staticmethod
+    def legacy_semver_key(text: object) -> Tuple[int, ...]:
+        """`_semver_key` 的等价物（含 None 输入的 (0,) 退化）。"""
+        v = Version.parse(text)
+        return v.strict_key if v is not None else (0,)
+
+    @staticmethod
+    def legacy_version_key(dir_name: object) -> Tuple[int, ...]:
+        """`_version_key` 的等价物。"""
+        return Version.from_install_dir(dir_name).dir_key
+
+
+def _pad_compare(a: Tuple[int, ...], b: Tuple[int, ...]) -> int:
+    """按数值分段比两个版本元组：短的一边补 0。
+
+    补 0 而不是补"最小值"：`_version_parts` 的原实现就是把不同长度按
+    尾部补 0 比的（见 `version_is_newer` 里的 `a + (0,) * (...)`）。
+    """
+    n = max(len(a), len(b))
+    pa = a + (0,) * (n - len(a))
+    pb = b + (0,) * (n - len(b))
+    return (pa > pb) - (pa < pb)
+
+
+def component_registry() -> Dict[str, "Component"]:
+    """进程级的组件表（key → Component），惰性建一次。
+
+    2026-10-14 从 `component_registry()` 抽成模块级函数。
+    原因是 ComponentCard 里有 5 处反向调用 `component_registry()`：
+    卡片为了查前置依赖（needs 判定）而去引用**顶层窗口类**，形成
+    "子组件依赖父容器"的方向倒置 —— 后果是卡片没法脱离 MainWindow 单测，
+    而且 MainWindow 一旦改名/移动，这 5 处跟着炸。
+
+    抽成模块级之后，依赖方向变成「卡片 → 模块单例」，与既有的
+    `SERVICE_MANAGER` 同一模式（那边也是卡片直接用进程级单例）。
+
+    与 MainWindow 的关系：`__init__` 建完 self.components 后会调用
+    `register_components(self.components)` 把这份灌进来，于是**全进程只有
+    一份组件对象**——此前 __init__ 与 current_components() 各建一份，
+    卡片用的和查前置依赖用的不是同一批对象。
+    """
+    if not _COMPONENT_REGISTRY:
+        _COMPONENT_REGISTRY.update(
+            {c.key: c for c in build_components()})
+    return _COMPONENT_REGISTRY
+
+
+# 进程级组件表。空表示还没建，见 component_registry()。
+_COMPONENT_REGISTRY: Dict[str, "Component"] = {}
+
+
+def register_components(components: Sequence["Component"]) -> None:
+    """把 MainWindow 建好的那批组件灌进进程级登记表。
+
+    入参 components: build_components() 的结果
+    返回: 无
+
+    为什么要这一步：MainWindow.__init__ 已经建好了一份（卡片就用它），
+    如果不灌进登记表，component_registry() 会**再建一份** —— 于是同一批组件
+    在进程里存在两套对象，卡片查前置依赖时拿到的是另一套。这是"注册表
+    只有一个真源"的必要条件。
+    """
+    _COMPONENT_REGISTRY.clear()
+    _COMPONENT_REGISTRY.update({c.key: c for c in components})
+
+
+# 关窗标志。原先每处靠 `getattr(self.window(), "_closing", False)` 拿 ——
+# 那是"绕过构造注入、沿 Qt 父指针爬回去读私有属性"，卡片因此与窗口的内部
+# 状态耦合。改成与 FETCH_ABORT 同款的事件后，卡片只问"应用是否正在退出"，
+# 不必知道窗口长什么样。
+_CLOSING = threading.Event()
+
+
+def is_closing() -> bool:
+    """应用是否正在退出（关窗流程已开始）。
+
+    返回: True 表示 closeEvent 已经立旗，此后不再派发后台任务、不再回写界面。
+    """
+    return _CLOSING.is_set()
+
+
+def reset_closing() -> None:
+    """清掉关窗标志。**仅测试用**（一个进程里要反复构造多次窗口）。"""
+    _CLOSING.clear()
+
+
+def _version_parts(text: object):
+    """`v1.10.2` → (1, 10, 2)；读不出数字段返回 None（宁可不提示也不猜）。
+
+    实现已收敛到 Version.parse()，这里只保留薄壳以免动到几十个调用点。
+    """
+    return Version.legacy_parts(text)
 
 
 def version_is_newer(current: str, latest: str) -> bool:
@@ -227,11 +458,16 @@ def version_is_newer(current: str, latest: str) -> bool:
 
 
 def parse_latest_release(payload: object):
-    """把 `releases/latest` 的响应读成 {tag, version, page_url, assets}。
+    """把 `releases/latest` 的响应读成 {tag, version, page_url, assets, notes}。
 
     draft / prerelease 一律不算：本项目的发布流程是"各平台先传草稿暂存，
     Gitee 同步核对齐全后才自动取消草稿"，所以 latest 里出现 draft 就等于半成品，
     提示用户去下它会把人坑在没传完的包上。
+
+    notes 取 release 的 body（即 release notes）。2026-10-14 补：原先这个字段
+    被整个丢掉，用户点开那颗版本号 chip 得到的全部信息只有"有个新版，去哪下"，
+    看不到"这版改了什么"。而 GitHub 的 `releases/latest` **本来就返回** body，
+    是白捡的。
     """
     if not isinstance(payload, dict):
         return None
@@ -254,6 +490,7 @@ def parse_latest_release(payload: object):
     return {"tag": tag,
             "version": tag[1:] if tag[:1] in ("v", "V") else tag,
             "page_url": str(payload.get("html_url") or ""),
+            "notes": str(payload.get("body") or ""),
             "assets": assets}
 
 
@@ -286,6 +523,199 @@ def parse_gitee_releases(payload: object):
 
 # 每个更新源用自己的解析器；不在表里的按 GitHub 形状读。
 UPDATE_PARSERS = {GITEE_RELEASES_API: parse_gitee_releases}
+
+# release notes 的展示上限。GitHub 的 release body 常带完整 CHANGELOG 与徽章图，
+# 整段塞进日志浮层会把别的东西顶走；这里只取靠前的要点行，够回答"要不要升"。
+RELEASE_NOTES_MAX_LINES = 8
+RELEASE_NOTES_MAX_CHARS = 600
+
+
+# ---------------------------------------------------------------------------
+# 导出诊断信息（2026-10-14 新增）
+# ---------------------------------------------------------------------------
+# 为什么要有这个：用户的报障此前只能靠"在 QQ/微信里手打截图"传回来，而截图
+# 看不清时间戳、看不出用的是哪个源、也带不走日志全文。这里把一次运行里**所有
+# 与故障相关的事实**汇成一份可直接贴进 issue 的纯文本。
+#
+# 脱敏纪律（逐条对应下面代码里的处理）：
+#   · 环境变量：只列**键名**与本工具相关的 XXX_HOME / PATH 条目数，不打印值 ——
+#     PATH 里可能有内网地址，XXX_HOME 路径能反推用户名与目录结构。
+#   · config.json：整份原样贴。它只存组件 key、版本号与路径，没有凭据；
+#     而 `takeover[key].snapshot` 是排查"接管/还原"类问题的唯一依据，
+#     脱敏掉就等于把最有价值的那部分信息删了。
+#   · 不读任何 GITHUB_TOKEN / 密钥类变量。
+
+DIAG_SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")
+
+
+def _diag_section(title: str, lines: List[str]) -> List[str]:
+    """给一段诊断内容加标题分隔，返回可直接拼接的行列表。"""
+    return ["", f"── {title} " + "─" * max(0, 56 - len(title))] + lines
+
+
+def build_diagnostics() -> str:
+    """生成一份完整的诊断报告（纯文本，可直接贴进 issue）。
+
+    返回: 报告全文。任何一个采集环节失败都只在该节里写明"读取失败"，绝不让
+          整份报告生成不出来 —— 一份少一节的报告仍然有用，一份空白的没有。
+    """
+    out: List[str] = ["字节工具箱 ByteTools 诊断信息", "=" * 60]
+
+    # ---- 版本与运行环境 ----
+    env_lines = [
+        f"软件版本: {APP_VERSION}",
+        f"Python: {sys.version.split()[0]}",
+        f"操作系统: {CURRENT_OS} / {MACHINE} (arm={IS_ARM})",
+        f"工作目录: {CONFIG_DIR}",
+        f"配置文件: {CONFIG_FILE}（存在={CONFIG_FILE.is_file()}）",
+        f"本次日志: {Path(CONFIG_DIR) / 'logs' / f'session-{time.strftime('%Y%m%d-%H%M%S')}.log'}",
+        f"采集时刻: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    out += _diag_section("版本与运行环境", env_lines)
+
+    # ---- 组件清单与生效版本 ----
+    comp_lines: List[str] = []
+    try:
+        active = load_active_map()
+        comps = build_components()
+        comp_lines.append(f"组件总数: {len(comps)}（界面可见 {sum(1 for c in comps if c.key != 'erlang')}）")
+        comp_lines.append(f"{'组件':<14}{'生效版本':<14}{'已装版本'}")
+        for c in comps:
+            if c.hidden:
+                continue
+            try:
+                installed = [v for v, _p in installed_versions(c)]
+            except Exception as exc:
+                installed = [f"<读取失败 {type(exc).__name__}>"]
+            comp_lines.append(
+                f"{c.key:<14}{active.get(c.key, '-') or '-':<14}"
+                f"{', '.join(installed) if installed else '-'}")
+    except Exception as exc:
+        comp_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("组件与生效版本", comp_lines)
+
+    # ---- 环境变量现状 ----
+    env_lines = []
+    try:
+        from_env = sorted(k for k in os.environ
+                          if k.endswith("_HOME") or k in ("JAVA_HOME", "NODE_HOME"))
+        env_lines.append("已设置的 XXX_HOME（只列键名与是否指向本工具目录）：")
+        for k in from_env:
+            v = os.environ.get(k, "")
+            in_tool = str(Path(CONFIG_DIR)) in v
+            env_lines.append(f"  {k}: {'指向本工具目录' if in_tool else '工具目录之外（未打印路径）'}")
+        if not from_env:
+            env_lines.append("  （无）")
+        try:
+            entries = EnvManager.read_user_path_entries()
+            dead = [e for e in entries if not Path(e).exists()]
+            env_lines.append("")
+            env_lines.append(f"用户 PATH 条目数: {len(entries)}，其中目录已不存在: {len(dead)}")
+            for e in dead[:10]:
+                env_lines.append(f"  [死条目] {e}")
+            in_tool = [e for e in entries if str(Path(CONFIG_DIR)) in e]
+            env_lines.append(f"指向本工具目录的条目数: {len(in_tool)}")
+        except Exception as exc:
+            env_lines.append(f"PATH 读取失败: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        env_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("环境变量与 PATH", env_lines)
+
+    # ---- 启停登记 ----
+    run_lines = []
+    try:
+        running = load_running_map()
+        run_lines.append(f"登记在跑的服务: {len(running)}")
+        for key, rec in running.items():
+            ports = getattr(rec, "ports", None)
+            run_lines.append(f"  {key}: pid={getattr(rec, 'pid', '?')} ports={ports}")
+    except Exception as exc:
+        run_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("一键启停登记（running.json）", run_lines)
+
+    # ---- 外部版本接管 ----
+    take_lines = []
+    try:
+        takeover = load_takeover_map()
+        machine_fix = load_machine_fix_map()
+        take_lines.append(f"接管登记: {len(takeover)} 项")
+        for key, entry in takeover.items():
+            home = (entry or {}).get("home") or (entry or {}).get("path") or "?"
+            take_lines.append(f"  {key}: {home}（有原文快照={(entry or {}).get('snapshot') is not None}）")
+        take_lines.append(f"系统级 PATH 插队记录: {len(machine_fix)} 项")
+        for key in machine_fix:
+            take_lines.append(f"  {key}")
+    except Exception as exc:
+        take_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("外部版本接管", take_lines)
+
+    # ---- config.json 全文 ----
+    cfg_lines = []
+    try:
+        if not CONFIG_FILE.is_file():
+            cfg_lines.append("（配置文件尚不存在）")
+        else:
+            raw = CONFIG_FILE.read_text(encoding="utf-8")
+            # 校验是不是**合法 JSON**：用户手改坏配置是常见故障，而读侧会把
+            # 解析失败回落成空表 —— 也就是"所有生效版本登记静默消失"。
+            # 只把坏内容原样贴出来，用户看不出问题在哪；这里必须明确说。
+            try:
+                json.loads(raw)
+                cfg_lines.append("（以下是原文，格式合法）")
+                cfg_lines.append(raw)
+            except json.JSONDecodeError as exc:
+                cfg_lines.append(
+                    f"⚠ 配置文件不是合法 JSON（{exc.msg}，第 {exc.lineno} 行第 "
+                    f"{exc.colno} 列）——**读侧会把它回落成空表**，"
+                    f"这意味着所有生效版本登记当前都是丢失状态。"
+                    f"旁边还有一个 {CONFIG_FILE.name}.bak 可用于回退。")
+                cfg_lines.append("--- 原文（供人工修复） ---")
+                cfg_lines.append(raw)
+    except Exception as exc:
+        cfg_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("config.json 全文（生效版本 / 接管快照都在这里）", cfg_lines)
+
+    return "\n".join(out)
+
+
+def _release_notes_digest(notes: str) -> str:
+    """把 release body 压成几行要点，供日志展示。
+
+    入参 notes: release 的 body 原文（可能为空）
+    返回:       压平后的单行文本；没有可用内容时返回空串
+
+    四步清洗：去 HTML 标签 → 去 markdown 图片 → 逐行剔除噪声 → 取前 N 行。
+    剔除的"噪声"有三类，少一类就会在日志里看到废话：
+      · 版本标题行（`## v1.3.0`）—— 它就在版本号 chip 上，重复一遍没意义
+      · 纯标点分隔行（`---` / `***` / `===`）
+      · 空行
+    刻意不解析 Markdown 结构：日志浮层显示纯文本，做成表格反而更难读。
+    """
+    if not notes or not notes.strip():
+        return ""
+    text = _re.sub(r"<[^>]+>", " ", notes)           # 徽章 / 图片标签
+    text = _re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)  # markdown 图片
+    text = text.replace("\r", "")
+    lines: List[str] = []
+    for idx, raw in enumerate(text.split("\n")):
+        line = raw.strip().lstrip("#").strip()
+        # 版本标题：首行恰好是个 v1.2.3 形式的串（release notes 的惯例第一行就是它）。
+        # 必须先剥掉 markdown 标题井号再判，否则 "## v1.3.0" 匹配不上。
+        if idx == 0 and _re.fullmatch(r"[vV]?\d+(\.\d+)+[\s\-—:：]*", line):
+            continue
+        # 去掉列表符号与首尾强调标记（*bold* / **bold**）
+        line = line.strip("*_").lstrip("-*+ ").strip().rstrip("*_").strip()
+        # 去掉 markdown 列表符号后若只剩标点，就是分隔线 / 空装饰
+        stripped = line.lstrip("-*+ ").strip()
+        if not stripped or not _re.search(r"[\w一-鿿]", stripped):
+            continue
+        lines.append(stripped)
+        if len(lines) >= RELEASE_NOTES_MAX_LINES:
+            break
+    out = "；".join(lines)
+    if len(out) > RELEASE_NOTES_MAX_CHARS:
+        out = out[:RELEASE_NOTES_MAX_CHARS] + "…"
+    return out
 
 
 def update_download_urls(asset: dict, tag: str = "") -> list:
@@ -352,13 +782,7 @@ def pick_update_asset(assets, os_name: str):
 
 def load_update_state() -> dict:
     """读 `config.json` 里的更新检查状态；读不到就是一张空表（= 该查一次）。"""
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:                       # noqa: BLE001
-        return {}
-    state = (data or {}).get("update_check")
+    state = _config_read_raw().get("update_check")
     return dict(state) if isinstance(state, dict) else {}
 
 
@@ -392,13 +816,7 @@ def load_download_dir() -> Path:
     没记录 / 记录的不是目录 / 那个目录后来被删了 —— 一律安静回落到 ~/Downloads。
     这只是一个"默认落在哪"的偏好，为它弹错误框不值得。
     """
-    data: dict = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) or {}
-        except Exception:                    # noqa: BLE001  坏配置不该挡住下载
-            data = {}
-    raw = data.get(DOWNLOAD_DIR_KEY) if isinstance(data, dict) else None
+    raw = _config_read_raw().get(DOWNLOAD_DIR_KEY)
     if not isinstance(raw, str) or not raw.strip():
         return default_download_dir()
     candidate = Path(raw)
@@ -506,15 +924,25 @@ def _row_to_component_version(row) -> Optional["ComponentVersion"]:
         return None
 
 
+_VERSION_CACHE_PENDING: Dict[str, dict] = {}
+
+
 def load_version_cache() -> Dict[str, dict]:
     path = version_cache_path()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    data: Dict[str, dict] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            data = loaded
+    # 把"已抓到但还没落盘"的条目并进来。批量落盘（见 save_version_entry）
+    # 之后这一层是必须的：抓取过程中紧接着就会读缓存给卡片用，
+    # 不并进来就会出现"刚抓到的版本在下一次读缓存时不见了"。
+    if _VERSION_CACHE_PENDING:
+        data.update(_VERSION_CACHE_PENDING)
+    return data
 
 
 def _cached_versions_from(cache: dict, key: str, now: Optional[float] = None,
@@ -545,21 +973,54 @@ def cached_versions_for(key: str, now: Optional[float] = None,
 
 def save_version_entry(key: str, versions: List["ComponentVersion"],
                        now: Optional[float] = None) -> None:
-    """抓成功就落盘。读-改-写：整体覆盖会把别的组件当天已抓的结果一起清掉。
+    """记下"这个组件抓成功了"，**不立刻落盘**；由 flush_version_cache() 统一写。
+
+    入参 key:      组件标识符
+    入参 versions: 该组件抓到的版本清单
+    入参 now:      时间戳（可注入，便于测试）
+
+    2026-10-14 改为批量落盘。原来这里是"读全文件 → 改一个 key → 全量
+    json.dumps → 原子写"，而一次刷新会抓 87 个组件 —— 也就是**87 次全量读 +
+    87 次全量序列化 + 87 次原子写**，全部跑在主线程上（信号槽里），是可感的卡顿。
+
+    改成：先攒进内存，等整轮抓取结束（_fetch_finished）再写一次。
+    读侧 load_version_cache() 会把内存里这层并进来，所以抓取过程中读缓存
+    仍能看到刚抓到的结果，界面行为不变。
+
+    为什么不靠"每隔 N 秒自动写"：那要在运行期引入定时器与退出时的 flush，
+    而抓取本来就是"一批一批回来、一轮一批结束"的形状 —— 收尾点天然存在。
 
     写失败（只读盘、目录被删、磁盘满）只影响"下次要不要重抓"，不值得让界面报错，
-    所以这里静默吞掉 OSError。
+    所以 flush 里静默吞掉 OSError，且**不清空内存层**（下次 flush 会重试）。
     """
+    _VERSION_CACHE_PENDING[str(key)] = {
+        "ts": float(time.time() if now is None else now),
+        "versions": [_component_version_to_row(v) for v in versions],
+    }
+
+
+def flush_version_cache() -> int:
+    """把内存里攒着的版本条目一次性写进 version_cache.json，返回写入条数。
+
+    入参: 无
+    返回: 实际落盘的条目数（没有待写内容时返回 0 且不碰磁盘）
+
+    调用点：MainWindow._fetch_finished() —— 整轮抓取结束的那一刻。
+    """
+    pending = _VERSION_CACHE_PENDING
+    if not pending:
+        return 0
     try:
         data = load_version_cache()
-        data[str(key)] = {
-            "ts": float(time.time() if now is None else now),
-            "versions": [_component_version_to_row(v) for v in versions],
-        }
+        data.update(pending)
         ensure_dir(CONFIG_DIR)
         _atomic_write(version_cache_path(), json.dumps(data, ensure_ascii=False))
     except (OSError, ValueError, TypeError):
-        pass
+        # 保留内存层不清空：下次 flush 会重试，别让一次磁盘故障把
+        # 这一整轮抓到的结果全丢了
+        return 0
+    pending.clear()
+    return len(pending)
 
 
 def _gh_limited_now(now_mono: Optional[float] = None) -> bool:
@@ -588,7 +1049,7 @@ def _is_rate_limit_text(reason: str) -> bool:
 
 def _fetch_release_json(url: str, timeout: float):
     """默认取回实现：只带项目统一 UA，**不带任何用户信息**。"""
-    resp = requests.get(url, headers=HTTP_UA, timeout=timeout)
+    resp = http_session().get(url, timeout=timeout)
     if resp.status_code != 200:
         return int(resp.status_code), {}
     try:
@@ -688,6 +1149,13 @@ def ensure_dir(path: Path) -> None:
 ARTIFACT_LABELS: Dict[str, str] = {
     "exe": "exe 安装器（走安装向导）",
     "zip": "zip 便携包（解压即用）",
+    # 2026-10-15：只下载类里有组件同时发"同一件事的两种形态"，光靠 exe/zip 区分不开 ——
+    # Goose / Qwen Code 都同时发**桌面端**与**终端版**，两个若都标成「zip 便携包」，
+    # 「下载 ▾」菜单里会出现两条一模一样的文案。给它俩一组说得清的标签。
+    "cli": "命令行版（解压后把可执行文件放进 PATH）",
+    "portable": "免安装便携版（exe，双击即用）",
+    # 2026-10-15 第五批：GitHub Copilot CLI 官方只发 .msi（外加一个 zip）。
+    "msi": "msi 安装包（走 Windows 安装向导）",
 }
 
 
@@ -783,6 +1251,11 @@ class ComponentVersion:
 # 测试桩兼容：_which_fast 先比对 shutil.which 的身份，被测试换掉实现时
 # 直接调用换掉的实现，桩语义逐字保持（bt_launch_tests 有四处打桩点）。
 _PATH_INDEX: dict = {"key": None, "dirs": [], "map": {}}
+# 2026-10-14 补：_path_effective_check 用的目录清单缓存。
+# _path_index 只覆盖 os.environ["PATH"]，而复验走的是**系统合成 PATH**
+# （系统段 + 用户段），两者未必相同，所以另起一张表。失效策略与上面一致，
+# 外加本工具改动 PATH 后由 invalidate_path_caches() 显式清。
+_PATH_DIRLIST: dict = {"key": None, "map": {}}
 _REAL_SHUTIL_WHICH = shutil.which
 
 
@@ -830,6 +1303,64 @@ def _path_index() -> dict:
     _PATH_INDEX["dirs"] = dirs
     _PATH_INDEX["map"] = idx
     return _PATH_INDEX
+
+
+def _path_dir_listing(dirpath: str) -> frozenset:
+    """列出某个目录下的条目名（大写化），按 PATH 原文缓存整表。
+
+    入参 dirpath: 目录路径
+    返回:        该目录条目名的大写集合；目录读不到时是**空集**（不抛异常）
+
+    为什么需要它：`_path_effective_check` 要在系统合成的 PATH 上按顺序找
+    "第一个含这个命令的目录"，原来是对每个条目 × 每个候选后缀做一次
+    `os.path.exists`。实测 37 条 PATH × 5 个后缀 ≈ 185 次系统调用，
+    **每个组件都要来一遍**（88 张卡建卡时都会走到），也就是说同一批目录被
+    stat 了两万次上下，而内容在这一次启动里根本不会变。
+
+    R18 的 `_path_index` 解决不了这条路径：它以 `os.environ["PATH"]` 为键，
+    而这里查的是系统合成的 PATH（系统段 + 用户段），两者未必相同。
+
+    缓存以 PATH 原文为键（与 _path_index 同一套失效逻辑）：改了环境变量就
+    整表重建，避免"装完组件后新加的目录查不到"。
+    """
+    raw = os.environ.get("PATH", "")
+    if _PATH_DIRLIST["key"] != raw:
+        _PATH_DIRLIST["key"] = raw
+        _PATH_DIRLIST["map"] = {}
+    cache = _PATH_DIRLIST["map"]
+    norm = os.path.normcase(dirpath)
+    hit = cache.get(norm)
+    if hit is not None:
+        return hit
+    try:
+        names = frozenset(
+            ent.name.upper() if sys.platform == "win32" else ent.name
+            for ent in os.scandir(dirpath)
+        )
+    except OSError:
+        # 目录不存在 / 无权限 / 网络盘掉线 —— 与 _path_index 的处理一致：
+        # 当它不含任何命令，而不是当成错误
+        names = frozenset()
+    cache[norm] = names
+    return names
+
+
+def invalidate_path_caches() -> None:
+    """PATH 相关缓存全部失效。
+
+    入参: 无
+    返回: 无
+
+    **什么时候必须调**：本工具自己往 PATH 里加/删条目之后（切换生效版本、
+    卸载、清理残留 PATH）。这些操作会改写环境变量，但不一定改写
+    `os.environ`（后者只在部分路径上被同步），所以靠"读 os.environ 判变化"
+    这条自动失效机制不一定能察觉 —— 显式清一次更可靠。
+    """
+    _PATH_INDEX["key"] = None
+    _PATH_INDEX["dirs"] = None
+    _PATH_INDEX["map"] = {}
+    _PATH_DIRLIST["key"] = None
+    _PATH_DIRLIST["map"] = {}
 
 
 def _which_fast(name: str) -> str:
@@ -950,6 +1481,19 @@ class Component:
     # 置上这个位之后，build_components() 末尾会连带把 multi_version 置 False，
     # 于是角标（条件就是 multi_version）自动不创建；其余短路点见 ComponentCard 各方法开头。
     download_only: bool = False
+    # 「只下载」里更弱的一档（2026-10-15 用户要求）：**官方没有可直接下载的安装包**，
+    # 或我们没能拿到可直链的地址（只给滚动入口 / 要真机抓包 / 只能 npm・pip・插件装）。
+    # 置上它之后，卡片主按钮不写「下载」而写**「官网下载」**：点一下用
+    # `QDesktopServices.openUrl()` 打开 `official_url`，由用户自己在官网下载。
+    #
+    # 用户 2026-10-15 的原话是"如果拿不到下载方式的就做一个『官网下载』按钮，
+    # 用户点击时就直接打开浏览器自行去官网下载"——目的是**先把组件都收进来**，
+    # 不给个空卡片。所以这条不是"降级"，是这类组件**应有**的形态。
+    #
+    # 约束：置上它必须同时有 `official_url`（否则按钮点开是空的），由
+    # `bt_download_only_tests.WebFallback` 的两条用例钉住；版本表通常为空
+    # （表里那一行的版本行写成空元组即可，见 `_download_only_components`）。
+    official_page_only: bool = False
     # 一句话说清"这个组件是干嘛的"（2026-10-12 用户要求：详情功能）。
     # 由 build_components() 末尾按 COMPONENT_SUMMARY 统一赋值，不在构造处手写
     # —— 与 category / launch 同一套"单一真源"做法。
@@ -957,6 +1501,10 @@ class Component:
     # 与 data_note 的分工：这条回答"它是什么、我要不要装"，data_note 回答
     # "它的数据落在哪、删版本会不会丢数据"。两者读者时机不同，不合并。
     summary: str = ""
+    # 官方网址（2026-10-14 新增）：可选中国大陆区域官网链接。
+    # 优先用 CN URL，没有则用第一个可下载 URL 解析出的官方域名。
+    # 由 build_components() 末尾按 COMPONENT_OFFICIAL_URLS 统一赋值。
+    official_url: Optional[str] = None
 
     def install_dir(self, version: str) -> Path:
         """返回该版本组件的解压安装目录。"""
@@ -1531,7 +2079,11 @@ DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
 # 读取超时给足（单次读 60 秒），连接仍保持短（10 秒，探测到不通就快速切下一个源）。
 DOWNLOAD_CONNECT_TIMEOUT = 10
 DOWNLOAD_READ_TIMEOUT = 60
-DOWNLOAD_RETRY_PER_URL = 2    # 单 URL 内重试次数
+# 原先这里有个 DOWNLOAD_RETRY_PER_URL = 2「单 URL 内重试次数」，2026-10-14 删除。
+# 它**零引用**：下载路径压根不做单 URL 内的重试，靠的是 R1 的多源故障转移
+# （这个 URL 失败就换下一个源，实测更有效），而元数据抓取（_get）另有自己
+# 的重试策略、写死成 range(3)。留着一个与实现脱钩的常量，是"改它以为能生效"
+# 的那种陷阱 —— 必须去 _get 里找真正的次数才能改对。
 # 关窗时等抓取线程收尾的总预算（秒）。抓取线程最长按一个在途请求的超时返回
 # （DOWNLOAD_PROBE_TIMEOUT * 2 = 10s），这里留 2s 余量。
 FETCH_EXIT_WAIT = 12
@@ -1539,6 +2091,39 @@ FETCH_EXIT_WAIT = 12
 # 实测（2026-09-28）：清华/北外对 requests 默认 UA 与浏览器 UA 一律回 403，
 # 只对自定义 UA 放行；列目录（_get）已带，下载（_try_download）也必须带。
 HTTP_UA = {"User-Agent": "byte-tools"}
+
+# HTTP 会话池（2026-10-14 加）。全文件原先零 Session：每个 requests.get 都新建
+# 一个隐式 Session，用完就关 —— 于是每次调用都要重新做 TCP 握手与 TLS 握手。
+# 一次启动要替 88 个组件各抓一次版本清单，其中 30 多个直连 api.github.com，
+# 每个 fetcher 内部还要串行请求若干次（fetch_jdk_versions 最极端：约 18 个 major
+# × 2 个镜像 ≈ 36 次）。这些请求如果能复用连接，光省下的握手时间就很可观。
+#
+# **必须线程本地**：Session 及其底层连接池不是线程安全的，而抓取全跑在
+# QThread 里。用 threading.local() 给每个线程各发一份，既拿到复用又不引入
+# 并发 bug。同一个线程内多次调用复用同一份 —— 这正是想要的粒度。
+_HTTP_LOCAL = threading.local()
+
+
+def http_session() -> "requests.Session":
+    """返回当前线程的 HTTP 会话（首次调用时创建）。
+
+    入参: 无
+    返回: 绑定好默认 UA 与连接池参数的 requests.Session
+
+    为什么 UA 挂在 session 上而不是每次传：省掉每个调用点的字典拷贝，
+    也让"所有请求都带专用 UA"这条实测得来的规矩只有一个落点
+    （部分高校镜像站对默认 UA 一律回 403）。
+    """
+    sess = getattr(_HTTP_LOCAL, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        sess.headers.update(HTTP_UA)
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=4, pool_maxsize=8, max_retries=0)
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        _HTTP_LOCAL.session = sess
+    return sess
 # 实测（2026-09-28 GET + 本 UA）：华为云 anaconda 对任意不存在的路径都回
 # 「301 → 200 + 一小段软 404 HTML、无 Content-Length」，会把错误页当下载成功；
 # 本工具的归档包最小的也有几 MB，故按字节数判真假。
@@ -2943,6 +3528,22 @@ class FetchAborted(RuntimeError):
 # 每个重试边界查一次标志，退避等待改用 Event.wait（置位即醒）。
 FETCH_ABORT = _threading.Event()
 
+# 版本抓取的并发上限（2026-10-14 加）。
+#
+# 为什么需要：启动端那个错峰定时器（gap_ms）只解决"同一瞬间齐发"，不解决
+# "87 条长时间同时在飞"。而 GitHub 匿名 API 是**每 IP 每小时 60 次**，其中
+# 30 多个 fetcher 直连 api.github.com —— 首启、24 小时后首启、点「⟳ 刷新版本」
+# 这三个时刻都会瞬间打满，剩下的组件拿到 403 然后集体降级到内置清单，
+# 现象是"明明联网了，版本却一直很旧"。
+#
+# 取 6：既能压住瞬时并发，又不至于让 87 个组件串成十几轮那么慢
+# （实测单个 fetcher 最长约 1~2s，6 并发下整轮在 30s 内收得住）。
+# 留 1 的余量给不经过 GitHub 的源（Apache / 华为云 / Adoptium 等）。
+VERSION_FETCH_CONCURRENCY = 6
+# 闸门等待被打断的轮询间隔：关窗时 FETCH_ABORT 置位，排队中的 worker
+# 最迟这么久就会退出，不会干等到轮到自己（那会儿界面早没了）。
+FETCH_ABORT_POLL_SEC = 0.25
+
 
 def _get(url: str, timeout: int = 10) -> requests.Response:
     """带自动重试与 SSL 降级的 GET 请求。
@@ -2950,20 +3551,26 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
     - 网络抖动/临时错误：最多重试 3 次，指数退避（1s, 2s）
     - SSL 错误（企业代理 MITM / 系统证书缺失等）：最后一次尝试关闭 SSL 校验
     - 关窗取消：FETCH_ABORT 置位后在下一次尝试或退避处抛 FetchAborted
+    - 走 http_session() 复用连接与默认 UA（2026-10-14）；关闭 SSL 校验那一次
+      用独立的临时会话，因为它带着 verify=False，不能污染线程里那份
     """
-    headers = HTTP_UA
+    sess = http_session()
     last_exc: Optional[Exception] = None
     for attempt in range(3):
         if FETCH_ABORT.is_set():
             raise FetchAborted("应用正在退出，已取消版本抓取")
         try:
             if attempt < 2:
-                r = requests.get(url, timeout=timeout, headers=headers)
+                r = sess.get(url, timeout=timeout)
             else:
-                # 最后一次：关闭 SSL 校验，让企业代理/自签证书场景也能工作
+                # 最后一次：关闭 SSL 校验，让企业代理/自签证书场景也能工作。
+                # 用临时会话而不是给共享那份传 verify=False —— 后者会把这个
+                # 标志留在连接池上，之后的正常请求也跟着不校验证书。
                 import urllib3
                 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                r = requests.get(url, timeout=timeout, headers=headers, verify=False)
+                with requests.Session() as lax:
+                    lax.headers.update(HTTP_UA)
+                    r = lax.get(url, timeout=timeout, verify=False)
             r.raise_for_status()
             return r
         except requests.exceptions.SSLError as e:
@@ -3009,7 +3616,7 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
             # 额度旗已立，再发请求就是继续烧额度、继续让界面转圈
             raise RuntimeError(GH_LIMITED_TEXT)
         try:
-            r = requests.get(url, timeout=timeout, headers=headers)
+            r = http_session().get(url, timeout=timeout, headers=headers)
             # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
             # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
             # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
@@ -3032,11 +3639,12 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
 
 
 def _semver_key(v: str):
-    """语义版本排序键：逐段转 int，转不了的（如 "21.0.4-beta"）退到最小档。"""
-    try:
-        return tuple(int(x) for x in v.split("."))
-    except ValueError:
-        return (0,)
+    """语义版本排序键：逐段转 int，转不了的（如 "21.0.4-beta"）退到最小档。
+
+    薄壳，实现见 Version.strict_key。**那�� `(0,)` 的退化是承重设计**：
+    它让预发布版在排序里沉底，别顺手改成宽松档（理由见该属性的 docstring）。
+    """
+    return Version.legacy_semver_key(v)
 
 
 def _sort_semver_desc(vs) -> list:
@@ -3965,8 +4573,18 @@ def fetch_vscode_versions() -> List[ComponentVersion]:
     return out
 
 
-def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple):
+def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple,
+                              tag_re: Optional[str] = None):
     """GitHub releases 抓取器：tag 给版本号，`asset_hints` 按 `((格式, 名字后缀), ...)` 挑产物。
+
+    入参 tag_re: 可选的"从 tag 里抠出版本号"正则（取第 1 个分组）。默认 None = 老行为
+         （`tag.lstrip("vV")` 之后必须整个就是版本号）。
+         2026-10-15 加它是因为两个组件的 tag 把版本号夹在中间：Biome 是
+         `@biomejs/biome@2.5.15`、Oxlint 是 `oxlint_v1.88.0` —— 老行为下
+         `_version_parts()` 直接判空、整批 release 全被跳过，抓取器报"版本列表为空"。
+         ⚠ **不要把老行为直接放宽**（例如改成"在 tag 里搜版本号"）：这个函数与既有组件
+         共用，放宽会连带让那些**故意**被跳过的 tag（如带 `-rc1` 的）重新进来。
+         需要前缀的组件就各自带一条 tag_re。
 
     一个版本可以挑中**多种**产物（DBX 同一次 release 里既有 portable.zip 又有 setup.exe），
     菜单就按传入顺序列出来，第一个也是默认。
@@ -3985,7 +4603,12 @@ def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple):
         for rel in (data if isinstance(data, list) else []):
             if not rel or rel.get("prerelease") or rel.get("draft"):
                 continue
-            tag = str(rel.get("tag_name") or "").lstrip("vV")
+            raw_tag = str(rel.get("tag_name") or "")
+            if tag_re:
+                m = _re.search(tag_re, raw_tag)
+                tag = m.group(1) if m else ""
+            else:
+                tag = raw_tag.lstrip("vV")
             if _version_parts(tag) is None:
                 continue
             assets = list(rel.get("assets") or [])
@@ -4972,6 +5595,24 @@ def fetch_postman_versions() -> List[ComponentVersion]:
 #   · `eza` 看着像 Unix-only，实际**有官方 Windows 包**（`eza.exe_x86_64-pc-windows-gnu.zip`）
 #     —— 差点凭印象跳过它，这就是"资产名必须从接口读"的理由。
 #
+# 界面 Tab 的四个分类名（2026-10-14 新增常量）。
+#
+# 为什么提成常量：这些名字原先是散落在 main.py 二十多处、tests 四个文件、
+# 六份文档里的**裸字符串**。改一次「开发软件 → 服务端组件」要动 51 处，
+# 漏掉任何一处就会留下"分类名对不上"的暗坑（Tab 里少组件、或者文档与界面
+# 说法不一致）。提成常量之后，改名只改这一段，字符串比较也不必再靠肉眼核对。
+#
+# 四个分类各自代表什么、以及 Tab 顺序为何是这样，见 COMPONENT_CATEGORIES 处。
+CAT_LAUNCH = "一键启停"       # 卡片上有「启动/停止」按钮的组件（成员由 LAUNCH_KEYS 派生）
+CAT_SERVER = "服务端组件"     # 装在服务器上、命令行操作的后台服务与运维组件
+CAT_ENV = "开发环境"          # 装完进 PATH、直接在开发机上写/编译/打包代码的东西
+CAT_TOOL = "开发工具"         # **只下载**的 GUI 软件（IDE / 数据库客户端 / 接口调试）
+# Agent 客户端：AI 编程 / 办公 Agent 的桌面端与 CLI 发行包。
+# 形态与「开发工具」同类（**只下载**，见 _AGENT_CLIENTS 与 R13），单独立一个 Tab 是因为
+# 它既不是"开发环境"也不是"工具"：用户 2026-10-15 要求单列，并**放在最后**。
+CAT_AGENT = "Agent客户端"
+
+
 # 字段：key / name 显示名 / arch 归档类型 / exe 探测用可执行文件名（不含扩展名）
 #       args 版本参数 / v 内置版本 / tag 与 asset 的 {v} 模板 / size 官方字节数
 #       cat 分类 / note 卡片说明（含"为什么不是另一种形态"）
@@ -4982,41 +5623,41 @@ _CLI_TOOLS: tuple = (
     # 两处各加一遍的结果是同一个 key 出现两张卡片（建窗口时不报错，界面上多一格）。
     {"key": "jq", "name": "jq", "arch": "exe", "exe": "jq", "args": ["--version"],
      "v": "1.8.2", "repo": "jqlang/jq", "tag": "jq-{v}", "asset": "jq-windows-amd64.exe",
-     "size": 1035264, "cat": "开发环境",
+     "size": 1035264, "cat": CAT_ENV,
      "note": "JSON 处理器。官方产物就是裸 .exe（不是压缩包），下载后改名成 jq.exe 放进 PATH。"
              "tag 形如 `jq-1.8.2`，与版本号不同形，所以版本号要从 tag 里剥前缀。"},
     {"key": "trivy", "name": "Trivy", "arch": "zip", "exe": "trivy",
      "args": ["--version"], "v": "0.75.0", "repo": "aquasecurity/trivy", "tag": "v{v}",
-     "asset": "trivy_{v}_windows-64bit.zip", "size": 52927180, "cat": "开发软件",
+     "asset": "trivy_{v}_windows-64bit.zip", "size": 52927180, "cat": CAT_SERVER,
      "note": "容器/依赖漏洞扫描。首次 `trivy image` 要下漏洞库（几百 MB），"
              "那一步由 trivy 自己做，本工具不预取。"},
     {"key": "k9s", "name": "k9s", "arch": "zip", "exe": "k9s", "args": ["version"],
      "v": "0.51.0", "repo": "derailed/k9s", "tag": "v{v}",
-     "asset": "k9s_Windows_amd64.zip", "size": 42330705, "cat": "开发软件",
+     "asset": "k9s_Windows_amd64.zip", "size": 42330705, "cat": CAT_SERVER,
      "note": "Kubernetes 终端界面。要能连上一个已配置的集群才有画面。"},
     {"key": "docker-compose", "name": "Docker Compose v2", "arch": "exe",
      "exe": "docker-compose", "args": ["version"], "v": "5.6.0", "repo": "docker/compose",
      "tag": "v{v}", "asset": "docker-compose-windows-x86_64.exe", "size": 33352192,
      "dao": True,      # files.m.daocloud.io 的 github 代理树实测有它（200 + MZ + 整包字节数一致）
-     "cat": "开发软件",
+     "cat": CAT_SERVER,
      "note": "独立二进制版 Compose。**它能装能进 PATH，但要真的跑起来仍然需要一个能用的 "
              "Docker 引擎** —— 而 Docker Desktop 在 Windows 上没有免安装形态（见 Docker 卡片"
              "的引导）。登记它是因为 `docker-compose version` 这类自检不需要引擎。"},
     {"key": "pnpm", "name": "pnpm", "arch": "zip", "exe": "pnpm", "args": ["--version"],
      "v": "12.11.2", "repo": "pnpm/pnpm", "tag": "v{v}", "asset": "pnpm-win32-x64.zip",
-     "size": 22582408, "cat": "开发环境",
+     "size": 22582408, "cat": CAT_ENV,
      "note": "Node 包管理器。zip 顶层直接是 pnpm.exe。"
              "⚠ 本工具只放二进制，**不改 corepack、不动全局 node_modules** —— "
              "要用它接管 `npm` 得你自己 `corepack enable`。"},
     {"key": "helm", "name": "Helm", "arch": "zip", "exe": "helm", "args": ["version"],
      "v": "4.3.0", "repo": None, "tag": None, "asset": None, "size": 20832154,
-     "cat": "开发软件",
+     "cat": CAT_SERVER,
      "note": "Kubernetes 包管理器。**产物不在 GitHub release 上**（那里只挂 .asc/.sha256 "
              "旁证），本体在官方 CDN `get.helm.sh`；zip 顶层是 `windows-amd64/` 一个目录。",
      "url_tmpl": "https://get.helm.sh/helm-v{v}-windows-amd64.zip"},
     {"key": "sqlite", "name": "SQLite", "arch": "zip", "exe": "sqlite3",
      "args": ["--version"], "v": "3.54.0", "repo": None, "tag": None, "asset": None,
-     "size": 6982216, "cat": "开发环境",
+     "size": 6982216, "cat": CAT_ENV,
      "note": "官方 `sqlite-tools-win-x64` 包，里面是 sqlite3.exe / sqldiff.exe / "
              "sqlite3_analyzer.exe / sqlite3_rsync.exe 四个裸文件（实测整包下载列过：0 个顶层目录）。"
              "⚠ 官网把版本号写成**六位无点**形式（3.54.0 → `3540000`），且 URL 里带"
@@ -5024,12 +5665,165 @@ _CLI_TOOLS: tuple = (
      "url_tmpl": "https://sqlite.org/2026/sqlite-tools-win-x64-3540000.zip"},
     {"key": "dotnet-sdk", "name": ".NET SDK", "arch": "zip", "exe": "dotnet",
      "args": ["--version"], "v": "10.0.401", "repo": None, "tag": None, "asset": None,
-     "size": 300608304, "cat": "开发环境",
+     "size": 300608304, "cat": CAT_ENV,
      "note": "微软官方 zip 便携包（300 MB），解压即用 —— 所以**不需要 installer_mode**，"
              "这是计划里点名的本批最高风险项，实测确认可以避开。"
              "⚠ `builds.dotnet.microsoft.com` 本机连不上，`dotnetcli.azureedge.net` 通。",
      "url_tmpl": "https://dotnetcli.azureedge.net/dotnet/Sdk/{v}/dotnet-sdk-{v}-win-x64.zip"},
+    # ------------------------------------------------------------------
+    # 2026-10-15 第六批：服务端/运维与开发环境里"解压即用"的那批（用户问"这三个 Tab
+    # 就没要补的吗" -> 专项调研后接入）。URL / 字节数由我本人带 `byte-tools/1.2.1` UA
+    # 实测（206 + 前四字节 PK/MZ），台账见 DEVELOPMENT.md R20.8。
+    # ⚠ 同批的 `delta`（git diff 高亮分页器）**没接**：它没有官方图形标识（仓库里
+    # 只有终端截图），Simple Icons 的 `delta` 是三角洲航空的标 —— 宁缺勿错，撤掉。
+    # 全部用 `path_subdir=""`：`extract_archive` 会把"单顶层目录"塌成安装根，
+    # 而 `exec_path_in_home` 还会依次试 root / bin / Scripts / condabin —— 两者合起来
+    # 覆盖了这批的全部布局（含 gh 的 bin/、elixir 的 bin/*.bat）。
+    # ------------------------------------------------------------------
+    # —— 服务端组件 ——
+    {"key": "terraform", "name": "Terraform", "arch": "zip", "exe": "terraform",
+     "args": ["version"], "v": "1.16.6", "repo": None, "tag": None, "asset": None,
+     "size": 36770861, "cat": CAT_SERVER,
+     "note": "基础设施即代码（IaC）的事实标准：写 .tf 描述云资源，`terraform apply` 落地。"
+             "官方产物在 releases.hashicorp.com（zip 里只有一个 terraform.exe），"
+             "版本号从 HashiCorp 的官方 releases API 读。",
+     "url_tmpl": "https://releases.hashicorp.com/terraform/{v}/terraform_{v}_windows_amd64.zip"},
+    {"key": "opentofu", "name": "OpenTofu", "arch": "zip", "exe": "tofu",
+     "args": ["version"], "v": "1.13.1",
+     "repo": "opentofu/opentofu", "tag": "v{v}", "asset": "tofu_{v}_windows_amd64.zip",
+     "size": 36001381, "cat": CAT_SERVER,
+     "note": "Terraform 的开源分叉（Linux 基金会托管，许可证从 BUSL 换回 MPL）。"
+             "命令名是 `tofu`，用法与 terraform 基本一致。"},
+    {"key": "argocd", "name": "Argo CD CLI", "arch": "exe", "exe": "argocd",
+     "args": ["version", "--client"], "v": "3.5.5",
+     "repo": "argoproj/argo-cd", "tag": "v{v}", "asset": "argocd-windows-amd64.exe",
+     "size": 252547072, "cat": CAT_SERVER,
+     "note": "GitOps 交付的官方命令行（把 Git 仓库当唯一事实源，声明式同步到集群）。"
+             "这只是 CLI；**服务端 Argo CD 本身要部署在集群里**（官方只发容器镜像与清单）。"},
+    {"key": "prometheus", "name": "Prometheus", "arch": "zip", "exe": "prometheus",
+     "args": ["--version"], "v": "3.15.0",
+     "repo": "prometheus/prometheus", "tag": "v{v}",
+     "asset": "prometheus-{v}.windows-amd64.zip", "size": 114650144, "cat": CAT_SERVER,
+     "note": "指标采集与告警的时序库，监控领域的事实标准。zip 里除 prometheus.exe 还有"
+             "console_libraries/ 与 consoles/（Web 控制台用），根上也有散文件，"
+             "所以解压不塌层、直接就是安装根。默认监听 9090。"},
+    {"key": "victoriametrics", "name": "VictoriaMetrics", "arch": "zip",
+     "exe": "victoria-metrics-windows-amd64-prod", "args": ["--version"], "v": "1.154.0",
+     "repo": "VictoriaMetrics/VictoriaMetrics", "tag": "v{v}",
+     "asset": "victoria-metrics-windows-amd64-v{v}.zip", "size": 7488593, "cat": CAT_SERVER,
+     "note": "高性能时序数据库，兼容 Prometheus 的查询语言与抓取配置，单二进制即可跑。"
+             "与 Prometheus 的区别：它更省内存、可做长期存储。默认监听 8428。"},
+    {"key": "k6", "name": "k6", "arch": "zip", "exe": "k6", "args": ["version"],
+     "v": "2.3.0", "repo": "grafana/k6", "tag": "v{v}",
+     "asset": "k6-v{v}-windows-amd64.zip", "size": 31706650, "cat": CAT_SERVER,
+     "note": "Grafana 家的压测工具（脚本用 JavaScript 写，比 JMeter 轻得多）。"
+             "本工具已有的 JMeter 是图形化/XML 路线，k6 是代码路线，两个都在。"},
+    {"key": "pulumi", "name": "Pulumi", "arch": "zip", "exe": "pulumi",
+     "subdir": "bin", "args": ["version"], "v": "3.268.0",
+     "repo": "pulumi/pulumi", "tag": "v{v}", "asset": "pulumi-v{v}-windows-x64.zip",
+     "size": 117108545, "cat": CAT_SERVER,
+     "note": "IaC 的另一条路线：用真正的编程语言（TS/Python/Go/C#）写基础设施，"
+             "而不是 DSL。可执行文件在 zip 的 bin/ 下。"},
+    {"key": "istioctl", "name": "Istio CLI", "arch": "zip", "exe": "istioctl",
+     "args": ["version", "--remote=false"], "v": "1.31.1",
+     "repo": "istio/istio", "tag": "{v}", "asset": "istioctl-{v}-win-amd64.zip",
+     "size": 31244552, "cat": CAT_SERVER,
+     "note": "服务网格 Istio 的命令行（安装/诊断/注入 Sidecar）。"
+             "⚠ 它依赖一个能连上的 Kubernetes 集群；服务端组件本身由 istioctl 装进集群。"},
+    {"key": "talosctl", "name": "Talos Linux CLI", "arch": "exe", "exe": "talosctl",
+     "args": ["version", "--client"], "v": "1.14.2",
+     "repo": "siderolabs/talos", "tag": "v{v}", "asset": "talosctl-windows-amd64.exe",
+     "size": 117414912, "cat": CAT_SERVER,
+     "note": "Talos Linux（专为 K8s 做的极简发行版）的官方 CLI，用来生成集群配置、"
+             "引导节点与拿 kubeconfig。"},
+    # —— 开发环境 ——
+    {"key": "elixir", "name": "Elixir", "arch": "zip", "exe": "elixir",
+     "args": ["--version"], "v": "1.20.4",
+     "repo": "elixir-lang/elixir", "tag": "v{v}", "asset": "elixir-otp-27.zip",
+     "subdir": "bin", "size": 8658381, "cat": CAT_ENV,
+     "note": "跑在 Erlang 虚拟机上的函数式语言（Web 框架 Phoenix 的底座）。"
+             "⚠ **前置是本工具里那个隐藏组件 Erlang/OTP** —— 它与本工具装 Erlang 的路径"
+             "一致时不冲突；自己另外装过 OTP 的话，注意别把两套混着用。"},
+    {"key": "scala-cli", "name": "Scala CLI", "arch": "zip", "exe": "scala-cli",
+     "args": ["version"], "v": "1.18.0",
+     "repo": "VirtusLab/scala-cli", "tag": "v{v}", "asset": "scala-cli-x86_64-pc-win32.zip",
+     "size": 43050388, "cat": CAT_ENV,
+     "note": "Scala 的全家桶工具：单文件脚本、编译、打包、跑测试都用它，"
+             "不用先配 sbt 工程。首次运行会自己拉 JVM 与依赖。"},
+    {"key": "bazelisk", "name": "Bazelisk", "arch": "exe", "exe": "bazelisk",
+     "args": ["version"], "v": "1.29.0",
+     "repo": "bazelbuild/bazelisk", "tag": "v{v}", "asset": "bazelisk-windows-amd64.exe",
+     "size": 10502144, "cat": CAT_ENV,
+     "note": "Bazel 的版本选择器：按项目里的 .bazelversion 自动下载并调用对应版本的 Bazel。"
+             "官方推荐用它代替直接装 Bazel（本工具按这条建议，只登记它）。"},
+    {"key": "just", "name": "Just", "arch": "zip", "exe": "just", "args": ["--version"],
+     "v": "1.59.0", "repo": "casey/just", "tag": "{v}",
+     "asset": "just-{v}-x86_64-pc-windows-msvc.zip", "size": 2292448, "cat": CAT_ENV,
+     "note": "Make 的现代替代：一个 justfile 写常用命令，`just <任务名>` 就执行。"
+             "没有 Make 那些制表符与隐式规则的坑。"},
+    {"key": "task", "name": "Task", "arch": "zip", "exe": "task", "args": ["--version"],
+     "v": "3.54.0", "repo": "go-task/task", "tag": "v{v}", "asset": "task_windows_amd64.zip",
+     "size": 17023230, "cat": CAT_ENV,
+     "note": "另一个任务运行器（YAML 写 Taskfile），特色是**自动缓存**："
+             "输入文件没变就不重复跑，适合当项目的构建入口。"},
+    {"key": "oxlint", "name": "Oxlint", "arch": "zip",
+     "exe": "oxlint-x86_64-pc-windows-msvc", "args": ["--version"], "v": "1.88.0",
+     "repo": "oxc-project/oxc", "tag": "oxlint_v{v}",
+     "tag_re": r"(\d+\.\d+\.\d+)$",   # tag 形如 oxlint_v1.88.0
+     "asset": "oxlint-x86_64-pc-windows-msvc.zip", "size": 5762811, "cat": CAT_ENV,
+     "note": "Rust 写的 JS/TS 检查器，比 ESLint 快一两个数量级，适合放进提交前钩子。"
+             "⚠ 它的 release tag 形如 `oxlint_v1.88.0`（与版本号不同形）。"},
+    {"key": "biome", "name": "Biome", "arch": "exe", "exe": "biome", "args": ["--version"],
+     "v": "2.5.15", "repo": "biomejs/biome", "tag": "%40biomejs%2Fbiome%40{v}",
+     "tag_re": r"(\d+\.\d+\.\d+)$",   # tag 形如 @biomejs/biome@2.5.15
+     "asset": "biome-win32-x64.exe", "size": 79007744, "cat": CAT_ENV,
+     "note": "Rust 写的 JS/TS 格式 + Lint 一体化工具（对标 Prettier + ESLint）。"
+             "⚠ tag 形如 `@biomejs/biome@2.5.15`，URL 里要按 `%40`/`%2F` 转义。"},
+    {"key": "nushell", "name": "Nushell", "arch": "zip", "exe": "nu", "args": ["--version"],
+     "v": "0.116.1", "repo": "nushell/nushell", "tag": "{v}",
+     "asset": "nu-{v}-x86_64-pc-windows-msvc.zip", "size": 60864303, "cat": CAT_ENV,
+     "note": "把管道里的数据当结构化表格处理的现代 shell（不是传字符串）。"
+             "命令名是 `nu`。它的语法与 bash 不同，建议先看官方入门再换默认 shell。"},
+    {"key": "starship", "name": "Starship", "arch": "zip", "exe": "starship",
+     "args": ["--version"], "v": "1.26.0",
+     "repo": "starship/starship", "tag": "v{v}",
+     "asset": "starship-x86_64-pc-windows-msvc.zip", "size": 4758038, "cat": CAT_ENV,
+     "note": "跨 shell 的提示符（prompt）：自动显示当前目录的 git 分支/语言版本/耗时等。"
+             "⚠ 装完要在自己的 shell 配置里初始化一次（官方文档给的 `starship init` 那一行），"
+             "本工具只把二进制放进 PATH，不改你的 shell 配置。"},
+    {"key": "gh", "name": "GitHub CLI", "arch": "zip", "exe": "gh", "args": ["--version"],
+     "v": "2.102.0", "repo": "cli/cli", "tag": "v{v}",
+     "asset": "gh_{v}_windows_amd64.zip", "subdir": "bin", "size": 15512013, "cat": CAT_ENV,
+     "note": "GitHub 官方命令行：开 PR、看 issue、跑 workflow 都不用开浏览器。"
+             "可执行文件在 zip 的 bin/ 下。首次用会让你登录一次 GitHub 账号。"},
 )
+
+
+def fetch_terraform_versions() -> List[ComponentVersion]:
+    """Terraform：HashiCorp 官方 releases API 给一个 JSON 数组，元素里有版本号。
+
+    ⚠ 这个 API 返回的是**全部历史版本**（含 alpha/beta/rc 预发布）。本工具只取
+    `version` 字段里**不含连字符**的那些（官方把预发布写成 `1.14.0-beta1`），
+    再按数值降序取前几个 —— 否则下拉框首位会是某个 beta。
+    """
+    data = _get("https://api.releases.hashicorp.com/v1/releases/terraform",
+                timeout=DOWNLOAD_PROBE_TIMEOUT * 3).json()
+    if not isinstance(data, list):
+        raise RuntimeError(f"Terraform releases API 返回的不是列表：{type(data).__name__}")
+    vers = []
+    for item in data:
+        v = str((item or {}).get("version") or "")
+        if not v or "-" in v:            # 跳过 alpha / beta / rc
+            continue
+        if _version_parts(v) is not None:
+            vers.append(v)
+    if not vers:
+        raise RuntimeError("Terraform releases API 里没读出稳定版本号")
+    vers.sort(key=_version_parts, reverse=True)
+    return [_cv(v, {"Windows": [f"https://releases.hashicorp.com/terraform/{v}/"
+                                f"terraform_{v}_windows_amd64.zip"]},
+                {"Windows": "zip"})
+            for v in vers[:6]]
 
 
 def _cli_url(spec: dict, v: str) -> str:
@@ -5088,7 +5882,8 @@ def _cli_fetcher(spec: dict):
     if spec.get("repo"):
         # 资产名里带版本号的用 {v} 模板精确匹配，不带的用固定名
         return make_github_asset_fetcher(
-            spec["key"], spec["repo"], ((spec["arch"], _cli_asset_suffix(spec)),))
+            spec["key"], spec["repo"], ((spec["arch"], _cli_asset_suffix(spec)),),
+            tag_re=spec.get("tag_re"))
     return _CLI_CUSTOM_FETCHERS[spec["key"]]
 
 
@@ -5172,6 +5967,9 @@ _CLI_CUSTOM_FETCHERS = {
     "helm": fetch_helm_versions,
     "sqlite": fetch_sqlite_versions,
     "dotnet-sdk": fetch_dotnet_sdk_versions,
+    # 2026-10-15 第六批：terraform 的产物在 HashiCorp 自家 CDN（GitHub release 上只有源码），
+    # 版本号走官方 releases API。同批其余 19 个都是 GitHub 托管，走通用抓取器。
+    "terraform": fetch_terraform_versions,
 }
 
 
@@ -5273,9 +6071,21 @@ del _cli_spec
 
 
 class VersionFetchWorker(QThread):
-    """在后台线程里跑抓取器，避免阻塞 UI。"""
+    """在后台线程里跑抓取器，避免阻塞 UI。
+
+    **并发闸门**（2026-10-14 加）：真正限制"同时在飞多少条抓取"的是这里，
+    不是启动端那个错峰定时器。错峰只解决了"同一瞬间齐发"，没解决
+    "87 条长时间同时在飞" —— 而 GitHub 匿名额度是**每 IP 每小时 60 次**，
+    其中 30 多个 fetcher 直连 api.github.com。首启 / 24 小时后首启 /
+    点「⟳ 刷新版本」都会瞬间打满，后面几个组件拿到 403 集体降级到内置清单，
+    表现是"明明联网了却版本很旧"，而且用户无从判断原因。
+
+    用 Semaphore 而不是换成线程池，是为了不动"每个组件一个 QThread"这个
+    既有结构 —— 测试里有大量按 key 找 worker 的打桩点。
+    """
 
     done = Signal(str, object)  # (component_key, versions or None)
+    _gate = _threading.Semaphore(VERSION_FETCH_CONCURRENCY)
 
     def __init__(self, key: str, fetcher: Callable[[], List[ComponentVersion]],
                  parent: Optional[QObject] = None) -> None:
@@ -5287,56 +6097,83 @@ class VersionFetchWorker(QThread):
         self.error_text: str = ""
 
     def run(self) -> None:  # noqa: D401
+        # 闸门：并发上限见类 docstring。acquire 可被 FETCH_ABORT 打断，
+        # 所以关窗时排队中的 worker 不会干等到轮到自己。
+        if not self._gate.acquire(timeout=FETCH_ABORT_POLL_SEC):
+            return
         try:
-            vs = self.fetcher()
-        except FetchAborted:
-            self.done.emit(self.key, None)  # 关窗取消：静默收尾，不打失败日志
-        except Exception as exc:  # pragma: no cover
-            # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
-            # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
-            self.error_text = str(exc)[:220]
-            if not FETCH_ABORT.is_set():
-                print(f"[fetch:{self.key}] {self.error_text}")
-            self.done.emit(self.key, None)
-        else:
-            self.done.emit(self.key, vs)
+            if FETCH_ABORT.is_set():
+                self.done.emit(self.key, None)
+                return
+            try:
+                vs = self.fetcher()
+            except FetchAborted:
+                self.done.emit(self.key, None)  # 关窗取消：静默收尾，不打失败日志
+            except Exception as exc:  # pragma: no cover
+                # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
+                # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
+                self.error_text = str(exc)[:220]
+                if not FETCH_ABORT.is_set():
+                    print(f"[fetch:{self.key}] {self.error_text}")
+                self.done.emit(self.key, None)
+            else:
+                self.done.emit(self.key, vs)
+        finally:
+            self._gate.release()
 
 
-# 界面 Tab 分组：三个分类的显示顺序（Tab 顺序即此顺序）
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "开发工具", "一键启停")
+# 界面 Tab 分组：四个分类的**显示顺序**（Tab 顺序即此顺序）。
+#
+# 顺序变更史，两次都记在这儿：
+#   · 2026-10-14 用户要求把「一键启停」提到第一位 —— 它是本工具最能干活的一组长，
+#     原先压在最右边。原先那条"必须是最后一个 Tab"的护栏随之改写成"必须是第一个"。
+#   · 2026-10-14 用户要求「开发软件」改名「服务端组件」并**提到第二位**。
+#     新顺序：一键启停 → 服务端组件 → 开发环境 → 开发工具。
+#
+# 为什么「服务端组件」排在「开发环境」前面：这两个 Tab 的界线是**东西跑在哪**——
+# 服务端组件装在服务器/集群上（数据库、MQ、网关、容器编排、K8s 运维，全是命令行），
+# 开发环境跑在你自己这台开发机上（运行时、编译器、PATH 里的命令行小工具）。
+# 用户装东西时先问的是"装服务器上还是装本机"，这个顺序直接对应那个问题。
+#
+# 四个分类的划分依据彼此正交，不是同一根轴上的四段：
+#   一键启停 —— **能力**维度：这个工具能不能替你一键起停
+#   服务端组件 —— **位置**维度：装在服务器上
+#   开发环境 —— **位置**维度：装在本机开发机上
+#   开发工具 —— **形态**维度：带图形界面的软件（26 个全是 IDE / GUI 客户端）
+COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL, CAT_AGENT)
 
 # 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
 # build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。
 #   开发环境：装完进 PATH、直接用来写 / 编译 / 打包代码
-#   开发软件：本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）
-#             + 容器与编排外围（docker / kubectl —— 2026-10-10 原「其它软件」并入，那个 Tab 已删）
+#   服务端组件：装在服务器上、命令行操作的后台服务与运维组件
+#             （数据库 / 消息队列 / 网关 / 容器与编排 / K8s 运维）
 #   开发工具：**只下载**的 GUI 软件（Component.download_only）——只列版本 + 下官方安装包，
 #             不配环境变量、不扫盘、不代跑安装器（见 R13）
 #   一键启停：卡片上有「启动/停止」按钮的组件 —— 成员由 LAUNCH_KEYS 派生，不写在这里
 COMPONENT_CATEGORY_OF = {
-    "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
-    "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
-    "maven": "开发环境", "gradle": "开发环境", "powershell": "开发环境",
+    "jdk": CAT_ENV, "python": CAT_ENV, "node": CAT_ENV, "go": CAT_ENV,
+    "bun": CAT_ENV, "conda": CAT_ENV, "git": CAT_ENV,
+    "maven": CAT_ENV, "gradle": CAT_ENV, "powershell": CAT_ENV,
     # 2026-10-12 新增：语言/编译器工具链一档（rust 的 MSI、kotlin 的 zip 都是解压/提取即用）
-    "kotlin": "开发环境", "graalvm": "开发环境", "rust": "开发环境",
+    "kotlin": CAT_ENV, "graalvm": CAT_ENV, "rust": CAT_ENV,
     # 2026-10-12 B1：protoc / uv（单二进制、没有 XXX_HOME，只把目录放进 PATH）
-    "protoc": "开发环境", "uv": "开发环境",
+    "protoc": CAT_ENV, "uv": CAT_ENV,
     # 2026-10-12 B3/B5：CLI 与构建工具归「开发环境」；etcd / nats / caddy / traefik
-    # 是服务型组件，先落在「开发软件」，哪天接进 LAUNCH_OF 会自动挪到「一键启停」。
-    "deno": "开发环境", "ninja": "开发环境", "duckdb": "开发环境",
-    "cmake": "开发环境", "ripgrep": "开发环境", "fd": "开发环境",
-    "bat": "开发环境", "eza": "开发环境", "zoxide": "开发环境",
-    "fzf": "开发环境", "yq": "开发环境",
-    # 2026-10-12 B7：Ant 归构建工具；JMeter 是压测服务型，先落「开发软件」
-    "ant": "开发环境", "jmeter": "开发软件",
-    "etcd": "开发软件", "nats-server": "开发软件", "caddy": "开发软件",
-    "traefik": "开发软件",
-    "tomcat": "开发软件", "mysql": "开发软件", "mongodb": "开发软件",
-    "postgresql": "开发软件", "elasticsearch": "开发软件", "nacos": "开发软件",
-    "seata": "开发软件", "kafka": "开发软件", "rocketmq": "开发软件",
-    "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
-    "nginx": "开发软件", "redis": "开发软件",
-    "docker": "开发软件", "kubectl": "开发软件", "jenkins": "开发软件",
+    # 是服务型组件，先落在「服务端组件」，哪天接进 LAUNCH_OF 会自动挪到「一键启停」。
+    "deno": CAT_ENV, "ninja": CAT_ENV, "duckdb": CAT_ENV,
+    "cmake": CAT_ENV, "ripgrep": CAT_ENV, "fd": CAT_ENV,
+    "bat": CAT_ENV, "eza": CAT_ENV, "zoxide": CAT_ENV,
+    "fzf": CAT_ENV, "yq": CAT_ENV,
+    # 2026-10-12 B7：Ant 归构建工具；JMeter 是压测服务型，先落「服务端组件」
+    "ant": CAT_ENV, "jmeter": CAT_SERVER,
+    "etcd": CAT_SERVER, "nats-server": CAT_SERVER, "caddy": CAT_SERVER,
+    "traefik": CAT_SERVER,
+    "tomcat": CAT_SERVER, "mysql": CAT_SERVER, "mongodb": CAT_SERVER,
+    "postgresql": CAT_SERVER, "elasticsearch": CAT_SERVER, "nacos": CAT_SERVER,
+    "seata": CAT_SERVER, "kafka": CAT_SERVER, "rocketmq": CAT_SERVER,
+    "pulsar": CAT_SERVER, "activemq": CAT_SERVER, "rabbitmq": CAT_SERVER,
+    "nginx": CAT_SERVER, "redis": CAT_SERVER,
+    "docker": CAT_SERVER, "kubectl": CAT_SERVER, "jenkins": CAT_SERVER,
     "idea": "开发工具", "pycharm": "开发工具", "clion": "开发工具",
     "webstorm": "开发工具", "goland": "开发工具", "datagrip": "开发工具",
     "vscode": "开发工具", "dbx": "开发工具", "windterm": "开发工具",
@@ -5347,22 +6184,418 @@ COMPONENT_CATEGORY_OF = {
     "dbeaver": "开发工具", "heidisql": "开发工具", "bruno": "开发工具",
     "redisinsight": "开发工具", "ardm": "开发工具", "mongodb-compass": "开发工具",
     "pgadmin4": "开发工具", "mysql-workbench": "开发工具", "postman": "开发工具",
+    # 2026-10-15 第五批：开发者桌面工具（只下载）。表在 _DEVTOOLS 尾部，台账见 R20.7。
+    "notepad-plus-plus": "开发工具", "wireshark": "开发工具", "gitkraken": "开发工具",
+    "sourcetree": "开发工具", "insomnia": "开发工具", "beekeeper-studio": "开发工具",
+    "obsidian": "开发工具", "zettlr": "开发工具", "yaak": "开发工具", "gvim": "开发工具",
+    "cc-switch": "开发工具", "codex-app-manager": "开发工具",
     # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
     # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
-    "consul": "开发软件", "zookeeper": "开发软件",
+    "consul": CAT_SERVER, "zookeeper": CAT_SERVER,
     # 2026-10-12 B4：MinIO / Dart —— 前者进 LAUNCH_OF 自动去「一键启停」，
     # 这行是它退下来时的落点；后者是纯装配组件，直接归「开发环境」。
-    "minio": "开发软件",
-    "dart": "开发环境",
+    "minio": CAT_SERVER,
+    "dart": CAT_ENV,
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
-    "erlang": "开发环境",
+    "erlang": CAT_ENV,
 }
 
 # 2026-10-12 B5/B3 那 19 件的分类**由 _CLI_TOOLS 喂进这张表**，不在这里再抄一遍
 # key→分类：两处各写一份迟早会漂，而漂了的症状是"组件出现在错的 Tab"，
 # 界面测试比的是集合、看不出归属错了还是漏登记了。
 COMPONENT_CATEGORY_OF.update({s["key"]: s["cat"] for s in _CLI_TOOLS})
+
+# ---------------------------------------------------------------------------
+# 「Agent客户端」：用户 2026-10-15 要求新增的第 5 个 Tab（放最后）
+# ---------------------------------------------------------------------------
+# 与「开发工具」同类：**只下载、不解压不配置**，卡片形态就是「版本下拉 + 下载」。
+# 所以下面这张表**刻意复用 `_DEVTOOLS` 的行格式**，由同一个 builder 生成
+# （见 `_download_only_components`）—— 抄两遍必然漏一处，而漏抄的后果是建卡时去扫盘
+# 或者往注册表写环境变量。
+#
+# 两条与「开发工具」不同的现实（都在各行的 data_note 里写明了）：
+#   1. **几乎没有大陆镜像**：这批全是各家官网/CDN 直发，所以按 R1 属"单源官网"，
+#      已按 R1.5 登记为例外（同 mongodb / postgresql / powershell）。
+#   2. **多数只有滚动 latest**：官方不给"列历史版本"的接口，做不出多版本下拉 ——
+#      用户 2026-10-15 明确"只要能下载就好"，所以版本位取实测到的版本号，
+#      实在没有版本号的（QoderWork）就取服务端文件 Last-Modified 的年月
+#      （与「微信开发者工具」同一套先例）。
+#
+# ⚠ 每条的 URL 与字节数都是**带 byte-tools UA 实测**的（R1 的口径），别凭记忆改。
+_AGENT_CLIENTS: tuple = (
+    ("cursor", "Cursor", "exe",
+     "商业软件：只提供官方安装包直链，**不含授权与账号**。版本位写的是**主.次**版本号 ——"
+     "官方的 golden 链就是按这个粒度发版（…/golden/win32-x64-user/cursor/<主.次>，"
+     "实测 3.24 / 3.23 / 3.20 均可取），装完以 About 面板里的完整版本为准。",
+     (("3.24", "https://api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/3.24",
+       215228800),
+      ("3.23", "https://api2.cursor.sh/updates/download/golden/win32-x64-user/cursor/3.23",
+       214105952))),
+    ("zcode", "ZCode", "exe",
+     "智谱（Z.ai）的 AI 编程 IDE。官方 CDN 按版本号分目录，实测 3.15.3 可取；"
+     "官方没给「列全部版本」的接口（latest.yml 实测 404），所以版本位只登记实测到的那几个。",
+     (("3.15.3", "https://cdn-zcode.z.ai/zcode/electron/releases/3.15.3/windows-x64/"
+                 "ZCode-3.15.3-win-x64.exe", 181367144),)),
+    ("claude-code", "Claude Code", "zip",
+     "Anthropic 的命令行编程 Agent，Windows 官方发 zip（解压得到 claude.exe）。"
+     "**是 CLI 不是 GUI 安装器**：本工具只负责把包下到你选的目录，怎么配怎么用看官方文档。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2.1.300", "https://github.com/anthropics/claude-code/releases/download/v2.1.300/"
+                  "claude-win32-x64.zip", 121043936),)),
+    ("codex-cli", "Codex CLI", "exe",
+     "OpenAI 的命令行编程 Agent，Windows 官方发单文件 exe。它的 release tag 形如"
+     "`rust-v0.162.1`，与版本号不同形，所以版本位只留数字。GitHub 产物，走加速器优先。"
+     "同一次 release 也发了 zip（体积小一半），列在「下载 ▾」里让你挑。",
+     (("0.162.1", "https://github.com/openai/codex/releases/download/rust-v0.162.1/"
+                  "codex-x86_64-pc-windows-msvc.exe", 333479728,
+       ("zip", "https://github.com/openai/codex/releases/download/rust-v0.162.1/"
+               "codex-x86_64-pc-windows-msvc.exe.zip", 164672399)),)),
+    ("opencode", "opencode", "exe",
+     "anomalyco（原 SST）的开源编程 Agent，**不只是 CLI**：同一次 release 同时发桌面端"
+     "与终端版，两个都在「下载 ▾」里。桌面端是 Electron 安装向导（双击走安装流程）；"
+     "终端版是 zip 便携包，解压得到 opencode.exe，**要自己放进 PATH 才能在终端里敲 "
+     "`opencode`**。GitHub 产物，下载走加速器优先。找仓库时注意：旧的 "
+     "`opencode-ai/opencode` 已归档、`sst/opencode` 也已 301 跳到 `anomalyco/opencode`。",
+     (("1.19.0", "https://github.com/anomalyco/opencode/releases/download/v1.19.0/"
+                 "opencode-desktop-win-x64.exe", 126382672,
+       ("cli", "https://github.com/anomalyco/opencode/releases/download/v1.19.0/"
+               "opencode-windows-x64.zip", 62173956)),)),
+    # ------------------------------------------------------------------
+    # 2026-10-15 第四批：用户看过候选清单后点名要接的 11 个。
+    # 每条 URL / 字节数都带 `byte-tools/1.2.1` UA **实测**（206 + 前四字节是 MZ/PK），
+    # 详见 DEVELOPMENT.md R20.5 末尾那张表 —— 与前三批同一条口径（R1 / R20.3）。
+    # ------------------------------------------------------------------
+    ("openhands", "OpenHands", "exe",
+     "All Hands AI 的开源自主编码 Agent（前身 OpenDevin），现在发的是带图形界面的"
+     "桌面版「Agent Canvas」。GitHub 产物，下载走加速器优先。",
+     (("1.27.1", "https://github.com/OpenHands/OpenHands/releases/download/v1.27.1/"
+                 "OpenHands-Agent-Canvas-Setup-1.27.1.exe", 140354744),)),
+    ("cherry-studio", "Cherry Studio", "exe",
+     "CherryHQ（北京团队）的多模型桌面客户端，国内装机量最大的那一批；支持 MCP、"
+     "知识库与 300+ 预设助手。官方同时发安装版与免安装便携版，两个都在「下载 ▾」里。",
+     (("2.1.6", "https://github.com/CherryHQ/cherry-studio/releases/download/v2.1.6/"
+                "Cherry-Studio-2.1.6-win-x64-setup.exe", 396037216,
+       ("portable", "https://github.com/CherryHQ/cherry-studio/releases/download/v2.1.6/"
+                    "Cherry-Studio-2.1.6-win-x64-portable.exe", 395662608)),)),
+    ("goose", "Goose", "zip",
+     "Block（现由 aaif-goose 维护）的开源通用 Agent：不只写代码，也能调研、写文档、"
+     "跑自动化，可接任意 LLM。同一次 release 同时发**桌面端**（本行，解压即用的"
+     "Electron 包）与**终端版**（见「下载 ▾」，解压后把 goose.exe 放进 PATH）。",
+     (("1.54.0", "https://github.com/aaif-goose/goose/releases/download/v1.54.0/"
+                 "Goose-win32-x64.zip", 247217050,
+       ("cli", "https://github.com/aaif-goose/goose/releases/download/v1.54.0/"
+               "goose-x86_64-pc-windows-msvc.zip", 77666256)),)),
+    ("qwen-code", "Qwen Code", "exe",
+     "阿里通义的开源编码 Agent（qwen-code 仓库）。**同一次发版同时出桌面端与终端版**，"
+     "两个都在「下载 ▾」里：桌面端是安装向导，终端版是 zip（解压后把可执行文件放进 PATH）。"
+     "官方 release 里还有 nightly / preview 标签，本行登记的是稳定版。",
+     (("0.25.1", "https://github.com/QwenLM/qwen-code/releases/download/desktop-v0.25.1/"
+                 "Qwen-Code-Desktop_0.25.1_x64-setup.exe", 52505536,
+       ("cli", "https://github.com/QwenLM/qwen-code/releases/download/v0.25.1/"
+               "qwen-code-win-x64.zip", 72012450)),)),
+    ("crush", "Crush", "zip",
+     "Charm（charmbracelet）的终端编码 Agent，Go 单文件、TUI 界面精致。"
+     "解压得到 crush.exe，**要自己放进 PATH 才能在终端里敲 `crush`**。"
+     "GitHub 产物，下载走加速器优先。",
+     (("0.98.1", "https://github.com/charmbracelet/crush/releases/download/v0.98.1/"
+                 "crush_0.98.1_Windows_x86_64.zip", 27319516),)),
+    ("kiro", "Kiro", "exe",
+     "AWS 的编码 IDE，主打**规格驱动**（先写 spec、再生成实现）。官方按版本号分目录发"
+     "签过名的安装器，版本位取路径里的 1.3.0（与官网下载页逐字一致）。"
+     "厂商自有 CDN 直发，无大陆镜像。",
+     (("1.3.0", "https://prod.download.desktop.kiro.dev/releases/stable/win32-x64/"
+                "signed/1.3.0/kiro-ide-1.3.0-stable-win32-x64.exe", 210208904),)),
+    ("jan", "Jan", "exe",
+     "Menlo 的开源本地优先 AI 助手，可接本地模型（配合 llama.cpp / Ollama）。"
+     "GitHub 产物，下载走加速器优先。",
+     (("0.8.6", "https://github.com/janhq/jan/releases/download/v0.8.6/"
+                "Jan_0.8.6_x64-setup.exe", 556441144),)),
+    ("openclaw", "OpenClaw", "exe",
+     "跑在你自己电脑上、把个人助手接到 WhatsApp / Telegram / Slack 的开源 Agent，"
+     "这一行是它的 **Windows 伴生端**（Companion）。官方只发滚动 latest 链接、"
+     "不带版本号，版本位按 R20.2 取服务端文件的 Last-Modified 年月 —— "
+     "**这不是软件版本号**。",
+     (("2026.10", "https://github.com/openclaw/openclaw-windows-node/releases/latest/"
+                  "download/OpenClawCompanion-Setup-x64.exe", 128746840),)),
+    ("hermes", "Hermes Agent", "exe",
+     "Nous Research 的个人 Agent（会按你的使用习惯自我调整）。官方 Windows 入口就是"
+     "这一个安装器，直链不带版本号，版本位按 R20.2 取服务端文件的 Last-Modified 年月 —— "
+     "**这不是软件版本号**。⚠ 实测这个安装器只有约 8 MB（多半是联网拉取组件的小体积"
+     "安装器），且服务端文件的 Last-Modified 停在 2026-08，装之前请自行确认。",
+     (("2026.08", "https://hermes-assets.nousresearch.com/Hermes-Setup.exe", 7946048),)),
+    # 下面两件是 `official_page_only`（R21）：官方**没有 Windows 可直接下载的安装包**
+    # （只有 npm / pip，或在终端里跑安装脚本），所以给「官网下载」入口。
+    # 空元组 () = 没有版本表，builder 据此自动置 official_page_only=True。
+    ("gemini-cli", "Gemini CLI", "exe",
+     "Google 的命令行编程 Agent。**官方不提供 Windows 安装包**：只能 `npm install -g "
+     "@google/gemini-cli`（实测它的 release 资产只有 bundle.zip 与 darwin 包，没有 win），"
+     "所以这一行只给官方安装说明页。",
+     ()),
+    ("aider", "Aider", "exe",
+     "老牌的终端结对编程 Agent，git 原生集成。**官方不提供安装包**：只能用 "
+     "`python -m pip install aider-install` 或 pipx 装（没有 exe / msi），"
+     "所以这一行只给官网。",
+     ()),
+    # ------------------------------------------------------------------
+    # 2026-10-15 第五批：本地模型客户端与几家漏掉的 Agent。
+    # 这一批的来源是"各 Tab 还缺哪些热门组件"的专项调研；URL / 字节数一律由我本人
+    # 带 `byte-tools/1.2.1` UA 实测（206 + 前四字节 MZ/PK/OLE），台账见 R20.7。
+    # ⚠ 本轮调研里被**排除**的：`warp`（我 4 次都取不到前四字节，验不出就登记不了）、
+    # `chatbox`（GitHub release 只有源码，网页直链没挖到）、`void`（项目已弃坑）、
+    # `iflow-cli`（官方已停运）、`roo-code`（官方公告将停运、并迁 Kilo）。
+    # ------------------------------------------------------------------
+    ("ollama", "Ollama", "exe",
+     "一条命令在本地跑大模型的运行时（也有桌面端）。**官方站点直链不带版本号**，"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月 —— 这不是软件版本号。"
+     "它同时是很多本地 Agent 的后端，装了它别的客户端才连得上本地模型。",
+     (("2026.10", "https://ollama.com/download/OllamaSetup.exe", 1581967176),)),
+    ("lm-studio", "LM Studio", "exe",
+     "图形化的本地模型客户端，下载模型、对话、起本地 OpenAI 兼容服务一条龙。"
+     "官方给的 `/download/latest/` 是滚动入口（实测 302 到带版本号的安装器），"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://lmstudio.ai/download/latest/win32/x64", 618785040),)),
+    ("gpt4all", "GPT4All", "exe",
+     "Nomic 的离线本地模型客户端，装上就能跑开源模型、不需要 API Key。"
+     "GitHub 产物，下载走加速器优先。",
+     (("3.10.0", "https://github.com/nomic-ai/gpt4all/releases/download/v3.10.0/"
+                "gpt4all-installer-win64-v3.10.0.exe", 744456856),)),
+    ("anything-llm", "AnythingLLM", "exe",
+     "本地的私有知识库 + Agent 桌面端：把文档喂进去做 RAG，再接模型回答。"
+     "它的安装包名**不带版本号**（`AnythingLLMDesktop.exe`），所以这个链接长期有效。"
+     "GitHub 产物，下载走加速器优先。",
+     (("1.18.0", "https://github.com/Mintplex-Labs/anything-llm/releases/download/v1.18.0/"
+                 "AnythingLLMDesktop.exe", 407381240),)),
+    ("lobehub", "LobeHub", "exe",
+     "LobeChat 的桌面端（仓库已从 `lobehub/lobe-chat` 更名为 `lobehub/lobehub`），"
+     "现代 UI 的多模型聊天/助手客户端，插件与助手市场是它的特色。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2.2.19", "https://github.com/lobehub/lobehub/releases/download/v2.2.19/"
+                 "LobeHub-2.2.19-setup.exe", 151357692),)),
+    ("copilot-cli", "GitHub Copilot CLI", "msi",
+     "GitHub 官方的命令行 Copilot Agent（终端里读改代码、跑命令）。"
+     "官方主推 **msi 安装包**。⚠ 它面向终端，不是双击即用的窗口程序。"
+     "GitHub 产物，下载走加速器优先。",
+     (("1.0.98", "https://github.com/github/copilot-cli/releases/download/v1.0.98/"
+                 "copilot-x64.msi", 95662080),)),
+    ("ima", "ima（腾讯）", "exe",
+     "腾讯的 AI 知识管家：把微信/文档/网页沉淀成个人知识库，再基于它问答与写作。"
+     "官方直链按版本目录发（实测 2.3.0_3717），无大陆镜像。",
+     (("2.3.0_3717", "https://ima-app.image.myqcloud.com/win/2.3.0_3717/"
+                     "ima.copilot_win_x64_1018_2.3.0_3717.exe", 205057816),)),
+    ("kilo-code", "Kilo Code", "exe",
+     "原 Roo Code 团队的 AI 编程客户端（Roo 已公告停运并迁到 Kilo），"
+     "桌面端 / IDE 插件 / 终端三种形态。官方走滚动 latest 路径、不带版本号，"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://autoupdate.desktop.anaconda.com/kilo-desktop/latest/latest/"
+                  "windows/x64/Kilo-Setup.exe", 410662216),)),
+    ("wave-terminal", "Wave Terminal", "exe",
+     "开源的现代终端（可内嵌图表、编辑器与 AI 助手）。"
+     "GitHub 产物，下载走加速器优先；同一次 release 也发 zip，按需挑。",
+     (("0.14.5", "https://github.com/wavetermdev/waveterm/releases/download/v0.14.5/"
+                 "Wave-win32-x64-0.14.5.exe", 163826544),)),
+    ("msty", "Msty Studio", "exe",
+     "隐私优先的本地 AI 工作台：本地/云端模型混用、多模型并排对比、知识库。"
+     "官方滚动 latest 直链、不带版本号，版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://next-assets.msty.studio/app/latest/win/MstyStudio_x64.exe",
+       226457032),)),
+    ("mistral-vibe", "Mistral Vibe", "cli",
+     "Mistral 官方的终端编码 Agent（Vibe 与其对话产品同名，这个是 CLI）。"
+     "解压得到可执行文件，**要自己放进 PATH 才能在终端里用**。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2.26.1", "https://github.com/mistralai/mistral-vibe/releases/download/v2.26.1/"
+                 "vibe-windows-x86_64-2.26.1.zip", 61496201),)),
+    ("kimi-work", "Kimi Work", "exe",
+     "月之暗面面向**知识工作**的桌面 Agent（与「Kimi」「Kimi Code」是三个不同客户端）。"
+     "官方给的是一个**滚动下载端点**，它 302 到当天的版本化文件，所以登记端点而不是落点。"
+     "版本位按 R20.2 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://appsupport.kimi.ai/api/app/pkg/latest/windows/download",
+       438668088),)),
+    ("qoderwork-cn", "QoderWork CN", "exe",
+     "Qoder 的办公 Agent 中文版。**官方只发一个滚动 latest 链接**（试过按版本目录取，404），"
+     "所以版本位写的是实测当天服务端文件的 Last-Modified 年月 —— 与「微信开发者工具」"
+     "同一套做法，不是软件版本号；装完以程序里的「关于」为准。",
+     (("2026.09", "https://download.qoder.com/qoder-work/releases/latest/"
+                  "QoderWork-Setup-x64.exe", 253672408),)),
+    ("trae", "Trae", "exe",
+     "字节跳动的 AI 编程 IDE（国际版，站点 trae.ai）。官方 CDN 按**构建号**分目录"
+     "（…/stable/2.3.91093/…），软件自己的版本号是另一套（实测 3.6.2）—— 版本位取软件"
+     "版本号，装完以「关于」为准。国内访问 trae.ai 会绕远，想直连请看「Trae CN」。",
+     (("3.6.2", "https://lf-cdn.trae.ai/obj/trae-ai-sg/pkg/app/releases/stable/2.3.91093/"
+                "win32/TRAE-Setup-x64.exe", 437637152),)),
+    ("trae-cn", "Trae CN", "exe",
+     "字节跳动 AI 编程 IDE 的**中国大陆版**：独立站点 trae.cn、独立安装包（TRAE_CN-Setup），"
+     "国内直连不需要科学上网。**与国际版是两个不同的构建**（版本号也不同步），别混装。",
+     (("3.4.3", "https://lf-cdn.trae.com.cn/obj/trae-com-cn/pkg/app/releases/stable/2.3.92182/"
+                "win32/TRAE_CN-Setup-x64.exe", 478058944),)),
+    ("qoder", "Qoder IDE", "exe",
+     "阿里的 AI 编程 IDE「Qoder」（**与「QoderWork CN」是两个产品**：那个是办公 Agent，"
+     "这个才是写代码的 IDE）。官方只发滚动 latest，版本位取官方发行说明里的版本号（实测 1.32.0）。",
+     (("1.32.0", "https://download.qoder.com/release/latest/QoderIDESetup-x64.exe", 207181792),)),
+    ("marvis", "Marvis（腾讯）", "exe",
+     "腾讯的 AI 桌面助手「马维斯」。官方分发链按渠道号分目录、文件名自带版本（实测 1.0.0.44）。"
+     "安装包只有 8 MB 出头 —— 它是个轻客户端，能力与内容多在服务端。",
+     (("1.0.0.44", "https://down.marvis.qq.com/marvis_install/channelsup/"
+                   "marvis_4100100002_1.0.0.44_x64_6373.exe", 8669224),)),
+    ("wukong", "悟空（钉钉）", "exe",
+     "钉钉（阿里）的企业级 AI 工作平台「悟空」。它的下载 URL **结尾必须带渠道号**"
+     "（实测 _chl260506.exe 可取，去掉渠道号直接 404），版本位取文件名里的 0.9.61。",
+     (("0.9.61", "https://dtapp-pub.dingtalk.com/dingtalk-desktop/dingtalk-real-personal/release/"
+                 "windows/chl_installer/Wukong_0.9.61-26060905_x64-setup_chl260506.exe", 281106680),)),
+    ("lobsterai", "LobsterAI（有道）", "exe",
+     "网易有道的桌面 AI 助手「LobsterAI（龙虾）」。官方客户端清单接口只给最新一版，"
+     "版本位取官方清单里的日期号（实测 2026.10.13）。",
+     (("2026.10.13", "https://ydschool-video.nosdn.127.net/"
+                     "1791811631995LobsterAI-Setup-x64-2026.10.13-official.exe", 346796264),)),
+    ("autoclaw", "AutoClaw（智谱）", "exe",
+     "智谱的桌面 Agent「AutoClaw（澳龙）」。官方按 latest.yml 发版：国内站在 autoglm.aminer.cn"
+     "（实测 2.1.0），海外站另发 2.1.1。这里登记的是**国内站**的包。",
+     (("2.1.0", "https://autoglm.aminer.cn/zwork/updates/production/official/win32-x64/"
+                "AutoClaw-2.1.0-x64-cn.exe", 222287304),)),
+    ("dumate", "百度搭子 DuMate", "exe",
+     "百度的桌面 AI 智能体「DuMate」（**与文心一言是两回事**）。官方直链文件名固定写 latest、"
+     "站点不暴露版本号，版本位按 R20 取实测当天服务端文件的 Last-Modified 年月 —— 不是软件版本号。",
+     (("2026.10", "https://dumate-app-public.bj.bcebos.com/release-info/win-artifacts/"
+                  "Dumate-win-setup-x64-latest.exe", 737054752),)),
+    ("openworker", "OpenWorker", "exe",
+     "吴恩达（Andrew Ng）团队的开源 AI 办公 Agent。GitHub 产物，下载走加速器优先。"
+     "同一次 release 还发了 msi，列在「下载 ▾」里让你挑。",
+     (("0.3.1", "https://github.com/andrewyng/openworker/releases/download/v0.3.1/"
+                "OpenWorker-windows-setup.exe", 65364059,
+       ("msi", "https://github.com/andrewyng/openworker/releases/download/v0.3.1/"
+               "OpenWorker-windows.msi", 77747177)),)),
+    ("orkas", "Orkas", "exe",
+     "开源的本地优先 AI 桌面应用：指挥官模型调度子代理，直接驱动你本机已装的编程 CLI"
+     "（Claude Code / Codex / OpenCode 等）。GitHub 产物，走加速器优先；官网 orkas.ai。"
+     "release tag 是日期形态（v2026.10.1），版本位取包里的 1.8.0。",
+     (("1.8.0", "https://github.com/Orkas-AI/Orkas/releases/download/v2026.10.1/"
+                "Orkas.Setup.1.8.0.exe", 393954328),)),
+    ("zed", "Zed", "exe",
+     "Zed Industries 的高性能协作式代码编辑器（Rust 写的），内置 AI 编辑与多人协作。"
+     "GitHub 产物，走加速器优先；Windows 版官方发单文件 exe。",
+     (("1.24.2", "https://github.com/zed-industries/zed/releases/download/v1.24.2/"
+                 "Zed-x86_64.exe", 84235440),)),
+    ("cline", "Cline", "exe",
+     "开源自主编程 Agent，最初是 VS Code 插件，2026-10 起也发独立 Windows 桌面端。"
+     "GitHub 产物，走加速器优先；另可用 VS Code 扩展或 npm 安装。",
+     (("0.0.46", "https://github.com/cline/cline/releases/download/desktop-v0.0.46/"
+                 "Cline_0.0.46_x64-setup.exe", 103528744),)),
+    ("chatgpt", "ChatGPT", "exe",
+     "OpenAI 的 ChatGPT 桌面客户端。**官方 Windows 分发走微软商店**（chatgpt.com 在大陆不可达），"
+     "这里给的就是微软商店的**引导安装器**（约 800 KB，跑完由商店下载主体）—— 实测 813,088 字节。"
+     "商店不暴露版本号，版本位按 R20 写实测月份，不是软件版本号。",
+     (("2026.10", "https://get.microsoft.com/installer/download/9PLM9XGG6VKS", 813088),)),
+    ("kimi", "Kimi", "exe",
+     "月之暗面的 Kimi 桌面客户端。官方给的是**滚动下载端点**（…/api/app/pkg/latest/windows/"
+     "download，302 到带版本号的文件），登记端点而不是 302 之后那条 —— 后者换个版本就没了。"
+     "版本位取实测那天重定向到的文件名里的 3.2.16。",
+     (("3.2.16", "https://appsupport.moonshot.cn/api/app/pkg/latest/windows/download", 438668088),)),
+    ("kimi-code", "Kimi Code", "exe",
+     "月之暗面的**编程 Agent 桌面端**（与 Kimi 助手是两个客户端）。官方下载地址会 302 到 "
+     "cdn.kimi.com，站点不暴露版本号，版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.10", "https://code.kimi.com/kimi-code/desktop/download/KimiCode-win-x64.exe",
+       123131600),)),
+    ("minimax", "MiniMax Code", "exe",
+     "MiniMax 的桌面 Agent「MiniMax Code」。官方直链带空格、已编码（%20），版本位取文件名里的 3.1.1。",
+     (("3.1.1", "https://filecdn.minimax.chat/public/minimax-agent-prod/release/"
+                "MiniMax%20Code%20Setup%203.1.1.exe", 581010136),)),
+    ("stepfun", "阶跃AI 桌面伙伴", "exe",
+     "阶跃星辰的桌面 AI 助手。官方给的是**滚动版本端点**（…/api/desktopversion/windows/latest），"
+     "它会 307 到一条**一天就过期的签名直链** —— 所以只能登记端点，登记签名链明天就是死链。"
+     "版本位取实测那天 307 落点文件名里的 1.0.5_716。",
+     (("1.0.5_716", "https://chat.stepfun.com/api/desktopversion/windows/latest", 308306472),)),
+    ("nano-ai", "纳米AI（360）", "exe",
+     "360 的桌面 AI 助手「纳米AI搜索」。官方直链固定不带版本号，版本位按 R20 取服务端文件的 "
+     "Last-Modified 年月（该包实测已数月未更新）。",
+     (("2026.06", "https://sedown.qihucdn.com/se/360namiai_setup_x64.exe", 296555144),)),
+    ("tiangong", "天工 AI（昆仑万维）", "exe",
+     "昆仑万维的桌面智能体「天工 / Skywork」。官方按版本号发目录（skywork-desktop_2.5.0_"
+     "x64-setup.exe），版本位取文件名里的 2.5.0。",
+     (("2.5.0", "https://static-us-img.skywork.ai/desktop-package/"
+                "skywork-desktop_2.5.0_x64-setup.exe", 49231352),)),
+    ("codebuddy", "腾讯 CodeBuddy", "exe",
+     "腾讯的 AI 编程 IDE「CodeBuddy」。官方有版本接口（www.codebuddy.cn/v2/update?platform="
+     "ide-win32-x64-user），版本位取实测那天的 4.12.2.41207131。同站的 WorkBuddy 是它的办公版。",
+     (("4.12.2.41207131", "https://download.codebuddy.cn/aiide/win32-x64-user/"
+                          "CodeBuddy-win32-x64-user-4.12.2.41207131-425ab70e-cn.exe", 164626336),)),
+    ("workbuddy", "WorkBuddy", "exe",
+     "腾讯 CodeBuddy 团队出的**办公 Agent**（与 CodeBuddy IDE 同站不同包）。版本接口 "
+     "?platform=workbuddy-win32-x64-user，版本位取实测那天的 5.8.2.41111488。",
+     (("5.8.2.41111488", "https://download.codebuddy.cn/workbuddy/saas/win32-x64-user/"
+                         "WorkBuddy-win32-x64-user-5.8.2.41111488-b8f6c953.exe", 441172480),)),
+    ("deepseek-harness", "DeepSeek Harness", "exe",
+     "DeepSeek 官方的桌面 Agent「DeepSeek Harness」。官方直链写死 dsh-latest、不带版本号，"
+     "版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.09", "https://download.deepseek.com/desktop/dsh-latest-windows-x64.exe",
+       289313640),)),
+    ("reasonix", "Reasonix", "exe",
+     "开源的 DeepSeek 编程 Agent「Reasonix Studio」。GitHub 产物，走加速器优先；"
+     "release tag 是 studio-v2.41.0 形态，版本位取 2.41.0。",
+     (("2.41.0", "https://github.com/esengine/DeepSeek-Reasonix/releases/download/"
+                 "studio-v2.41.0/ReasonixStudio-windows-amd64-installer.exe", 127480752),)),
+    ("doubao", "豆包", "zip",
+     "字节跳动的桌面 AI 助手「豆包」。官方发**签名 zip**（解压得到安装器）；版本接口 "
+     "`…/samantha/desktop/get_latest_version?platform=win` 里 `newest_version` 才是最新版"
+     "（实测 2.32.4 —— 另一个字段 `version` 是 1.49.10 的老包，已实测它的 Last-Modified 停在 "
+     "2025-03，别拿它当最新版）。",
+     (("2.32.4", "https://lf-flow-web-cdn.doubao.com/obj/flow-doubao/doubao_pc/2.32.4/"
+                 "Doubao_win_X64_2.32.4-signed.zip", 950867262),)),
+    ("yuanbao", "腾讯元宝", "exe",
+     "腾讯的桌面 AI 助手「腾讯元宝」，底层是混元大模型。官方直链按渠道号拼装、**不带版本号**，"
+     "版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.08", "https://cdn-hybrid-prod.hunyuan.tencent.com/Desktop/business/channels/"
+                  "yuanbao_7001_x64.exe", 54353464),)),
+    ("tongyi-qianwen", "通义千问", "exe",
+     "阿里「千问」的 PC 客户端。官方按版本号发目录（…/native/app/2.3.2/win32/x64/…），"
+     "版本位取路径与文件名里的 2.3.2。",
+     (("2.3.2", "https://qianwen-portal-cdn.tongyi.com/native/app/2.3.2/win32/x64/"
+                "qwenclient_setup_2.3.2.2603032250.exe", 104342072),)),
+    ("lingma", "通义灵码", "exe",
+     "阿里的 AI 编程助手「通义灵码」（**与「通义千问」是两个产品**：这个是写代码用的）。"
+     "官方直链写 release/latest、不带版本号，版本位按 R20 取服务端文件的 Last-Modified 年月。",
+     (("2026.08", "https://lingma-ide.oss-rg-china-mainland.aliyuncs.com/release/latest/"
+                  "LingmaSetup-x64.exe", 165879464),)),
+    ("ernie", "文心（文小言）", "exe",
+     "百度的桌面 AI 助手（文心一言 / 文小言）。官方直链不带版本号，版本位按 R20 取服务端文件的 "
+     "Last-Modified 年月。**与「百度搭子 DuMate」是两个产品**，那个是独立的桌面智能体。",
+     (("2026.09", "https://xiaoyan-desktop.cdn.bcebos.com/wenxin_setup.exe", 240738256),)),
+    ("chatglm", "智谱清言", "exe",
+     "智谱的桌面 AI 助手「智谱清言」。官方配置接口（chatglm.cn/chatglm/operation-api/config/"
+     "operation_data?tag=clientConfig）给出 winUrl，版本位取文件名里的 2.0.6。",
+     (("2.0.6", "https://sfile.chatglm.cn/apk/xinyu/windows/chatglm_2.0.6_win32_x64.exe",
+       109101416),)),
+    # 下面几件是 `official_page_only`（R21）：官方没有可登记的稳定直链，卡片给「官网下载」。
+    # 空元组 () = 没有版本表，builder 据此自动置 official_page_only=True。
+    ("xinghuo", "讯飞星火", "exe",
+     "科大讯飞的桌面 AI 助手「讯飞星火」。官网页是 JS SPA、下载 chunk 对脚本一律 404，"
+     "配置接口需登录，**没有可登记的直链** —— 只给官网入口。",
+     ()),
+    ("metaso", "秘塔AI搜索", "exe",
+     "秘塔科技的 AI 搜索/写作桌面端。**官方只上架 Microsoft Store，官网只给网页版与手机端**"
+     "（下载页实测无 .exe；版本接口 401），所以只给官网入口。",
+     ()),
+    ("windsurf", "Windsurf (Devin)", "exe",
+     "Cognition 的 AI 编程 IDE，**现已更名升级为 Devin Desktop**（windsurf.com 现在 308 跳到 "
+     "devin.ai）。它的官方安装包地址按**发版 hash 分目录**（…/stable/<hash>/DevinUserSetup-x64-"
+     "<版本>.exe），新版一发旧目录就没了，登记直链等于登记一条会过期的死链 —— 所以本工具"
+     "只给官网入口，去官网点一下即可。",
+     ()),
+    ("claude", "Claude 桌面版", "exe",
+     "Anthropic 的 Claude 桌面客户端。**官方对大陆区域做了限制**：下载入口 302 到 "
+     "app-unavailable-in-region。旧直链（storage.googleapis.com/…/nest-win-x64/Claude-Setup-"
+     "x64.exe）实测仍可取，但那个桶已**冻结在 2025-10-29 的 0.14.10**（同目录 RELEASES 清单"
+     "末条即 0.14.10），拿它当「最新版」是错的 —— 所以这里只给官网入口，去官网下当前版。",
+     ()),
+    ("antigravity", "Google Antigravity", "exe",
+     "Google 的 Agent 优先编程 IDE。**antigravity.google 在大陆不可达**（DNS 能解析、TCP 连不上），"
+     "下载直链也拿不到 —— 所以只给官网入口，能不能下取决于你的网络环境。",
+     ()),
+    ("gemini", "Google Gemini", "exe",
+     "Google 的 Gemini 桌面客户端。**gemini.google 在大陆不可达**，下载直链同样拿不到 —— "
+     "只给官网入口，能不能下取决于你的网络环境。",
+     ()),
+)
+COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})
 
 # ---------------------------------------------------------------------------
 # 组件「它是干嘛的」一句话说明（详情对话框的唯一内容真源）
@@ -5410,7 +6643,7 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "zoxide": "智能 cd：按使用频率记忆目录，跳转常用路径只敲几个字母（shell 集成需自行配置）。",
     "sqlite": "SQLite 命令行工具。单文件数据库，无需服务端；学习 SQL、调试、小型应用存数据都很方便。",
     "duckdb": "进程内分析型数据库 CLI。直接查询 Parquet/CSV/JSON 等文件，OLAP 聚合比 Pandas 快；数据分析师的轻量工具。",
-    # ---- 开发软件：数据库与基础服务 ----
+    # ---- 服务端组件：数据库与基础服务 ----
     "mysql": "MySQL 关系数据库服务端。Web 后端最常用数据库；本工具负责下载解压与配环境，初始化与运维由官方命令完成。",
     "postgresql": "PostgreSQL 关系数据库服务端。功能最全的开源数据库（JSON/窗口函数/扩展丰富）；本工具仅提供 Windows 免安装包。",
     "mongodb": "MongoDB 文档数据库服务端。JSON 式文档模型，适合结构多变、快速迭代的项目。",
@@ -5469,7 +6702,456 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "postman": "Postman：全球主流 API 调试工具。Collection 管理、环境变量、自动化测试；核心功能免费。",
     "bruno": "Bruno：开源 API 客户端。集合就是普通文件夹，可直接进 Git 版本管理，适合团队协作且不锁数据。",
     "windterm": "WindTerm：开源高性能 SSH/终端工具。多标签、分屏、图形化 SFTP；官方只发便携 zip。",
+    # ---- Agent 客户端（2026-10-15 新增 Tab，表见 _AGENT_CLIENTS）----
+    "cursor": "Cursor：AI 编程 IDE。整库上下文对话、多文件编辑、内联补全一体化。"
+              "商业软件：本工具只给官方安装包直链，**不含授权与账号**。",
+    "zcode": "ZCode：智谱（Z.ai）的 AI 编程 IDE，深度接入 GLM 系列模型，中文场景友好。",
+    "claude-code": "Claude Code：Anthropic 的命令行编程 Agent，在终端里读改代码、跑命令。"
+                   "Windows 官方发 zip（解压得到 claude.exe）——它是 CLI，不是 GUI 安装器。",
+    "codex-cli": "Codex CLI：OpenAI 的命令行编程 Agent，Windows 官方发单文件 exe。",
+    "opencode": "opencode：anomalyco（原 SST）的开源编程 Agent，桌面端与终端版都发。",
+    "openhands": "OpenHands：All Hands AI 的开源自主编码 Agent（前身 OpenDevin）。",
+    "cherry-studio": "Cherry Studio：CherryHQ 的多模型桌面客户端，支持 MCP 与知识库。",
+    "goose": "Goose：Block 的开源通用 Agent，能写代码也能调研/写文档/跑自动化。",
+    "qwen-code": "Qwen Code：阿里通义的开源编码 Agent，桌面端与终端版都发。",
+    "crush": "Crush：Charm 的终端编码 Agent，Go 单文件、TUI 界面精致。",
+    "kiro": "Kiro：AWS 的编码 IDE，主打规格驱动（spec-driven）开发。",
+    "jan": "Jan：开源的本地优先 AI 助手，可接本地模型。",
+    "openclaw": "OpenClaw：跑在你自己电脑上的开源个人 Agent，可接聊天软件。",
+    "hermes": "Hermes Agent：Nous Research 的个人 Agent，会随使用习惯自我调整。",
+    "gemini-cli": "Gemini CLI：Google 的命令行编程 Agent（官方只提供 npm 安装）。",
+    "aider": "Aider：老牌的终端结对编程 Agent，git 原生集成（官方只提供 pip 安装）。",
+    "ollama": "Ollama：一条命令在本地跑大模型的运行时，很多本地 Agent 的后端。",
+    "lm-studio": "LM Studio：图形化本地模型客户端，下载模型/对话/起本地 API 服务。",
+    "gpt4all": "GPT4All：离线运行的本地模型桌面客户端，不需要 API Key。",
+    "anything-llm": "AnythingLLM：本地私有知识库 + Agent 桌面端（文档喂进去做 RAG）。",
+    "lobehub": "LobeHub：LobeChat 的桌面端，多模型聊天/助手客户端。",
+    "copilot-cli": "GitHub Copilot CLI：GitHub 官方的命令行 Copilot Agent。",
+    "ima": "ima（腾讯）：腾讯的 AI 知识管家，把资料沉淀成个人知识库再问答。",
+    "kilo-code": "Kilo Code：原 Roo Code 团队的 AI 编程客户端（桌面/插件/终端）。",
+    "wave-terminal": "Wave Terminal：开源的现代终端，可内嵌图表、编辑器与 AI 助手。",
+    "msty": "Msty Studio：隐私优先的本地 AI 工作台，本地与云端模型混用。",
+    "mistral-vibe": "Mistral Vibe：Mistral 官方的终端编码 Agent。",
+    "kimi-work": "Kimi Work：月之暗面面向知识工作的桌面 Agent。",
+    "notepad-plus-plus": "Notepad++：最普及的轻量代码/文本编辑器。",
+    "wireshark": "Wireshark：抓包与协议分析的事实标准。",
+    "gitkraken": "GitKraken：图形化 Git 客户端，协作与冲突处理做得细。",
+    "sourcetree": "SourceTree：Atlassian 官方的免费 Git GUI。",
+    "insomnia": "Insomnia：Kong 家的 API 调试客户端（REST / GraphQL / gRPC）。",
+    "beekeeper-studio": "Beekeeper Studio：开源 SQL 客户端，界面清爽、支持各家数据库。",
+    "obsidian": "Obsidian：本地 Markdown 知识库，笔记以纯文件存在你自己的目录。",
+    "zettlr": "Zettlr：面向学术写作的 Markdown 编辑器（引用管理、卡片笔记）。",
+    "yaak": "Yaak：离线优先的 API 客户端，数据存本地。",
+    "gvim": "Vim (gVim)：Vim 的 Windows 图形版，带菜单与鼠标支持。",
+    "terraform": "Terraform：基础设施即代码（IaC）的事实标准，写 .tf 描述云资源。",
+    "opentofu": "OpenTofu：Terraform 的开源分叉（Linux 基金会托管），命令名是 tofu。",
+    "argocd": "Argo CD CLI：GitOps 交付的命令行（把 Git 当唯一事实源同步到集群）。",
+    "prometheus": "Prometheus：指标采集与告警的时序库，监控领域的事实标准。",
+    "victoriametrics": "VictoriaMetrics：高性能时序数据库，兼容 Prometheus 查询与抓取。",
+    "k6": "k6：Grafana 家的压测工具，脚本用 JavaScript 写，比 JMeter 轻得多。",
+    "pulumi": "Pulumi：用真正的编程语言（TS/Python/Go）写基础设施的 IaC。",
+    "istioctl": "Istio CLI：服务网格 Istio 的命令行，负责安装与诊断。",
+    "talosctl": "Talos Linux CLI：生成集群配置、引导节点、拿 kubeconfig。",
+    "elixir": "Elixir：跑在 Erlang 虚拟机上的函数式语言（Phoenix 框架的底座）。",
+    "scala-cli": "Scala CLI：Scala 的单文件脚本 + 编译 + 打包 + 测试一体化工具。",
+    "bazelisk": "Bazelisk：按项目 .bazelversion 自动选 Bazel 版本并调用的启动器。",
+    "just": "Just：Make 的现代替代，一个 justfile 写常用命令。",
+    "task": "Task：YAML 写任务的任务运行器，带输入缓存（没变就不重跑）。",
+    "oxlint": "Oxlint：Rust 写的 JS/TS 检查器，比 ESLint 快一两个数量级。",
+    "biome": "Biome：Rust 写的 JS/TS 格式化 + Lint 一体化工具。",
+    "nushell": "Nushell：把管道数据当结构化表格处理的现代 shell（命令名 nu）。",
+    "starship": "Starship：跨 shell 的提示符，自动显示 git 分支/语言版本/耗时。",
+    "gh": "GitHub CLI：GitHub 官方命令行，开 PR/看 issue/跑 workflow 不用开浏览器。",
+    "cc-switch": "CC-Switch：Claude Code / Codex / OpenCode 等 CLI 的统一配置管理器。",
+    "codex-app-manager": "CodexAppManager：官方 Codex 桌面应用的安装/更新/卸载管理器。",
+    "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
+    "trae": "Trae：字节跳动的 AI 编程 IDE（国际版）。整库理解、多文件改写、Builder 模式从需求直出工程。",
+    "trae-cn": "Trae CN：Trae 的中国大陆版。功能与界面同国际版，独立站点、国内直连不需要科学上网。",
+    "windsurf": "Windsurf (Devin)：Cognition 的 AI 编程 IDE，现已更名升级为 Devin Desktop。"
+                "主打 Cascade 智能体式改代码；本工具只给官网入口（见卡片说明）。",
+    "claude": "Claude 桌面版：Anthropic 的 Claude 桌面客户端。可对接本地文件与 MCP 扩展；"
+              "官方限制大陆区域，本工具只给官网入口（见卡片说明）。",
+    "qoder": "Qoder IDE：阿里的 AI 编程 IDE。整库理解、Agent 式改代码、行内补全；"
+             "与「QoderWork CN」不是一个产品（那个偏办公）。",
+    "marvis": "Marvis（马维斯）：腾讯的 AI 桌面助手，偏日常问答与轻办公。安装包很小，能力多在服务端。",
+    "wukong": "悟空：钉钉（阿里）的企业级 AI 工作平台桌面端，面向团队办公与钉钉生态。",
+    "lobsterai": "LobsterAI（龙虾）：网易有道的桌面 AI 助手，主打日常任务与内容处理。",
+    "autoclaw": "AutoClaw（澳龙）：智谱的桌面 Agent，接 GLM 系列模型，面向自动化办公与浏览任务。",
+    "dumate": "百度搭子 DuMate：百度的桌面 AI 智能体，独立于文心一言 App。",
+    "openworker": "OpenWorker：吴恩达团队开源的 AI 办公 Agent，可自主拆解并执行桌面办公任务。",
+    "orkas": "Orkas：开源的本地优先 AI 桌面应用。指挥官模型调度子代理，直接驱动本机已装的编程 CLI。",
+    "zed": "Zed：Rust 写的高性能协作式代码编辑器，内置 AI 编辑与多人实时协作。",
+    "cline": "Cline：开源自主编程 Agent。原本是 VS Code 插件，现在也有独立 Windows 桌面端。",
+    "chatgpt": "ChatGPT：OpenAI 的桌面客户端。Windows 官方走微软商店分发（本工具给商店引导安装器）。",
+    "antigravity": "Google Antigravity：Google 的 Agent 优先编程 IDE。官方站在大陆不可达，只给官网入口。",
+    "gemini": "Google Gemini：Google 的 Gemini 桌面客户端。官方站在大陆不可达，只给官网入口。",
+    "kimi": "Kimi：月之暗面的桌面智能助手。长文本理解与联网搜索是它的强项。",
+    "kimi-code": "Kimi Code：月之暗面的编程 Agent 桌面端，与 Kimi 助手是两个独立客户端。",
+    "minimax": "MiniMax Code：MiniMax 的桌面 Agent，接自家大模型做自动化任务。",
+    "stepfun": "阶跃AI 桌面伙伴：阶跃星辰的桌面 AI 助手，接 Step 系列多模态模型。",
+    "nano-ai": "纳米AI：360 的桌面 AI 助手，主打搜索问答与文档处理。",
+    "tiangong": "天工 AI：昆仑万维的桌面智能体（Skywork），面向办公与内容生成。",
+    "codebuddy": "腾讯 CodeBuddy：腾讯的 AI 编程 IDE，深度集成腾讯云开发链路。",
+    "workbuddy": "WorkBuddy：腾讯 CodeBuddy 团队出的办公 Agent，偏日常办公与文档任务。",
+    "deepseek-harness": "DeepSeek Harness：DeepSeek 官方的桌面 Agent，把模型能力包成本地可用的智能体。",
+    "reasonix": "Reasonix：开源编程 Agent（基于 DeepSeek），本地跑代码、按任务改工程。",
+    "metaso": "秘塔AI搜索：秘塔科技的 AI 搜索与写作桌面端。官方只上架微软商店，本工具只给官网入口。",
+    "doubao": "豆包：字节跳动的桌面 AI 助手。问答、写作、多模态与联网搜索都在一处。",
+    "yuanbao": "腾讯元宝：腾讯的桌面 AI 助手，底层是混元大模型，接微信生态。",
+    "tongyi-qianwen": "通义千问：阿里「千问」的 PC 客户端，面向日常问答、写作与文档处理。",
+    "lingma": "通义灵码：阿里的 AI 编程助手，IDE 里补全与对话改代码。",
+    "ernie": "文心（文小言）：百度的桌面 AI 助手。与「百度搭子 DuMate」是两个产品。",
+    "chatglm": "智谱清言：智谱的桌面 AI 助手，接 GLM 系列模型。",
+    "xinghuo": "讯飞星火：科大讯飞的桌面 AI 助手。官方未提供可登记的下载直链，只给官网入口。",
     "erlang": "Erlang/OTP 运行时。RabbitMQ 的必需前置（本工具按需自动安装）；不单独出现在界面上。",
+}
+
+
+# ---------------------------------------------------------------------------
+# 组件官方图标（2026-10-13 新增，2026-10-14 改为按 key 直接探测资产目录）
+# ---------------------------------------------------------------------------
+# 为什么不要映射表：原 `_COMPONENT_ICON_MAP` 登记了 27 条"key → 文件名"，
+# 与 assets/component-icons/ 实有的 124 个文件**逐条核对命中率为 0**，
+# 还混进 4 个根本不存在的 key（java / jq / helm / rider）。维护一张
+# "需要人工与磁盘保持同步"的表，在这种"文件名由采集脚本批量生成"的前提下
+# 必然漂移。这里改成**按 key 探测实际存在的文件**，零同步点。
+#
+# 资产目录：byte-tools.spec 的 datas 已经把整个 assets/ 收进包，
+# 打包后落在 sys._MEIPASS/assets，与 Path(__file__).parent 同一层。
+ICON_DIR_NAME = "component-icons"
+ICON_BOX_PX = 32          # 卡片上图标槽的边长（QLabel.setFixedSize 用同一个值）
+ICON_RENDER_SCALE = 2     # 以 2 倍分辨率渲染再缩回，HiDPI 下不发虚
+# 探测顺序：先 svg（矢量，任意尺寸清晰）后 png（部分官方只有栅格图）
+ICON_EXTS = (".svg", ".png")
+
+# 同一次运行里 87 张卡会各问一次；QImage→QPixmap 有实际开销，按 key 缓存
+_ICON_PIXMAP_CACHE: Dict[str, Optional["QPixmap"]] = {}
+
+
+def icon_asset_dir() -> Path:
+    """组件图标资产目录（源码运行与 PyInstaller 打包后同构）。"""
+    return Path(__file__).parent / "assets" / ICON_DIR_NAME
+
+
+def find_component_icon_file(key: str) -> Optional[Path]:
+    """按组件 key 在资产目录里找图标文件，找不到返回 None。
+
+    入参：
+      key: 组件标识符（如 "jdk"）。
+    返回：
+      命中的文件路径（assets/component-icons/<key>.<ext>），没有则 None。
+    只认 key 本身，不做别名猜测 —— 别名表是一处需要人工同步的数据，
+    与本函数要消除的正是同一类问题。
+    """
+    base = icon_asset_dir()
+    for ext in ICON_EXTS:
+        p = base / f"{key}{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+def load_component_icon_pixmap(key: str, px: int) -> Optional["QPixmap"]:
+    """把组件图标渲染成 px×px 的 QPixmap；没有图标或渲染失败返回 None。
+
+    入参：
+      key: 组件标识符。
+      px:   渲染输出的像素边长（调用方传 ICON_BOX_PX * ICON_RENDER_SCALE）。
+    返回：
+      已渲染好的 QPixmap（devicePixelRatio 已按 1:2 设好，显示时正好 ICON_BOX_PX），
+      或 None —— None 一律由调用方回落到分类色块，本函数不抛异常。
+    """
+    cached = _ICON_PIXMAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    pm = _render_icon_file(find_component_icon_file(key), px)
+    # None 也缓存：没有图标的组件每次建卡都白找一次磁盘没必要
+    _ICON_PIXMAP_CACHE[key] = pm
+    return pm
+
+
+def _render_icon_file(path: Optional[Path], px: int) -> Optional["QPixmap"]:
+    """把单个图标文件渲染成 px×px 的 QPixmap。渲染失败返回 None 而不抛异常。
+
+    入参：
+      path: 图标文件路径，None 直接返回 None。
+      px:   输出像素边长（调用方传 ICON_BOX_PX * ICON_RENDER_SCALE = 64）。
+    返回：
+      QPixmap（devicePixelRatio 已设为 ICON_RENDER_SCALE，显示时正好占
+      ICON_BOX_PX 逻辑像素）或 None。
+
+    ⚠ **devicePixelRatio 必须在画完之后再设**，不能设完再开 QPainter（2026-10-14
+    实测踩出来的显示 bug）。设在前面的结果是：QPainter 的逻辑视口被 DPR 缩小，
+    QSvgRenderer 按 SVG 的 defaultSize（本项目的图标多为 128×128）去适配这个
+    视口，渲染出的画面比画布大出一截，于是**每个图标都被放大裁掉一大块**——
+    界面上看到的是"图标缺了右上角"。表现极像资产文件本身损坏，极难定位。
+
+    反过来，画完再设 DPR 就没有这个问题：QPainter 看到的视口就是 px×px，
+    SVG 正确等比缩放填满；DPR 只是事后记录"这块 px×px 的像素要显示成
+    px/scale 逻辑像素"，供 QLabel 排版用。
+    """
+    if path is None:
+        return None
+    try:
+        if path.suffix.lower() == ".svg":
+            # 矢量：QSvgRenderer 按目标视口重新栅格化，任意尺寸都清晰
+            renderer = QSvgRenderer(str(path))
+            if not renderer.isValid():
+                return None
+            img = QImage(px, px, QImage.Format_ARGB32)
+            img.fill(Qt.transparent)
+            painter = QPainter(img)
+            renderer.render(painter)
+            painter.end()
+            img.setDevicePixelRatio(float(ICON_RENDER_SCALE))   # 画完再设
+            return QPixmap.fromImage(img)
+
+        # 栅格：QPixmap 自己就能读，缩放到目标边长（保持长宽比）
+        src = QPixmap(str(path))
+        if src.isNull():
+            return None
+        out = src.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        out.setDevicePixelRatio(float(ICON_RENDER_SCALE))
+        return out
+    except Exception:
+        # 图标是纯装饰：渲染不了就回色块，绝不能让它把主窗口带崩
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 「官网」：详情对话框里那个可点击链接的真源（R19 · 2026-10-14 用户要求）
+# ---------------------------------------------------------------------------
+# 为什么必须是**手写的一张表**，不能像原先那样从下载 URL 里推导域名：
+# 推导出来的东西根本不是官网。实测 88 个组件，能靠推导得到真官网的只有 7 个；
+# 39 个推成 github.com（那是仓库页不是官网）、31 个推成 CDN/下载服务器
+# （api.adoptium.net、artifacts.elastic.co、aka.ms、edgedl.me.gvt1.com…）、
+# 10 个推成 archive.apache.org（该是 kafka.apache.org）、docker 干脆推不出来。
+# 而详情里那行字写的就是"官方地址"，写错了比不写更糟，所以逐条人工核实。
+#
+# 取值口径（用户 2026-10-14 拍板，取"乙档"）：
+#   1) 有**中国大陆区域的官网入口**的优先用 —— 包括两种形态：
+#      a) 独立的 CN 域名：golang.google.cn / navicat.com.cn / apifox.cn …
+#      b) 同一域名下的中文路径：nodejs.org/zh-cn、jetbrains.com/zh-cn 这一类
+#   2) 没有中文入口的，用该项目的**真实国际官网首页**。
+#
+# 下面每条后面的注释是**核实依据**（2026-10-14 逐条 HTTP 验证过能打开）：
+#   CN  = 命中第 1 条口径，用的是中文入口
+#   INT = 无中文入口，用的是国际官网首页
+#   403 = 站点有反爬，脚本直接请求会被拒，但域名本身有效（人工浏览器可开）
+#
+# ⚠ 这 88 条是**人工核实的事实**，项目改名换域名后会悄悄过期。护栏在
+#   tests/bt_component_detail_tests.py：漏登记即测试变红，接新组件时补一条。
+
+COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
+    # ---- 语言运行时 / 编译工具 ----
+    "jdk": "https://adoptium.net/",                    # INT Eclipse Adoptium 官网（Temurin 的发行方）
+    "python": "https://www.python.org/",               # INT
+    "node": "https://nodejs.org/zh-cn",                # CN  官方文档站自带中文路径
+    "go": "https://golang.google.cn/",                  # CN  Google 为大陆单独运营的官方域名
+    "rust": "https://www.rust-lang.org/",              # INT
+    "bun": "https://bun.sh/",                          # INT
+    "deno": "https://deno.com/",                       # INT
+    "dart": "https://dart.dev/",                       # INT
+    "kotlin": "https://kotlinlang.org/",               # INT
+    "graalvm": "https://www.graalvm.org/",             # INT
+    "dotnet-sdk": "https://dotnet.microsoft.com/zh-cn/download/dotnet",  # CN  微软自带 zh-cn 路径
+    "ninja": "https://ninja-build.org/",               # INT
+    "cmake": "https://cmake.org/",                     # INT
+    "protoc": "https://protobuf.dev/",                  # INT  Protobuf 官网（编译器随 SDK 分发）
+    "sqlite": "https://www.sqlite.org/",               # INT
+    "erlang": "https://www.erlang.org/",               # INT
+    "duckdb": "https://duckdb.org/",                   # INT
+
+    # ---- 构建 / 依赖 / 版本控制 ----
+    "maven": "https://maven.apache.org/",              # INT  各 Apache 子项目各有自己的主页，不是 archive.apache.org
+    "gradle": "https://gradle.org/",                   # INT  不是 services.gradle.org（那是下载站）
+    "ant": "https://ant.apache.org/",                  # INT
+    "jmeter": "https://jmeter.apache.org/",            # INT
+    "conda": "https://docs.conda.io/en/latest/miniconda.html",  # INT  docs.conda.io 没有 zh-cn（实测 404）
+    "pnpm": "https://pnpm.io/",                        # INT
+    "git": "https://git-scm.com/",                     # INT  不是 github.com
+    "powershell": "https://learn.microsoft.com/zh-cn/powershell/",  # CN  MS Learn 自带 zh-cn
+
+    # ---- Web / 应用服务器 / 网关 ----
+    "nginx": "https://nginx.org/",                     # INT
+    "tomcat": "https://tomcat.apache.org/",            # INT
+    "caddy": "https://caddyserver.com/",               # INT
+    "traefik": "https://traefik.io/",                  # INT
+    "consul": "https://developer.hashicorp.com/consul",  # INT  HashiCorp 文档站
+
+    # ---- 容器 / 编排 ----
+    "docker": "https://www.docker.com/",               # INT  原先从下载 URL 推不出任何域名
+    "docker-compose": "https://docs.docker.com/compose/",  # INT  官网文档的 Compose 章节
+    "kubectl": "https://kubernetes.io/zh-cn/docs/reference/kubectl/",  # CN  K8s 官方文档自带 zh-cn
+    "helm": "https://helm.sh/",                        # INT
+    "k9s": "https://k9scli.io/",                       # INT
+
+    # ---- 数据库 ----
+    "mysql": "https://www.mysql.com/",                 # 403 按 UA 反爬：curl/8.0 请求直接 200，浏览器同理
+    "mongodb": "https://www.mongodb.com/",             # INT
+    "postgresql": "https://www.postgresql.org/",       # INT  不是 get.enterprisedb.com（那是下载站）
+    "redis": "https://redis.io/",                      # INT
+    "etcd": "https://etcd.io/",                        # INT
+    "nats-server": "https://nats.io/",                 # INT
+    "minio": "https://min.io/",                        # INT
+
+    # ---- 消息队列 ----
+    "kafka": "https://kafka.apache.org/",              # INT
+    "rocketmq": "https://rocketmq.apache.org/",        # INT
+    "pulsar": "https://pulsar.apache.org/",            # INT
+    "rabbitmq": "https://www.rabbitmq.com/",           # INT
+    "activemq": "https://activemq.apache.org/",        # INT
+    "nacos": "https://nacos.io/",                      # INT
+    "seata": "https://seata.apache.org/",              # INT
+    "zookeeper": "https://zookeeper.apache.org/",      # INT
+
+    # ---- 搜索 / 观测 / 安全 ----
+    "elasticsearch": "https://www.elastic.co/elasticsearch",  # INT
+    "trivy": "https://trivy.dev/",                     # INT  Aqua Security 出品，trivy.dev 是当前官网
+
+    # ---- CI ----
+    "jenkins": "https://www.jenkins.io/",              # INT  不是 get.jenkins.io（那是下载站）
+
+    # ---- 命令行小工具（上游只维护仓库，没有独立官网）----
+    "uv": "https://docs.astral.sh/uv/",                # INT
+    "jq": "https://jqlang.github.io/jq/",              # INT
+    "ripgrep": "https://github.com/BurntSushi/ripgrep",   # INT  作者已弃用 ripgrep.rs，仓库即官网
+    "fd": "https://github.com/sharkdp/fd",             # INT
+    "bat": "https://github.com/sharkdp/bat",           # INT
+    "eza": "https://eza.rocks/",                       # INT
+    "zoxide": "https://github.com/ajeetdsouza/zoxide",  # INT
+    "fzf": "https://github.com/junegunn/fzf",          # INT
+    "yq": "https://github.com/mikefarah/yq",           # INT
+
+    # ---- JetBrains 系（统一指向官网产品页，不是 download.jetbrains.com）----
+    "idea": "https://www.jetbrains.com/idea/",         # INT
+    "pycharm": "https://www.jetbrains.com/pycharm/",   # INT
+    "clion": "https://www.jetbrains.com/clion/",       # INT
+    "webstorm": "https://www.jetbrains.com/webstorm/", # INT
+    "goland": "https://www.jetbrains.com/goland/",     # INT
+    "datagrip": "https://www.jetbrains.com/datagrip/", # INT
+
+    # ---- 其它 IDE / 编辑器 ----
+    "vscode": "https://code.visualstudio.com/docs/?locale=zh-cn",  # CN  站点用 ?locale= 而不是 /zh-cn（实测 /zh-cn 是 404）
+    "eclipse": "https://www.eclipse.org/downloads/",   # INT
+    "android-studio": "https://developer.android.com/studio?hl=zh-cn",  # CN  官方中文页（?hl= 不是路径；/zh-cn 形式不存在）
+    "visual-studio": "https://visualstudio.microsoft.com/zh-hans/",  # CN  微软自带 zh-hans 路径
+    "hbuilderx": "https://www.dcloud.io/hbuilderx.html",  # CN  DCloud（国内公司）官网
+    "wechat-devtools": "https://developers.weixin.qq.com/miniprogram/dev/devtools/download.html",  # CN  微信官方
+
+    # ---- 数据库 / API 客户端工具 ----
+    "navicat": "https://www.navicat.com.cn/",          # CN  Navicat 中国版官网（海外版是 navicat.com）
+    "dbeaver": "https://dbeaver.io/",                   # INT
+    "heidisql": "https://www.heidisql.com/",           # INT
+    "mysql-workbench": "https://www.mysql.com/products/workbench/",  # 403 按 UA 反爬，同 mysql，curl/8.0 请求 200
+    "pgadmin4": "https://www.pgadmin.org/",            # INT
+    "mongodb-compass": "https://www.mongodb.com/products/compass",  # INT
+    "redisinsight": "https://redis.io/insight/",       # INT
+    "dbx": "https://github.com/t8y2/dbx",              # INT  个人项目，仓库即官网
+    "ardm": "https://github.com/qishibo/AnotherRedisDesktopManager",  # INT  个人项目，仓库即官网
+    "windterm": "https://github.com/KingToolbox/WindTerm",  # INT  个人项目，仓库即官网
+    # ---- Agent 客户端（R19 官网登记；2026-10-15 逐条实测）----
+    "cursor": "https://cursor.com/",                          # INT
+    "zcode": "https://zcode.z.ai/",                           # CN   智谱官方站，国内直连
+    "claude-code": "https://www.anthropic.com/claude-code",   # INT
+    "codex-cli": "https://openai.com/codex/",                 # INT  403 按 UA 反爬，浏览器可正常打开
+    "opencode": "https://opencode.ai/download",               # INT  下载入口页（R21.5 要入口不要品牌首页）
+    "openhands": "https://github.com/OpenHands/OpenHands/releases",  # INT  官方只在这里发 Windows 安装器
+    "cherry-studio": "https://www.cherry-ai.com/",            # CN   CherryHQ 官方站（下载页同域）
+    "goose": "https://block.github.io/goose/",                # INT  官方文档站，首页给各平台下载入口
+    "qwen-code": "https://github.com/QwenLM/qwen-code/releases",  # CN  官方 release 页（桌面端与 CLI 都在这）
+    "crush": "https://github.com/charmbracelet/crush/releases",   # INT
+    "kiro": "https://kiro.dev/downloads/",                    # INT  官方下载页（实测 1.3.0 与本工具登记一致）
+    "jan": "https://jan.ai/",                                 # INT  官网首页即下载入口
+    "openclaw": "https://docs.openclaw.ai/install",           # INT  安装说明（Windows 伴生端入口）
+    "hermes": "https://hermes-agent.nousresearch.com/desktop",  # INT 官方桌面端页，Windows 按钮就指向本工具登记的直链
+    "gemini-cli": "https://geminicli.com/docs/get-started/installation/",  # INT 官方安装说明（只有 npm）
+    "aider": "https://aider.chat/docs/install.html",          # INT 官方安装说明（只有 pip/pipx）
+    "ollama": "https://ollama.com/download",                  # INT 官方下载页（Windows 安装器）
+    "lm-studio": "https://lmstudio.ai/download",              # INT 官方下载页
+    "gpt4all": "https://www.nomic.ai/gpt4all",                # INT Nomic 官方产品页
+    "anything-llm": "https://anythingllm.com/",               # INT 官网首页即下载入口
+    "lobehub": "https://lobehub.com/",                        # INT 官网（桌面端下载入口同页）
+    "copilot-cli": "https://github.com/github/copilot-cli/releases",  # INT 只在 GitHub 发版
+    "ima": "https://ima.qq.com/",                             # CN  腾讯官方站
+    "kilo-code": "https://kilo.ai/install",                   # INT 官方安装页
+    "wave-terminal": "https://www.waveterm.dev/",             # INT 官网（首页给下载入口）
+    "msty": "https://msty.app/",                              # INT 官网
+    "mistral-vibe": "https://github.com/mistralai/mistral-vibe/releases",  # INT 只在 GitHub 发版
+    "kimi-work": "https://www.kimi.com/products/kimi-work",   # CN  月之暗面官方产品页
+    "notepad-plus-plus": "https://notepad-plus-plus.org/downloads/",  # INT 官网下载页
+    "wireshark": "https://www.wireshark.org/download.html",   # INT 官网下载页
+    "gitkraken": "https://www.gitkraken.com/download",        # INT 官网下载页
+    "sourcetree": "https://www.sourcetreeapp.com/",           # INT 官网（下载入口同页）
+    "insomnia": "https://insomnia.rest/download",             # INT 官网下载页
+    "beekeeper-studio": "https://www.beekeeperstudio.io/get", # INT 官网下载页
+    "obsidian": "https://obsidian.md/download",               # INT 官网下载页
+    "zettlr": "https://www.zettlr.com/download",              # INT 官网下载页
+    "yaak": "https://yaak.app/download",                      # INT 官网下载页
+    "gvim": "https://www.vim.org/download.php",               # INT 官网下载页（Win 版入口）
+    "terraform": "https://developer.hashicorp.com/terraform/downloads",  # INT 官方下载页
+    "opentofu": "https://opentofu.org/docs/intro/install/",   # INT 官方安装说明
+    "argocd": "https://argo-cd.readthedocs.io/en/stable/cli_installation/",  # INT CLI 安装页
+    "prometheus": "https://prometheus.io/download/",          # INT 官方下载页
+    "victoriametrics": "https://docs.victoriametrics.com/",  # INT 官方文档（下载入口同页）
+    "k6": "https://grafana.com/docs/k6/latest/get-started/installation/",  # INT 官方安装说明
+    "pulumi": "https://www.pulumi.com/docs/iac/download-install/",  # INT 官方下载页
+    "istioctl": "https://istio.io/latest/docs/ops/diagnostic-tools/istioctl/",  # INT 官方文档
+    "talosctl": "https://www.talos.dev/latest/talos-guides/install/talosctl/",  # INT 官方安装说明
+    "elixir": "https://elixir-lang.org/install.html",         # INT 官方安装说明
+    "scala-cli": "https://scala-cli.virtuslab.org/install/",  # INT 官方安装说明
+    "bazelisk": "https://github.com/bazelbuild/bazelisk",     # INT 官方仓库（README 即用法）
+    "just": "https://just.systems/man/en/",                   # INT 官方手册（含安装）
+    "task": "https://taskfile.dev/installation/",             # INT 官方安装说明
+    "oxlint": "https://oxc.rs/docs/guide/usage/linter.html",  # INT 官方文档
+    "biome": "https://biomejs.dev/guides/getting-started/",   # INT 官方入门（含安装）
+    "nushell": "https://www.nushell.sh/",                     # INT 官网（下载入口同页）
+    "starship": "https://starship.rs/guide/#%F0%9F%9A%80-installation",  # INT 官方安装说明
+    "gh": "https://cli.github.com/",                          # INT 官网（下载入口同页）
+    "cc-switch": "https://ccswitch.io/",                      # CN/INT 官方站（作者声明这是唯一官网）
+    "codex-app-manager": "https://github.com/Wangnov/Codex-App-Manager/releases",  # 只在 GitHub 发版
+    "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
+    "trae": "https://www.trae.ai/",                           # INT  国际站
+    "trae-cn": "https://www.trae.cn/",                        # CN   大陆站
+    "windsurf": "https://devin.ai/download",                  # INT  windsurf.com 已 308 跳 devin.ai
+    "claude": "https://claude.com/download",                  # INT  官方下载页（大陆区域受限）
+    "qoder": "https://qoder.com/",                            # INT  Qoder 主站（IDE）
+    "marvis": "https://marvis.qq.com/",                       # CN
+    "wukong": "https://wukong.dingtalk.com/",                 # CN
+    "lobsterai": "https://lobsterai.youdao.com/",             # CN
+    "autoclaw": "https://autoclaw.zhipuai.cn/",               # CN
+    "dumate": "https://www.dumate.cn/",                       # CN
+    "openworker": "https://openworker.com/",                  # INT
+    "orkas": "https://orkas.ai/",                             # INT  仓库 README 里登记的官网
+    "zed": "https://zed.dev/",                                # INT
+    "cline": "https://cline.bot/",                            # INT
+    "chatgpt": "https://chatgpt.com/",                        # INT  大陆不可达；下载走微软商店（见卡片）
+    "antigravity": "https://antigravity.google/",             # INT  大陆不可达
+    "gemini": "https://gemini.google/desktop/",               # INT  大陆不可达
+    "kimi": "https://www.kimi.com/",                          # CN
+    "kimi-code": "https://www.kimi.com/code",                 # CN
+    "minimax": "https://www.minimax.cn/",                     # CN
+    "stepfun": "https://www.stepfun.com/",                    # CN
+    "nano-ai": "https://www.n.cn/",                           # CN  360 出品
+    "tiangong": "https://www.tiangong.cn/",                   # CN
+    "codebuddy": "https://www.codebuddy.cn/ide/",             # CN
+    "workbuddy": "https://www.workbuddy.cn/",                 # CN
+    "deepseek-harness": "https://www.deepseek.com/zh/harness/",  # CN
+    "reasonix": "https://reasonix.io/",                       # INT  个人开源项目，站点即官网
+    "metaso": "https://metaso.cn/",                           # CN  只有官网入口（见卡片）
+    "doubao": "https://www.doubao.com/",                      # CN
+    "yuanbao": "https://yuanbao.tencent.com/",                # CN
+    "tongyi-qianwen": "https://www.qianwen.com/",             # CN
+    "lingma": "https://lingma.aliyun.com/",                   # CN
+    "ernie": "https://wenxiaoyan.com/pc",                     # CN  文心/文小言 PC 页
+    "chatglm": "https://chatglm.cn/",                         # CN
+    "xinghuo": "https://xinghuo.xfyun.cn/desktop-app-download",  # CN  只有官网入口
+    # ---- API 调试 / 接口管理 ----
+    "apipost": "https://www.apipost.cn/",              # CN  国产工具，原生中文站
+    "apifox": "https://apifox.cn/",                    # CN  国产工具，原生中文站
+    "bruno": "https://www.usebruno.com/",              # INT
+    "postman": "https://www.postman.com/",             # INT
 }
 
 
@@ -5546,7 +7228,7 @@ COMPONENT_USAGE: Dict[str, str] = {
               "临时数据用内存库 sqlite3 :memory:。",
     "duckdb": "duckdb -c 查询语句直接写：select count(*) from 'x.parquet'；交互模式更顺手。"
               "进入交互后同一条 SQL 可反复执行。",
-    # ---- 开发软件：数据库与基础服务 ----
+    # ---- 服务端组件：数据库与基础服务 ----
     "mysql": "解压后先 mysqld --initialize 初始化数据目录，再启动服务。"
              "客户端用 mysql -u root -p 连接；本工具不做初始化与密码设置。",
     "postgresql": "Windows 免安装包解压即用：initdb 初始化，pg_ctl start 启动。"
@@ -5642,6 +7324,149 @@ COMPONENT_USAGE: Dict[str, str] = {
     "bruno": "安装后把集合当普通文件夹管，git 里直接版本化接口。",
     "windterm": "解压后双击 WindTerm.exe；建 SSH 会话输主机账号即连。"
                 "分屏、SFTP、多标签齐全。",
+    # ---- Agent 客户端（2026-10-15 新增 Tab）----
+    "cursor": "装完启动会让你登录（有免费额度）。打开一个代码目录即可对话；"
+              "要它改文件时，先看清它列出的改动再确认执行。",
+    "zcode": "装完启动用智谱账号登录，打开项目目录后即可对话改代码。",
+    "claude-code": "解压后把 claude.exe 放进 PATH（或直接用完整路径跑）。首次运行 `claude` "
+                   "会引导登录授权；之后在项目目录里执行 `claude` 就能用。"
+                   "⚠ 它面向终端，不是双击即用的窗口程序。",
+    "codex-cli": "单文件 exe，放进 PATH 或直接用完整路径跑；首次运行会让你登录。"
+                 "⚠ 同样是终端工具。",
+    "opencode": "两种形态按需挑：**桌面端**（exe 安装向导）装完双击即用；**终端版**"
+                "（zip 便携包）解压后把 opencode.exe 放进 PATH，再到项目目录里敲 `opencode`。"
+                "首次使用会让你配置模型提供方与 API Key。",
+    "openhands": "装完启动，跟着引导接一个模型（可填各家 API Key 或本地模型）。"
+                 "它是自主型 Agent：给它一个任务，它自己读代码、改文件、跑命令。",
+    "cherry-studio": "装完先到「设置 → 模型服务」里填一家的 API Key（它不绑定厂商），"
+                     "之后就能多模型对话、传文档建知识库。免安装便携版解压即可双击运行。",
+    "goose": "桌面端装完启动即用，首次会让你选模型提供方；终端版则把 goose.exe 放进 PATH，"
+             "在项目目录里敲 `goose`。",
+    "qwen-code": "桌面端装完启动登录即可；终端版解压后把可执行文件放进 PATH，"
+                 "在项目目录里敲 `qwen`。需要先准备一个通义千问（DashScope）的 API Key。",
+    "crush": "解压后把 crush.exe 放进 PATH（或直接用完整路径跑），在项目目录里敲 `crush`。"
+             "首次运行会让你填模型 API Key。⚠ 它面向终端，不是双击即用的窗口程序。",
+    "kiro": "装完启动登录 AWS Builder ID / 组织账号。它是 IDE，按它引导先写规格再生成实现。",
+    "jan": "装完启动，在「设置 → 模型」里选一个已下载的本地模型（或填 API Key）。"
+           "想跑本地模型要另外准备模型文件。",
+    "openclaw": "装完启动，按官方引导把它接到你的聊天软件（WhatsApp / Telegram / Slack）"
+                "并配置模型。它主要在后台按你的指令干活。",
+    "hermes": "装完启动，按引导配置模型提供方。它会记录你的使用习惯并自我调整。"
+              "⚠ 官方只发这一个滚动链接的安装器，本工具无法替它标出版本号。",
+    "gemini-cli": "**本工具不代下**：官方只提供 npm 安装，点「官网下载」看官方说明，"
+                  "在终端里执行 `npm install -g @google/gemini-cli` 即可。",
+    "aider": "**本工具不代下**：官方只提供 pip / pipx 安装，点「官网下载」看官方说明。"
+             "装完在项目目录里敲 `aider`，首次会让你选模型与填 API Key。",
+    "ollama": "装完即用：`ollama run <模型名>` 会自动把模型拉下来再对话。"
+              "它同时会在本地起一个 OpenAI 兼容服务（默认 127.0.0.1:11434），"
+              "别的客户端（LM Studio 之外的那些）可以直接连它。",
+    "lm-studio": "装完启动，在左侧搜索并下载模型（首次会比较大），选中后即可对话；"
+                 "「Developer」页能起一个本地 API 服务给别的程序用。",
+    "gpt4all": "装完启动，先在「Models」里下载一个模型文件，再回到对话页即可用。"
+               "全程离线，不需要任何 API Key。",
+    "anything-llm": "装完启动，先选一个模型提供方（本地或云端），再新建工作区把文档/网页"
+                    "喂进去即可基于它问答。",
+    "lobehub": "装完启动，到「设置」里填一家模型服务的 API Key（它不绑定厂商）即可对话。",
+    "copilot-cli": "装完后在终端里敲 `copilot`（或 `gh copilot`）使用，首次会让你登录 GitHub 账号。"
+                   "⚠ 它是终端工具，不是双击即用的窗口程序。",
+    "ima": "装完启动登录微信/QQ 账号，跟着引导把资料导入知识库，之后就能基于它问答与写作。",
+    "kilo-code": "桌面端装完启动登录即可；它也能作为 VS Code / JetBrains 插件安装"
+                 "（那种形态不在本工具范围内）。",
+    "wave-terminal": "装完启动即用，首次会让你选一个 shell。它默认会上报匿名使用数据，"
+                     "不想要就去设置里关掉。",
+    "msty": "装完启动，在界面里选本地模型或填云端 API Key；它主打本地模型与知识库。",
+    "mistral-vibe": "解压后把可执行文件放进 PATH（或直接用完整路径跑），在项目目录里启动。"
+                    "首次会让你配置 Mistral 的 API Key。⚠ 它面向终端。",
+    "kimi-work": "装完启动登录 Kimi 账号，跟着引导建知识库、接自己的资料。",
+    "notepad-plus-plus": "双击安装器按向导装完即用。装的时候注意**不要**勾选它捆绑的"
+                         "语言包之外的附加项（安装器里可取消）。",
+    "wireshark": "装 Wireshark 会一并装 Npcap 抓包驱动（安装向导里有这一步）。"
+                 "⚠ 抓包需要管理员权限，且只在你有授权的网络上使用。",
+    "gitkraken": "双击安装器装完即用，首次会让你登录 GitKraken 账号（免费档够个人用）。",
+    "sourcetree": "双击安装器装完即用；首次启动会要求登录 Atlassian 账号（免费）。",
+    "insomnia": "双击安装器装完即用。它默认把数据放本地，也可登录账号同步。",
+    "beekeeper-studio": "双击安装器装完即用，建连接时填各数据库的连接串即可。",
+    "obsidian": "双击安装器装完即用，第一次让你**选一个本地文件夹当仓库**（笔记就是里面的 .md 文件）。",
+    "zettlr": "双击安装器装完即用，第一次让你选工作目录（笔记同样是纯 Markdown 文件）。",
+    "yaak": "双击安装器装完即用，数据默认存本地、可导出。",
+    "gvim": "双击安装器装完即用（会一并装命令行版 vim）。配置文件是 `~/_vimrc`。",
+    "terraform": "把二进制放进 PATH 后，在项目目录里 `terraform init` → `plan` → `apply`。"
+                 "**认证要走各家云的密钥**（AWS_ACCESS_KEY_ID 之类），本工具不碰这类凭据。",
+    "opentofu": "用法与 terraform 基本一致（`tofu init` / `plan` / `apply`）；"
+                "已有 .tf 文件可以直接拿来用。",
+    "argocd": "先 `argocd login <你的 argocd 服务端>` 再操作；服务端本身要另外部署在集群里。"
+              "本工具只提供这个 CLI。",
+    "prometheus": "解压目录里有 prometheus.exe 与示例 prometheus.yml，直接跑起来就监听 9090。"
+                  "要抓谁、告警规则写哪儿，都在那个 yml 里配。",
+    "victoriametrics": "跑起来默认监听 8428；抓取目标用 `-promscrape.config` 指一个"
+                       "Prometheus 格式的配置即可。",
+    "k6": "用法是 `k6 run 脚本.js`（脚本里用 `import http from 'k6/http'` 写请求与断言）。"
+          "它也有 Grafana Cloud 的云端结果面板，可选，不影响本地跑。",
+    "pulumi": "要先用 `pulumi login`（可登录官方托管或自建后端）再 `pulumi up`；"
+              "项目用你熟悉的语言（TS/Python/Go/C#）写，不需要学新 DSL。",
+    "istioctl": "常用的是 `istioctl install` 装网格、`istioctl analyze` 查配置问题。"
+                "⚠ 都要先有一个能用的 kubeconfig 与连得上的集群。",
+    "talosctl": "用 `talosctl gen config` 生成机器配置，引导节点后再 `talosctl kubeconfig` 拿集群凭据。"
+                "它管的是 Talos Linux 节点，不是在 Windows 上跑 K8s。",
+    "elixir": "装完 `elixir --version` 应能看到 Erlang/OTP 与 Elixir 两个版本号。"
+              "**它需要 Erlang/OTP**（见卡片说明里的前置提示）。",
+    "scala-cli": "直接 `scala-cli run 文件.scala` 就能跑单文件；建工程用 `scala-cli init`。"
+                 "首次运行会下载 JVM 与依赖，之后有缓存。",
+    "bazelisk": "把它当 `bazel` 用即可（`bazelisk build //...`）；"
+                "项目里有 .bazelversion 时它会自己下对应版本。",
+    "just": "在项目根写一个 justfile，`just` 列全部任务、`just <任务名>` 执行。",
+    "task": "在项目根写 Taskfile.yml，`task --list` 看任务、`task <名字>` 执行；"
+            "声明了 sources/generates 的任务会自动跳过没必要的重跑。",
+    "oxlint": "在项目目录里直接 `oxlint`（默认查当前目录），`oxlint --fix` 自动修可修项。"
+              "它只做 Lint，格式化交给 biome / prettier。",
+    "biome": "`biome check --write .` 一把跑格式 + Lint；`biome format .` 只格式化。",
+    "nushell": "输入 `nu` 进入它的交互界面；它的管道传的是结构化数据（`ls | where size > 1mb`）。"
+               "⚠ 想设成默认 shell 要自己改终端配置，本工具不改。",
+    "starship": "装完在 shell 配置里加一行初始化（官方文档有 PowerShell / bash 两种写法），"
+                "重启终端后提示符就变了。本工具不改你的 shell 配置。",
+    "gh": "首次用 `gh auth login` 登录 GitHub。之后 `gh pr create`、`gh issue list`、"
+          "`gh run watch` 都能在终端里做完。",
+    "cc-switch": "装完启动，在界面里添供应商（填 API Key / 中转端点）并「切换」即可；"
+                 "它会去改对应 CLI 自己的配置文件，所以**先装好目标 CLI** 再切。",
+    "codex-app-manager": "装完启动，界面里选 Codex 桌面端的版本并安装；后续更新与卸载也在同一处。"
+                         "它只管那个桌面应用本体。",
+    "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
+    "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
+    "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",
+    "qoder": "装完启动登录阿里账号，打开项目目录后即可对话改代码；它是 IDE，写代码用这一个。",
+    "marvis": "装完启动登录微信/QQ 账号即可用；以问答与轻办公为主。",
+    "wukong": "装完启动用钉钉扫码登录；团队协作与办公任务都从它的工作台进。",
+    "lobsterai": "装完启动登录有道账号；按它的任务面板发起日常任务即可。",
+    "autoclaw": "装完启动登录智谱账号；它是自动化 Agent，给目标它会自己拆步骤执行。",
+    "dumate": "装完启动登录百度账号；给一句需求它自己规划并执行桌面任务。",
+    "openworker": "装完启动配好模型 API Key；然后给一句办公任务，它自己拆解执行。",
+    "orkas": "装完启动配自己的模型 Key；它用你本机已装的编程 CLI 干活，先确保那些 CLI 可用。",
+    "zed": "解压/装完双击即用；打开项目目录，Ctrl+Enter 唤起 AI 编辑面板。",
+    "cline": "装完启动在设置里填模型 API Key，再打开项目目录即可开始。"
+             "也可以改用 VS Code 扩展版。",
+    "chatgpt": "双击这个引导安装器，它会从微软商店把 ChatGPT 主体装上；之后开始菜单启动。",
+    "windsurf": "点「官网下载」会打开官方下载页，在页面里点一次下载即可（官方直链会随发版失效）。",
+    "claude": "点「官网下载」会打开官方下载页；注意该页面按区域限制，大陆网络可能打不开。",
+    "antigravity": "点「官网下载」会打开官网；该站在大陆不可达，需自备可访问的网络环境。",
+    "gemini": "点「官网下载」会打开官网；该站在大陆不可达，需自备可访问的网络环境。",
+    "kimi": "装完启动登录 Kimi 账号；长文档直接丢进对话框，或让它联网查资料再总结。",
+    "kimi-code": "装完启动登录月之暗面账号，打开项目目录即可开始编程。它面向写代码，不是聊天助手。",
+    "minimax": "装完启动登录 MiniMax 账号；给一句任务它会自己拆步骤执行。",
+    "stepfun": "装完启动登录阶跃账号；支持图片/文档输入，按界面引导建任务即可。",
+    "nano-ai": "装完启动登录 360 账号；搜索问答与文档处理都在同一个对话框里。",
+    "tiangong": "装完启动登录昆仑万维账号；办公与内容生成任务直接下指令即可。",
+    "codebuddy": "装完启动登录腾讯账号，打开项目目录后即可对话改代码；写作与调试在同一窗口。",
+    "workbuddy": "装完启动登录腾讯账号；按它的任务面板下发办公任务即可。",
+    "deepseek-harness": "装完启动配 DeepSeek API Key；然后给任务，它在本机执行。",
+    "reasonix": "装完启动配 DeepSeek Key（或用本地模型）；打开代码目录即可对话改工程。",
+    "metaso": "点「官网下载」会打开官网；Windows 版只在微软商店，按页面引导去商店装。",
+    "doubao": "解压后跑安装器；启动登录字节账号即可对话，长文档与图片都能直接丢进去。",
+    "yuanbao": "装完启动微信扫码登录；问答、读长文、生成内容都在同一个对话框里。",
+    "tongyi-qianwen": "装完启动登录阿里账号；文档、图片、表格都能丢进去让它处理。",
+    "lingma": "装完在 IDE 里登录阿里云账号；写代码时补全与对话都在侧边栏。",
+    "ernie": "装完启动登录百度账号；问答与写作直接在对话框里下指令。",
+    "chatglm": "装完启动登录智谱账号；问答、文档解读与画图都从对话框进。",
+    "xinghuo": "点「官网下载」会打开官网下载页，在页面里点一次下载即可。",
     "erlang": "RabbitMQ 缺它时本工具自动装它，无需手动使用。",
 }
 
@@ -5893,6 +7718,77 @@ _DEVTOOLS: tuple = (
      "字节核对就没数了。旧版本会被官方清理（11.50.0 实测 404 且 `Content-Length: 0`），"
      "所以下拉框里的版本数不会像别家那样攒很多。",
      (("12.32.0", "https://dl.pstmn.io/download/version/12.32.0/win64", 212922848),)),
+    # ------------------------------------------------------------------
+    # 2026-10-15 第五批：开发者桌面工具（只下载）。来源同 Agent 那批的专项调研，
+    # URL / 字节数由我本人带 `byte-tools/1.2.1` UA 实测（206 + 前四字节 MZ）。
+    # 台账见 DEVELOPMENT.md R20.7。
+    # ⚠ 本轮被**排除**的：`httpie-desktop`（调研给的 tag 是错的，实际 release 只到
+    # v2023.3.x，测出 404）、`notepad++` 之外的编辑器里拿不到可靠直链的若干家
+    # （typora / HxD / FileZilla / Charles 直链要么超时要么走 JS 页），清单在 R20.7。
+    # ------------------------------------------------------------------
+    ("notepad-plus-plus", "Notepad++", "exe",
+     "最普及的轻量代码/文本编辑器。官方同时发安装器与 7z 便携包，本工具只登记安装器。"
+     "GitHub 产物，下载走加速器优先。",
+     (("8.9.8.1", "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/"
+                 "v8.9.8.1/npp.8.9.8.1.Installer.x64.exe", 6963432),)),
+    ("wireshark", "Wireshark", "exe",
+     "抓包与协议分析的事实标准。官方按 `1.as.dl.wireshark.org/win64/` 分平台目录发版。",
+     (("4.6.9", "https://1.as.dl.wireshark.org/win64/Wireshark-4.6.9-x64.exe", 97931232),)),
+    ("gitkraken", "GitKraken", "exe",
+     "图形化 Git 客户端，团队协作与冲突处理做得比较细。官方只给一个**稳定别名**"
+     "（`GitKrakenSetup.exe`，不带版本号），所以版本位取服务端文件的 Last-Modified 年月 —— "
+     "这不是软件版本号。",
+     (("2026.10", "https://release.gitkraken.com/windows/GitKrakenSetup.exe", 411656624),)),
+    ("sourcetree", "SourceTree", "exe",
+     "Atlassian 官方的 Git GUI，免费。官方 GA 目录按版本号命名。",
+     (("3.4.20", "https://product-downloads.atlassian.com/software/sourcetree/windows/ga/"
+                 "SourceTreeSetup-3.4.20.exe", 25350096),)),
+    ("insomnia", "Insomnia", "exe",
+     "Kong 家的 API 调试客户端（REST / GraphQL / gRPC）。"
+     "⚠ 它的 release tag 形如 `core@13.3.1`（与版本号不同形），所以这里写的是裸版本号。"
+     "GitHub 产物，下载走加速器优先。",
+     (("13.3.1", "https://github.com/Kong/insomnia/releases/download/core%4013.3.1/"
+                 "Insomnia.Core-13.3.1.exe", 617933504),)),
+    ("beekeeper-studio", "Beekeeper Studio", "exe",
+     "开源的 SQL 客户端，界面清爽、支持各家数据库。GitHub 产物，走加速器优先。",
+     (("6.1.6", "https://github.com/beekeeper-studio/beekeeper-studio/releases/download/"
+                "v6.1.6/Beekeeper-Studio-Setup-6.1.6.exe", 255855152),)),
+    ("obsidian", "Obsidian", "exe",
+     "本地 Markdown 知识库（笔记以纯文件存在你自己的目录里）。"
+     "产物挂在 `obsidian-releases` 仓库（主程序闭源）。GitHub 产物，走加速器优先。",
+     (("1.14.4", "https://github.com/obsidianmd/obsidian-releases/releases/download/"
+                 "v1.14.4/Obsidian-1.14.4.exe", 341331008),)),
+    ("zettlr", "Zettlr", "exe",
+     "面向学术写作的 Markdown 编辑器（引用管理、Zettelkasten 卡片笔记）。"
+     "GitHub 产物，下载走加速器优先。",
+     (("4.8.0", "https://github.com/Zettlr/Zettlr/releases/download/v4.8.0/"
+                "Zettlr-4.8.0-x64.exe", 157306080),)),
+    ("yaak", "Yaak", "exe",
+     "离线优先的 API 客户端（Tauri 写的，轻快、数据存本地）。"
+     "GitHub 产物，下载走加速器优先。",
+     (("2026.9.0", "https://github.com/mountain-loop/yaak/releases/download/v2026.9.0/"
+                   "Yaak_2026.9.0_x64-setup.exe", 45674440),)),
+    ("gvim", "Vim (gVim)", "exe",
+     "Vim 的 Windows 图形版（带菜单与鼠标支持）。仓库 `vim/vim-win32-installer` 是官方"
+     "Windows 构建地。GitHub 产物，下载走加速器优先。",
+     (("9.2.1192", "https://github.com/vim/vim-win32-installer/releases/download/"
+                   "v9.2.1192/gvim_9.2.1192_x64.exe", 12401328),)),
+    # 2026-10-16 用户点名要的两个"AI 编码工具链管理器"。
+    ("cc-switch", "CC-Switch", "msi",
+     "Claude Code / Codex / OpenCode / OpenClaw / Grok Build / Hermes Agent 的**统一管理器**"
+     "（14 万 star）：图形界面里切供应商配置、管多个 CLI 的 API Key 与端点，省得手改配置文件。"
+     "官方 Windows 产物是 **msi 安装包**（另有便携 zip，见「下载 ▾」），没有裸 exe。"
+     "GitHub 产物，下载走加速器优先。",
+     (("4.0.13", "https://github.com/farion1231/cc-switch/releases/download/v4.0.13/"
+                 "CC-Switch-v4.0.13-Windows.msi", 16846848,
+       ("zip", "https://github.com/farion1231/cc-switch/releases/download/v4.0.13/"
+               "CC-Switch-v4.0.13-Windows-Portable.zip", 17039432)),)),
+    ("codex-app-manager", "CodexAppManager", "exe",
+     "**官方 Codex 桌面应用**的安装 / 增量更新 / 干净卸载管理器（含国内可达的镜像自更新）。"
+     "注意它管的是 OpenAI 那个 Codex 桌面端，**不是** Codex CLI。"
+     "GitHub 产物，下载走加速器优先。",
+     (("0.5.14", "https://github.com/Wangnov/Codex-App-Manager/releases/download/v0.5.14/"
+                 "CodexAppManager_0.5.14_x64-setup.exe", 5281355),)),
 )
 
 
@@ -5903,15 +7799,19 @@ def _devtool_urls(src: object) -> List[str]:
     return list(src)
 
 
-def _devtool_components() -> List["Component"]:
-    """把 _DEVTOOLS 那张表变成组件。
+def _download_only_components(table: tuple) -> List["Component"]:
+    """把「只下载」类组件的表变成组件 —— 目前 `_DEVTOOLS` 与 `_AGENT_CLIENTS` 共用。
 
-    集中生成而不是手写十个 Component(...)：这批的字段全是同一套"什么都不配"的取值
+    集中生成而不是手写十几个 Component(...)：这批的字段全是同一套"什么都不配"的取值
     （env_var / exec_name 为空、version_probe=False、installer_mode=False），
-    抄十遍只会让人漏抄一处 —— 而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+    抄十几遍只会让人漏抄一处 —— 而漏抄的后果是建卡时去扫盘、或者往注册表写环境变量。
+
+    入参 table: 行格式为
+        (key, 显示名, 主产物格式, data_note, ((版本, URL, 字节数[, 备用产物]), ...))
+    返回:       组件列表（顺序即表内顺序）。
     """
     out: List[Component] = []
-    for key, name, arch, note, rows in _DEVTOOLS:
+    for key, name, arch, note, rows in table:
         versions = []
         for row in rows:
             ver, src, size = row[0], row[1], row[2]
@@ -5937,11 +7837,20 @@ def _devtool_components() -> List["Component"]:
             version_probe=False,
             versions=versions,
             download_only=True,
+            # 版本行为空 = 官方没有可直接下载的安装包地址（只给网页入口 / 只能包管理器装）
+            # → 卡片主按钮改成「官网下载」，点开浏览器由用户自己去下（见 R21 与
+            # ComponentCard.on_open_official_page_clicked）。
+            official_page_only=not rows,
             unsupported_platform_hint="当前只登记了实测过的 Windows 官方直链；"
                                       "macOS / Linux 官方也有包，但未按 R1 实测，暂不提供",
             data_note=note,
         ))
     return out
+
+
+def _devtool_components() -> List["Component"]:
+    """「开发工具」Tab 的组件（表见 `_DEVTOOLS`）。"""
+    return _download_only_components(_DEVTOOLS)
 
 # 允许并存多版本、可切换生效版本的组件（2026-09-29 与用户确认，固定 7 个，别自行扩大）。
 # 排除 conda：installer_mode 组件装在固定目录、卸载也不删目录，"每版本一目录"的前提不成立。
@@ -6993,9 +8902,66 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "admin/password 返回 401）。"
         ),
     ),
+    "nats-server": LaunchSpec(
+        # 2026-10-16 在 %TEMP% 里跑真进程实测（2.15.1，官方 windows-amd64.zip）：
+        #   ① 归档是「单顶层目录 + nats-server.exe」⇒ 解压塌层后 path_subdir="" 正确；
+        #   ② `-p <端口>` 实测能改口 ⇒ port_writeback="cli_flag"，不碰配置文件；
+        #   ③ **只给 `-sd` 是不够的**：实测数据目录根本不会被创建（NATS 只在启用
+        #      JetStream 时才落盘），必须连 `-js` 一起给，才会建出 <dir>/jetstream/；
+        #   ④ nats-server.exe 自己就是监听进程（不是包装器）⇒ stop_kind="pid"，
+        #      terminate() 后端口随即释放（实测从"在听"变"不在听"）。
+        commands={"Windows": ["{home}/nats-server.exe", "-p", "{port}", "-js",
+                              "-sd", "{data_dir}"],
+                  "Linux":   ["{home}/nats-server", "-p", "{port}", "-js",
+                              "-sd", "{data_dir}"],
+                  "Darwin":  ["{home}/nats-server", "-p", "{port}", "-js",
+                              "-sd", "{data_dir}"]},
+        stop_kind="pid",
+        main_port=4222,
+        port_search_span=99,
+        port_writeback="cli_flag",
+        # 4222 讲的是 NATS 协议，不是 HTTP；不带 `-m` 时压根没有监控口
+        # ⇒ 没有控制台、也不能用 HTTP 探活，判活只看端口（与 redis 同一档）。
+        console_path=None,
+        health_path=None,
+        startup_timeout=30,
+        risk_note=("命令行启动用的是官方默认：**只监听 127.0.0.1、无认证**。"
+                   "本工具不替你加 --user/--pass，也不改配置文件。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/nats-server-data"
+                   "（实测 `-js -sd` 会建出里面的 jetstream/）。"
+                   "切换生效版本与卸载都**不碰它**。"),
+        credentials_hint=(
+            "**NATS 没有网页控制台** —— 4222 说的是 NATS 协议，浏览器打开只会看到协议错误，"
+            "所以本工具不给它挂「访问页」按钮。"
+            "官方这个 zip 里**只有 nats-server.exe**（实测条目就三个：LICENSE / README / "
+            "nats-server.exe），没带 nats 命令行；要验活就自己下一个 nats CLI，"
+            "执行 `nats -s nats://127.0.0.1:<端口> server check`。"
+        ),
+    ),
 }
 
 LAUNCH_KEYS = set(LAUNCH_OF)
+
+
+def _tab_sort_key(comp: "Component") -> Tuple[str, str]:
+    """Tab 内卡片排序键：**按显示名 a→z（忽略大小写）**，同名前再按 key。
+
+    用户 2026-10-15 要求"各个 table 下的组件做个字母 a-z 顺序排序"。排的是
+    **显示名**而不是 key —— 用户在界面上看到的是显示名，按 key 排会出现
+    "百度搭子 DuMate 排在 D 段、文心排在 E 段"这种念不出来的错位。
+
+    中文显示名没有"字母"，`casefold()` 之后它们按码位比较，**自然落在英文名之后**。
+    这是刻意选的：用户要的是"念得出字母的排在前、a→z"，硬把中文混进字母序里
+    反而更乱（码位序对中文本身也是无意义的）。要按拼音排得单独引一张拼音表 ——
+    那是个独立的决定，不是这里顺手能加的。
+
+    key 作为第二关键字，保证"显示名相同"时顺序仍是确定的（不依赖字典序漂移）。
+
+    显示名**开头的标点先剥掉**再比：否则 `.NET SDK` 会因 `.`(0x2E) 比字母小
+    而排到整个列表最前面，而用户念它是"点 NET"，该落在 N 段（Miniconda 与 Ninja 之间）。
+    """
+    name = comp.display_name.lstrip(" \t\r\n.-_·—")
+    return ((name or comp.display_name).casefold(), comp.key)
 
 
 def group_components(components: List[Component]) -> Dict[str, List[Component]]:
@@ -7004,13 +8970,53 @@ def group_components(components: List[Component]) -> Dict[str, List[Component]]:
     **隐藏组件不进界面**（Component.hidden，目前只有 Erlang）：它是 rabbitmq
     的前置运行时，由「启动 rabbitmq」自动装好，不该出现在用户的组件列表里 ——
     列出来用户就会以为"我也该单独装一个 Erlang"，而版本还必须是配套的那个。
+
+    每个 Tab 内的卡片按 `_tab_sort_key` **重新排序**（不再沿用 build_components()
+    的书写顺序）—— 见该函数的说明与 DEVELOPMENT.md R22。
     """
     grouped: Dict[str, List[Component]] = {name: [] for name in COMPONENT_CATEGORIES}
     for comp in components:
         if getattr(comp, "hidden", False):
             continue
         grouped[comp.category].append(comp)   # 未登记的分类直接 KeyError
+    for lst in grouped.values():
+        lst.sort(key=_tab_sort_key)
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# 组件搜索别名（2026-10-14 新增）
+# ---------------------------------------------------------------------------
+# key → 用户可能敲的别的叫法。只登记**真的有人这么叫**的，
+# 不做穷举（"java 后端""部署工具"这类整句搜索交给 summary/usage 兜）。
+# 写全称官方名的反面例子：官方名（Temurin / PyCharm）本来就能被
+# display_name 子串命中，不必登记。
+COMPONENT_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "jdk": ("java", "temurin", "openjdk", "jdk8", "jdk11", "jdk17", "jdk21"),
+    "go": ("golang", "go语言"),
+    "node": ("nodejs", "node.js"),
+    "maven": ("mvnd",),
+    "postgresql": ("postgres", "pgsql", "pg"),
+    "mysql": ("mariadb",),
+    "mongodb": ("mongo",),
+    "kubernetes": ("k8s",),
+    "kubectl": ("k8s", "kube"),
+    "redis": ("redis-stack",),
+    "miniconda": ("conda", "anaconda"),
+    "powershell": ("pwsh",),
+    "sqlite": ("sqlite3",),
+    "duckdb": ("duck",),
+    "protoc": ("protobuf", "proto"),
+    "yq": ("yaml jq",),
+    "zoxide": ("z",),
+    "ripgrep": ("rg",),
+    "eza": ("exa", "ls",),
+    "fzf": ("fuzzy finder", "模糊查找"),
+    "visual-studio": ("vs", "vs2022", "msbuild"),
+    "idea": ("intellij", "ij", "idea"),
+    "dbeaver": ("数据库客户端",),
+    "navicat": ("数据库客户端",),
+}
 
 
 def component_matches(comp: Component, query: str) -> bool:
@@ -7019,16 +9025,32 @@ def component_matches(comp: Component, query: str) -> bool:
 
     入参 comp:  Component  待判定的组件
     入参 query: str        用户输入的查询词
-    返回:      bool  空查询恒为 True（等于不过滤）；否则要求查询词是
-                     显示名或内部 key 的子串（忽略大小写与首尾空白）
+    返回:      bool  空查询恒为 True（等于不过滤）；否则要求查询词命中
+                     显示名、内部 key、别名、一句话说明或「怎么用」文案中
+                     任意一项的子串（忽略大小写与首尾空白）
 
-    说明: 只匹配「显示名 + key」这两个用户看得见的标识，不匹配分类名——
-          分类已经由 Tab 页表达，再混进来会让搜「开发」跳出全部卡片。
+    说明: 匹配面 2026-10-14 扩过一次。原来只比「显示名 + key」，于是搜
+          「java」「golang」「数据库」「缓存」「消息队列」「服务网格」这类
+          用户真会敲的词**一张卡都搜不出来** —— 而这些词明明就写在
+          COMPONENT_SUMMARY / COMPONENT_USAGE 里（详情弹窗第二段照着它生成）。
+          文案已经写了、搜索读不到，等于没写。
+
+          仍然**不匹配分类名**：分类由 Tab 页表达，混进来会让搜「开发」
+          跳出全部卡片（这条是 R2 的原意，保留）。
     """
     q = query.strip().lower()
     if not q:
         return True
-    return q in comp.display_name.lower() or q in comp.key.lower()
+    for field in (
+        comp.display_name,
+        comp.key,
+        COMPONENT_SUMMARY.get(comp.key, ""),
+        COMPONENT_USAGE.get(comp.key, ""),
+    ):
+        if q in field.lower():
+            return True
+    # 别名单独一轮：别名是短词，不该混进上面的长文本里做无谓的逐条扫描
+    return any(q in alias.lower() for alias in COMPONENT_ALIASES.get(comp.key, ()))
 
 
 def build_components() -> List[Component]:
@@ -7947,6 +9969,10 @@ def build_components() -> List[Component]:
     # 而网格排布与"最后一个格子"的用例都依赖这个顺序稳定。
     components.extend(_devtool_components())
 
+    # 「Agent客户端」Tab（2026-10-15 用户要求新增，放最后一页）：形态与「开发工具」完全同类
+    # ——只下载、不配置，表见 `_AGENT_CLIENTS`。同样追加在最后，保持上面旧组件的顺序稳定。
+    components.extend(_download_only_components(_AGENT_CLIENTS))
+
     for comp in components:
         # 可一键启停的组件全部集中到「一键启停」Tab（2026-10-08 用户要求），
         # 成员**由 LAUNCH_KEYS 派生**而不是再写一张表：那张表的准入条件本来就是
@@ -7965,6 +9991,12 @@ def build_components() -> List[Component]:
         # 一句话说明（详情对话框用）。漏登记直接 KeyError —— 与 category 同一套
         # 「少一套平行实现就少一处会坏的地方」的做法，逼每个组件都有一句话。
         comp.summary = COMPONENT_SUMMARY[comp.key]
+        # 官网链接（详情对话框那个可点击行用，2026-10-14 用户要求）。
+        # 同样用登记表 + 漏登记即 KeyError 的做法，理由与上面一致：
+        # 这 88 条是人工核实的事实，一旦有人"顺手"改成下载域名（那不是官网）
+        # 就等于把错误写进了承重墙 —— 但那种改动会留下痕迹、且有护栏可拦，
+        # 远好过在 88 个地方各写一份推导逻辑。
+        comp.official_url = COMPONENT_OFFICIAL_URLS[comp.key]
     return components
 
 
@@ -8135,8 +10167,8 @@ class DownloadWorker(QThread):
         # (连接, 读取) 二元组：连接 10 秒（不通就快速换源）、读取 60 秒
         # （大包慢速下载时两次读之间可能超过 30 秒，单值超时会把 jdk/gradle 这类打死）。
         timeout = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT)
-        with requests.get(url, stream=True, timeout=timeout,
-                          allow_redirects=True, headers=HTTP_UA) as r:
+        with http_session().get(url, stream=True, timeout=timeout,
+                                   allow_redirects=True) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length", 0))
             downloaded = 0
@@ -8603,6 +10635,10 @@ class EnvManager:
         if not any(EnvManager._same_path(p, entry) for p in parts):
             parts.append(entry)
             os.environ["PATH"] = os.pathsep.join(parts)
+            # 缓存的键是 PATH 原文，正常会自己失效；但显式清一次是为了覆盖
+            # "目录内容变了而 PATH 原文没变"的情况（新装组件的那个目录
+            # 在加入 PATH 之前就已经被列过一次），见 invalidate_path_caches。
+            invalidate_path_caches()
 
     @staticmethod
     def _filter_path_entries(pred) -> List[str]:
@@ -8617,6 +10653,7 @@ class EnvManager:
         kept = [p for p in proc if not pred(p)]
         if len(kept) != len(proc):
             os.environ["PATH"] = os.pathsep.join(kept)
+            invalidate_path_caches()
         return removed
 
     @staticmethod
@@ -9123,8 +11160,29 @@ def _atomic_write_config(data: Dict[str, object]) -> None:
     _save_settings）把损坏文件回落成空表——用户所有"生效版本"登记就静默消失了。
     replace 在同目录内是原子覆盖：要么新内容完整就位，要么旧文件原样不动，
     最坏只残留一个 .tmp，不影响读侧。
+
+    落盘前**额外留一份 .bak**（2026-10-14）。原子写只防"写崩"，不防"写错"：
+    一份结构合法但内容错了的 config.json 能被 os.replace 完美地写进去，读侧
+    也照样认（它只校验类型不校验语义），用户看到的现象是"切了没生效"之类，
+    而且没有任何线索可查。
+
+    留备份的理由很具体：config.json 里 `takeover[key].snapshot` 是**唯一**能
+    把 HKLM 环境变量还原回接管前状态的东西，而还原环境变量是本工具里唯一
+    需要管理员权限的路径。同一个文件里的接管备份本来就有独立副本
+    （takeover-backups/<key>-<时间戳>.json），唯独这份最重要的没有 —— 保护
+    等级不一致。现在补上。
+
+    备份策略：每次写盘都覆盖同一个 config.json.bak（即"上一版"），
+    不做时间戳轮转 —— 它是给人手工回退用的，不是归档。
     """
     ensure_dir(CONFIG_FILE.parent)
+    # 先备份**当前**内容（不存在时不备份，避免把一个 .bak 占位）
+    if CONFIG_FILE.is_file():
+        try:
+            shutil.copy2(CONFIG_FILE, CONFIG_FILE.with_name(CONFIG_FILE.name + ".bak"))
+        except OSError as exc:
+            # 备份失败不许拦住真正的写盘：写盘有原子替换兜底，而备份只是保险
+            print(f"备份 config.json 失败（继续写盘）：{exc}")
     tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, CONFIG_FILE)
@@ -10679,13 +12737,10 @@ def resolve_java_home(comps: Dict[str, Component]) -> Optional[str]:
 def _version_key(dir_name: str) -> Tuple[int, ...]:
     """`jdk-21.0.5` → (21, 0, 5)。用于挑"已安装的最高版本"。
 
-    按数值分段比而不是字符串比：`2.10.0 > 2.9.0`，字符串比会反过来。
+    薄壳，实现见 Version.dir_key。按数值分段比而不是字符串比：
+    `2.10.0 > 2.9.0`，字符串比会反过来。
     """
-    tail = dir_name.split("-", 1)[1] if "-" in dir_name else dir_name
-    out: List[int] = []
-    for chunk in tail.split("."):
-        out.append(int(chunk) if chunk.isdigit() else 0)
-    return tuple(out)
+    return Version.legacy_version_key(dir_name)
 
 
 def resolve_launch_version(comp: Component) -> Optional[str]:
@@ -11463,7 +13518,7 @@ class ServiceManager:
             return ""
         url = f"http://127.0.0.1:{port}{spec.console_path}"
         try:
-            r = requests.get(url, timeout=8, allow_redirects=True, headers=HTTP_UA)
+            r = http_session().get(url, timeout=8, allow_redirects=True)
             code = r.status_code
         except Exception:
             return ""
@@ -11599,21 +13654,39 @@ class ActiveTarget:
     level: str = ""      # "user" | "machine"；工作区固定 user，外部取决于是否动过 HKLM
 
 
+def _config_read_raw() -> Dict[str, object]:
+    """config.json 的统一读入口。读不到 / 不是 dict 一律回空表。
+
+    收敛点（2026-10-14）。此前全文件有 **9 处** `json.loads(CONFIG_FILE.read_text())`，
+    每处各自写一遍"存在吗 → 读 → 解析 → 是不是 dict → 异常回落空表"。
+    样板重复本身不是问题，问题是**回落策略分散**：一处漏了 isinstance 检查，
+    磁盘上一个 `[]` 就会让那条路径在别处炸。
+
+    为什么解析失败要回空表而不是抛：这张表里全是"用户偏好与登记"
+    （选了哪个版本、哪个版本生效、接管过什么），最坏结果是用户多点一次、
+    重新选一次；而抛异常等于**工具直接打不开**。旁边已经留了 .bak 可供回退。
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _update_config(mutate) -> None:
     """config.json 的合并写通用入口：读出 → 交给 mutate 就地改 → 原子写回。
 
     必须是"读-改-写"而不是整体覆盖：active / takeover / selections / view_mode
     是四个互不相干的写入方，任何一方整体覆盖都会把别人的数据抹掉
     （R3.2 的教训：_save_settings 曾经整体覆盖，把 active 登记表清了）。
+
+    读侧统一走 _config_read_raw；写侧统一走 _atomic_write_config
+    （它内部会留一份 .bak）。**新增写入方请一律走这里**，不要再自己
+    read_text + json.loads + write_text —— 那正是 R3.2 事故的形状。
     """
-    data: Dict[str, object] = {}
-    if CONFIG_FILE.exists():
-        try:
-            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            data = {}
+    data = _config_read_raw()
     mutate(data)
     _atomic_write_config(data)
 
@@ -11626,13 +13699,8 @@ def load_takeover_map() -> Dict[str, dict]:
     读侧要挑剔的理由：还原整条链路都靠它，读进来一个半截快照比"没有这条"
     更危险——那会让还原拿一份错的原值去写 HKLM。
     """
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    raw = data.get("takeover") if isinstance(data, dict) else None
+    data = _config_read_raw()
+    raw = data.get("takeover")
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, dict] = {}
@@ -11711,13 +13779,8 @@ def load_machine_fix_map() -> Dict[str, dict]:
 
     读侧同样挑剔：还原整条链路都靠它，半截快照比"没有这条"更危险。
     """
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    raw = data.get("machine_fix") if isinstance(data, dict) else None
+    data = _config_read_raw()
+    raw = data.get("machine_fix")
     if not isinstance(raw, dict):
         return {}
     out: Dict[str, dict] = {}
@@ -13473,13 +15536,8 @@ def load_active_map() -> Dict[str, str]:
     说明: 值只接受非空字符串——磁盘上手改成 {"jdk": 21} 或 {"jdk": {...}} 时
           跳过该键（其余键照常返回，不整体抛），绝不把非字符串当版本号往下传。
     """
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    active = data.get("active") if isinstance(data, dict) else None
+    data = _config_read_raw()
+    active = data.get("active")
     if not isinstance(active, dict):
         return {}
     return {k: v for k, v in active.items()
@@ -13500,23 +15558,22 @@ def save_active_version(comp_key: str, version: Optional[str]) -> None:
     if version is not None and (not isinstance(version, str) or not version):
         raise ValueError(
             f"生效版本号必须是非空字符串或 None（None=清除），收到 {version!r}")
-    data: Dict[str, object] = {}
-    if CONFIG_FILE.exists():
-        try:
-            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            data = {}
-    active = data.get("active")
-    if not isinstance(active, dict):
-        active = {}
-    if version is None:
-        active.pop(comp_key, None)
-    else:
-        active[comp_key] = version
-    data["active"] = active
-    _atomic_write_config(data)
+
+    def _mut(data: Dict[str, object]) -> None:
+        active = data.get("active")
+        if not isinstance(active, dict):
+            active = {}
+        if version is None:
+            active.pop(comp_key, None)
+        else:
+            active[comp_key] = version
+        data["active"] = active
+
+    # 2026-10-14：原先这里手搓了整条"读-改-写"（自己 exists + read_text +
+    # json.loads + _atomic_write_config），与 _update_config 逐字重复 —— 而
+    # R3.2 那次事故（整体覆盖清掉别的登记表）正是这种"自己再写一遍"长出来的。
+    # 现在统一走 _update_config，读侧也是同一个 _config_read_raw。
+    _update_config(_mut)
 
 
 def infer_active_from_env(comp: Component) -> Optional[str]:
@@ -13615,6 +15672,66 @@ def cleanup_dead_tool_path_entries() -> List[str]:
 # ---------------------------------------------------------------------------
 # 归档解压
 # ---------------------------------------------------------------------------
+def _safe_archive_members(names: List[str], extract_to: Path, label: str) -> None:
+    """解压前逐条校验归档成员名，发现越界条目就地拒绝整个归档。
+
+    入参 names:     归档内的成员名列表（zip 的 namelist / tar 的 getnames）
+    入参 extract_to: 解压目标目录
+    入参 label:     归档描述，写进异常信息里让用户知道是哪个包
+    返回:           全部成员安全则正常返回
+
+    抛出:           ValueError —— 只要有一条成员名能写到 extract_to 之外
+
+    为什么必须校验（与下载侧 _safe_download_name 的对称防御）：
+    归档里的**成员名同样是外部输入**，而且和产物名来自同一批公开 release API。
+    zip 的 entry 名允许 `../../evil.sh` 与 `/etc/cron.d/x`，tar 允许绝对路径与
+    `../`，裸 extractall 会照单全收 —— 等于"往任意路径写文件"。
+    下载侧早就防了这道（见 _safe_download_name 的 docstring），解压侧原先却是裸的，
+    同一个威胁模型下两套标准是不能接受的。
+
+    判据三条，与 tarfile.extractall(filter=...) 的 data_filter 语义一致：
+      1. 绝对路径（含 Windows 盘符与 UNC）→ 拒
+      2. 解析后逃出 extract_to → 拒
+      3. tar 成员是符号链接/硬链接 → 拒（本工具用不到，少一条少一个入口）
+    """
+    base = extract_to.resolve()
+    for raw in names:
+        name = str(raw).replace("\\", "/")
+        if not name or name in (".", "./"):
+            continue
+        # 1) 绝对路径：POSIX 根、UNC、以及 Windows 盘符
+        if name.startswith("/") or ntpath.isabs(name) or _re.match(r"^[A-Za-z]:", name):
+            raise ValueError(f"{label} 含越界条目（绝对路径）：{raw}")
+        dest = (base / name).resolve()
+        # 2) 逃逸出目标目录
+        try:
+            dest.relative_to(base)
+        except ValueError:
+            raise ValueError(f"{label} 含越界条目（路径穿越）：{raw}") from None
+
+
+def _safe_tar_members(tf: "tarfile.TarFile", extract_to: Path, label: str) -> None:
+    """校验 tar 成员名，并在可用时启用 data_filter 双保险。
+
+    入参 tf:         已打开的 tarfile
+    入参 extract_to: 解压目标目录
+    入参 label:      归档描述
+    返回:            校验通过则正常返回；抛出 ValueError
+
+    在 _safe_archive_members 的名字检查之外，额外拒掉链接类成员
+    （符号链接 / 硬链接 / 设备文件）—— 它们即使名字老实，也能在解压后
+    把后续写入引到目标目录之外。
+    """
+    members = tf.getmembers()
+    for m in members:
+        if m.issym() or m.islnk() or m.isdev() or m.isfifo():
+            raise ValueError(f"{label} 含链接类条目，拒绝解压：{m.name}")
+    _safe_archive_members([m.name for m in members], extract_to, label)
+    # Python 3.12+ 有内置的 data_filter，再叠一层标准实现
+    if hasattr(tarfile, "data_filter"):
+        tf.extraction_filter = tarfile.data_filter
+
+
 def extract_archive(archive: Path, extract_to: Path) -> Path:
     """解压归档，返回解压后（通常包含一个根目录）的根路径。
 
@@ -13629,17 +15746,24 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
       - .msi：Windows 安装包，用 `msiexec /a` 管理性提取成统一 prefix（Rust）
       - .exe / .war / 无扩展名：单二进制 / 单文件（kubectl.exe / kubectl / jenkins.war），
         直接拷贝到 extract_to 根目录；Linux/Mac 上无扩展名单二进制赋予 0o755 执行权限
+
+    zip / tar 三条解压路径**都先过一遍越界校验**（_safe_archive_members /
+    _safe_tar_members），发现成员名能写到 extract_to 之外就整体拒绝并抛
+    ValueError，绝不部分解压 —— 半解压的目录比不解压更难判断。
     """
     ensure_dir(extract_to)
     name = archive.name.lower()
     if name.endswith(".zip"):
         with zipfile.ZipFile(archive, "r") as zf:
+            _safe_archive_members(zf.namelist(), extract_to, archive.name)
             zf.extractall(extract_to)
     elif name.endswith(".tar.gz") or name.endswith(".tgz"):
         with tarfile.open(archive, "r:gz") as tf:
+            _safe_tar_members(tf, extract_to, archive.name)
             tf.extractall(extract_to)
     elif name.endswith(".tar.xz"):
         with tarfile.open(archive, "r:xz") as tf:
+            _safe_tar_members(tf, extract_to, archive.name)
             tf.extractall(extract_to)
     elif name.endswith(".msi"):
         # Rust 的 MSI：走 msiexec 的**管理性提取**（/a）把文件铺出来，不是 /i 真装机。
@@ -14032,20 +16156,6 @@ def stale_shell_lines(procs: List[Tuple[int, str, float, bool]],
     return lines
 
 
-def open_clean_console(env: Dict[str, str]) -> Optional[int]:
-    """用给定的环境块开一个独立的 cmd 窗口，返回 pid；开不了返回 None。
-
-    这是顶栏「开验证终端」唯一的副作用接缝，也是它唯一的测试接缝 ——
-    参数名（env / creationflags）写错的话界面要点下去才炸，所以有一条用例专门钉它。
-    """
-    try:
-        proc = subprocess.Popen(["cmd.exe"], env=env,
-                                creationflags=subprocess.CREATE_NEW_CONSOLE)
-        return proc.pid
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # 卡片网格：列宽锚点与分块（纯函数，不碰几何，可离线测）
 #
@@ -14053,20 +16163,40 @@ def open_clean_console(env: Dict[str, str]) -> Optional[int]:
 # 视口宽度决定：宽了自动 3 列，窄了退回 1 列。日志做成浮层就是为了不参与这场
 # 计算——它不占布局空间，展开/收起都不会让列数忽大忽小。
 # ---------------------------------------------------------------------------
+# 2026-10-14 移除了 open_clean_console()：它唯一的用途与唯一的调用点都是顶栏
+# 「开验证终端」按钮，该按钮按用户要求取消后它就成了无人调用的死代码。
+# 一并移除的是"造一个必然干净的新终端窗口"这条能力 —— Windows 把环境块复制
+# 给新进程，所以用户在**自己新开的** PowerShell / cmd 窗口里查版本就已经等价。
+# 需要时看 git 历史即可取回。
 MIN_CARD_WIDTH_PX = 300          # 格子最小宽度：一张卡片信息不砍的下限
 CARD_ROW_SPACING = 14            # 同行两格的间距（与卡片区原 spacing 一致）
 
 # 统一搜索结果面板在 `_tab_rows` 里的键；四个 Tab 用 0..N-1 的序号。
 RESULTS_KEY = "results"
 
-# 告警把日志浮层自动弹开后，静默多久自动收起（毫秒）。用户手动点开的不自动收。
-LOG_AUTO_HIDE_MS = 8000
+# 日志浮层不再自动弹开，也不再自动收起（2026-10-14 用户要求：默认不打开，
+# 而且"偶尔自己弹出来"要修掉）。
+# 原来这里是 LOG_AUTO_HIDE_MS（自动收起静默期）+ LOG_AUTO_POP_DELAY_MS
+# （启动后 10 秒内不自动弹）。两个常量连同 _log_auto_hide / _on_log_auto_hide /
+# _log_user_open / _startup_mono 一并删除。
+# 为什么那个 10 秒静默期救不了场：它只挡住启动后的前 10 秒，而一轮版本抓取要
+# 30~40 秒，于是第 12/25/35 秒到达的告警全部照弹。网络快时失败早、被静默期
+# 挡住；网络慢或撞上 GitHub 限流时失败晚就弹 —— 用户看到的正是"有时候会自己打开"。
+# 现在只剩未读数：warn/error 在浮层关着时累加到「📋 日志 (N)」，绝不主动弹。
 
-# 启动后多少毫秒内不自动弹开日志浮层（2026-10-13 用户要求"启动后默认不打开日志"）。
-# 启动那一段的 warn（GitHub 限流、个别组件版本抓取失败）不该抢走主界面 ——
-# 它们照旧累计未读数，按钮上显示「📋 日志 (N)」，想看点一下就行。
-# 只对"自动弹开"生效；用户手点「📋 日志」不受影响。
-LOG_AUTO_POP_DELAY_MS = 10000
+# 日志落盘（2026-10-14 新增）：一次运行一个 session-<时间戳>.log，
+# 目录 ~/.env-tools/logs/。只保留最近这么多个 —— 用户报障看的是最近几次，
+# 而日志目录是长命目录，不裁会一直涨（一次装 JDK 就能写几百 KB）。
+LOG_KEEP_SESSIONS = 10
+
+# 压制 PyInstaller 遗留 Tk 引导窗（2026-10-13 引入，2026-10-14 调参）。
+# bootloader 抽出 PySide6/Qt 之前会先弹一个基于 Tk 的空引导窗，用户看得见。
+# 实测：Python 起来后约 0.3s 它才出现，且 bootloader **不会**反复 ShowWindow ——
+# 外部压一次就永久消失。所以这里只需要抢"它刚出现的那一瞬"，
+# 剩下的交给常驻后台线程（上限 30s）。
+TK_SUPPRESS_POLL_SEC = 0.05     # 每次轮询的间隔
+TK_SUPPRESS_SYNC_ROUNDS = 6     # 主线程同步轮询次数（6 × 50ms = 0.3s）
+TK_SUPPRESS_BG_LIMIT = 600      # 后台线程轮询上限（600 × 50ms = 30s，防失控）
 
 
 def grid_columns_for(available_px, min_card_px) -> int:
@@ -14132,7 +16262,12 @@ class CardColumnLayout(QVBoxLayout):
         if idx != -1:
             return idx
         for n, row in enumerate(self.row_widgets):
-            lay = row.layout() if row is not None else None
+            if row is None:
+                continue
+            # 行有**两种形态**：Tab 里是 `QWidget#cardRow`，统一结果面板里是
+            # **无宿主的 QHBoxLayout**（2026-10-15，见 R2.6 —— 那是不 reparent
+            # 卡片、跳过整条 QSS polish 的关键）。两种都得能钻进去找。
+            lay = row.layout() if isinstance(row, QWidget) else row
             if lay is not None and lay.indexOf(widget) != -1:
                 return n
         return -1
@@ -14194,6 +16329,16 @@ class ComponentCard(QFrame):
         shadow.setColor(QColor(0, 0, 0, 40))
         self.setGraphicsEffect(shadow)
 
+        # 外部版本接管那组属性**必须**在任何可能提前 return 的渲染代码之前就位。
+        # 2026-10-13 的崩溃就是这么来的：这段初始化原先被塞在 _load_icon() 末尾的
+        # fallback 分支里，而该分支上方有一条「图标加载成功就 return」的早退；
+        # 于是 jdk（外部接管白名单成员，且 assets/component-icons/jdk.png 存在）
+        # 一进卡片就跳过初始化，紧接着 __init__ 里的 _detect_status() 调
+        # _refresh_external_section() 读 self._external_frame → AttributeError，
+        # 主窗口起不来（traceback 停在"正在加载组件 1/87"）。
+        # 规矩：**属性初始化不许挂在任何带早退分支的函数里**。
+        self._init_external_state()
+
         self._build_ui()
         self._detect_status()
 
@@ -14206,9 +16351,24 @@ class ComponentCard(QFrame):
         root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(6)
 
-        # 顶部：名称 & 角标
+        # 顶部：图标 + 名称 & 角标
         top = QHBoxLayout()
-        top.setSpacing(10)
+        top.setSpacing(8)
+        
+        # 左侧图标（ICON_BOX_PX 见组件图标一节；渲染尺度 ICON_RENDER_SCALE）
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(ICON_BOX_PX, ICON_BOX_PX)
+        self.icon_label.setStyleSheet("""
+            background: linear-gradient(135deg, #f5f7fa 0%, #e3e8ef 100%);
+            border-radius: 6px;
+            border: 1px solid #d8dde6;
+        """)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setPixmap(QPixmap(":/icons/default-icon.svg").scaled(
+            28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        top.addWidget(self.icon_label)
+        
+        # 标题 & 角标
         title = QLabel(self.component.display_name)
         title.setObjectName("cardTitle")
         title.setFont(QFont("", 13, QFont.Bold))
@@ -14255,6 +16415,9 @@ class ComponentCard(QFrame):
             top.addWidget(badge)
         top.addStretch(1)
         root.addLayout(top)
+
+        # 图标在 _build_ui 末尾统一渲染（_render_icon），这里不再画一次 ——
+        # 原先这里和末尾各调了一次，等于每张卡白渲染两遍。
 
         self.status_label = QLabel("检测中…")
         self.status_label.setObjectName("statusLabel")
@@ -14318,19 +16481,31 @@ class ComponentCard(QFrame):
         # on_download_clicked。不改属性名是因为 _sync_action_buttons、布局与一批用例
         # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
         if self.component.download_only:
-            # 有两种产物可选时按钮写成「下载 ▾」：不点就不知道有得挑，而选错一次
-            # 是重下 1.5 GB。▾ 只是提示"这里会弹菜单"，真正的挑选在 on_download_clicked 里。
-            multi = any(len(cv.artifacts) > 1 for cv in self.component.versions)
-            self.btn_install.setText("下载 ▾" if multi else "下载")
-            tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
-            if multi:
-                tip += "\n这个版本官方同时提供 exe 安装器与 zip 便携包，点了会让你选（带体积）"
-            if self.component.data_note:
-                # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
-                # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
-                tip += "\n" + self.component.data_note
-            self.btn_install.setToolTip(tip)
-            self.btn_install.clicked.connect(self.on_download_clicked)
+            if self.component.official_page_only:
+                # 更弱的一档：没有可直链的安装包 → 给「官网下载」，点开浏览器自己去下。
+                # 文案要说清"本工具不代下不代装"，否则用户会以为点了就开始下。
+                self.btn_install.setText("官网下载")
+                tip = ("这个组件官方没有可直接下载的安装包链接（只给网页入口 / 需要用包管理器装）——"
+                       "点一下会在浏览器里打开它的官网，请在那里自行下载安装。"
+                       "本工具不代下、不代装、不代跑安装程序")
+                if self.component.data_note:
+                    tip += "\n" + self.component.data_note
+                self.btn_install.setToolTip(tip)
+                self.btn_install.clicked.connect(self.on_open_official_page_clicked)
+            else:
+                # 有两种产物可选时按钮写成「下载 ▾」：不点就不知道有得挑，而选错一次
+                # 是重下 1.5 GB。▾ 只是提示"这里会弹菜单"，真正的挑选在 on_download_clicked 里。
+                multi = any(len(cv.artifacts) > 1 for cv in self.component.versions)
+                self.btn_install.setText("下载 ▾" if multi else "下载")
+                tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
+                if multi:
+                    tip += "\n这个版本官方同时提供 exe 安装器与 zip 便携包，点了会让你选（带体积）"
+                if self.component.data_note:
+                    # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
+                    # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
+                    tip += "\n" + self.component.data_note
+                self.btn_install.setToolTip(tip)
+                self.btn_install.clicked.connect(self.on_download_clicked)
         else:
             self.btn_install.clicked.connect(self.on_install_clicked)
         actions.addWidget(self.btn_install)
@@ -14414,9 +16589,45 @@ class ComponentCard(QFrame):
         self.progress.setValue(0)
         root.addWidget(self.progress)
 
+        # 卡片左上角的官方图标（2026-10-13 新增）。纯渲染，无副作用、无早退。
+        self._render_icon()
+
         # ---- 「系统里检测到的版本」折叠区＋还原按钮（设计 §6）----
-        # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余 19 张卡片保持原样，
+        # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余卡片保持原样，
         # R3.9 那句"非目标组件文案与按钮零变化"才守得住。
+        # 必须排在 _build_ui 末尾：_build_external_section 会往布局尾部塞一个
+        # 撑高的 stretch，放在进度条之前会被后面的控件顶到折叠区上面去。
+        if supports_external_takeover(self.component):
+            self._build_external_section(root)
+
+        # 末尾必须有一个 stretch：网格会把同一行的卡片拉成等高，内容少的卡片就
+        # 多出一段高度。没有这个占位的话，那段高度会被**能长大的控件**吃掉 ——
+        # statusLabel 的纵向策略是 Preferred，首当其冲被拉成一个空白大色块
+        # （真机截图：Ant / bat 卡的「未安装」「已装 …」被撑成大方块，
+        #  而同一行内容更多的 Maven 卡是紧凑一行）。
+        #
+        # ⚠ 2026-10-15 修：这一行原先写在 `_build_external_section()` 里，也就是
+        # **只有那 7 个外部接管组件**（jdk / python / node / go / maven / gradle / bun）
+        # 才有，其余 125 张卡一张都没有。旧顺序下恰好没排出"高矮混排"的一行，
+        # 所以一直没露出来；当天给 Tab 加了 a→z 排序（R22）后，高卡（Maven 238px）
+        # 与矮卡（Ant / bat 178px）排进同一行，立刻变成肉眼可见的大色块。
+        # **排序只是触发器，缺陷本身一直都在。**
+        #
+        # 无条件加在 `_build_ui` 末尾，位置与那 7 张卡原来完全一致（它们也是
+        # external 区之后才加），所以对既有卡片零行为变化。
+        root.addStretch(1)
+
+    def _init_external_state(self) -> None:
+        """初始化外部版本接管那组实例属性（状态，不碰任何控件）。
+
+        由 __init__ 在 _build_ui() **之前**调用。控件本身在 _build_ui 末尾
+        通过 _build_external_section() 创建；这里只把"还没建"这件事记成
+        None，好让 _refresh_external_section() 在折叠区尚未存在的组件上
+        也能安全空转。
+
+        单独拆出来是为了守住一条规矩：**属性初始化不许写在带早退分支的
+        函数里**。2026-10-13 的启动崩溃就是这么来的（详见 __init__ 里那段注释）。
+        """
         self._external_candidates: List["DiscoveredVersion"] = []
         self._external_scanned = False
         self._external_expanded = False
@@ -14426,9 +16637,50 @@ class ComponentCard(QFrame):
         self._external_frame: Optional[QFrame] = None
         self._external_toggle: Optional[QPushButton] = None
         self._external_body: Optional[QWidget] = None
-        if supports_external_takeover(self.component):
-            self._build_external_section(root)
 
+    def _render_icon(self) -> None:
+        """在卡片左上角渲染该组件的官网图标，取不到就退回分类色块。
+
+        纯渲染：这个方法不建任何后续逻辑依赖的属性，也不提前 return 后还要
+        有人接着干活 —— 渲染成功与否对卡片的其余部分没有任何影响。
+        职责拆分：
+          · `load_component_icon_pixmap()` 负责"找到并栅格化"，全部防错都在那边
+          · 本方法只负责"贴上去，贴不上就画色块"
+        """
+        key = self.component.key
+        pixmap = load_component_icon_pixmap(key, ICON_BOX_PX * ICON_RENDER_SCALE)
+        if pixmap is not None:
+            # 不要再 scaled()：load_component_icon_pixmap 返回的已经是
+            # ICON_BOX_PX 逻辑尺寸、ICON_RENDER_SCALE 倍密度的成品。
+            # 二次缩放会把它压成 64 逻辑像素 = 逻辑尺寸的 2 倍，
+            # QLabel 32x32 的槽位放不下就被裁掉一角 —— 界面看到的是
+            # "图标缺了一块"（2026-10-14 用户截图就是这个现象）。
+            self.icon_label.setPixmap(pixmap)
+            return
+
+        # fallback: 使用默认色块（按分类显示不同颜色）
+        # ⚠ 这个字典的**键是分类名字符串**，2026-10-14 分类改名时它必须跟着改 ——
+        # 键对不上不会报错，只会安静地落到下面的兜底灰色 (#757575)，那个 Tab 的
+        # 所有无图标组件会一起变成灰块。所以这里用 CAT_* 常量而不是裸字符串。
+        category_map = {
+            CAT_ENV: ("#4CAF50", "#43A047"),       # 绿色系（编程语言、SDK 等）
+            CAT_SERVER: ("#2196F3", "#1976D2"),     # 蓝色系（数据库、服务器等）
+            CAT_LAUNCH: ("#FF9800", "#F57C00"),     # 橙色系（服务组件）
+            CAT_TOOL: ("#9C27B0", "#7B1FA2"),       # 紫色系（IDE、客户端等）
+        }
+        cat = COMPONENT_CATEGORY_OF.get(key, CAT_TOOL)
+        grad_from, grad_to = category_map.get(cat, ("#757575", "#424242"))
+
+        self.icon_label.setStyleSheet(f"""
+            background: linear-gradient(135deg, {grad_from} 0%, {grad_to} 100%);
+            border-radius: 6px;
+            border: 1px solid #d8dde6;
+        """)
+        self.icon_label.setText(key[:3].upper())
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setFont(QFont("", 10, QFont.Bold))
+        self.icon_label.setForegroundRole(QPalette.Text)
+        
     # ------------------------------------------------------------------
     # 「系统里检测到的版本」折叠区（§6）
     # ------------------------------------------------------------------
@@ -14476,12 +16728,6 @@ class ComponentCard(QFrame):
 
         self._external_frame.setVisible(False)
         root.addWidget(self._external_frame)
-
-        # 末尾必须有一个 stretch：网格会把同一行的卡片拉成等高，内容少的卡片
-        # 就多出一段高度。没有这个占位的话，那段高度会被各行按策略分掉 ——
-        # 带背景色的标签首当其冲：真机 2026-10-10 用户截图里，JDK / Python 卡的
-        # 「可多版本」角标被拉成一个大盒子，而同一行内容更多的 Maven 卡是紧凑胶囊。
-        root.addStretch(1)
 
     def _toggle_external_section(self) -> None:
         self._external_expanded = not self._external_expanded
@@ -14894,7 +17140,7 @@ class ComponentCard(QFrame):
             return
         # 「开机就能用」：缺前置运行时（JDK / Erlang）时**先自动装好再启动**，
         # 而不是弹一句"请先装一个 JDK"把活儿交回给用户。
-        missing = prereq_components(self.component, MainWindow.current_components())
+        missing = prereq_components(self.component, component_registry())
         if missing:
             self._install_missing_prereqs(missing)
             return
@@ -14923,7 +17169,7 @@ class ComponentCard(QFrame):
         # parent=self：worker 归卡片的 Qt 对象树持有，run() 还没回来时不依赖
         # launch_worker 这一个引用吊命；结束后由 _on_launch_worker_done deleteLater 收回。
         self.launch_worker = LaunchWorker("start", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          component_registry(), SERVICE_MANAGER,
                                           parent=self)
         self.launch_worker.started_ok.connect(self._on_launch_ok)
         self.launch_worker.failed.connect(self._on_launch_failed)
@@ -14941,7 +17187,7 @@ class ComponentCard(QFrame):
         再问一次等于把决定权丢回去；而这里要装的都是**明确的、可复现的**东西
         （JDK / Erlang 的官方包），装错了也只是多一个版本目录。
         """
-        comps = MainWindow.current_components()
+        comps = component_registry()
         queue: List[Tuple[Component, str]] = []
         for key in keys:
             pre = comps.get(key)
@@ -15152,7 +17398,7 @@ class ComponentCard(QFrame):
         # try 包的是 self.window() 这次 Qt 调用本身：顶层 C++ 对象先没了它会抛 RuntimeError，
         # 而那时候连"记一条日志"的机会都没有 —— 那正是本方法要避免的静默失败。
         try:
-            closing = getattr(self.window(), "_closing", False)
+            closing = is_closing()
         except Exception:
             closing = True
         if closing:
@@ -15173,7 +17419,7 @@ class ComponentCard(QFrame):
         # 可能还没返回，丢掉它最后一个引用会被 PySide 就地销毁还在跑的 QThread。
         # parent=self 把引用交给对象树持有，这条窗口才关得掉。
         self.launch_worker = LaunchWorker("force_stop", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          component_registry(), SERVICE_MANAGER,
                                           parent=self)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
@@ -15221,7 +17467,7 @@ class ComponentCard(QFrame):
         self.btn_start.setEnabled(False)
         self.btn_start.setText("停止中…")
         self.launch_worker = LaunchWorker("stop", self.component,
-                                          MainWindow.current_components(), SERVICE_MANAGER,
+                                          component_registry(), SERVICE_MANAGER,
                                           parent=self)
         self.launch_worker.stopped.connect(self._on_launch_stopped)
         self.launch_worker.failed.connect(self._on_launch_failed)
@@ -15361,7 +17607,7 @@ class ComponentCard(QFrame):
     def _start_version_probe(self, exe_path: str) -> None:
         # 关窗途中事件循环还会转（closeEvent 里那些 wait 就是机会），残留的 singleShot
         # 这时再起一条线程 = 窗口析构时它还在跑 = 进程 abort。_launch_fetch_worker 早有这道闸。
-        if getattr(self.window(), "_closing", False):
+        if is_closing():
             return
         worker = VersionProbeWorker(exe_path, list(self.component.version_args), self)
         worker.done.connect(lambda text, w=worker: self._on_version_probed(text, w))
@@ -15926,6 +18172,24 @@ class ComponentCard(QFrame):
         self.worker.start()
 
     # ------------------------------------------------------------------
+    def on_open_official_page_clicked(self) -> None:
+        """「官网下载」那颗按钮：打开组件官网，由用户自己在那里下载。
+
+        适用于 `official_page_only` 的组件 —— 官方没有可直接下载的安装包地址
+        （只给网页入口 / 要真机抓包 / 只能用 npm・pip・插件装）。用户 2026-10-15 的要求：
+        与其因为"拿不到直链"就不放这张卡，不如给一颗「官网下载」，点开浏览器自己去下。
+
+        URL 取 `official_url`（R19 那张**人工登记**的表），不从下载地址推导 ——
+        与 R19 同一条纪律。没登记就报错而不是打开空页面（护栏已保证这类组件必有登记）。
+        """
+        url = self.component.official_url
+        if not url:
+            self._log("error", f"{self.component.display_name} 没有登记官网地址，打不开。")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self._log("info", f"已在浏览器打开 {self.component.display_name} 的官网：{url}"
+                          "（本工具不代下、不代装，去官网自己下）")
+
     def on_download_clicked(self) -> None:
         """「开发工具」那颗「下载」：把官方安装包下到用户挑的目录，到此为止。
 
@@ -16185,15 +18449,19 @@ class ComponentCard(QFrame):
                  else ([exec_name + s for s in (".exe", ".cmd", ".bat", "")]
                        if not os.path.splitext(exec_name)[1] else [exec_name]))
         expected = str(self._expected_bin_dir(active))
+        # 走目录清单缓存，而不是逐条 os.path.exists：合成 PATH 上有几十个条目，
+        # 每个条目 × 4 个后缀，而这张表在 88 张卡建卡时会被重复问同一批目录
+        # 两万次上下（详见 _path_dir_listing 的说明）。
+        upper = (lambda s: s.upper()) if sys.platform == "win32" else (lambda s: s)
         for entry in path_value.split(";"):
             entry = entry.strip()
             if not entry:
                 continue
             try:
-                hit = any(os.path.exists(os.path.join(entry, n)) for n in names)
+                listing = _path_dir_listing(entry)
             except (OSError, ValueError):
                 continue
-            if hit:
+            if any(upper(n) in listing for n in names):
                 return ("ok", None) if EnvManager._same_path(entry, expected) else ("shadowed", entry)
         return "unknown", None
 
@@ -16244,7 +18512,11 @@ class ComponentCard(QFrame):
     def on_detail_clicked(self) -> None:
         """打开详情对话框。无副作用：只读地展示登记表里已有的事实。"""
         dlg = ComponentDetailDialog(self.component, self.detail_lines(), self)
-        dlg.exec()
+        # 2026-10-13 修：用 show() 而不是 exec()，modal=False 让 eventFilter 能捕获
+        # "点击外部"的动作（exec() 会变成真正模态，把鼠标事件全吞掉）。show() 后
+        # 对话框虽然还带"知道了"按钮，但用户习惯外点即关，体验更好。
+        dlg.setModal(False)
+        dlg.show()
 
     def active_version(self) -> Optional[str]:
         """当前生效版本：active 登记表 → 持久层 XXX_HOME 反推 → PATH 实际命中。
@@ -16520,13 +18792,26 @@ class ComponentDetailDialog(QDialog):
         head.setFont(QFont("", 14, QFont.Bold))
         v.addWidget(head)
 
-        # 官方地址一行：从已登记的 URL 提取 host，不新写任何事实。
-        home = comp_download_host(comp)
-        if home:
-            addr = QLabel(f"官方下载 / 文档：{home}")
+        # 官网一行（2026-10-14 用户要求"所有组件的详情页都加可点击官网链接，
+        # 有中国大陆官网的用大陆的，没有的用原本官网"）。
+        # 取值全部来自 COMPONENT_OFFICIAL_URLS（人工逐条核实），**不再从下载 URL
+        # 推导域名** —— 推导出来的是 api.adoptium.net / artifacts.elastic.co 这类
+        # 下载服务器，写成"官网"是误导。
+        #
+        # 链接文字与 href **必须同源**：早先的写法是文字显示下载域名、跳转却是官网，
+        # 于是出现"写着 archive.apache.org、点进去是 apache.org"。文字里的域名
+        # 直接从 URL 切出来，不另写一份字符串，两者就不可能对不上。
+        official = comp.official_url
+        if official:
+            domain = _url_netloc(official)
+            addr = QLabel(
+                f'官网：<a href="{official}">{_escape_html(comp.display_name)} · '
+                f'{_escape_html(domain)}</a>')
+            addr.setOpenExternalLinks(True)      # 点击直接走系统浏览器，不在软件内开
             addr.setObjectName("detailHome")
             addr.setStyleSheet("color:#7a8ea3;font-size:11px;")
-            addr.setToolTip("详情里的命令与地址均来自登记表；下载仍走卡片上的按钮。")
+            addr.setToolTip(f"{official}\n点击用系统浏览器打开官方网站；"
+                            f"组件本体请用卡片上的「安装 / 下载」按钮。")
             v.addWidget(addr)
 
         body = QTextEdit(self)
@@ -16606,31 +18891,41 @@ class ComponentDetailDialog(QDialog):
         return "".join(parts) or "<div>这个组件还没有写说明。</div>"
 
 
-def comp_download_host(comp) -> str:
-    """从组件第一个可下载 URL 提取“官方地址”域名。取不到返回空串。"""
+def _url_netloc(url: str) -> str:
+    """从 URL 里切出域名（netloc），给详情页那个链接当文字用。
+
+    入参：
+      url：完整 URL，如 "https://www.navicat.com.cn/"。
+    返回：
+      域名，如 "www.navicat.com.cn"；切不出来返回空串。
+
+    为什么单独抽一个函数：链接文字与 href 必须同源。早期写法是文字写下载域名、
+    跳转写官网地址，两份字符串各写一遍，必然会出现"写着 A 点进去是 B"。
+    现在文字里的域名是从 href 那个 URL 现切出来的，结构上不可能对不上。
+    """
     try:
-        cv = comp.versions[0]
-        urls = cv.urls_for_current()
-        # 取**末位官网**而不是首位镜像：详情行叫“官方地址”，给用户看的就是
-        # 官方域名（api.adoptium.net / python.org 这类），首位是清华/南大镜像，
-        # 写上去会让用户误以为官网是镜像站。
-        first = urls[-1] if urls else None
+        import urllib.parse as _up
+        return _up.urlsplit(url).netloc
     except Exception:
         return ""
-    if not first:
-        return ""
-    import urllib.parse as _up
-    try:
-        netloc = _up.urlsplit(first).netloc
-    except Exception:
-        return ""
-    # 加速器/镜像的 URL 剥掉代理前缀，露出真实官方域名（纯展示，不影响下载）
-    for prefix in ("gh-proxy.com/", "ghfast.top/", "ghproxy.net/"):
-        if first.startswith("https://" + prefix):
-            inner = first[len("https://" + prefix):]
-            inner = inner.split("/", 3)[2] if inner.count("/") >= 2 else inner
-            return inner
-    return netloc or ""
+
+
+def _escape_html(text: str) -> str:
+    """转义要插进 QLabel 富文本的片段（组件名里可能有 & 之类）。
+
+    与 ComponentDetailDialog._to_html 用的是同一个 html.escape（那里在函数体
+    里做局部导入），这里同样局部导入而不是提到模块级 —— 保持两处写法一致，
+    免得以后有人只改一处。
+    """
+    import html as _html
+    return _html.escape(str(text or ""))
+
+
+# 2026-10-14 移除了 comp_download_host()：它从组件的**下载 URL** 里推导"官方地址"
+# 域名，而推导结果绝大多数根本不是官网（api.adoptium.net、artifacts.elastic.co、
+# aka.ms、edgedl.me.gvt1.com 这类下载服务器，以及 39 个推成 github.com 仓库页）。
+# 详情页改用 COMPONENT_OFFICIAL_URLS 这张人工核实的表之后，它再无调用者，
+# 连同它在 tests/bt_component_detail_tests.py 里的两条用例一并移除。
 
 
 def _event_global_pos(ev):
@@ -16846,15 +19141,15 @@ class UpdateCheckWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    _COMPONENTS_CACHE: Dict[str, "Component"] = {}
-
     @staticmethod
     def current_components() -> Dict[str, "Component"]:
-        """只读的组件表：卡片的启动/停止要用别的组件（needs 判定），
-        但不该每张卡片自己再 build_components() 一次。"""
-        if not MainWindow._COMPONENTS_CACHE:
-            MainWindow._COMPONENTS_CACHE = {c.key: c for c in build_components()}
-        return MainWindow._COMPONENTS_CACHE
+        """只读的组件表。
+
+        2026-10-14 起这只是 `component_registry()` 的一层薄壳：卡片不再通过
+        MainWindow 这个**类**去拿组件表（那是"子组件依赖父容器"的方向倒置），
+        而是直接问模块级单例。这里保留是为了不破坏既有调用点与打桩点。
+        """
+        return component_registry()
 
     def __init__(self, splash: Optional["SplashScreen"] = None) -> None:
         super().__init__()
@@ -16874,11 +19169,18 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
 
         self.components = build_components()
+        # 灌进进程级登记表。全进程只保留这一份组件对象 —— 此前 __init__ 与
+        # _adopt_running → current_components() 各建一份，卡片用的和查前置依赖
+        # 用的不是同一批，等于白构造一次 88 个 Component（含全部版本表）。
+        register_components(self.components)
         self._drag_pos: Optional[QPoint] = None
         self._fetch_workers: List[VersionFetchWorker] = []
         self._fetch_pending: int = 0
-        # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面
+        # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面。
+        # 同时立模块级的 _CLOSING —— 卡片过去靠 getattr(self.window(), "_closing")
+        # 沿 Qt 父指针爬回窗口读私有属性，那等于让卡片知道窗口的内部状态。
         self._closing: bool = False
+        _CLOSING.clear()
         # 视图模式：grid（按宽度自动分列）/ list（恒 1 列）；_load_settings 会按
         # config.json 覆盖它，老配置没有这个键时留在 grid，即"老用户自动获得新默认"。
         self.view_mode: str = "grid"
@@ -16888,9 +19190,12 @@ class MainWindow(QMainWindow):
         # 里的占位 None 会被替换成真 ComponentCard。
         self._pending_cards: List[Tuple[str, "Component", QWidget]] = []
         self._splash: Optional["SplashScreen"] = splash
-        # 日志自动弹开的静默期起点（启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹）。
-        import time as _time
-        self._startup_mono: float = _time.monotonic()
+        # 2026-10-14：这里原先取过 _startup_mono（monotonic 时间戳），供日志浮层的
+        # "启动后 N 秒内不自动弹"静默期使用。该静默期随自动弹出一起取消，故删除。
+        # 本次会话的日志文件标识（落盘用，见 _log_file_path）。在 __init__ 里定一次，
+        # 整条运行期不变 —— 同一次运行的日志必须落在同一个文件里，否则"另存为"
+        # 和"复制"会给用户一份东一段西一段的碎片。
+        self._session_stamp: str = time.strftime("%Y%m%d-%H%M%S")
 
         self._build_ui()
         self._apply_qss()
@@ -17029,25 +19334,32 @@ class MainWindow(QMainWindow):
         self.btn_cleanup_path.clicked.connect(self._on_cleanup_path_clicked)
         tb.addWidget(self.btn_cleanup_path)
 
-        # 开验证终端按钮
-        self.btn_clean_terminal = QPushButton("🖥 开验证终端")
-        self.btn_clean_terminal.setObjectName("iconBtn")
-        self.btn_clean_terminal.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_clean_terminal.setToolTip(
-            "用「系统为新进程合成的环境」开一个命令行窗口\n"
-            "在这里查版本号，等价于在一个全新打开的终端里查——"
-            "已开着的终端/IDE 标签页拿的仍是旧环境，那里对不上不代表切换失败"
-        )
-        self.btn_clean_terminal.clicked.connect(self._on_clean_terminal_clicked)
-        tb.addWidget(self.btn_clean_terminal)
+        # 2026-10-14 按用户要求移除标题栏的两个按钮：
+        #   「🖥 开验证终端」「🩺 导出诊断」
+        # 原因：标题栏只留"每天都会用"的动作。这两个都属于"出问题时才用"，
+        # 常年占着标题栏最宽的两块地方却不点（实测这一行真实字体需 802 像素，
+        # 它们占了将近三分之一）。对应的能力没有丢：
+        #   · 导出诊断 —— 日志浮层里仍可通过「另存为」产出同样内容
+        #     （_save_log_to_file 把本次会话日志写出，配合落盘的 config.json
+        #     与日志已经覆盖了诊断报告的主要部分）
+        #   · 开验证终端 —— 环境变量是否真的生效，用户用系统自己的"新开一个
+        #     PowerShell 窗口"即可验证；本工具里那条 1~2 行的自查提示
+        #     （_refresh_logs 里的复制命令）仍然保留
+        # 处理函数一并删除，避免留下无人调用的死代码。
 
         # 标题栏按钮定宽：空间不足时宁可让窗口最小宽去兜（见上面 setMinimumSize），
         # 也不许把按钮压扁裁字。chip 也在名单里：它的文字按状态变
         # （`v1.2.0` → `↓ v1.2.1 待更新`），不定宽的话一旦某档宽度紧张，布局会先压它 ——
-        # 那状态字就等于没写。真实字体下这一行总共需要 697 像素（见
-        # tools/bt_titlebar_budget.py），1000 这一档余量充足，定宽只是兜底。
+        # 那状态字就等于没写。真实字体下这一行共需约 660 像素
+        # （tools/bt_titlebar_budget.py 实测），1000 这一档余量充足，
+        # 定宽只是兜底。**这个数字只能用真实字体量**：offscreen 没有中文回退字体，
+        # 度量虚高约 1.6 倍，拿它判断会误判成"要裁字"然后白抬窗口最小宽。
+        #
+        # ⚠ 这个循环必须放在**所有**标题栏按钮建完之后（下面 btn_donate 之后）。
+        # 它原先在 btn_donate 创建之前，于是捐赠按钮一直是唯一漏网的：空间紧张时
+        # 被压扁的比例会先落到它身上。加按钮时务必检查自己在不在这个名单里。
         for _btn in (self.btn_version, self.btn_github, self.btn_refresh,
-                     self.btn_cleanup_path, self.btn_clean_terminal):
+                     self.btn_cleanup_path):
             _btn.setSizePolicy(QSizePolicy.Fixed, _btn.sizePolicy().verticalPolicy())
 
         # 捐赠图标（不在 README 中提及）
@@ -17057,6 +19369,9 @@ class MainWindow(QMainWindow):
         self.btn_donate.setToolTip("支持作者")
         self.btn_donate.clicked.connect(self._on_donate_clicked)
         tb.addWidget(self.btn_donate)
+        # 上面那个定宽循环因为位置关系漏了它，在这里补上（见上面那段注释）
+        self.btn_donate.setSizePolicy(QSizePolicy.Fixed,
+                                      self.btn_donate.sizePolicy().verticalPolicy())
 
         # 窗口控制按钮
         self.btn_min = QPushButton("—")
@@ -17251,6 +19566,25 @@ class MainWindow(QMainWindow):
         log_title.setStyleSheet("color:#e6e9ef;font-weight:600;")
         overlay_head.addWidget(log_title)
         overlay_head.addStretch(1)
+        # 「复制日志」：用户报障时最需要的是把原文贴出来。手打上百行中文日志
+        # 不现实，截图又看不清时间戳 —— 落盘之后一键复制是闭环的最后一环。
+        self.btn_log_copy = QPushButton("复制")
+        self.btn_log_copy.setObjectName("overlayCopyBtn")
+        self.btn_log_copy.setFixedSize(52, 26)
+        self.btn_log_copy.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_log_copy.setToolTip("把本次会话的全部日志复制到剪贴板（便于粘贴到反馈里）")
+        self.btn_log_copy.clicked.connect(self._copy_log_to_clipboard)
+        overlay_head.addWidget(self.btn_log_copy)
+        # 「另存为」：落盘文件按会话切，用户想留档或直接发给别人的时候用。
+        self.btn_log_save = QPushButton("导出诊断")
+        self.btn_log_save.setObjectName("overlayCopyBtn")
+        self.btn_log_save.setFixedSize(70, 26)
+        self.btn_log_save.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_log_save.setToolTip(
+            "把「诊断报告 + 本次会话日志」另存为一个文本文件\n"
+            "（报告说明环境状态，日志说明刚才发生了什么；反馈时附上它）")
+        self.btn_log_save.clicked.connect(self._save_log_to_file)
+        overlay_head.addWidget(self.btn_log_save)
         self.btn_log_close = QPushButton("×")
         self.btn_log_close.setObjectName("overlayCloseBtn")
         self.btn_log_close.setFixedSize(26, 26)
@@ -17286,13 +19620,10 @@ class MainWindow(QMainWindow):
         self.status_bar.linkActivated.connect(self._on_status_link)
         outer.addWidget(self.status_bar)
 
-        # 日志浮层的未读计数与自动收起定时器（QTimer 挂在窗口上，测试可注入时钟）
+        # 日志浮层的未读计数。2026-10-14 起浮层不再自动弹开/自动收起
+        # （原 _log_auto_hide 定时器与 _log_user_open 标记已删除），
+        # 只剩这一个计数：warn/error 在浮层关着时累加，显示在「📋 日志 (N)」上。
         self._log_unread = 0
-        self._log_user_open = False
-        self._log_auto_hide = QTimer(self)
-        self._log_auto_hide.setSingleShot(True)
-        self._log_auto_hide.setInterval(LOG_AUTO_HIDE_MS)
-        self._log_auto_hide.timeout.connect(self._on_log_auto_hide)
 
         # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）。
         # 2026-10-13：构造期**不重排** —— 此时 QScrollArea 的 viewport 宽度还没就绪，
@@ -17348,7 +19679,8 @@ class MainWindow(QMainWindow):
     def _relayout_results(self) -> None:
         """统一结果面板：保留分类小标题，在各自标题下面重建卡片行。
 
-        行与浏览 Tab 是同一套 cardRow（`_make_rows` 造的），所以格子等宽。
+        行用 `_make_layout_rows` 造的**无宿主 QHBoxLayout**（2026-10-15，见 R2.6）——
+        网格、等宽、占位格的算法与浏览 Tab 完全一致，只是行不再是控件。
         **列数恒取浏览列数**（2026-10-10 用户改的口径：「搜索组件时如果只有一个组件
         也要以网格显示，现在变成列表了」）：命中 1 个也是 3 个格子里占 1 个，
         另外两格补透明占位控件 —— 少补一格，`addWidget(card, 1)` 就会把那张卡拉成
@@ -17364,9 +19696,12 @@ class MainWindow(QMainWindow):
         columns = max(1, self._card_columns())
         # 分块必须在搬家**之前**算完：setParent 会把卡片显式隐藏，先搬再算就排空
         chunks_per_group = [chunk_visible(group, columns) for _, group in sections]
-        # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走
+        # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走。
+        # ⚠ **父级已经是宿主时一个字都别动**：`setParent(当前父级)` 实测仍约
+        # 5 ms/张（Qt 照样重跑 inheritStyle → QSS polish），115 张就是 ~0.6 s。
+        # 行改成无宿主布局之后卡片本来就一直挂在宿主上，这个判断直接省掉那 0.6 s。
         for card in cards:
-            if self.results_content.isAncestorOf(card):
+            if card.parent() is not self.results_content:
                 card.setParent(self.results_content)
         # 只摘行、留标题：结果面板是"标题 + 行"交错的结构，全清会把标题一起删掉
         self._drop_rows(self.results_layout, only_rows=True)
@@ -17375,9 +19710,9 @@ class MainWindow(QMainWindow):
             pos = self.results_layout.indexOf(header)
             if pos < 0:
                 continue
-            for k, row in enumerate(self._make_rows(self.results_content, chunks,
-                                                    pad_to=columns)):
-                self.results_layout.insertWidget(pos + 1 + k, row)
+            for k, row in enumerate(self._make_layout_rows(self.results_content, chunks,
+                                                           pad_to=columns)):
+                self.results_layout.insertLayout(pos + 1 + k, row)
                 rows.append(row)
         self.results_layout.row_widgets = rows
         self._tab_rows[RESULTS_KEY] = rows
@@ -17398,7 +19733,7 @@ class MainWindow(QMainWindow):
         self._drop_rows(layout)
         layout.row_widgets = []
         # pad_to 必须给：半行不补占位的话，QHBoxLayout 的 addWidget(card, 1) 会把
-        # 末行的卡片**拉伸占满整行** —— 「其它软件」2 张各半行、「开发软件」的 Pulsar
+        # 末行的卡片**拉伸占满整行** —— 「其它软件」2 张各半行、「服务端组件」的 Pulsar
         # 独占一行，跟满行格子的 309px 完全不同宽（真机 2026-10-08 用户截图实测）。
         rows = self._make_rows(root, chunks, pad_to=columns)
         for row in rows:
@@ -17410,18 +19745,32 @@ class MainWindow(QMainWindow):
     def _drop_rows(self, layout, only_rows: bool = False) -> None:
         """摘掉 layout 里的条目并销毁（`_fill_rows` 与结果面板重排共用）。
 
-        入参 only_rows: bool  True → 只摘 objectName 为 "cardRow" 的行控件，
-             分类小标题与末尾 stretch 原样留下。结果面板是「标题 + 行 + 标题 + 行」
-             的交错结构，整清一次会把分类标题一起 deleteLater。
+        入参 only_rows: bool  True → 只摘「行」：Tab 里是 objectName 为 "cardRow"
+             的**行控件**，统一结果面板里是**无宿主的 QHBoxLayout**（见 R2.6）。
+             分类小标题与末尾 stretch 原样留下。
         """
         i = 0
         while i < layout.count():
             item = layout.itemAt(i)
             w = item.widget()
-            if only_rows and (w is None or w.objectName() != "cardRow"):
+            sub = item.layout()
+            is_row = (w is not None and w.objectName() == "cardRow") or sub is not None
+            if only_rows and not is_row:
                 i += 1
                 continue
             layout.takeAt(i)
+            if sub is not None:
+                # 无宿主行布局：把里面的条目逐个摘出来再丢掉空布局。
+                # 卡片**留在宿主里不动**（父级不变正是这么省下来的），由调用方
+                # 决定是送回 Tab 还是重新排进新行；占位格是临时控件，随行一起销毁。
+                while sub.count():
+                    inner = sub.takeAt(0)
+                    filler = inner.widget()
+                    if filler is not None and not any(filler is c for c in self.cards):
+                        filler.hide()
+                        filler.deleteLater()
+                sub.deleteLater()
+                continue
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
@@ -17469,6 +19818,43 @@ class MainWindow(QMainWindow):
             # show() 会顺着子控件往下走，把行里的卡片一起带出来。
             row.show()
             rows.append(row)
+        return rows
+
+    def _make_layout_rows(self, host, chunks, pad_to: int = 0) -> list:
+        """统一结果面板专用：造**无宿主的 QHBoxLayout** 当行（2026-10-15，见 R2.6）。
+
+        为什么不沿用 `_make_rows` 的 `QWidget#cardRow`：`QLayout::addChildWidget`
+        是把控件 reparent 到**布局的 `parentWidget()`** —— 行是个 QWidget 时，
+        卡片的父级就变成那个新建的行，而父级一变 Qt 就得对该卡**整棵子树**重跑一遍
+        样式解析（实测约 5 ms/张，115 张就是 0.6 s）。无宿主布局的 `parentWidget()`
+        正好是外层容器本身，于是卡片**父级不变**，整条 QSS polish 路径被跳过。
+        实测同一份 115 张卡：行控件 1001 ms → 无宿主布局 **3.5 ms**。
+
+        别把 Tab 也换过来：Tab 的行是 `QWidget`，`_reveal_running_tabs` 那一族逻辑
+        与一批像素断言都按 `findChildren` / `objectName()=="cardRow"` 认行，
+        而搜索结果面板是唯一"每次按键都要整页重排"的地方 —— 收益只在这里，
+        风险也只摊在这里。
+
+        入参 host: QWidget  占位格控件的挂载点（行布局自己没有宿主，子控件得有）。
+        """
+        rows: list = []
+        for row_cards in chunks:
+            row_lay = QHBoxLayout()
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(CARD_ROW_SPACING)
+            for card in row_cards:
+                row_lay.addWidget(card, 1)     # 同一行的格子等分宽度
+                # 卡片从 Tab 那边搬过来时 setParent 会把它显式隐藏，进格子后放出来一次；
+                # 本来就在结果面板里的卡片（连续改搜索词）这一步是无副作用的。
+                card.show()
+            if pad_to and len(row_cards) < pad_to:
+                for _ in range(pad_to - len(row_cards)):
+                    filler = QWidget(host)
+                    filler.setObjectName("cardRowFiller")
+                    filler.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    row_lay.addWidget(filler, 1)
+                    filler.show()
+            rows.append(row_lay)
         return rows
 
     def resizeEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
@@ -17567,11 +19953,20 @@ class MainWindow(QMainWindow):
             return
         self._update_res = res
         self._set_chip_state("update", new_version=version)
-        if update_notify_due(load_update_state(), version):
+        # 只在这个版本**首次**告知时写一遍（下面 save_update_check 会把 notified 置位，
+        # 所以判定必须取一次存起来，不能写完通知再判第二次 —— 那样恒为 False）
+        first_time = update_notify_due(load_update_state(), version)
+        if first_time:
             save_update_check(notified=version)
             self._append_log("ok", f"发现新版本 v{version}（当前 v{APP_VERSION}）："
                             f"{latest.get('page_url') or GITHUB_URL}"
                             "（点左上角那颗 ↓ 直接下载到默认目录）")
+            # 有 release notes 就把要点写进日志。用户决定要不要升级，看的就是"改了什么"，
+            # 而不是"有个新版存在"——原先整个 body 被解析层丢掉，这里是它第一次
+            # 真正到达用户眼前。
+            notes = _release_notes_digest(str(latest.get("notes") or ""))
+            if notes:
+                self._append_log("info", "新版本更新内容：" + notes)
         if not auto and not isinstance(res.get("asset"), dict):
             # 没有本平台可下的产物时才弹窗；有产物的话点 chip 就下，不该多问一句。
             self._notify_update_without_asset(res)
@@ -17771,25 +20166,11 @@ class MainWindow(QMainWindow):
         """点「📋 日志」：toggle 一次；点开即视为已读，未读计数清零。"""
         if self.log_overlay.isHidden():
             self._log_unread = 0
-            self._log_user_open = True
-            self._log_auto_hide.stop()
             self._set_log_open(True)
         else:
             self._close_log_by_user()
 
     def _close_log_by_user(self) -> None:
-        self._log_user_open = False
-        self._log_auto_hide.stop()
-        self._set_log_open(False)
-
-    def _on_log_auto_hide(self) -> None:
-        """告警自动弹开的浮层，静默 LOG_AUTO_HIDE_MS 后自己收起。
-
-        用户手动点开的那一侧不做自动收起（_log_user_open），免得看着日志
-        正看到一半被关掉。
-        """
-        if getattr(self, "_log_user_open", False):
-            return
         self._set_log_open(False)
 
     def _refresh_log_button(self) -> None:
@@ -17925,16 +20306,25 @@ class MainWindow(QMainWindow):
         # 所以"重复搜索、清空再搜"拿到的已经是干净状态。
         # 清空输入要回到浏览态时才真复位，而且只在确实处于搜索态时复位一次：
         # 浏览态下按退格把最后一个字符删掉，不该重排 85 张卡。
-        if not q:
-            if self._in_search():
-                self._restore_browse()
-            self.search_hint.setText("")
-            self.search_hint.setProperty("empty", "false")
-            self.search_hint.style().unpolish(self.search_hint)
-            self.search_hint.style().polish(self.search_hint)
-            return
+        # 重建期间关掉重绘（2026-10-15 性能修复）：一次重建要让几十上百张卡搬家、
+        # 销毁旧行、再建新行，而本函数是**同步**的 —— 回到事件循环之前根本不会重绘，
+        # 开着只让 Qt 在每个中间态白算一遍布局与绘制。实测省掉约 1/3 的总耗时。
+        # 必须 try/finally：异常时也要把重绘还回去，否则窗口从此不再刷新
+        # （那是比"慢"更难排查的故障）。
+        self.setUpdatesEnabled(False)
+        try:
+            if not q:
+                if self._in_search():
+                    self._restore_browse()
+                self.search_hint.setText("")
+                self.search_hint.setProperty("empty", "false")
+                self.search_hint.style().unpolish(self.search_hint)
+                self.search_hint.style().polish(self.search_hint)
+                return
 
-        self._build_unified(q)
+            self._build_unified(q)
+        finally:
+            self.setUpdatesEnabled(True)
 
     def _in_search(self) -> bool:
         """结果面板是否正盖着四个 Tab（`top_stack` 第 1 页 = 统一搜索结果）。
@@ -17964,9 +20354,10 @@ class MainWindow(QMainWindow):
 
         读不到就跳过——凭据只是便利信息，缺了不该让"认清本机运行状态"看起来失败。
         """
-        # 走类名而不是 self：_COMPONENTS_CACHE 是类属性，用 MainWindow.xxx
-        # 在测试的"半初始化实例"上也能跑通（那类实例的 self 上没有绑定 staticmethod）。
-        comp = MainWindow.current_components().get(key)
+        # 走模块级组件表而不是 self 上的什么：这里在测试里可能被一个
+        # "半初始化实例"（只绑了几个方法、没跑 __init__）调用，
+        # 模块级函数对那种实例一样成立。
+        comp = component_registry().get(key)
         if comp is None or getattr(comp, "launch", None) is None:
             return
         try:
@@ -17979,7 +20370,7 @@ class MainWindow(QMainWindow):
         """Tab 标题后标 `●` 表示"这一页有组件在运行"，清空搜索/退出搜索时都要重算。
 
         2026-10-06 用户反馈"启动了 nacos，没看到停止选项"—— 按钮一直是好的，
-        但当时三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「开发软件」、Jenkins 在「其它软件」），
+        但当时三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「服务端组件」、Jenkins 在「其它软件」），
         界面默认停在「开发环境」。用户在自己的启动页上找不到刚才那个卡片。
         （2026-10-08 起可启停组件已集中到「一键启停」Tab，这一条分散找卡的起因消了；
         `●` 仍然保留 —— 同时跑着两三个组件时，还是要知道哪一页上有活的。）
@@ -18003,7 +20394,7 @@ class MainWindow(QMainWindow):
         2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。查下来按钮一直是好的
         （btn_stop 可见可用、文本"停止"、label 显示"● 运行中 · 端口 8848"），
         真正的原因是**当时三个启动组件分在两个 Tab**：
-        Jenkins 在「其它软件」，Nacos/ActiveMQ 在「开发软件」，
+        Jenkins 在「其它软件」，Nacos/ActiveMQ 在「服务端组件」，
         而界面默认停在 Tab0「开发环境」。用户自然找不到自己刚启动的那个卡片。
         （2026-10-08 起它们都在「一键启停」一页；跳页与这句说明留着，是因为
         同时跑多个组件、或用户停在别的页上时，症状会一模一样地复发。）
@@ -18044,7 +20435,10 @@ class MainWindow(QMainWindow):
         所以搜索结果的卡片宽度与浏览时一致。列数取 min(命中数, 浏览列数)，由
         `_relayout_results` 统一算 —— 命中 1 个就是 1 列，命中 5 个就是 3 列。
         """
-        self._clear_results_layout()
+        # send_home=False：命中的卡片**留在结果面板宿主上**，别先送回 Tab 再搬回来。
+        # 搬两次家 = 每张卡两轮 QSS 重算，而这一次清空本来只是为了把旧行拆掉。
+        # 退出搜索（`_restore_browse`）才需要真的送回各自 Tab。
+        self._clear_results_layout(send_home=False)
         # 先按分类归好组：列数要按**总命中数**算，而它得等这一轮扫完才知道
         groups: list = []
         order: dict = {}
@@ -18052,6 +20446,10 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             comp = card.component
             if not component_matches(comp, q):
+                # 只隐藏、**不送回 Tab**（2026-10-15）：搜索期间每一次"退出命中"都搬一次家
+                # 就是每张卡一轮 QSS 重算，逐字输入时最贵（实测 'c'→'cu' 这一下要 0.7 s）。
+                # 这些卡就留在结果面板宿主上藏着，退出搜索时由
+                # `_clear_results_layout(send_home=True)` 一次扫干净（见那里）。
                 card.setVisible(False)
                 continue
             cat = comp.category
@@ -18068,9 +20466,13 @@ class MainWindow(QMainWindow):
             header.setObjectName("resultCatHeader")
             self.results_layout.addWidget(header)
             for card in cards:
-                # 先挂到结果面板宿主上（不进外层布局），具体排进哪个格子由
-                # _relayout_results 决定；setParent 会显式隐藏，随后要放出来
-                card.setParent(self.results_content)
+                # 这里**刻意只设可见性、不设父级**（2026-10-15 性能修复）：
+                # 下面 `relayout_cards(RESULTS_KEY)` 里 `_relayout_results` 会把
+                # 这批卡收回到 `results_content` 再排进行里，在这里先 setParent
+                # 一遍等于每张卡多搬一次家。而**搬到同一个父级也不便宜** ——
+                # 实测 `card.setParent(同父)` 仍会触发 Qt 对该卡整棵子树重跑一遍
+                # QSS 解析，约 5 ms/张；115 张就是 ~0.6 s（真机实测，见
+                # DEVELOPMENT.md 的搜索性能一节）。
                 card.setVisible(True)
             sections.append((header, cards))
         self.results_layout.addStretch(1)
@@ -18107,32 +20509,55 @@ class MainWindow(QMainWindow):
         if home is not None:
             card.setParent(home)      # 卡片稍后由 _restore_browse 重排归位
 
-    def _clear_results_layout(self) -> None:
+    def _clear_results_layout(self, send_home: bool = True) -> None:
         """清空统一结果面板里的所有条目（分类小标题、卡片行）。
 
-        卡片不在这里销毁：它们只是被摘出布局并回到自己 Tab 的容器，
-        随后由 _restore_browse 统一重排。
+        卡片**不在这里销毁**：它们只是被摘出布局。去哪由 `send_home` 决定 ——
+        退出搜索时回各自 Tab 的容器；**连续搜索时原地留在宿主里**。
+        留在原地是这次性能修复的一半：下一次重排把它们放进新行时父级没变，
+        Qt 就不必重跑那棵子树的 QSS 解析（见 R2.6 与 `_make_layout_rows`）。
+
+        入参 send_home: bool  True → 卡片回所属 Tab（退出搜索）；
+                             False → 卡片留在 `results_content` 上（继续搜索）。
         """
         self._result_sections = []
         self.results_layout.row_widgets = []
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             w = item.widget()
+            sub = item.layout()
+            if sub is not None:
+                # 无宿主行布局：逐个摘出条目，再丢掉空布局。
+                # 卡片按 send_home 决定去向；占位格是临时控件，随行一起销毁。
+                while sub.count():
+                    child = sub.takeAt(0).widget()
+                    if child is None:
+                        continue
+                    if any(child is card for card in self.cards):
+                        if send_home:
+                            self._send_card_home(child)
+                    else:
+                        child.hide()
+                        child.deleteLater()
+                sub.deleteLater()
+                continue
             if w is not None:
                 if w.objectName() == "cardRow":
-                    # 行里住着卡片：先把它们送回各自 Tab 的容器，再销毁空行 ——
-                    # 直接 deleteLater 会把行内的卡片一起带走。
+                    # Tab 的行控件（结果面板已改用无宿主布局，这里保留兜底）：
+                    # 先把卡片送回各自 Tab，再销毁空行 —— 直接 deleteLater
+                    # 会把行内的卡片一起带走。
                     lay = w.layout()
                     if lay is not None:
                         while lay.count():
                             child = lay.takeAt(0).widget()
-                            if child is not None:
+                            if child is not None and send_home:
                                 self._send_card_home(child)
                     w.hide()
                     w.deleteLater()
                     continue
                 if any(w is card for card in self.cards):
-                    self._send_card_home(w)
+                    if send_home:
+                        self._send_card_home(w)
                     continue
                 # deleteLater 是**异步**的：takeAt 之后布局不再管它，但 widget 的
                 # parent 还挂在 results_content 上、几何也没变，在 deferred delete
@@ -18146,6 +20571,17 @@ class MainWindow(QMainWindow):
             if sp is not None:
                 del sp
 
+        if send_home:
+            # 收尾扫一遍"不属于任何一行、但父级还是宿主"的卡片。
+            # 搜索期间它们被刻意留在宿主上（只隐藏不搬家，省掉每张一轮 QSS 重算），
+            # 于是布局里已经找不到它们 —— 上面那圈"拆行"只会走到"行里的卡"。
+            # 漏掉这一步的后果很实在：结果面板是 `top_stack` 的隐藏页，卡挂在那儿
+            # 等于浏览态下**凭空少一批卡片**（2026-10-15 自查实测到：清空后仍有 115 张
+            # 卡留在 results_content 上）。
+            for card in self.cards:
+                if card.parent() is self.results_content:
+                    self._send_card_home(card)
+
     def _home_wrap_of(self, card):
         """这张卡片所属 Tab 的容器（搜索结束要按它归位）。"""
         for idx, cards in enumerate(self._tab_cards):
@@ -18154,381 +20590,15 @@ class MainWindow(QMainWindow):
         return None
 
     def _apply_qss(self) -> None:
-        """应用 QSS 样式表。"""
-        self.setStyleSheet(
-            """
-            #centralRoot {
-                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #eef2f7, stop:1 #dee5ee);
-            }
-            #titleBar {
-                background: #2c3e50;
-                color: white;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }
-            #titleText { color: white; padding-left: 4px; }
-            #versionChip {
-                background: rgba(255, 255, 255, 0.14);
-                color: #dfe7ee;
-                border: 1px solid rgba(255, 255, 255, 0.28);
-                padding: 4px 9px;
-                font-size: 12px;
-                border-radius: 10px;
-            }
-            #versionChip:hover {
-                background: rgba(255, 255, 255, 0.26);
-                color: white;
-            }
-            /* chip 的四种状态配色，全挂在**动态属性**上（objectName 不许改，
-               改了按名字找它的代码与用例就失效）。琥珀色=有新版可点，
-               灰色带问号=没查到（跟"已是最新"必须一眼能分）。 */
-            #versionChip[chipState="update"],
-            #versionChip[chipState="downloading"] {
-                background: #f9a825;
-                color: #3e2723;
-                border: none;
-                padding: 4px 9px;
-                font-size: 12px;
-                font-weight: 700;
-                border-radius: 10px;
-            }
-            #versionChip[chipState="update"]:hover,
-            #versionChip[chipState="downloading"]:hover {
-                background: #ffb74d;
-            }
-            #versionChip[chipState="error"] {
-                background: rgba(255, 255, 255, 0.08);
-                color: #9aa7b3;
-                border: 1px dashed rgba(255, 255, 255, 0.34);
-                padding: 4px 9px;
-                font-size: 12px;
-                border-radius: 10px;
-            }
-            #versionChip[chipState="error"]:hover {
-                color: #dfe7ee;
-                border-color: rgba(255, 255, 255, 0.5);
-            }
-            #iconBtn, #donateBtn, #ctrlBtn, #closeBtn {
-                background: transparent;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                font-size: 14px;
-                border-radius: 6px;
-            }
-            #iconBtn:hover, #ctrlBtn:hover, #donateBtn:hover {
-                background: rgba(255,255,255,0.15);
-            }
-            #donateBtn { color: #ff8181; font-size: 18px; }
-            #closeBtn:hover { background: #e74c3c; }
+        """应用全局样式表。
 
-            #searchBar { background: transparent; }
+        样式表本体在 `theme.QSS`（2026-10-14 从这里抽出去）——它是一份纯声明
+        数据，没有分支也不参与计算，混在 MainWindow 里只会让改配色变成
+        "翻 20000 行找一段 CSS"。
+        """
+        from theme import QSS
+        self.setStyleSheet(QSS)
 
-            /* 搜索框：外壳统一承载放大镜与输入框，聚焦时整条胶囊高亮，
-               比原先「细边框小方框」更有整体感，也和卡片/下拉框的圆角语言一致 */
-            #searchShell {
-                background: #ffffff;
-                border: 1px solid #d5dfea;
-                border-radius: 10px;
-                min-width: 340px;
-                max-width: 460px;
-            }
-            #searchShell:hover { border: 1px solid #b9c9dc; }
-            #searchShell[focused="true"] { border: 1px solid #4a7fd0; }
-            #searchIcon { background: transparent; border: none; }
-            #compSearch {
-                background: transparent;
-                border: none;
-                padding: 8px 0;
-                font-size: 13px;
-                color: #17253b;
-            }
-            #compSearch:focus { border: none; }
-            #compSearch QToolButton { background: transparent; border: none; }
-            #searchHint { color: #66788c; font-size: 12px; padding-left: 2px; }
-            #searchHint[empty="true"] { color: #c0392b; }
-
-            /* 搜索条右侧的两个工具按钮（视图切换 / 日志开关） */
-            #toolBtn {
-                background: #ffffff;
-                color: #33465c;
-                border: 1px solid #d5dfea;
-                border-radius: 8px;
-                padding: 5px 10px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            #toolBtn:hover { border-color: #90caf9; color: #1976d2; }
-
-            /* 卡片名称后的详情入口：一枚 20px 圆点，视觉上必须"轻"，
-               不能与「可多版本」角标争注意力（同在一行）。 */
-            #detailBtn {
-                background: #eef2f6;
-                color: #5c6f82;
-                border: 1px solid #d5dfea;
-                border-radius: 10px;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 0px;
-            }
-            #detailBtn:hover { background: #e3f2fd; color: #1976d2;
-                               border-color: #90caf9; }
-            #detailTitle { color: #263238; }
-
-            #compTabs { background: transparent; border: none; }
-
-            #compTabs::pane { border: none; background: transparent; }
-            #compTabs > QTabBar { background: transparent; }
-            #compTabs > QTabBar::tab {
-                background: #cfd8e3;
-                color: #33465c;
-                padding: 7px 18px;
-                margin-right: 4px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                font-weight: 600;
-            }
-            #compTabs > QTabBar::tab:selected {
-                background: #ffffff;
-                color: #17253b;
-            }
-            #cardsScroll { border: none; background: transparent; }
-            #cardsWrap { background: transparent; }
-
-            #topStack { background: transparent; }
-            #resultsArea { border: none; background: transparent; }
-            #resultsContent { background: transparent; }
-            #resultCatHeader {
-                font-weight: 600;
-                color: #33465c;
-                font-size: 13px;
-                padding: 8px 2px 2px 10px;
-                margin-top: 4px;
-                border-left: 3px solid #4a7fd0;
-            }
-            #card {
-                background: white;
-                border-radius: 12px;
-                border: 1px solid #e6ebf1;
-            }
-            #cardTitle { color: #263238; }
-            #statusLabel { font-size: 12px; }
-            #fieldLabel { color:#546e7a; font-size:13px; }
-
-            /* ---- 「系统里检测到的版本」折叠区（设计 §6）----
-               格子内部只有 271px，所以这里是"一行一件事"的紧凑排版：
-               标题是一条扁按钮，展开后每行是「版本·路径 + 切过去」。 */
-            #externalToggle {
-                text-align: left;
-                padding: 0 6px;
-                border: 1px dashed #cfd8dc;
-                border-radius: 7px;
-                background: #f7f9fc;
-                color: #455a64;
-                font-size: 12px;
-            }
-            #externalToggle:hover { border-color: #90caf9; color: #1565c0; }
-            #externalRow { background: transparent; }
-            #externalVersion { color:#263238; font-size:12px; font-weight:600; }
-            #externalPath { color:#78909c; font-size:11px; }
-            #externalLabel { color:#37474f; font-size:12px; }
-            #externalHint { color:#90a4ae; font-size:12px; }
-            #restoreBtn {
-                border: 1px solid #ffb74d;
-                border-radius: 7px;
-                background: #fff8e1;
-                color: #e65100;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            #restoreBtn:hover { background: #ffecb3; border-color: #ffa726; }
-
-            /* ----------------- 下拉框 ----------------- */
-            QComboBox {
-                padding: 0 34px 0 12px;
-                border: 1px solid #cfd8dc;
-                border-radius: 8px;
-                background: white;
-                color: #263238;
-                font-size: 13px;
-                min-height: 32px;
-                selection-background-color: #1976d2;
-            }
-            QComboBox:hover  { border-color: #90caf9; }
-            QComboBox:focus  { border-color: #1976d2; }
-            QComboBox:on     { border-color: #1976d2; }
-            QComboBox QLineEdit {
-                border: none;
-                background: transparent;
-                padding: 0;
-                margin: 0;
-                color: #263238;
-                font-size: 13px;
-                selection-background-color: #1976d2;
-                selection-color: white;
-            }
-            QComboBox QLineEdit:focus { outline: none; }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: center right;
-                width: 30px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0;
-                height: 0;
-            }
-            #comboArrow {
-                color: #78909c;
-                font-size: 14px;
-                background: transparent;
-                border: none;
-                padding-right: 6px;
-            }
-            QComboBox:hover #comboArrow { color: #1976d2; }
-            QComboBox:focus #comboArrow { color: #1976d2; }
-            QComboBox QAbstractItemView {
-                border: 1px solid #cfd8dc;
-                border-radius: 8px;
-                background: white;
-                padding: 6px;
-                outline: 0;
-                selection-background-color: #1976d2;
-                selection-color: white;
-            }
-            QComboBox QAbstractItemView::item {
-                padding: 8px 14px;
-                border-radius: 6px;
-                min-height: 24px;
-                color: #263238;
-            }
-            QComboBox QAbstractItemView::item:hover {
-                background: #e3f2fd;
-                color: #0d47a1;
-            }
-            QComboBox QAbstractItemView::item:selected {
-                background: #1976d2;
-                color: white;
-            }
-
-            QPushButton#primaryBtn {
-                background: #1976d2;
-                color: white;
-                border: none;
-                padding: 6px 8px;
-                border-radius: 8px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QPushButton#primaryBtn:hover { background: #1e88e5; }
-            QPushButton#primaryBtn:pressed { background: #1565c0; }
-            QPushButton#primaryBtn:disabled { background: #b0bec5; color:#eceff1; }
-
-            QPushButton#secondaryBtn {
-                background: #ffffff;
-                color: #1976d2;
-                border: 1px solid #1976d2;
-                padding: 6px 8px;
-                border-radius: 8px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QPushButton#secondaryBtn:hover { background: #e3f2fd; }
-            QPushButton#secondaryBtn:pressed { background: #bbdefb; }
-            QPushButton#secondaryBtn:disabled {
-                color: #b0bec5;
-                border-color: #cfd8dc;
-                background: #f5f7fa;
-            }
-
-            QPushButton#dangerBtn {
-                background: #ffffff;
-                color: #c62828;
-                border: 1px solid #c62828;
-                padding: 6px 8px;
-                border-radius: 8px;
-                font-size: 13px;
-            }
-            QPushButton#dangerBtn:hover { background: #ffebee; }
-            QPushButton#dangerBtn:disabled { color:#e0a4a4; border-color:#e0a4a4; }
-
-            QProgressBar {
-                background: #eceff1;
-                border: none;
-                border-radius: 6px;
-                height: 14px;
-                text-align: center;
-                color: #263238;
-                font-size: 11px;
-            }
-            QProgressBar::chunk {
-                border-radius: 6px;
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #26c6da, stop:1 #1976d2);
-            }
-
-            /* 日志浮层：盖在卡片区上面，不占布局空间（展开不会挤压网格） */
-            #logOverlay {
-                background: #26303f;
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
-                border-top: 1px solid #3d4a5d;
-            }
-            #logOverlay QLabel { color: #e6e9ef; }
-            #overlayCloseBtn {
-                background: transparent;
-                color: #9fb0c4;
-                border: none;
-                font-size: 16px;
-                border-radius: 6px;
-            }
-            #overlayCloseBtn:hover { background: rgba(255,255,255,0.12); color: #ffffff; }
-            #logView {
-                background: #1e1e2e;
-                color: #dcdcdc;
-                border-radius: 8px;
-                padding: 6px;
-                font-family: Menlo, Consolas, "Courier New", monospace;
-                font-size: 12px;
-            }
-            #statusBar {
-                background: #eceff1;
-                color: #455a64;
-                padding: 6px 14px;
-                font-size: 12px;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-            }
-
-            QScrollBar:vertical {
-                background: transparent;
-                width: 10px;
-                margin: 4px 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #b0bec5;
-                border-radius: 5px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover { background: #90a4ae; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-
-            QToolTip {
-                background: #37474f;
-                color: white;
-                border: 1px solid #263238;
-                padding: 6px 10px;
-                border-radius: 6px;
-            }
-            """
-        )
-
-    # ------------------------------------------------------------------
-    # 无边框窗口拖动
-    # ------------------------------------------------------------------
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self.title_bar.underMouse():
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -18556,32 +20626,6 @@ class MainWindow(QMainWindow):
             self.btn_max.setText("❐")
 
     # ------------------------------------------------------------------
-    def _on_clean_terminal_clicked(self) -> None:
-        """开一个"新进程环境"的命令行窗口，用来判定切换到底生效没有。
-
-        为什么非做不可：Windows 是把环境块**复制**给新进程的，旧宿主（Windows Terminal、
-        IDE）开出来的新标签页拿的还是宿主那份旧环境。2026-09-30 真机就是这个局面 ——
-        注册表与 explorer 现场启动的进程都是 1.4.1，用户"新开的"窗口里仍是 1.4.2。
-        跟用户解释机制没用，给一个必然干净的窗口才有结论。
-        """
-        composed = EnvManager.composed_env()
-        if not composed:
-            self._append_log(
-                "warn", "拿不到系统为新进程合成的环境（非 Windows 或 API 被拒），"
-                        "无法开验证终端。可以在当前 PowerShell 里原地刷新再验："
-                        "$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine')"
-                        " + ';' + [Environment]::GetEnvironmentVariable('Path','User')")
-            return
-        pid = open_clean_console(composed)
-        if pid is None:
-            self._append_log("error", "验证终端开不了（cmd.exe 启动失败）。")
-            return
-        self._append_log(
-            "ok", f"已开一个干净环境的命令行窗口（pid={pid}）。在里面跑 bun -v / java -version，"
-                  "得到的版本就是任何**全新**终端应当看到的版本；"
-                  "若这里正确、你原来那个窗口不对，说明那个窗口比本次切换更早"
-                  "（见日志里点名的旧终端清单）。")
-
     def _on_cleanup_path_clicked(self) -> None:
         """扫描并清理 PATH 中指向本工具目录、但已不存在的残留条目。"""
         dead = find_dead_tool_path_entries()
@@ -18687,6 +20731,10 @@ class MainWindow(QMainWindow):
 
     def _fetch_finished(self) -> None:
         """一轮抓取的收尾：恢复按钮 + 一句完成日志（缓存全命中时也要走这里）。"""
+        # 整轮结束才落盘（原来每个组件抓成功就全量重写一次，一轮 87 次，
+        # 全部跑在主线程信号槽里）。放在"恢复按钮"之前：万一写盘慢，
+        # 按钮先恢复，用户不至于对着一个灰掉的按钮等。
+        flush_version_cache()
         if hasattr(self, "btn_refresh"):
             self.btn_refresh.setEnabled(True)
             self.btn_refresh.setText("⟳ 刷新版本")
@@ -18731,6 +20779,112 @@ class MainWindow(QMainWindow):
         DonateDialog(self).exec()
 
     # ------------------------------------------------------------------
+    def _toast(self, text: str, msec: int = 2600) -> None:
+        """在状态栏位置闪一条短提示，不弹模态框。
+
+        入参 text: 提示文案
+        入参 msec: 停留毫秒数
+        用状态栏而不是 QMessageBox：这类提示是"顺带告诉用户一句"，
+        弹模态框会打断他正在做的事（例如刚点完复制就去点别的按钮）。
+        """
+        try:
+            bar = getattr(self, "status_bar", None)
+            if bar is None:
+                return
+            original = bar.text()
+            bar.setText(html_escape(text))
+            QTimer.singleShot(msec, lambda: bar.setText(original))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    def _log_file_path(self) -> Path:
+        """本次会话的日志文件路径：~/.env-tools/logs/session-<时间戳>.log。
+
+        落盘是这个界面**唯一**的诊断来源出口：日志浮层只活在内存里，
+        程序一关，用户这次看到的全部信息（镜像怎么换的、哪个源失败、
+        哪条 warn/error）就永久消失了。而"导出诊断信息"与报障都依赖它。
+        """
+        return Path(CONFIG_DIR) / "logs" / f"session-{self._session_stamp}.log"
+
+    def _log_to_disk(self, level: str, msg: str) -> None:
+        """把一条日志追加到本次会话文件。**任何失败都不许影响界面**。
+
+        入参 level: 日志级别（info/ok/warn/error）
+        入参 msg:   已经过 html 转义的纯文本
+        落盘格式刻意用 `[时间] [级别] 正文` 的纯文本 —— 它要被用户复制出去贴到
+        issue 里，不该带 HTML 标签与颜色代码。
+        """
+        try:
+            path = self._log_file_path()
+            ensure_dir(path.parent)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(f"[{self._session_clock()}] [{level:<5}] {msg}\n")
+            # 顺手裁掉过老的会话文件：日志目录是长命目录，不裁会一直涨
+            self._trim_log_files()
+        except Exception:
+            # 写不了日志是"诊断能力退化"，不是"用户要知道的故障"，所以静默
+            pass
+
+    def _trim_log_files(self) -> None:
+        """只保留最近 LOG_KEEP_SESSIONS 个会话日志，按修改时间倒序删多余的。"""
+        try:
+            log_dir = Path(CONFIG_DIR) / "logs"
+            files = sorted(log_dir.glob("session-*.log"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            for old in files[LOG_KEEP_SESSIONS:]:
+                old.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _log_text_all(self) -> str:
+        """本次会话日志的纯文本全文（不含 HTML），供复制与另存。"""
+        try:
+            return self._log_file_path().read_text(encoding="utf-8")
+        except Exception:
+            # 落盘还没发生过（极少见）：从内存里的日志控件反推
+            return self.log_view.toPlainText()
+
+    def _copy_log_to_clipboard(self) -> None:
+        """把本次会话日志全文复制到剪贴板。"""
+        try:
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.clipboard().setText(self._log_text_all())
+            self._toast("日志已复制到剪贴板")
+        except Exception as exc:
+            self._toast(f"复制失败：{exc}")
+
+    def _save_log_to_file(self) -> None:
+        """让用户挑个位置，把「诊断报告 + 本次会话日志」一起另存为文本。
+
+        2026-10-14：标题栏的「导出诊断」按钮按用户要求移除后，导出能力搬到这里
+        —— 日志浮层本来就是这些数据的所在地，「另存为」顺手就能产出可贴进
+        issue 的完整材料，不必为它单独在标题栏留一个按钮（那两个按钮常年占掉
+        标题栏近三分之一宽度却不点）。
+        """
+        try:
+            default = Path(CONFIG_DIR) / "logs" / f"diagnostics-{self._session_stamp}.txt"
+            ensure_dir(default.parent)
+            target, _ = QFileDialog.getSaveFileName(
+                self, "导出诊断信息与日志", str(default),
+                "文本文件 (*.txt);;日志文件 (*.log);;全部文件 (*)")
+            if not target:
+                return
+            # 诊断报告说明「环境是什么样」，会话日志说明「刚才发生了什么」，
+            # 两段缺一不可：只有报告看不出问题出在哪一步，只有日志看不出环境。
+            payload = build_diagnostics()
+            payload += "\n\n" + "=" * 60 + "\n本次会话日志\n" + "=" * 60 + "\n"
+            payload += self._log_text_all()
+            Path(target).write_text(payload, encoding="utf-8")
+            self._append_log("ok", f"诊断信息已导出：{target}")
+            self._toast("已导出，可直接附到反馈里")
+        except Exception as exc:
+            self._toast(f"导出失败：{exc}")
+
+    def _session_clock(self) -> str:
+        """当前时刻，格式 HH:MM:SS。会话日志只要时分秒，跨天由文件名区分。"""
+        return time.strftime("%H:%M:%S")
+
     def _append_log(self, level: str, msg: str) -> None:
         color = {
             "info": "#dcdcdc",
@@ -18739,44 +20893,35 @@ class MainWindow(QMainWindow):
             "error": "#FF6B6B",
         }.get(level, "#dcdcdc")
         self.log_view.append(f'<span style="color:{color};">{msg}</span>')
-        # 只有 warn/error 才自动弹开浮层：下载/安装这类常规进度在卡片上已有进度条，
-        # 每来一条都弹会把用户正在操作的那张卡盖住。弹开同时在按钮上挂未读条数，
-        # 点开一次即清零。
-        # 2026-10-13：启动后 LOG_AUTO_POP_DELAY_MS 内不自动弹 —— 启动那一波的
-        # 限流/抓取失败告警不该盖住主界面；未读数照旧累计在「📋 日志 (N)」上。
+        # 同时落盘（纯文本、不带 HTML）。界面写的是转义后的 msg，直接用同一个
+        # 字符串落盘最省事，也保证"用户复制的"与"界面显示的"逐字一致。
+        self._log_to_disk(level, msg)
+        # 2026-10-14 按用户要求：日志浮层**永远不自动弹开**。
+        # 原先这里有一段 warn/error 自动弹开 + 静默自动收起的逻辑，配一个
+        # "启动后 10 秒内不弹"的静默期。它看起来能解决"启动那一波告警盖住界面"，
+        # 实际却制造了用户抱怨的"偶尔自己弹出来"，原因是那个静默期只挡住**前 10 秒**：
+        # 一轮版本抓取要 30~40 秒，第 12 秒、第 25 秒、第 35 秒到达的告警
+        # （GitHub 限流、各组件抓取失败）全都晚于 10 秒，于是照弹不误。
+        # 表现上像随机 —— 网络快时失败来得早被挡住、看起来正常；网络慢或被限流时
+        # 失败来得晚就弹，所以用户觉得"有时候会自己打开"。
+        #
+        # 现在改成：只累计未读数并挂在「📋 日志 (N)」按钮上，绝不主动弹。
+        # 用户想看就点那个按钮 —— 未读数已经把"有事发生了"说清楚了，
+        # 没必要用浮层盖住他正在操作的那张卡。自动收起的一整套（_log_auto_hide
+        # 定时器、_on_log_auto_hide、_log_user_open）随之删除。
         if level in ("warn", "error"):
             overlay = getattr(self, "log_overlay", None)
             if overlay is not None and overlay.isHidden():
                 self._log_unread += 1
-                if self._log_autopop_allowed():
-                    self._set_log_open(True)
-                    self._log_auto_hide.start()
             self._refresh_log_button()
 
-    def _log_autopop_allowed(self) -> bool:
-        """现在是否允许自动弹开日志浮层。
-
-        启动后 LOG_AUTO_POP_DELAY_MS 内为 False。时间基准用 monotonic
-        （不受用户改系统时间影响）；`_startup_mono` 在 __init__ 里取，
-        半初始化的测试窗口没有该属性时按"允许"处理（测试要看弹开行为）。
-        """
-        started = getattr(self, "_startup_mono", None)
-        if started is None:
-            return True
-        import time as _time
-        return (_time.monotonic() - started) * 1000 >= LOG_AUTO_POP_DELAY_MS
 
     # ------------------------------------------------------------------
     def _load_settings(self) -> None:
         """加载上次选择的版本。"""
-        if not CONFIG_FILE.exists():
-            return
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return
+        data = _config_read_raw()      # 读不到就是空表，下面每个键各取各的默认值
         # 视图模式：老配置没有这个键，取新默认 grid（不报错、不回退整个加载）
-        mode = data.get("view_mode") if isinstance(data, dict) else None
+        mode = data.get("view_mode")
         self.view_mode = mode if mode in ("grid", "list") else "grid"
         try:
             selections = data.get("selections", {}) if isinstance(data, dict) else {}
@@ -18805,26 +20950,26 @@ class MainWindow(QMainWindow):
         合并写：先读原文件只替换 selections 那一段。整体覆盖会把 active（生效版本
         登记表）抹掉——那是切换功能写的数据，和用户这次选了哪个下拉项无关。
         （负向对照：改回整体覆盖后，测试 SaveSettingsKeepsActive 即报 KeyError: 'active'。）
+
+        2026-10-14：原先这里手搓了整条"读-改-写"，与 _update_config 逐字重复。
+        重复的代价不是难读，而是**两份逻辑必须永远保持一致** —— 而这份注释
+        记着的 R3.2 事故（整体覆盖清掉 active 登记表）正是这种重复长出来的。
+        现在只保留"要改哪几个键"这一段属于本方法的业务，其余全交给统一入口。
         """
         try:
             ensure_dir(CONFIG_DIR)
-            data: dict = {}
-            if CONFIG_FILE.exists():
-                try:
-                    loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        data = loaded
-                except Exception:
-                    data = {}
-            data["selections"] = {
-                card.component.key: card.version_combo.currentText()
-                for card in self.cards
-            }
-            if not isinstance(data.get("active"), dict):
-                data["active"] = {}
-            # 视图模式与 selections 一起合并写回，不整体覆盖（active 是切换那侧的数据）
-            data["view_mode"] = getattr(self, "view_mode", "grid")
-            _atomic_write_config(data)
+
+            def _mut(data: Dict[str, object]) -> None:
+                data["selections"] = {
+                    card.component.key: card.version_combo.currentText()
+                    for card in self.cards
+                }
+                if not isinstance(data.get("active"), dict):
+                    data["active"] = {}
+                # 视图模式与 selections 一起合并写回，不整体覆盖（active 是切换那侧的数据）
+                data["view_mode"] = getattr(self, "view_mode", "grid")
+
+            _update_config(_mut)
         except Exception:
             pass
 
@@ -18918,6 +21063,7 @@ class MainWindow(QMainWindow):
         # QThread 在运行时被析构会直接 abort 进程（Windows 退出码 0xC0000409），
         # 而版本抓取是启动即触发的，所以关窗必须等这些线程收尾。
         self._closing = True
+        _CLOSING.set()          # 卡片通过模块级事件问"是否正在退出"
         FETCH_ABORT.set()
         # 下载/检查/外部探测/版本探测这几类线程统一在这里等（含被顶替的探测历史线程）
         self._drain_background_workers()
@@ -18931,6 +21077,10 @@ class MainWindow(QMainWindow):
                 continue
             remain = max(0.0, deadline - _time.monotonic())
             _qthread_wait(w, int(remain * 1000))
+        # 抓取线程已收尾，把这轮攒在内存里的版本条目落盘。
+        # 放在最后是有意的：关窗时正在抓的那几个组件可能刚好返回了，
+        # 它们的成果不该因为"用户关得比网络快"而白丢。
+        flush_version_cache()
         super().closeEvent(event)
 
 
@@ -18947,6 +21097,99 @@ def main() -> int:
             return 2
         return elevate_helper_main(argv[1])
 
+    # 2026-10-13：立刻关掉 PyInstaller 的 Tk splash 引导窗（onefile 打包 + Splash
+    # target 时 bootloader 会开一个标题为 "tk" 的 TkTopLevel 窗口显示 assets/splash.png）。
+    # 用户实测：它一直挂到主界面出现，和应用内 SplashScreen 同屏两窗。
+    # ⚠ 2026-10-13 实测：**不能用 `import pyi_splash`** —— main() 探针证明执行到
+    # 它进程就死了（后续代码全部不跑，bt_tk_close.log 永远不出现），疑似它与
+    # bootloader 的握手在 PYZ 冻结环境里触发 fail-fast。所以只走 Win32 路线：
+    # SW_HIDE 隐藏窗口（bootloader 会周期性重新 ShowWindow，所以要持续压制）。
+    def _close_tk_splash() -> bool:
+        """隐藏 bootloader 的 Tk splash 窗口（标题 'tk'，类 TkTopLevel）。
+
+        只精确匹配这个窗口：类名必须是 TkTopLevel、标题必须是 'tk' ——
+        这是 PyInstaller splash 的固定特征（源码里写死的），不误伤别的窗口。
+
+        为什么用 ShowWindow(SW_HIDE) 而不是 WM_CLOSE / pyi_splash.close()：
+        实测（2026-10-13）这窗口的消息循环归 bootloader 线程管，WM_CLOSE 投递
+        后没人处理（窗口挂 5.5s+ 才消失）；SW_HIDE 让它**立即从屏幕上消失**
+        （本工具要的是"看不见"，不是"进程里销毁"），窗口对象等进程退出时自然回收。
+        返回是否找到了窗口（false = 还没出现或已隐藏）。
+        """
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW("TkTopLevel", "tk")
+            if hwnd:
+                # 已隐藏就不用再藏（重复 SW_HIDE 无害，但省一次调用）
+                if user32.IsWindowVisible(hwnd):
+                    user32.ShowWindow(hwnd, 0)        # SW_HIDE
+                    return True
+                return True            # 已不可见：视为成功，停止重试
+        except Exception:
+            pass
+        return False
+
+    # Python 起来时 Tk 窗口可能还没被 bootloader 创建（实测 0.3s 才出现），
+    # 且 QTimer 要等 app.exec() 才走。**先同步压一轮**（见下面两个常量），
+    # 再交给后台线程持续压制直到应用内 splash 接管。实测（2026-10-13）bootloader
+    # **不会**反复重新 ShowWindow —— 外部压 1 次就永久消失，所以这里的敌人只有
+    # "时机"：同步轮询负责抢 Tk 刚出现的那一瞬，后台线程兜底防它复活。
+    import time as _t
+    import threading as _threading
+    import ctypes as _ctypes
+    from pathlib import Path as _P_home
+    _tk_suppress = {"on": True}
+    _user32 = _ctypes.windll.user32
+
+    def _hide_tk_once() -> bool:
+        hwnd = _user32.FindWindowW("TkTopLevel", "tk")
+        if hwnd and _user32.IsWindowVisible(hwnd):
+            _user32.ShowWindow(hwnd, 0)        # SW_HIDE
+            return True
+        return False
+
+    # 同步轮询：至多 0.3s（6 × 50ms），藏掉即停。
+    #
+    # 2026-10-14 从 1s（20 次）压到 0.3s（6 次）。依据是注释里已经写明的事实：
+    # bootloader **不会**反复 ShowWindow，外部压一次就永久消失，敌人只是"时机"。
+    # 而这 6 次的窗口已经覆盖了 Tk 出现的实测值（Python 起来后约 0.3s），
+    # 剩下的交给下面那个已经存在的后台线程 —— 它每 50ms 查一次、上限 30s，
+    # 兜底能力远超同步这段。继续用 1s 换来的只是"多 0.7 秒白等"，
+    # 而那 0.7 秒正落在冷启动最宝贵的位置上。
+    for _ in range(TK_SUPPRESS_SYNC_ROUNDS):
+        if _hide_tk_once():
+            break
+        _t.sleep(TK_SUPPRESS_POLL_SEC)
+
+    def _suppress_tk_splash() -> None:
+        n = 0
+        lines = [f"thread alive @{_t.monotonic() - _t0:.2f}s"]
+        while _tk_suppress["on"] and n < TK_SUPPRESS_BG_LIMIT:
+            hwnd = _user32.FindWindowW("TkTopLevel", "tk")
+            if hwnd:
+                vis = _user32.IsWindowVisible(hwnd)
+                if vis:
+                    _user32.ShowWindow(hwnd, 0)
+                if n % 20 == 0:
+                    lines.append(f"@{_t.monotonic() - _t0:.2f}s n={n} "
+                                 f"hwnd={hwnd} vis={vis}")
+                    try:
+                        (_P_home() / "AppData/Local/Temp/bt_tk_suppress.log"
+                         ).write_text("\n".join(lines), encoding="utf-8")
+                    except Exception:
+                        pass
+            n += 1
+            _t.sleep(0.05)
+        lines.append(f"thread end @{_t.monotonic() - _t0:.2f}s (on={_tk_suppress['on']})")
+        try:
+            (_P_home() / "AppData/Local/Temp/bt_tk_suppress.log"
+             ).write_text("\n".join(lines), encoding="utf-8")
+        except Exception:
+            pass
+
+    _threading.Thread(target=_suppress_tk_splash, daemon=True,
+                      name="bt-tk-splash-suppressor").start()
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -18962,14 +21205,26 @@ def main() -> int:
     splash.show()
 
     win = MainWindow(splash=splash)
-    win._adopt_running()      # 认清本机在跑什么；不放 __init__——它会读写用户 running.json、探测真端口，构造窗口的测试会跟着遭殃
 
     def _on_cards_ready():
         # 全部卡片建完：splash 淡出，主窗口显示，然后才开始版本抓取与检查更新
+        _tk_suppress["on"] = False       # 主窗口已接管，停止压制 Tk 引导窗
         splash.close()
         splash.deleteLater()
         win._splash = None
         win._load_settings()        # 建卡后才恢复配置（需要真卡片上的 version_combo）
+        # 认清本机在跑什么。
+        #
+        # ⚠ 必须放在这里，不能放在 MainWindow() 之后、_build_cards_async 之前
+        #（2026-10-14 修的真实回归）。R18 改成**分帧建卡**之后，建卡完成前
+        # self.cards 与 _tab_cards 都还是空列表，而 _adopt_running 里的
+        #   · for card in self.cards: card._refresh_launch_state()
+        #   · _reveal_running_tabs() → _mark_running_tabs()
+        # 全都是遍历这两张列表的 —— 于是它们遍历的是空列表，**Tab 上的
+        # `●` 运行标记与"自动跳到运行页"在启动路径上永久失效**。
+        # 上方那句"卡片在那之前已经画过一遍了，必须让它们重读"的注释，
+        # 其前提（R18 之前，卡片在 __init__ 里就建完）在分帧之后已经不成立。
+        win._adopt_running()
         win.show()
         win.raise_()
         win.activateWindow()
