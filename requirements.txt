@@ -1,2 +1,19 @@
-PySide6>=6.6.0
+# 上限不是随手加的：PySide6 **6.12.0** 会让 5 个护栏套件在解释器退出阶段
+# 以 0xC0000409（MSVC fail-fast，Qt 的 abort 用的就是它）硬崩 —— unittest 已经
+# 打出 "OK"，进程随后才崩，所以表现是"用例全绿而 CI 红"。
+#
+# 2026-10-15 实测：
+#   · 本机 PySide6 6.11.2 → 946 条 / 20 套件全绿，干净 clone 同样全绿
+#   · 同一份代码 + 新建 venv 装 latest（6.12.0）→ bt_component_detail / bt_download_only /
+#     bt_external_version / bt_launch / bt_multiversion 五个文件退出码非 0
+#   · 二分到具体用例：bt_multiversion_tests 的
+#     InstalledCheckIcon.test_marks_are_already_there_right_after_the_card_is_built 与
+#     test_uninstalled_version_loses_its_mark
+#   · 同一个 6.12.0 下**应用本体不受影响**：真窗口 show → processEvents → close → 退出码 0
+#
+# 而 CI 的 requirements 是 `PySide6>=6.6.0`，于是 2026-10-14 加上 dev 分支触发后
+# **每一次推送都是红的**（此前没有绿色基线可比，所以一直没被发现）。
+#
+# 定位到 Qt 侧之后再放开上限；届时请用上面的二分用例复跑一遍再改。
+PySide6>=6.6.0,<6.12
 requests>=2.31.0

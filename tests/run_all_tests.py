@@ -38,6 +38,30 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]   # 本文件在 tests/ 下
 TEST_DIR = Path(__file__).resolve().parent
+
+
+def _gh_esc(text: str, *, prop: bool = False) -> str:
+    """按 GitHub Actions workflow command 的转义规则处理文本。"""
+    out = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if prop:                       # 属性值还要转义 `:` 与 `,`
+        out = out.replace(":", "%3A").replace(",", "%2C")
+    return out
+
+
+def _gh_annotate(level: str, message: str, *, file: str | None = None) -> None:
+    """在 GitHub Actions 里把失败写成**注解**（本地跑时是空操作）。
+
+    为什么值得单独做这一步：Actions 的 job 日志要带 token 才读得到，匿名请求
+    `/actions/runs/<id>/jobs` 只能拿到一句 "Process completed with exit code 1"
+    —— 2026-10-15 对着一条红的 dev 推送，本地 946 条全绿、却完全看不出 CI 是哪套件红。
+    注解反过来**匿名就能读**（`GET /check-runs/<id>/annotations`），把套件名与输出
+    尾巴塞进注解，等于给"手上没有 token 的人"留一条定位路径。
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    props = f" file={_gh_esc(file, prop=True)}" if file else ""
+    print(f"::{level}{props}::{_gh_esc(message)}", flush=True)
+
 TEST_GLOB = "bt_*_tests.py"
 
 # 绕开 PySide6 弹窗的关键环境变量：Qt 需要一个"无显示"的平台插件。
@@ -199,11 +223,21 @@ def main() -> int:
             print(f"▼ {name} 的失败输出（末尾若干行）")
             print("-" * 72)
             print(detail)
+            # 日志要 token 才读得到，注解匿名就能读 —— 两处都写，别只写一处。
+            tail = "\n".join(l for l in detail.splitlines() if l.strip())[-1200:]
+            _gh_annotate("error",
+                         f"{name} 失败（{len(files) - failed}/{len(files)} 个文件通过）。"
+                         f"输出尾部：\n{tail}",
+                         file=f"tests/{name}")
+        _gh_annotate("notice",
+                     f"护栏结果：{total_tests} 条用例 / {len(files)} 个文件，"
+                     f"{len(files) - failed} 通过 / {failed} 失败")
         print("\n以下文件失败，重跑单个文件看详情：")
         for name, ok, _, _ in results:
             if not ok:
                 print(f"  .venv\\Scripts\\python.exe -u tests/{name}")
         return 1
+    _gh_annotate("notice", f"护栏全绿：{total_tests} 条用例 / {len(files)} 个文件")
     return 0
 
 
