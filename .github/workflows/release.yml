@@ -81,7 +81,13 @@ jobs:
   build:
     name: 构建 ${{ matrix.platform_name }}
     # 手动补同步时不重新构建：产物已经在 GitHub Release 上了，重新打包纯属浪费
-    if: github.event_name != 'workflow_dispatch'
+    #
+    # **显式 tag 白名单（2026-10-15 补到 master）**：master 上这一行原先只有
+    # `event != workflow_dispatch`，也就是**任何分支推送都会构建并发版** ——
+    # 下面的 `softprops/action-gh-release` 用的是 `github.ref_name`，往 master
+    # 推一次就会拿 "master" 当 tag 去建 Release。用户口径是"**只有执行 tag 命令才构建**"，
+    # dev 分支上早已修好（c56fe74），master 这份旧文件漏了，这里补齐。
+    if: github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.runner }}
     # 兜底：单个平台 job 的最长运行时长，超时会被取消（默认 360 分钟太长，
     # 一卡就是 6 小时，且会让 needs: build 的 Gitee 同步 job 一直等）。
