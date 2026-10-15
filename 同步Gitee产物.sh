@@ -320,6 +320,21 @@ build_body() {
 }
 RELEASE_BODY="${RELEASE_BODY:-$(build_body)}"
 
+# 正文**不能直接放进 curl 的命令行**（2026-10-15 修，CI 上真实踩到）：
+#   原先的写法是把正文**插值进 `-F` 的取值**（取值为 `body=` 加变量），那会把整段中文
+#   送上命令行，而 Windows 上原生命令行的 argv 会按**系统 ANSI 代码页**（GetACP）转一次码：
+#     · CP1252（英文 Windows / GitHub runner）→ 中文全变 `?`
+#     · CP936（常见中文 Windows）→ 变成 GBK 字节，Gitee 按 UTF-8 读就是乱码
+#   只有 CP65001 恰好无损 —— 维护者本机正是 65001，所以一直没露出来
+#   （本文件 bt_gitee_sync_tests 里那句"让 System32 的 curl 优先"就是在绕这个，
+#    但那只解决"哪个 curl"，解决不了"argv 本身被转码"）。
+# 改成把正文落到临时文件、用 `-F "body=<文件"` 让 curl **读文件内容**当字段值：
+# 中文一个字节都不经过命令行，与代码页无关；顺带也不受命令行长度限制。
+RELEASE_BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/gitee-release-body.XXXXXX")"
+printf '%s' "${RELEASE_BODY}" > "${RELEASE_BODY_FILE}"
+cleanup_release_body_file() { rm -f "${RELEASE_BODY_FILE}"; }
+trap 'cleanup; cleanup_release_body_file' EXIT
+
 # 补不上正文时给人工补救用（PATCH 被拒 / 收尾校验没过都会打这段）
 print_remedies() {
   echo "已存在的 Release 只能二选一处理："
@@ -342,7 +357,7 @@ if [ -z "${RELEASE_ID}" ]; then
     -F "access_token=${GITEE_TOKEN}" \
     -F "tag_name=${TAG_NAME}" \
     -F "name=${TAG_NAME}" \
-    -F "body=${RELEASE_BODY}" \
+    -F "body=<${RELEASE_BODY_FILE}" \
     -F "target_commitish=${TARGET_COMMITISH}")
   RELEASE_ID=$(json_get "${CREATE_RESP}" "id")
   if [ -z "${RELEASE_ID}" ]; then
@@ -371,7 +386,7 @@ else
         -F "access_token=${GITEE_TOKEN}" \
         -F "tag_name=${TAG_NAME}" \
         -F "name=${TAG_NAME}" \
-        -F "body=${RELEASE_BODY}" >/dev/null; then
+        -F "body=<${RELEASE_BODY_FILE}" >/dev/null; then
       echo "   补写正文完成"
     else
       echo "错误：补写正文失败（Gitee 拒绝了 PATCH /releases/${RELEASE_ID}）"

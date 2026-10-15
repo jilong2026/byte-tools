@@ -288,14 +288,7 @@ class SyncScriptTest(unittest.TestCase):
         # 正文是给终端用户看的：不能写「Gitee 侧不挂大二进制」这种工程内部话，
         # 因为本机 .bat 传过产物之后这句话就变成假的（2026-09-29 真实演练时发现）
         self.assertNotIn("不挂大二进制", body)
-        # ⚠ 临时诊断（2026-10-15）：CI 上这里红，且报错里正文的中文全是 `?`。
-        # 本机复跑（含 LC_ALL=C）都过，所以先把"服务端收到的到底是哪些字节"钉在
-        # 失败消息里 —— 只有成功/失败都看到真身，才分得清是**脚本产出就错了**
-        # 还是**只在这一条消息的展示上糊了**。定位完就删。
-        self.assertIn("GitHub Release：", body,
-                      "诊断 body=…{}\n  hex[:160]={}\n  LANG/LANGUAGE={!r}/{!r}".format(
-                          repr(body[:300]), body[:160].encode("utf-8", "backslashreplace").hex(),
-                          os.environ.get("LANG"), os.environ.get("LANGUAGE")))
+        self.assertIn("GitHub Release：", body)
 
     def test_404_on_tags_lookup_is_not_an_error(self):
         # 真实 Gitee 返回 200 + null（见 new 场景），仓库不存在才 404；两种都要能走到「创建」
@@ -505,6 +498,28 @@ class AutoFetchContract(unittest.TestCase):
         cond = '[ "${#UPLOAD_LIST[@]}" -gt 0 ] && [ "${AUTO_FETCH_ASSETS:-1}" != "0" ]'
         self.assertIn(cond, self._sh(),
                       "自动下载没有绑在「真要往 Gitee 传二进制」这个条件上")
+
+    def test_release_body_never_travels_through_the_command_line(self):
+        """正文必须走**文件**，不许用 `-F "body=${RELEASE_BODY}"` 拼进命令行。
+
+        为什么这条要静态钉住（2026-10-15 CI 实测）：Windows 上原生命令行的 argv 会按
+        **系统 ANSI 代码页**（GetACP）转一次码，于是
+          · CP1252（英文 Windows / GitHub runner）→ 整段中文变 `?`
+          · CP936（常见中文 Windows）→ 变 GBK 字节，Gitee 按 UTF-8 读是乱码
+        只有 CP65001 无损 —— 维护者本机恰好是 65001，所以这条用例在本地**永远绿**，
+        回归了也看不出来。CI 上就是这么红的：正文里 `跨平台构建产物…` 全成了 `????`。
+        改成 `-F "body=<${RELEASE_BODY_FILE}"` 后中文只走文件，与代码页无关。
+
+        静态断言而不是跑一遍：本机改不了 GetACP，跑一遍也验不出转码。
+        """
+        sh = self._sh()
+        self.assertIn('-F "body=<${RELEASE_BODY_FILE}"', sh,
+                      "正文没有走文件 —— 中文会按系统代码页被转码")
+        self.assertNotIn('-F "body=${RELEASE_BODY}"', sh,
+                         "还有人把正文拼进命令行：argv 会按 ANSI 代码页转码，"
+                         "非 CP65001 的机器上中文会变 `?` 或乱码")
+        self.assertIn('printf \'%s\' "${RELEASE_BODY}" > "${RELEASE_BODY_FILE}"', sh,
+                      "正文没有真的落盘 —— `-F body=<文件` 会读到一个空文件")
 
     def test_offline_seam_exists_in_both(self):
         """回归用例的产物是 KB 级假文件，必须能用同一个开关把下载关掉。"""

@@ -1433,6 +1433,16 @@ class WorkspaceMachineFixTests(ExternalSandbox):
     def test_taking_over_another_external_version_releases_the_machine_fix_first(self):
         """两笔账会互相覆盖快照：接管前不还原 machine_fix，注册表就回不到任何一次改动前。"""
         comp = self._maven()
+        # ⚠ 夹具必须**自带**"压住命令的那条目录"，不能指望宿主机恰好装了
+        #   `E:\soft\maven\apache-maven-3.9.2\bin`（维护者机器上真有、CI runner 上没）：
+        #   `path_effective_check()` 是拿**真实文件系统** `os.path.exists` 去找命令的，
+        #   宿主机没那个 mvn.cmd 时它会判 'unknown' → 用户级接管直接早退 →
+        #   本条用例在 CI 上假红（2026-10-15 实测：switch 返回 verdict='unknown'，
+        #   steps 里写着"未能复验"）。同文件里
+        #   `test_shadowed_then_machine_takeover_level_is_machine` 早就用了这套写法。
+        shadow_home = self.make_home("maven-shadow", "mvn.cmd")
+        self.hklm["Path"] = (r"C:\Windows\system32;" + str(shadow_home / "bin"),
+                             "REG_EXPAND_SZ")
         before_path, before_type = self.hklm["Path"]
         self.install_fake_helper("ok")
         self.assertTrue(main.apply_workspace_machine(
@@ -1440,18 +1450,19 @@ class WorkspaceMachineFixTests(ExternalSandbox):
         self.assertTrue(main.load_machine_fix_map(), "前提：先有一笔 machine_fix")
 
         ext = self.make_home("maven-3.9.2-ext", "mvn.cmd")
-        # ⚠ 临时诊断（2026-10-15）：CI 上这条红在"接管没被登记"，而本机必过。
-        # 把 switch 的返回值（ok/verdict/error/steps）钉进失败消息 —— 它直接说明
-        # 是从哪一步早退的。定位完就删。
-        _res = main.switch_to_external_version(
+        res = main.switch_to_external_version(
             comp, self.dv(ext, "3.9.2", "path:HKLM"),
             confirm_machine=lambda plan: True, log=lambda m: None)
+        # 把"前提"显式断出来：这一步不成功，下面那条断言就只是在测一个没发生过的事
+        self.assertTrue(res["ok"], f"前提：用户级接管必须成功，实际 {res}")
         self.assertEqual(main.load_machine_fix_map(), {},
                          "接管前必须把 machine_fix 还掉，否则两次快照叠加、还原回不到原样")
         self.assertEqual(main.load_takeover_map().get("maven", {}).get("version"),
-                         "3.9.2",
-                         f"诊断 switch 返回={_res!r}  takeover_map={main.load_takeover_map()!r} "
-                         f"hklm={dict(self.hklm)!r}")
+                         "3.9.2")
+        # 反向：把这个接管也还掉，系统 Path 必须逐字节回到最初
+        main.revert_external_version(comp, log=lambda m: None)
+        self.assertEqual(self.hklm["Path"], (before_path, before_type),
+                         "两笔账都还清后，系统 Path 必须与最初逐字节相同")
         # 反向：把这个接管也还掉，系统 Path 必须逐字节回到最初
         main.revert_external_version(comp, log=lambda m: None)
         self.assertEqual(self.hklm["Path"], (before_path, before_type),

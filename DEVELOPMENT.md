@@ -2463,3 +2463,54 @@ JDK / Python 同排，而那两张**都在白名单里**，本来就有 stretch�
 `status_label` 的 `setMinimumWidth(1)` + 不换行 = 超宽部分被**裁掉**，全量原文在
 tooltip 里（源码注释写了理由：不同机器字体/缩放不同，不压掉最小宽会把格子撑开）。
 这是刻意的，看到长状态文字在卡片右边缘被切断**不要去加省略号**。
+
+## 规则 R24：Windows 上中文**不许走命令行 argv**（2026-10-15）
+
+### R24.1 规则描述
+
+Windows 上原生命令行的 `argv` 会按**系统 ANSI 代码页**（`GetACP()`）被 CRT 转一次码：
+
+| 系统 ANSI 代码页 | 中文的命运 |
+|---|---|
+| **65001**（UTF-8） | 无损 —— 维护者本机正是这个，所以**本地永远看不出问题** |
+| **1252**（英文 Windows / GitHub runner） | 全部变成 `?`（不可映射） |
+| **936**（常见中文 Windows） | 变成 GBK 字节，对方按 UTF-8 读就是乱码 |
+
+所以：**任何可能含非 ASCII 的内容，都不要作为命令行参数传给原生 exe**（`curl`、`git`、
+`python.exe`…）。要传就**走文件**或**走 stdin**。
+
+同一条根因的两种表现，2026-10-15 一天内各踩一次：
+
+1. **stdout 编码**：CI 上 `python -u tests/run_all_tests.py` 只跑 1 秒就红 ——
+   runner 是 en-US，Python 往**管道**写 stdout 按 cp1252 编码，项目输出几乎全是中文，
+   第一句 `print("解释器：…")` 就抛 `UnicodeEncodeError`。修：workflow 顶层
+   `PYTHONIOENCODING: utf-8`。
+2. **argv 编码**：`同步Gitee产物.sh` 里 `curl -F "body=<正文>"` 把整段中文送上命令行，
+   runner 上正文全变 `?`（本机 CP65001 恰好无损）。修：正文落临时文件，
+   用 `-F "body=<文件"` 让 curl 读文件当字段值。
+
+### R24.2 为什么这两个都特别难发现
+
+**维护者本机是 CP65001（UTF-8），两类问题在本地都不会复现**，而 CI 是 CP1252。
+并且第二类连"换个 locale 复跑"都验不出来 —— `LC_ALL=C` 也照样过（转码发生在
+cmdline→CRT 那一层，与 shell 的 locale 无关）。
+
+**本机的两个验伪手段**（都在 CI 上真红过之后才补的）：
+- 查环境：`ctypes.windll.kernel32.GetACP()` 在本机是 65001，runner 上是 1252。
+- 静态对账：`bt_gitee_sync_tests.test_release_body_never_travels_through_the_command_line`
+  断"脚本里不许出现把正文插值进 `-F` 取值的写法"，并要求落盘那一行存在。
+  **本机改不了 `GetACP`，所以跑一遍验不出转码；只有静态断言钉得住。**
+  （写这条时它立刻抓到我自己解释性注释里写的那句字面量 —— 注释里别再抄那个写法。）
+
+### R24.3 顺带记两条脚手架事实
+
+- GitHub 的 `windows-latest` 是 **Windows Server 2025**，`platform.win32_ver()[0]`
+  是 `2025Server`。断言"版本号必须是 10/11"这类**写死客户端 Windows** 的期望会在
+  runner 上无条件红（`bt_startup_tests` 就是这么红的）。正确做法是用标准库自己的
+  `platform._WIN32_{CLIENT,SERVER}_RELEASES` 表算期望值 —— 见该文件新增的
+  `_expected_release()`。
+- runner 的 `TEMP` 是 **8.3 短名**（`C:\Users\RUNNER~1\…`），而 `Path.resolve()`
+  给的是长名。**比路径要么两边都 `resolve()`**（`bt_update_check_tests`），
+  **要么就别依赖宿主机上恰好存在的目录**（`bt_external_version_tests` 里那个
+  `path_effective_check` 是按真实文件系统找命令的，夹具必须自己造出"压住命令的那个目录"，
+  不能指望宿主机装了 `E:\soft\maven\…`）。
