@@ -743,6 +743,32 @@ class BadgeNeverStretchesVertically(unittest.TestCase):
                          "角标被竖直拉伸了：它的高度必须等于自己的 sizeHint，"
                          "否则同一行里内容少的卡片会显示成一个大盒子")
 
+    def test_status_label_is_not_stretched_when_a_row_mate_is_taller(self):
+        """同一个坑的第二个受害者：状态标签。**这条必须用白名单外的组件。**
+
+        用户 2026-10-15 报"UI 样式乱了"，截图里 Ant / bat 卡的
+        「○ 未安装」「● 已装 …」被拉成**空白大色块**，而同一行内容更多的 Maven 卡
+        是紧凑一行。根因：承接多余行高的 `addStretch(1)` **原先只写在
+        `_build_external_section()` 里** —— 也就是只有那 7 个外部接管组件
+        （jdk / python / node / go / maven / gradle / bun）才有，其余 125 张卡一张都没有。
+
+        所以上面那条用例拿 `jdk` 当"短卡片"恰好是白名单成员，**永远钉不住这个缺陷**；
+        这里用 `ant`（白名单之外）才有效。排序（R22）只是触发器 —— 它把高卡（Maven）
+        与矮卡（Ant / bat）排进同一行，把既有缺陷变成了肉眼可见的大色块。
+        """
+        short, tall = self._row_with("ant", "maven")
+        self.assertGreater(tall.height(), short.minimumSizeHint().height(),
+                           "对照组失效：两张卡本来就不等高，这条用例钉不住东西")
+        self.assertGreater(short.height(), short.sizeHint().height(),
+                           "短卡片没被拉高，说明这一行根本没有多余空间")
+        self.assertFalse(main.supports_external_takeover(short.component),
+                         "对照组失效：短卡片自己就是外部接管组件（那样它本来就有 stretch），"
+                         "这条用例就又变成永真了 —— 请换一个白名单外的 key")
+        self.assertEqual(
+            short.status_label.height(), short.status_label.sizeHint().height(),
+            "statusLabel 被竖直拉伸了：多余行高必须落到布局末尾的 stretch 上，"
+            "否则同一行里内容少的卡片会显示成一个空白大色块")
+
 
 # ======================================================================
 # F3. 底部状态条：组件数、可点的工作目录、版本号（2026-10-10 用户三条要求）

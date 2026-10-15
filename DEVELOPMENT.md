@@ -2416,3 +2416,50 @@ npm・pip・插件装）时，**不是**从表里删掉、也不是放一张点�
 - 顺带说明为什么 `test_grouping_preserves_order_and_covers_every_tab` **不用改**：
   它断的是 **Tab 之间**的顺序（等于 `COMPONENT_CATEGORIES`）与成员集合，
   组内顺序不归它管。
+
+## 规则 R23：网格多余的**行高**必须落到布局末尾的 stretch 上（2026-10-15）
+
+### R23.1 规则描述
+
+卡片是网格排列的，**同一行的卡片会被 `QGridLayout` 拉成等高**。凡是"内容比别人少"
+的卡片，就多出一段高度。这段高度必须有明确去处：
+
+> **每张卡的 root 布局末尾都必须有一个 `addStretch(1)`。**
+
+`_build_ui()` 末尾那一行是**无条件**的。少了它，那段高度会被布局按策略分给**能纵向
+长大的控件**，而带背景色的 QLabel（`statusLabel` / `multiVersionBadge`）首当其冲 ——
+用户看到的就是同一行里"颜色方块一个大、一个紧凑"。
+
+### R23.2 这个缺陷真实发生过两次，第二次才修对
+
+| 时间 | 症状 | 当时怎么处理的 | 为什么没修净 |
+|---|---|---|---|
+| 2026-10-10 | JDK / Python 卡的**「可多版本」角标**被拉成大盒子，同行的 Maven 是紧凑胶囊 | 加了 `root.addStretch(1)` | **加错了地方** —— 写进了 `_build_external_section()` 的末尾，也就是**只有那 7 个外部接管组件**（jdk / python / node / go / maven / gradle / bun）才有 |
+| 2026-10-15 | Ant / bat 卡的**状态标签**（「○ 未安装」「● 已装 …」）被拉成空白大色块 | 把那一行挪到 `_build_ui()` 末尾，**所有卡片无条件都有** | —— |
+
+**为什么隔了 5 天才露出来**：旧顺序下恰好没有排出"高矮混排"的一行（Maven 那次和
+JDK / Python 同排，而那两张**都在白名单里**，本来就有 stretch）。2026-10-15 给 Tab
+加了 a→z 排序（R22）后，高卡（Maven 238px）与矮卡（Ant / bat 178px）排进同一行，
+缺陷立刻变成肉眼可见。**排序只是触发器，缺陷本身一直都在。**
+
+### R23.3 护栏，以及"永真式"的教训
+
+`tests/bt_grid_layout_tests.py::BadgeNeverStretchesVertically`：
+
+- `test_badge_height_is_its_size_hint_not_the_leftover_space` —— 用 `jdk`（白名单内）
+  当短卡片。**这条永远钉不住 2026-10-15 那个缺陷**，因为 jdk 自己就有 stretch。
+- `test_status_label_is_not_stretched_when_a_row_mate_is_taller` —— 用 `ant`
+  （**白名单外**）当短卡片，并且**显式断言**
+  `assertFalse(supports_external_takeover(short.component))`：
+  哪天有人把对照组换成白名单内的 key，这条会直接红，而不是悄悄退化成永真式。
+
+**实测确认有牙**：把这条用例拿到修复前的代码上跑，红在
+`AssertionError: 264 != 12`（statusLabel 被拉到 264px，它自己的 sizeHint 只有 12）。
+写"防拉伸"这类用例时，**必须同时断言"这一行真的有多余空间"**
+（`short.height() > short.sizeHint().height()`），否则控件没被拉高时它会假绿。
+
+### R23.4 不要顺手改的：状态标签的**横向**裁字是有意为之
+
+`status_label` 的 `setMinimumWidth(1)` + 不换行 = 超宽部分被**裁掉**，全量原文在
+tooltip 里（源码注释写了理由：不同机器字体/缩放不同，不压掉最小宽会把格子撑开）。
+这是刻意的，看到长状态文字在卡片右边缘被切断**不要去加省略号**。

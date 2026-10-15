@@ -15937,6 +15937,23 @@ class ComponentCard(QFrame):
         if supports_external_takeover(self.component):
             self._build_external_section(root)
 
+        # 末尾必须有一个 stretch：网格会把同一行的卡片拉成等高，内容少的卡片就
+        # 多出一段高度。没有这个占位的话，那段高度会被**能长大的控件**吃掉 ——
+        # statusLabel 的纵向策略是 Preferred，首当其冲被拉成一个空白大色块
+        # （真机截图：Ant / bat 卡的「未安装」「已装 …」被撑成大方块，
+        #  而同一行内容更多的 Maven 卡是紧凑一行）。
+        #
+        # ⚠ 2026-10-15 修：这一行原先写在 `_build_external_section()` 里，也就是
+        # **只有那 7 个外部接管组件**（jdk / python / node / go / maven / gradle / bun）
+        # 才有，其余 125 张卡一张都没有。旧顺序下恰好没排出"高矮混排"的一行，
+        # 所以一直没露出来；当天给 Tab 加了 a→z 排序（R22）后，高卡（Maven 238px）
+        # 与矮卡（Ant / bat 178px）排进同一行，立刻变成肉眼可见的大色块。
+        # **排序只是触发器，缺陷本身一直都在。**
+        #
+        # 无条件加在 `_build_ui` 末尾，位置与那 7 张卡原来完全一致（它们也是
+        # external 区之后才加），所以对既有卡片零行为变化。
+        root.addStretch(1)
+
     def _init_external_state(self) -> None:
         """初始化外部版本接管那组实例属性（状态，不碰任何控件）。
 
@@ -16048,12 +16065,6 @@ class ComponentCard(QFrame):
 
         self._external_frame.setVisible(False)
         root.addWidget(self._external_frame)
-
-        # 末尾必须有一个 stretch：网格会把同一行的卡片拉成等高，内容少的卡片
-        # 就多出一段高度。没有这个占位的话，那段高度会被各行按策略分掉 ——
-        # 带背景色的标签首当其冲：真机 2026-10-10 用户截图里，JDK / Python 卡的
-        # 「可多版本」角标被拉成一个大盒子，而同一行内容更多的 Maven 卡是紧凑胶囊。
-        root.addStretch(1)
 
     def _toggle_external_section(self) -> None:
         self._external_expanded = not self._external_expanded
