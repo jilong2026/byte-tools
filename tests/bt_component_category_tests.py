@@ -175,6 +175,48 @@ class GroupComponentsHelper(unittest.TestCase):
         for name, keys in groups.items():
             self.assertTrue(keys, f"分类 {name} 是空的，Tab 会是空白页")
 
+    def test_every_tab_is_sorted_a_to_z_by_display_name(self):
+        """每个 Tab 内的卡片按显示名 a→z（忽略大小写）—— 用户 2026-10-15 要求。
+
+        排的是**显示名**不是 key：界面上给用户看的是显示名，按 key 排会出现
+        "百度搭子 DuMate 排进 D 段、文心排进 E 段"这种念不出来的错位。
+
+        中文名没有"字母"，`casefold()` 之后按码位比较、**自然落在英文名之后** ——
+        这是刻意选的（硬把中文混进字母序里更乱），所以这里只断言"排序键单调不降"，
+        不钉某一种中文排法。
+        """
+        groups = main.group_components(main.build_components())
+        for name, comps in groups.items():
+            keys = [main._tab_sort_key(c) for c in comps]
+            self.assertEqual(
+                keys, sorted(keys),
+                f"「{name}」里的卡片没按显示名 a→z 排："
+                f"{[c.display_name for c in comps]}")
+        # 前面几类（以及 38 个 Agent 客户端）都必须真的有序 —— 上面已经逐类断言过。
+        # 再防一手"永真式"：至少有一个 Tab 的组内顺序**不同于** build_components()
+        # 的书写顺序，否则这条护栏分不清"排序生效了"和"没排也恰好有序"。
+        written = {c.key: i for i, c in enumerate(main.build_components())}
+        differs = any(
+            [c.key for c in comps] != sorted((c.key for c in comps), key=written.get)
+            for comps in groups.values())
+        self.assertTrue(
+            differs,
+            "所有 Tab 的组内顺序都等于 build_components() 的书写顺序 —— "
+            "排序要么没生效，要么表本身已经按名字写好了（那时请复核这条护栏还有没有意义）")
+
+    def test_alphabetical_sort_ignores_leading_punctuation(self):
+        """`.NET SDK` 要落在 N 段，不是整个列表最前面。
+
+        `.` 的码位(0x2E)比所有字母都小，不剥掉的话它会永远排第一 —— 而用户念它是
+        "点 NET"，预期在 Miniconda 与 Ninja 之间。
+        """
+        groups = main.group_components(main.build_components())
+        names = [c.display_name for c in groups[CAT_ENV]]
+        self.assertIn(".NET SDK", names)
+        i = names.index(".NET SDK")
+        self.assertEqual(names[i - 1], "Miniconda", names)
+        self.assertEqual(names[i + 1], "Ninja", names)
+
     def test_launch_tab_membership_is_derived_from_the_whitelist(self):
         """「一键启停」的成员**必须**等于 LAUNCH_KEYS，而不是第二张手写表。
 

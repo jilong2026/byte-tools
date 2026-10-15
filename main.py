@@ -8285,18 +8285,44 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
 LAUNCH_KEYS = set(LAUNCH_OF)
 
 
+def _tab_sort_key(comp: "Component") -> Tuple[str, str]:
+    """Tab 内卡片排序键：**按显示名 a→z（忽略大小写）**，同名前再按 key。
+
+    用户 2026-10-15 要求"各个 table 下的组件做个字母 a-z 顺序排序"。排的是
+    **显示名**而不是 key —— 用户在界面上看到的是显示名，按 key 排会出现
+    "百度搭子 DuMate 排在 D 段、文心排在 E 段"这种念不出来的错位。
+
+    中文显示名没有"字母"，`casefold()` 之后它们按码位比较，**自然落在英文名之后**。
+    这是刻意选的：用户要的是"念得出字母的排在前、a→z"，硬把中文混进字母序里
+    反而更乱（码位序对中文本身也是无意义的）。要按拼音排得单独引一张拼音表 ——
+    那是个独立的决定，不是这里顺手能加的。
+
+    key 作为第二关键字，保证"显示名相同"时顺序仍是确定的（不依赖字典序漂移）。
+
+    显示名**开头的标点先剥掉**再比：否则 `.NET SDK` 会因 `.`(0x2E) 比字母小
+    而排到整个列表最前面，而用户念它是"点 NET"，该落在 N 段（Miniconda 与 Ninja 之间）。
+    """
+    name = comp.display_name.lstrip(" \t\r\n.-_·—")
+    return ((name or comp.display_name).casefold(), comp.key)
+
+
 def group_components(components: List[Component]) -> Dict[str, List[Component]]:
     """按 COMPONENT_CATEGORIES 的顺序分组，供界面建 Tab。
 
     **隐藏组件不进界面**（Component.hidden，目前只有 Erlang）：它是 rabbitmq
     的前置运行时，由「启动 rabbitmq」自动装好，不该出现在用户的组件列表里 ——
     列出来用户就会以为"我也该单独装一个 Erlang"，而版本还必须是配套的那个。
+
+    每个 Tab 内的卡片按 `_tab_sort_key` **重新排序**（不再沿用 build_components()
+    的书写顺序）—— 见该函数的说明与 DEVELOPMENT.md R22。
     """
     grouped: Dict[str, List[Component]] = {name: [] for name in COMPONENT_CATEGORIES}
     for comp in components:
         if getattr(comp, "hidden", False):
             continue
         grouped[comp.category].append(comp)   # 未登记的分类直接 KeyError
+    for lst in grouped.values():
+        lst.sort(key=_tab_sort_key)
     return grouped
 
 

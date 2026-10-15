@@ -2374,3 +2374,45 @@ npm・pip・插件装）时，**不是**从表里删掉、也不是放一张点�
 - `tests/bt_mirror_spec_tests.py`：`test_counts` 开头 `if not comp.versions: continue`。
 - 新接这类组件仍须补 `COMPONENT_SUMMARY` / `COMPONENT_USAGE` / `COMPONENT_OFFICIAL_URLS`
   三张登记表 **+ 一个图标**（`bt_icon_assets_tests` 缺图标即红）。
+
+## 规则 R22：每个 Tab 内的卡片按显示名 a→z 排（2026-10-15）
+
+### R22.1 规则描述
+
+用户要求："对我们软件内各个 table 下的组件做个字母 a-z 顺序排序"。
+
+落点在**唯一一处**：`main.group_components()` 分组完，每个 Tab 内 `lst.sort(_tab_sort_key)`。
+不逐张表手工调顺序 —— 那样接一个新组件就要想"该插在哪一行"，而人一定会插错。
+
+### R22.2 排序键的三个决定（都别随手改）
+
+1. **排显示名，不排 key**。界面上给用户看的是显示名；按 key 排会出现
+   "`百度搭子 DuMate` 排进 D 段、`文心` 排进 E 段"这种念不出来的错位
+   （key 是 `dumate` / `ernie`）。反过来，按显示名排时英文名与汉语拼音大体同序。
+2. **`casefold()` 忽略大小写**，于是 `DBX` 与 `DBeaver` 按 `dbx` / `dbeaver` 相邻，
+   而不是把大写全排到小写前面。
+3. **显示名开头的标点先剥掉**（`.NET SDK` → `net sdk`）。`.` 的码位(0x2E)比所有字母小，
+   不剥就永远排第一；而用户念它是"点 NET"，预期落在 N 段。
+
+### R22.3 中文名怎么排（这是刻意选的，不是漏了）
+
+中文没有"字母"，`casefold()` 之后按**码位**比较、**自然全部落在英文名之后**
+（码位 U+4E00 以上远大于 `z`）。这是刻意选的：
+
+- 用户要的是"念得出字母的排在前、a→z"；硬把中文混进字母序里，只会让英文段也被割碎。
+- 按**拼音**排需要额外引一张拼音表（每个中文名一条），那是一份新的登记负担与新的
+  失败模式（漏登记就悄悄排错位）。**要做就得单独立一条规则**，不在 R22 里顺手加。
+
+当前效果：Agent客户端 Tab = 英文名 a→z（AutoClaw → Zed）→ 之后是中文名（码位序）。
+
+### R22.4 护栏
+
+- `tests/bt_component_category_tests.py`：
+  `test_every_tab_is_sorted_a_to_z_by_display_name`（逐 Tab 断排序键单调不降，
+  **并且**断"至少有一个 Tab 的顺序不同于 `build_components()` 的书写顺序"——
+  否则这条用例分不清"排序生效了"和"没排也恰好有序"）、
+  `test_alphabetical_sort_ignores_leading_punctuation`（`.NET SDK` 必须夹在
+  Miniconda 与 Ninja 之间）。
+- 顺带说明为什么 `test_grouping_preserves_order_and_covers_every_tab` **不用改**：
+  它断的是 **Tab 之间**的顺序（等于 `COMPONENT_CATEGORIES`）与成员集合，
+  组内顺序不归它管。
