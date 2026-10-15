@@ -5059,6 +5059,21 @@ class SeataLayout(unittest.TestCase):
         self.comps = {c.key: c for c in main.build_components()}
         self.comp = self.comps["seata"]
         self.spec = self.comp.launch
+        # ⚠ 三个全局一起挪（2026-10-15 由 CI 抓出来的真泄漏）：
+        # `test_plan_really_injects_server_port_into_child_env` 会调
+        # `build_launch_plan`，而它内部 `ensure_dir(data_dir)` —— data_dir 是
+        # `<CONFIG_DIR>/seata-data`。不沙箱就是往**用户真实的** ~/.env-tools 下建目录。
+        # 本机没暴露是因为这个目录早就存在（真跑过 seata），而 CI runner 是一台干净机器，
+        # `tests/run_all_tests.py` 的"真实配置目录被改写"护栏当场报了「新增 seata-data」。
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._cfg = (main.CONFIG_DIR, main.CONFIG_FILE, main.RUNNING_FILE)
+        main.CONFIG_DIR = Path(self._tmp.name)
+        main.CONFIG_FILE = main.CONFIG_DIR / "config.json"
+        main.RUNNING_FILE = main.CONFIG_DIR / "running.json"
+        self.addCleanup(setattr, main, "CONFIG_DIR", self._cfg[0])
+        self.addCleanup(setattr, main, "CONFIG_FILE", self._cfg[1])
+        self.addCleanup(setattr, main, "RUNNING_FILE", self._cfg[2])
 
     # ---------------- 布局 ----------------
 
