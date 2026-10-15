@@ -142,9 +142,40 @@ jobs:
       # 同一批模块级全局（main.setattr 有 168 处），同进程跑会互相污染；
       # 而某个文件里 Qt 直接 abort 时（进程 127 退出、无 traceback）也
       # 不会把整批用例一起带走。
+      #
+      # 2026-10-15：加「结果落进 Step Summary」这一圈。起因是 dev 分支从
+      # 2026-10-14 起**每次推送都红**，而 job 日志要 admin 权限才下得到
+      # （匿名 `/actions/jobs/<id>/logs` 回 403 "Must have admin rights"），
+      # 注解又只有一句 "Process completed with exit code 1" —— 完全没有线索。
+      # `$GITHUB_STEP_SUMMARY` 相反：它渲染在 **run 页面上，匿名就能看**。
+      # 所以这里把输出 tee 到文件，再用 always() 的步骤把尾巴贴进 summary。
       - name: 跑全部护栏
-        # 2026-10-14 测试套件移进 tests/，路径跟着改（runner 自己会定位仓库根）
-        run: python -u tests/run_all_tests.py
+        id: guards
+        continue-on-error: true          # 先让它跑完并留下证据，红了在末尾统一置红
+        run: |
+          python -u tests/run_all_tests.py *>&1 | Tee-Object -FilePath guards.log
+          exit $LASTEXITCODE
+
+      - name: 护栏结果写进 Step Summary（匿名可读）
+        if: always()
+        run: |
+          $mark = if ('${{ steps.guards.outcome }}' -eq 'success') { '✅ 全绿' } else { '❌ 失败' }
+          "## 护栏：$mark（outcome=${{ steps.guards.outcome }})" |
+            Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if (Test-Path guards.log) {
+            '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            Get-Content guards.log -Tail 120 | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            '（guards.log 不存在 —— 说明 python 那一步根本没跑起来）' |
+              Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: 护栏有失败则置红
+        if: steps.guards.outcome != 'success'
+        run: |
+          Write-Error "护栏未通过（outcome=${{ steps.guards.outcome }}），详见上一步的 Step Summary"
+          exit 1
 
   build:
     name: 构建 ${{ matrix.platform_name }}
