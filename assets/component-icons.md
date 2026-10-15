@@ -77,6 +77,27 @@ print('缺:', [c.key for c in cs if c.key not in have])"
 | `protoc` | `https://protobuf.dev/favicons/favicon.ico` | 48×48，即 Protocol Buffers 的软盘标识 |
 | `fzf` | `junegunn/i` → `fzf-color.png`（官方 README 顶部那张） | 4000×2200，缩到 512 宽入库 |
 | `navicat` | Apple Mac App Store 搜索 API → `artworkUrl512` | 发行方 PremiumSoft CyberTech Ltd.，即 Navicat 厂商本身 |
+| **JetBrains 六件套**<br>`idea` / `pycharm` / `clion` / `webstorm` / `goland` / `datagrip` | JetBrains 官方品牌资源站<br>`resources.jetbrains.com/storage/products/company/brand/logos/<Product>_icon.svg` | 见下"换成彩色" |
+
+## 为什么 JetBrains 六个换成了彩色（2026-10-15）
+
+用户对着界面截图指出"JetBrains 图标不都是彩色的吗，为什么我们软件里是黑的"——**他说得对**。
+
+原来是 **Simple Icons 的单色版**（`fill="#000000"` + `viewBox="0 0 24 24"`，460~720 字节）。
+Simple Icons 是**单色图标库**，SVG 里就写着纯黑填充，所以在我们界面上 6 个全渲染成黑方块。
+换成 JetBrains 官方品牌资源站的 `_icon.svg`（2~3.6KB，含 4 段渐变 / 6 个色值），
+现在与官网一致：黑底白字标 + 各自的彩色渐变形（IDEA 橙红、PyCharm 绿、CLion 品红、
+WebStorm 黄、GoLand 绿、DataGrip 紫）。
+
+**同类筛查（顺带做的，只查不改）**：全量扫了一遍，除了这 6 个还有 4 个也是 `fill="#000000"` ——
+但**它们的官方标本来就是黑白的，不动**：
+
+| 组件 | 官方标实际样子 | 结论 |
+|---|---|---|
+| `deno` | 官方站 `deno.land/logo.svg` 就是**黑色恐龙** | 现状正确，不动 |
+| `rust` | 官方 `rust-logo-blk.svg` 与 `rust-logo-128x128.png` 都是**黑色齿轮 R** | 现状正确，不动 |
+| `bun` | 官方 `bun.sh/logo.svg` 是**米白色**圆脸（官方品牌色），但在白色卡片上对比度很低 | 待定 |
+| `jdk` | 现状是 Simple Icons 的 OpenJDK 灰色 Duke 线稿；官方彩色只有 Adoptium 的**紫色 A 方标**（那是组织标，不是 Temurin 产品标） | 待定 |
 
 ## 曾经错过、已修的三个（同类错误别再犯）
 

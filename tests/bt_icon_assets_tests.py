@@ -298,6 +298,18 @@ class IconCoverage(unittest.TestCase):
     #   · pgadmin4        pgadmin-org/pgadmin4  docs/en_US/images/logo-128.png（官方大象线稿）。
     #                     它此前**有**图标，但那份是手绘占位图（圆角蓝底 + 文字 "Pg"）；
     #                     为此新增 PlaceholdersAreNotIcons 这条护栏。
+    #
+    # 2026-10-15 用户截图指出"JetBrains 的图标为什么是黑的、不都是彩色的吗"：
+    #   · JetBrains 六件套（idea/pycharm/clion/webstorm/goland/datagrip）原来是
+    #     **Simple Icons 的单色版**（`fill="#000000"` + viewBox 0 0 24 24）——
+    #     那个库本身就是单色库，所以界面上 6 个全是黑方块。已换成官方品牌资源站：
+    #     `resources.jetbrains.com/storage/products/company/brand/logos/<Product>_icon.svg`
+    #     （2~3.6KB、4 段渐变、6 个色值，黑底白字标 + 彩色渐变形）。
+    #   · 顺带全量筛查 `fill="#000000"`，另发现 deno / rust / bun / jdk 四个。
+    #     其中 **deno 与 rust 的官方标本来就是黑白的**（deno.land/logo.svg 是黑恐龙；
+    #     rust-logo-blk.svg 与 rust-logo-128x128.png 都是黑齿轮），**不动**。
+    #     bun（官方是米白圆脸，白底卡片上对比度低）与 jdk（现状是灰色 Duke 线稿，
+    #     官方彩色只有 Adoptium 的组织标）**待用户拍板**，见 assets/component-icons.md。
 
     @classmethod
     def setUpClass(cls):
