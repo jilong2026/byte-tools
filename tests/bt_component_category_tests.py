@@ -64,7 +64,11 @@ EXPECTED_MEMBERSHIP = {
                # 2026-10-12 并发那批补的服务型 CLI
                "k9s", "trivy", "docker-compose",
                # 2026-10-12 B7：JMeter（压测服务型，需 JDK 前置）
-               "jmeter"},
+               "jmeter",
+               # 2026-10-15 第六批：服务端/运维与 IaC（都是"解压即用"的单二进制/zip，
+               # 归档布局已用 tools/bt_archive_layout_audit.py 逐个验过）
+               "terraform", "opentofu", "argocd", "prometheus", "victoriametrics",
+               "k6", "pulumi", "istioctl", "talosctl"},
     # 「开发工具」= 只下载、不配置的 GUI 软件（Component.download_only）。
     # 这 17 个 key 的准入条件与别的 Tab 不同：**不进 LAUNCH_KEYS、不写环境变量、
     # 磁盘上不落 ~/.env-tools/<key>/ 目录**，所以遍历全组件的老断言都要按能力位豁免。
@@ -88,7 +92,10 @@ EXPECTED_MEMBERSHIP = {
                # 2026-10-12 B7：Ant（构建工具）
                "ant",
                # 2026-10-12 Dart（语言运行时；zip 顶层单目录 dart-sdk/ ⇒ bin）
-               "dart"},
+               "dart",
+               # 2026-10-15 第六批：语言运行时与开发 CLI（同批，布局已逐个验过）
+               "elixir", "scala-cli", "bazelisk", "just", "task", "oxlint",
+               "biome", "nushell", "starship", "gh"},
     # 剩下的服务型组件还不能一键启停（数据目录/端口/前置运行时的收尾还没做），
     # 留在「服务端组件」里 —— 它们接进框架后会自动挪到「一键启停」。
     # docker / kubectl 是 2026-10-10 从「其它软件」并进来的：那个 Tab 只剩 2 张卡，

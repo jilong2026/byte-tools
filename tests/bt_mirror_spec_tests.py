@@ -190,6 +190,10 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                # hermes 走 hermes-assets.nousresearch.com。同批其余都在
                                # GitHub（走加速器，算大陆源，登记在 github_assets）。
                                "kiro", "hermes",
+                               # 2026-10-15 第六批：terraform 的产物在 HashiCorp 自家 CDN
+                               # （releases.hashicorp.com），实测**没有任何大陆镜像**，
+                               # 同批其余 18 个都在 GitHub（加速器算大陆源，见 OFFICIAL_HOST）。
+                               "terraform",
                                # 2026-10-15 第五批里的 9 个非 GitHub 域名：全是官方
                                # 站点 / 厂商 CDN 直发，逐个实测过（同批其余 13 个在 GitHub）。
                                "ollama", "lm-studio", "ima", "kilo-code", "msty",
@@ -275,6 +279,15 @@ class OfficialIsLast(unittest.TestCase):
         # 2026-10-12 B3/B5：GitHub Releases 单二进制批，末位天然是裸 github.com；
         # 前面三个加速器都在 MAINLAND_MARKERS 里，所以大陆源 ≥3，不进 0 源豁免。
         # ripgrep 的 tag 实测**不带 v**（"15.2.0" 不是 "v15.2.0"），tag 模板已经钉住。
+        # 2026-10-15 第六批：这 18 个都是 GitHub 发行（加速器算大陆源，因此
+        # 不走任何例外表），末位天然是裸 github.com —— 与 deno/ripgrep 同列。
+        "opentofu": "github.com", "argocd": "github.com", "prometheus": "github.com",
+        "victoriametrics": "github.com", "k6": "github.com", "pulumi": "github.com",
+        "istioctl": "github.com", "talosctl": "github.com",
+        "elixir": "github.com", "scala-cli": "github.com", "bazelisk": "github.com",
+        "just": "github.com", "task": "github.com", "oxlint": "github.com",
+        "biome": "github.com", "nushell": "github.com", "starship": "github.com",
+        "gh": "github.com",
         "deno": "github.com", "ninja": "github.com", "duckdb": "github.com",
         "cmake": "github.com", "ripgrep": "github.com", "fd": "github.com",
         "bat": "github.com", "eza": "github.com", "zoxide": "github.com",

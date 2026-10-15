@@ -1083,6 +1083,19 @@ class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
         # 2026-10-12 Dart：zip 顶层单目录 dart-sdk/、根上 0 散文件 ⇒ collapse 后
         # install_dir 即 dart-sdk 内容，dart.exe 在 bin/ ⇒ path_subdir="bin"。
         "dart": "bin",
+        # 2026-10-15 第六批（19 个）：全部用 `tools/bt_archive_layout_audit.py`
+        # 逐个审过，下面就是审计输出的结论（不是照抄声明值）。
+        #   审计原文摘录：terraform/opentofu/prometheus/victoriametrics/k6/istioctl/
+        #   scala-cli/just/task/oxlint/nushell/starship → OK (归档根) 或单顶层目录内；
+        #   pulumi/elixir/gh → "实际在 bin"（所以写 bin）；
+        #   argocd/talosctl/bazelisk/biome → SKIP（单文件 exe，靠装完自检兜）。
+        #   ⚠ victoriametrics / oxlint 的 exe 名是官方原名（zip 不解压改名），
+        #     见 main.py 里那两行的 note。
+        "terraform": "", "opentofu": "", "argocd": "", "prometheus": "",
+        "victoriametrics": "", "k6": "", "pulumi": "bin", "istioctl": "",
+        "talosctl": "", "elixir": "bin", "scala-cli": "", "bazelisk": "",
+        "just": "", "task": "", "oxlint": "", "biome": "", "nushell": "",
+        "starship": "", "gh": "bin",
     }
     NOT_AUDITABLE = {"kafka", "pulsar", "seata", "docker"}
 

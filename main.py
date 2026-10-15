@@ -4573,8 +4573,18 @@ def fetch_vscode_versions() -> List[ComponentVersion]:
     return out
 
 
-def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple):
+def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple,
+                              tag_re: Optional[str] = None):
     """GitHub releases 抓取器：tag 给版本号，`asset_hints` 按 `((格式, 名字后缀), ...)` 挑产物。
+
+    入参 tag_re: 可选的"从 tag 里抠出版本号"正则（取第 1 个分组）。默认 None = 老行为
+         （`tag.lstrip("vV")` 之后必须整个就是版本号）。
+         2026-10-15 加它是因为两个组件的 tag 把版本号夹在中间：Biome 是
+         `@biomejs/biome@2.5.15`、Oxlint 是 `oxlint_v1.88.0` —— 老行为下
+         `_version_parts()` 直接判空、整批 release 全被跳过，抓取器报"版本列表为空"。
+         ⚠ **不要把老行为直接放宽**（例如改成"在 tag 里搜版本号"）：这个函数与既有组件
+         共用，放宽会连带让那些**故意**被跳过的 tag（如带 `-rc1` 的）重新进来。
+         需要前缀的组件就各自带一条 tag_re。
 
     一个版本可以挑中**多种**产物（DBX 同一次 release 里既有 portable.zip 又有 setup.exe），
     菜单就按传入顺序列出来，第一个也是默认。
@@ -4593,7 +4603,12 @@ def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple):
         for rel in (data if isinstance(data, list) else []):
             if not rel or rel.get("prerelease") or rel.get("draft"):
                 continue
-            tag = str(rel.get("tag_name") or "").lstrip("vV")
+            raw_tag = str(rel.get("tag_name") or "")
+            if tag_re:
+                m = _re.search(tag_re, raw_tag)
+                tag = m.group(1) if m else ""
+            else:
+                tag = raw_tag.lstrip("vV")
             if _version_parts(tag) is None:
                 continue
             assets = list(rel.get("assets") or [])
@@ -5655,7 +5670,160 @@ _CLI_TOOLS: tuple = (
              "这是计划里点名的本批最高风险项，实测确认可以避开。"
              "⚠ `builds.dotnet.microsoft.com` 本机连不上，`dotnetcli.azureedge.net` 通。",
      "url_tmpl": "https://dotnetcli.azureedge.net/dotnet/Sdk/{v}/dotnet-sdk-{v}-win-x64.zip"},
+    # ------------------------------------------------------------------
+    # 2026-10-15 第六批：服务端/运维与开发环境里"解压即用"的那批（用户问"这三个 Tab
+    # 就没要补的吗" -> 专项调研后接入）。URL / 字节数由我本人带 `byte-tools/1.2.1` UA
+    # 实测（206 + 前四字节 PK/MZ），台账见 DEVELOPMENT.md R20.8。
+    # ⚠ 同批的 `delta`（git diff 高亮分页器）**没接**：它没有官方图形标识（仓库里
+    # 只有终端截图），Simple Icons 的 `delta` 是三角洲航空的标 —— 宁缺勿错，撤掉。
+    # 全部用 `path_subdir=""`：`extract_archive` 会把"单顶层目录"塌成安装根，
+    # 而 `exec_path_in_home` 还会依次试 root / bin / Scripts / condabin —— 两者合起来
+    # 覆盖了这批的全部布局（含 gh 的 bin/、elixir 的 bin/*.bat）。
+    # ------------------------------------------------------------------
+    # —— 服务端组件 ——
+    {"key": "terraform", "name": "Terraform", "arch": "zip", "exe": "terraform",
+     "args": ["version"], "v": "1.16.6", "repo": None, "tag": None, "asset": None,
+     "size": 36770861, "cat": CAT_SERVER,
+     "note": "基础设施即代码（IaC）的事实标准：写 .tf 描述云资源，`terraform apply` 落地。"
+             "官方产物在 releases.hashicorp.com（zip 里只有一个 terraform.exe），"
+             "版本号从 HashiCorp 的官方 releases API 读。",
+     "url_tmpl": "https://releases.hashicorp.com/terraform/{v}/terraform_{v}_windows_amd64.zip"},
+    {"key": "opentofu", "name": "OpenTofu", "arch": "zip", "exe": "tofu",
+     "args": ["version"], "v": "1.13.1",
+     "repo": "opentofu/opentofu", "tag": "v{v}", "asset": "tofu_{v}_windows_amd64.zip",
+     "size": 36001381, "cat": CAT_SERVER,
+     "note": "Terraform 的开源分叉（Linux 基金会托管，许可证从 BUSL 换回 MPL）。"
+             "命令名是 `tofu`，用法与 terraform 基本一致。"},
+    {"key": "argocd", "name": "Argo CD CLI", "arch": "exe", "exe": "argocd",
+     "args": ["version", "--client"], "v": "3.5.5",
+     "repo": "argoproj/argo-cd", "tag": "v{v}", "asset": "argocd-windows-amd64.exe",
+     "size": 252547072, "cat": CAT_SERVER,
+     "note": "GitOps 交付的官方命令行（把 Git 仓库当唯一事实源，声明式同步到集群）。"
+             "这只是 CLI；**服务端 Argo CD 本身要部署在集群里**（官方只发容器镜像与清单）。"},
+    {"key": "prometheus", "name": "Prometheus", "arch": "zip", "exe": "prometheus",
+     "args": ["--version"], "v": "3.15.0",
+     "repo": "prometheus/prometheus", "tag": "v{v}",
+     "asset": "prometheus-{v}.windows-amd64.zip", "size": 114650144, "cat": CAT_SERVER,
+     "note": "指标采集与告警的时序库，监控领域的事实标准。zip 里除 prometheus.exe 还有"
+             "console_libraries/ 与 consoles/（Web 控制台用），根上也有散文件，"
+             "所以解压不塌层、直接就是安装根。默认监听 9090。"},
+    {"key": "victoriametrics", "name": "VictoriaMetrics", "arch": "zip",
+     "exe": "victoria-metrics-windows-amd64-prod", "args": ["--version"], "v": "1.154.0",
+     "repo": "VictoriaMetrics/VictoriaMetrics", "tag": "v{v}",
+     "asset": "victoria-metrics-windows-amd64-v{v}.zip", "size": 7488593, "cat": CAT_SERVER,
+     "note": "高性能时序数据库，兼容 Prometheus 的查询语言与抓取配置，单二进制即可跑。"
+             "与 Prometheus 的区别：它更省内存、可做长期存储。默认监听 8428。"},
+    {"key": "k6", "name": "k6", "arch": "zip", "exe": "k6", "args": ["version"],
+     "v": "2.3.0", "repo": "grafana/k6", "tag": "v{v}",
+     "asset": "k6-v{v}-windows-amd64.zip", "size": 31706650, "cat": CAT_SERVER,
+     "note": "Grafana 家的压测工具（脚本用 JavaScript 写，比 JMeter 轻得多）。"
+             "本工具已有的 JMeter 是图形化/XML 路线，k6 是代码路线，两个都在。"},
+    {"key": "pulumi", "name": "Pulumi", "arch": "zip", "exe": "pulumi",
+     "subdir": "bin", "args": ["version"], "v": "3.268.0",
+     "repo": "pulumi/pulumi", "tag": "v{v}", "asset": "pulumi-v{v}-windows-x64.zip",
+     "size": 117108545, "cat": CAT_SERVER,
+     "note": "IaC 的另一条路线：用真正的编程语言（TS/Python/Go/C#）写基础设施，"
+             "而不是 DSL。可执行文件在 zip 的 bin/ 下。"},
+    {"key": "istioctl", "name": "Istio CLI", "arch": "zip", "exe": "istioctl",
+     "args": ["version", "--remote=false"], "v": "1.31.1",
+     "repo": "istio/istio", "tag": "{v}", "asset": "istioctl-{v}-win-amd64.zip",
+     "size": 31244552, "cat": CAT_SERVER,
+     "note": "服务网格 Istio 的命令行（安装/诊断/注入 Sidecar）。"
+             "⚠ 它依赖一个能连上的 Kubernetes 集群；服务端组件本身由 istioctl 装进集群。"},
+    {"key": "talosctl", "name": "Talos Linux CLI", "arch": "exe", "exe": "talosctl",
+     "args": ["version", "--client"], "v": "1.14.2",
+     "repo": "siderolabs/talos", "tag": "v{v}", "asset": "talosctl-windows-amd64.exe",
+     "size": 117414912, "cat": CAT_SERVER,
+     "note": "Talos Linux（专为 K8s 做的极简发行版）的官方 CLI，用来生成集群配置、"
+             "引导节点与拿 kubeconfig。"},
+    # —— 开发环境 ——
+    {"key": "elixir", "name": "Elixir", "arch": "zip", "exe": "elixir",
+     "args": ["--version"], "v": "1.20.4",
+     "repo": "elixir-lang/elixir", "tag": "v{v}", "asset": "elixir-otp-27.zip",
+     "subdir": "bin", "size": 8658381, "cat": CAT_ENV,
+     "note": "跑在 Erlang 虚拟机上的函数式语言（Web 框架 Phoenix 的底座）。"
+             "⚠ **前置是本工具里那个隐藏组件 Erlang/OTP** —— 它与本工具装 Erlang 的路径"
+             "一致时不冲突；自己另外装过 OTP 的话，注意别把两套混着用。"},
+    {"key": "scala-cli", "name": "Scala CLI", "arch": "zip", "exe": "scala-cli",
+     "args": ["version"], "v": "1.18.0",
+     "repo": "VirtusLab/scala-cli", "tag": "v{v}", "asset": "scala-cli-x86_64-pc-win32.zip",
+     "size": 43050388, "cat": CAT_ENV,
+     "note": "Scala 的全家桶工具：单文件脚本、编译、打包、跑测试都用它，"
+             "不用先配 sbt 工程。首次运行会自己拉 JVM 与依赖。"},
+    {"key": "bazelisk", "name": "Bazelisk", "arch": "exe", "exe": "bazelisk",
+     "args": ["version"], "v": "1.29.0",
+     "repo": "bazelbuild/bazelisk", "tag": "v{v}", "asset": "bazelisk-windows-amd64.exe",
+     "size": 10502144, "cat": CAT_ENV,
+     "note": "Bazel 的版本选择器：按项目里的 .bazelversion 自动下载并调用对应版本的 Bazel。"
+             "官方推荐用它代替直接装 Bazel（本工具按这条建议，只登记它）。"},
+    {"key": "just", "name": "Just", "arch": "zip", "exe": "just", "args": ["--version"],
+     "v": "1.59.0", "repo": "casey/just", "tag": "{v}",
+     "asset": "just-{v}-x86_64-pc-windows-msvc.zip", "size": 2292448, "cat": CAT_ENV,
+     "note": "Make 的现代替代：一个 justfile 写常用命令，`just <任务名>` 就执行。"
+             "没有 Make 那些制表符与隐式规则的坑。"},
+    {"key": "task", "name": "Task", "arch": "zip", "exe": "task", "args": ["--version"],
+     "v": "3.54.0", "repo": "go-task/task", "tag": "v{v}", "asset": "task_windows_amd64.zip",
+     "size": 17023230, "cat": CAT_ENV,
+     "note": "另一个任务运行器（YAML 写 Taskfile），特色是**自动缓存**："
+             "输入文件没变就不重复跑，适合当项目的构建入口。"},
+    {"key": "oxlint", "name": "Oxlint", "arch": "zip",
+     "exe": "oxlint-x86_64-pc-windows-msvc", "args": ["--version"], "v": "1.88.0",
+     "repo": "oxc-project/oxc", "tag": "oxlint_v{v}",
+     "tag_re": r"(\d+\.\d+\.\d+)$",   # tag 形如 oxlint_v1.88.0
+     "asset": "oxlint-x86_64-pc-windows-msvc.zip", "size": 5762811, "cat": CAT_ENV,
+     "note": "Rust 写的 JS/TS 检查器，比 ESLint 快一两个数量级，适合放进提交前钩子。"
+             "⚠ 它的 release tag 形如 `oxlint_v1.88.0`（与版本号不同形）。"},
+    {"key": "biome", "name": "Biome", "arch": "exe", "exe": "biome", "args": ["--version"],
+     "v": "2.5.15", "repo": "biomejs/biome", "tag": "%40biomejs%2Fbiome%40{v}",
+     "tag_re": r"(\d+\.\d+\.\d+)$",   # tag 形如 @biomejs/biome@2.5.15
+     "asset": "biome-win32-x64.exe", "size": 79007744, "cat": CAT_ENV,
+     "note": "Rust 写的 JS/TS 格式 + Lint 一体化工具（对标 Prettier + ESLint）。"
+             "⚠ tag 形如 `@biomejs/biome@2.5.15`，URL 里要按 `%40`/`%2F` 转义。"},
+    {"key": "nushell", "name": "Nushell", "arch": "zip", "exe": "nu", "args": ["--version"],
+     "v": "0.116.1", "repo": "nushell/nushell", "tag": "{v}",
+     "asset": "nu-{v}-x86_64-pc-windows-msvc.zip", "size": 60864303, "cat": CAT_ENV,
+     "note": "把管道里的数据当结构化表格处理的现代 shell（不是传字符串）。"
+             "命令名是 `nu`。它的语法与 bash 不同，建议先看官方入门再换默认 shell。"},
+    {"key": "starship", "name": "Starship", "arch": "zip", "exe": "starship",
+     "args": ["--version"], "v": "1.26.0",
+     "repo": "starship/starship", "tag": "v{v}",
+     "asset": "starship-x86_64-pc-windows-msvc.zip", "size": 4758038, "cat": CAT_ENV,
+     "note": "跨 shell 的提示符（prompt）：自动显示当前目录的 git 分支/语言版本/耗时等。"
+             "⚠ 装完要在自己的 shell 配置里初始化一次（官方文档给的 `starship init` 那一行），"
+             "本工具只把二进制放进 PATH，不改你的 shell 配置。"},
+    {"key": "gh", "name": "GitHub CLI", "arch": "zip", "exe": "gh", "args": ["--version"],
+     "v": "2.102.0", "repo": "cli/cli", "tag": "v{v}",
+     "asset": "gh_{v}_windows_amd64.zip", "subdir": "bin", "size": 15512013, "cat": CAT_ENV,
+     "note": "GitHub 官方命令行：开 PR、看 issue、跑 workflow 都不用开浏览器。"
+             "可执行文件在 zip 的 bin/ 下。首次用会让你登录一次 GitHub 账号。"},
 )
+
+
+def fetch_terraform_versions() -> List[ComponentVersion]:
+    """Terraform：HashiCorp 官方 releases API 给一个 JSON 数组，元素里有版本号。
+
+    ⚠ 这个 API 返回的是**全部历史版本**（含 alpha/beta/rc 预发布）。本工具只取
+    `version` 字段里**不含连字符**的那些（官方把预发布写成 `1.14.0-beta1`），
+    再按数值降序取前几个 —— 否则下拉框首位会是某个 beta。
+    """
+    data = _get("https://api.releases.hashicorp.com/v1/releases/terraform",
+                timeout=DOWNLOAD_PROBE_TIMEOUT * 3).json()
+    if not isinstance(data, list):
+        raise RuntimeError(f"Terraform releases API 返回的不是列表：{type(data).__name__}")
+    vers = []
+    for item in data:
+        v = str((item or {}).get("version") or "")
+        if not v or "-" in v:            # 跳过 alpha / beta / rc
+            continue
+        if _version_parts(v) is not None:
+            vers.append(v)
+    if not vers:
+        raise RuntimeError("Terraform releases API 里没读出稳定版本号")
+    vers.sort(key=_version_parts, reverse=True)
+    return [_cv(v, {"Windows": [f"https://releases.hashicorp.com/terraform/{v}/"
+                                f"terraform_{v}_windows_amd64.zip"]},
+                {"Windows": "zip"})
+            for v in vers[:6]]
 
 
 def _cli_url(spec: dict, v: str) -> str:
@@ -5714,7 +5882,8 @@ def _cli_fetcher(spec: dict):
     if spec.get("repo"):
         # 资产名里带版本号的用 {v} 模板精确匹配，不带的用固定名
         return make_github_asset_fetcher(
-            spec["key"], spec["repo"], ((spec["arch"], _cli_asset_suffix(spec)),))
+            spec["key"], spec["repo"], ((spec["arch"], _cli_asset_suffix(spec)),),
+            tag_re=spec.get("tag_re"))
     return _CLI_CUSTOM_FETCHERS[spec["key"]]
 
 
@@ -5798,6 +5967,9 @@ _CLI_CUSTOM_FETCHERS = {
     "helm": fetch_helm_versions,
     "sqlite": fetch_sqlite_versions,
     "dotnet-sdk": fetch_dotnet_sdk_versions,
+    # 2026-10-15 第六批：terraform 的产物在 HashiCorp 自家 CDN（GitHub release 上只有源码），
+    # 版本号走官方 releases API。同批其余 19 个都是 GitHub 托管，走通用抓取器。
+    "terraform": fetch_terraform_versions,
 }
 
 
@@ -6570,6 +6742,25 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "zettlr": "Zettlr：面向学术写作的 Markdown 编辑器（引用管理、卡片笔记）。",
     "yaak": "Yaak：离线优先的 API 客户端，数据存本地。",
     "gvim": "Vim (gVim)：Vim 的 Windows 图形版，带菜单与鼠标支持。",
+    "terraform": "Terraform：基础设施即代码（IaC）的事实标准，写 .tf 描述云资源。",
+    "opentofu": "OpenTofu：Terraform 的开源分叉（Linux 基金会托管），命令名是 tofu。",
+    "argocd": "Argo CD CLI：GitOps 交付的命令行（把 Git 当唯一事实源同步到集群）。",
+    "prometheus": "Prometheus：指标采集与告警的时序库，监控领域的事实标准。",
+    "victoriametrics": "VictoriaMetrics：高性能时序数据库，兼容 Prometheus 查询与抓取。",
+    "k6": "k6：Grafana 家的压测工具，脚本用 JavaScript 写，比 JMeter 轻得多。",
+    "pulumi": "Pulumi：用真正的编程语言（TS/Python/Go）写基础设施的 IaC。",
+    "istioctl": "Istio CLI：服务网格 Istio 的命令行，负责安装与诊断。",
+    "talosctl": "Talos Linux CLI：生成集群配置、引导节点、拿 kubeconfig。",
+    "elixir": "Elixir：跑在 Erlang 虚拟机上的函数式语言（Phoenix 框架的底座）。",
+    "scala-cli": "Scala CLI：Scala 的单文件脚本 + 编译 + 打包 + 测试一体化工具。",
+    "bazelisk": "Bazelisk：按项目 .bazelversion 自动选 Bazel 版本并调用的启动器。",
+    "just": "Just：Make 的现代替代，一个 justfile 写常用命令。",
+    "task": "Task：YAML 写任务的任务运行器，带输入缓存（没变就不重跑）。",
+    "oxlint": "Oxlint：Rust 写的 JS/TS 检查器，比 ESLint 快一两个数量级。",
+    "biome": "Biome：Rust 写的 JS/TS 格式化 + Lint 一体化工具。",
+    "nushell": "Nushell：把管道数据当结构化表格处理的现代 shell（命令名 nu）。",
+    "starship": "Starship：跨 shell 的提示符，自动显示 git 分支/语言版本/耗时。",
+    "gh": "GitHub CLI：GitHub 官方命令行，开 PR/看 issue/跑 workflow 不用开浏览器。",
     "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
     "trae": "Trae：字节跳动的 AI 编程 IDE（国际版）。整库理解、多文件改写、Builder 模式从需求直出工程。",
     "trae-cn": "Trae CN：Trae 的中国大陆版。功能与界面同国际版，独立站点、国内直连不需要科学上网。",
@@ -6896,6 +7087,25 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "zettlr": "https://www.zettlr.com/download",              # INT 官网下载页
     "yaak": "https://yaak.app/download",                      # INT 官网下载页
     "gvim": "https://www.vim.org/download.php",               # INT 官网下载页（Win 版入口）
+    "terraform": "https://developer.hashicorp.com/terraform/downloads",  # INT 官方下载页
+    "opentofu": "https://opentofu.org/docs/intro/install/",   # INT 官方安装说明
+    "argocd": "https://argo-cd.readthedocs.io/en/stable/cli_installation/",  # INT CLI 安装页
+    "prometheus": "https://prometheus.io/download/",          # INT 官方下载页
+    "victoriametrics": "https://docs.victoriametrics.com/",  # INT 官方文档（下载入口同页）
+    "k6": "https://grafana.com/docs/k6/latest/get-started/installation/",  # INT 官方安装说明
+    "pulumi": "https://www.pulumi.com/docs/iac/download-install/",  # INT 官方下载页
+    "istioctl": "https://istio.io/latest/docs/ops/diagnostic-tools/istioctl/",  # INT 官方文档
+    "talosctl": "https://www.talos.dev/latest/talos-guides/install/talosctl/",  # INT 官方安装说明
+    "elixir": "https://elixir-lang.org/install.html",         # INT 官方安装说明
+    "scala-cli": "https://scala-cli.virtuslab.org/install/",  # INT 官方安装说明
+    "bazelisk": "https://github.com/bazelbuild/bazelisk",     # INT 官方仓库（README 即用法）
+    "just": "https://just.systems/man/en/",                   # INT 官方手册（含安装）
+    "task": "https://taskfile.dev/installation/",             # INT 官方安装说明
+    "oxlint": "https://oxc.rs/docs/guide/usage/linter.html",  # INT 官方文档
+    "biome": "https://biomejs.dev/guides/getting-started/",   # INT 官方入门（含安装）
+    "nushell": "https://www.nushell.sh/",                     # INT 官网（下载入口同页）
+    "starship": "https://starship.rs/guide/#%F0%9F%9A%80-installation",  # INT 官方安装说明
+    "gh": "https://cli.github.com/",                          # INT 官网（下载入口同页）
     "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
     "trae": "https://www.trae.ai/",                           # INT  国际站
     "trae-cn": "https://www.trae.cn/",                        # CN   大陆站
@@ -7175,6 +7385,42 @@ COMPONENT_USAGE: Dict[str, str] = {
     "zettlr": "双击安装器装完即用，第一次让你选工作目录（笔记同样是纯 Markdown 文件）。",
     "yaak": "双击安装器装完即用，数据默认存本地、可导出。",
     "gvim": "双击安装器装完即用（会一并装命令行版 vim）。配置文件是 `~/_vimrc`。",
+    "terraform": "把二进制放进 PATH 后，在项目目录里 `terraform init` → `plan` → `apply`。"
+                 "**认证要走各家云的密钥**（AWS_ACCESS_KEY_ID 之类），本工具不碰这类凭据。",
+    "opentofu": "用法与 terraform 基本一致（`tofu init` / `plan` / `apply`）；"
+                "已有 .tf 文件可以直接拿来用。",
+    "argocd": "先 `argocd login <你的 argocd 服务端>` 再操作；服务端本身要另外部署在集群里。"
+              "本工具只提供这个 CLI。",
+    "prometheus": "解压目录里有 prometheus.exe 与示例 prometheus.yml，直接跑起来就监听 9090。"
+                  "要抓谁、告警规则写哪儿，都在那个 yml 里配。",
+    "victoriametrics": "跑起来默认监听 8428；抓取目标用 `-promscrape.config` 指一个"
+                       "Prometheus 格式的配置即可。",
+    "k6": "用法是 `k6 run 脚本.js`（脚本里用 `import http from 'k6/http'` 写请求与断言）。"
+          "它也有 Grafana Cloud 的云端结果面板，可选，不影响本地跑。",
+    "pulumi": "要先用 `pulumi login`（可登录官方托管或自建后端）再 `pulumi up`；"
+              "项目用你熟悉的语言（TS/Python/Go/C#）写，不需要学新 DSL。",
+    "istioctl": "常用的是 `istioctl install` 装网格、`istioctl analyze` 查配置问题。"
+                "⚠ 都要先有一个能用的 kubeconfig 与连得上的集群。",
+    "talosctl": "用 `talosctl gen config` 生成机器配置，引导节点后再 `talosctl kubeconfig` 拿集群凭据。"
+                "它管的是 Talos Linux 节点，不是在 Windows 上跑 K8s。",
+    "elixir": "装完 `elixir --version` 应能看到 Erlang/OTP 与 Elixir 两个版本号。"
+              "**它需要 Erlang/OTP**（见卡片说明里的前置提示）。",
+    "scala-cli": "直接 `scala-cli run 文件.scala` 就能跑单文件；建工程用 `scala-cli init`。"
+                 "首次运行会下载 JVM 与依赖，之后有缓存。",
+    "bazelisk": "把它当 `bazel` 用即可（`bazelisk build //...`）；"
+                "项目里有 .bazelversion 时它会自己下对应版本。",
+    "just": "在项目根写一个 justfile，`just` 列全部任务、`just <任务名>` 执行。",
+    "task": "在项目根写 Taskfile.yml，`task --list` 看任务、`task <名字>` 执行；"
+            "声明了 sources/generates 的任务会自动跳过没必要的重跑。",
+    "oxlint": "在项目目录里直接 `oxlint`（默认查当前目录），`oxlint --fix` 自动修可修项。"
+              "它只做 Lint，格式化交给 biome / prettier。",
+    "biome": "`biome check --write .` 一把跑格式 + Lint；`biome format .` 只格式化。",
+    "nushell": "输入 `nu` 进入它的交互界面；它的管道传的是结构化数据（`ls | where size > 1mb`）。"
+               "⚠ 想设成默认 shell 要自己改终端配置，本工具不改。",
+    "starship": "装完在 shell 配置里加一行初始化（官方文档有 PowerShell / bash 两种写法），"
+                "重启终端后提示符就变了。本工具不改你的 shell 配置。",
+    "gh": "首次用 `gh auth login` 登录 GitHub。之后 `gh pr create`、`gh issue list`、"
+          "`gh run watch` 都能在终端里做完。",
     "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
     "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
     "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",

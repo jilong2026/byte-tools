@@ -742,7 +742,7 @@ UI 组成：
    `一键启停（15）` / `服务端组件（14）` / `开发环境（32）` / `开发工具（26）` / `Agent客户端（40）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起五个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 161 项可见 + 1 个隐藏的 `erlang`，别写死；`build_components()` 一改就会变）
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起五个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 180 项可见 + 1 个隐藏的 `erlang`，别写死；`build_components()` 一改就会变）
 5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
 6. **底部状态栏**：显示当前系统信息、可点开的工作目录与 `组件：N`（N=界面可见数，现 43；只写数字不写句子，版本号在标题栏 chip 上不重复）
 

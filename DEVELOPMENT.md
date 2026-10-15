@@ -480,7 +480,7 @@ tmp.replace(self.dest)
 
 ### R2.1 规则描述
 
-界面上 **161 个可见组件**归入且仅归入五个 Tab（162 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
+界面上 **180 个可见组件**归入且仅归入五个 Tab（181 个组件里含隐藏的 `erlang`），分类标准必须**机械可判**，不允许按感觉塞组件：
 
 | 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
@@ -2516,13 +2516,72 @@ Zettlr 4.8.0 / Yaak 2026.9.0 / Vim (gVim) 9.2.1192。
 | `iflow-cli` / `roo-code` | 官方已停运 / 公告将停运（roo 迁 Kilo） |
 | 只上微软商店的一批（`quark` / `perplexity` / `xiaoyi` / `lingguang` / `devtoys`） | 官方只发 msix / 商店分发，没有可直接下载的独立 exe |
 
-**仍未接入、但**能**接的（下一批候选，方式已明确）**：本批只落了"只下载"类的两个 Tab。
-「开发环境 / 服务端组件」那两批调研出的候选（terraform / rclone / minikube / argocd / gitea /
-prometheus / grafana / k6 / mariadb / influxdb / gh / act / k9s 之外的运维 CLI 等约 40 个）**都还没接** ——
-它们要额外做两件事：① 写进 `_CLI_TOOLS`（GitHub 托管的能自动配抓取器，HashiCorp / Grafana /
-InfluxData / MariaDB 这类厂商 CDN 的**要另写版本抓取器**）；② 用
+**当时还剩下的那批（现已由 R20.8 接掉其中 19 个）**：本批只落了"只下载"类的两个 Tab，
+「开发环境 / 服务端组件」的候选留到了下一排 —— 它们要额外做两件事：① 写进 `_CLI_TOOLS`
+（GitHub 托管的能自动配抓取器，厂商 CDN 的**要另写版本抓取器**）；② 用
 `tools/bt_archive_layout_audit.py` 逐个验证归档布局（`path_subdir` 写错会让"装好了但 PATH 里没东西"）。
-按项目惯例这批应当**单独一排**做。
+
+### R20.8 第六批：「开发环境 / 服务端组件」里"解压即用"的 19 个（2026-10-15）
+
+用户问"一键启停、服务端组件、开发环境，没有需要新增的组件吗" —— 于是把 R20.7 里
+留给下一排的那批做了。**只收"解压即用"形态**（单二进制 exe 或 zip），
+`installer_mode` 与 tar.gz / 7z 的都没收（前者要静默安装参数，后者本工具不解）。
+
+| key | 显示名 | Tab | 版本位 | 实测字节 | 来源 |
+|---|---|---|---|---|---|
+| `terraform` | Terraform | 服务端 | 1.13.4 | 30,962,506 | `releases.hashicorp.com`（**唯一非 GitHub 的那个**） |
+| `opentofu` | OpenTofu | 服务端 | 1.12.8 | 35,485,271 | GitHub Releases |
+| `argocd` | Argo CD CLI | 服务端 | 3.5.5 | 252,547,072 | GitHub Releases（裸 exe） |
+| `prometheus` | Prometheus | 服务端 | 3.15.0 | 114,650,144 | GitHub Releases |
+| `victoriametrics` | VictoriaMetrics | 服务端 | 1.154.0 | 7,488,593 | GitHub Releases |
+| `k6` | k6 | 服务端 | 2.3.0 | 31,706,650 | GitHub Releases |
+| `pulumi` | Pulumi | 服务端 | 3.268.0 | 117,108,545 | GitHub Releases |
+| `istioctl` | Istio CLI | 服务端 | 1.31.1 | 31,244,552 | GitHub Releases |
+| `talosctl` | Talos Linux CLI | 服务端 | 1.11.0 | 94,281,216 | GitHub Releases（裸 exe） |
+| `elixir` | Elixir | 开发环境 | 1.20.4 | 8,658,381 | GitHub Releases |
+| `scala-cli` | Scala CLI | 开发环境 | 1.18.0 | 43,050,388 | GitHub Releases |
+| `bazelisk` | Bazelisk | 开发环境 | 1.29.0 | 10,502,144 | GitHub Releases（裸 exe） |
+| `just` | Just | 开发环境 | 1.59.0 | 2,292,448 | GitHub Releases |
+| `task` | Task | 开发环境 | 3.54.0 | 17,023,230 | GitHub Releases |
+| `oxlint` | Oxlint | 开发环境 | 1.88.0 | 5,762,811 | GitHub Releases |
+| `biome` | Biome | 开发环境 | 2.5.15 | 79,007,744 | GitHub Releases（裸 exe） |
+| `nushell` | Nushell | 开发环境 | 0.116.1 | 60,864,303 | GitHub Releases |
+| `starship` | Starship | 开发环境 | 1.26.0 | 4,758,038 | GitHub Releases |
+| `gh` | GitHub CLI | 开发环境 | 2.102.0 | 15,512,013 | GitHub Releases |
+
+**这一批的方法论（可装配类通用，下次照抄）**
+
+1. **`path_subdir` 先用 `""` 起手**，因为两条既有逻辑合起来覆盖了绝大多数归档：
+   `extract_archive` 末尾会把"根上只有一个目录且没有散文件"塌成安装根，
+   而 `exec_path_in_home` 会依次试 `path_subdir` → `bin` → `Scripts` → `condabin` → 根。
+2. **但一定要跑 `tools/bt_archive_layout_audit.py` 终审**。我先按 `""` 登记，
+   审计当场报出 5 个问题，全是"声明与归档不符"：
+   - **BAD（exe 在子目录，要显式写 subdir）**：`pulumi` → `bin`、`elixir` → `bin`、`gh` → `bin`
+   - **FAIL（归档里根本没有我登记的那个 exe 名）**：`victoriametrics` 实际叫
+     `victoria-metrics-windows-amd64-prod.exe`、`oxlint` 实际叫
+     `oxlint-x86_64-pc-windows-msvc.exe`
+   `pulumi` 那次还栽了个跟头：先写 `subdir="pulumi/bin"`，审计报"PATH 指的
+   `pulumi/pulumi/bin`"—— 因为塌了一层之后根已经是 `pulumi/`，所以只能写 `bin`。
+3. **zip 里的二进制名是改不了的**：`install_binary` 的"按 exec_name 改名"只对
+   **单文件形态**（exe/war/裸文件）生效；zip 解压出来的文件保持官方名。
+   所以 `victoriametrics` / `oxlint` 的 `exec_name` 只能是那一长串官方名 ——
+   功能没问题（探测/PATH 都按它找），只是用户敲的命令会长；要短名得自己复制一份改名。
+4. **单文件 exe 的 SKIP 是正常的**：`argocd` / `talosctl` / `bazelisk` / `biome` 审计报
+   SKIP（单二进制没有可随机读的清单），这类靠装完自检 `verify_bin_dir` 兜。
+5. **`delta` 撤掉了**：它没有官方图形标识（仓库里只有终端截图），而 Simple Icons 的
+   `delta` 是**三角洲航空**的标（还是横幅，护栏本身也会拒）。宁缺勿错，不接。
+
+**镜像登记的新姿势**：可装配的 GitHub 组件登记进 `OFFICIAL_HOST`（值 `github.com`，
+与 `deno`/`ripgrep` 同列），**不是** `github_assets`（那张是只下载类的）；
+`terraform` 是唯一"官方单源、零大陆镜像"的，进 `OFFICIAL_ONLY_EXCEPTION`。
+
+**仍未接（候选还在，方式同上）**：grafana / loki / jaeger / alertmanager / otelcol（多半要 tar.gz
+或厂商 CDN 抓取器）、rclone / mariadb / influxdb / cockroachdb / nomad（厂商 CDN）、
+gitea / gitlab-runner / nexus（厂商 CDN、且是**服务**不是 CLI）、
+minikube / kind / k3d / kustomize / stern / nerdctl / velero / kubeseal / mkcert / sops / restic /
+terragrunt / act（GitHub，多数也能接）、zig / julia / php / nim / groovy / tinygo / v / nasm /
+clojure / jj / lazygit / aria2 / hyperfine / dust / duf / scc / miller（语言与效率 CLI）。
+本批只挑了我能一次验完的 19 个。
 
 ## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
 
