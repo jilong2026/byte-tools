@@ -3061,6 +3061,20 @@ class RunningTabMarker(unittest.TestCase):
         main.SERVICE_MANAGER._is_listening = lambda p, host="127.0.0.1": True
         self.addCleanup(setattr, main.SERVICE_MANAGER, "_is_listening",
                         self._orig_listen)
+        # 2026-10-16 加：**掐掉真实版本抓取**。本类要构造真 MainWindow（`show()` 会触发
+        # `_start_fetch_versions`），而组件已经有 180 个 —— 每建一次窗口就起一大把
+        # QThread 去真发 HTTP。它们由 closeEvent 的 drain 收尾，但 drain 有预算
+        # （6s + 12s），CI 机器慢 + 网络差时收不干净，**解释器退出阶段就会撞 Qt 的
+        # fail-fast**：表现是 unittest 打出 `OK`、进程却以 0xC0000409 退出
+        # （CI run 38778602822 实测到的就是这个码；本机更快所以连跑 4 遍都不复现）。
+        # 本类要验的是"Tab 上有没有标 ●、有没有自动跳过去"，与版本抓取无关，
+        # 按项目既有做法直接打桩（bt_install_safety / bt_refresh_versions 都这么做）。
+        self._orig_fetch = main.MainWindow._start_fetch_versions
+        self._orig_detect = main.ComponentCard._detect_status
+        main.MainWindow._start_fetch_versions = lambda self, *a, **k: None
+        main.ComponentCard._detect_status = lambda self, *a, **k: None
+        self.addCleanup(setattr, main.MainWindow, "_start_fetch_versions", self._orig_fetch)
+        self.addCleanup(setattr, main.ComponentCard, "_detect_status", self._orig_detect)
 
     def _win_with_nacos_running(self):
         """造一个"nacos 正在运行"的真窗口，返回 (窗口, 日志列表)。"""
