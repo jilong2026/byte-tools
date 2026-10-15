@@ -252,8 +252,7 @@ def run_one(path: Path, python: str, verbose: bool) -> tuple[bool, str, float, i
     # 之前这类失败只贴输出尾巴，尾巴上明明写着 OK，看的人无从下手 ——
     # 退出码是唯一能把"真失败"和"退出阶段崩"分开的证据，必须带出来。
     if not passed:
-        detail = f"[子进程退出码 {proc.returncode}]
-" + detail
+        detail = "[子进程退出码 %d]\n" % proc.returncode + detail
 
     return passed, detail, elapsed, count
 
