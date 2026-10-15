@@ -321,7 +321,7 @@ byte-tools/
 | `installer_args` | Dict[str, List[str]] | 按操作系统键取的安装器静默参数 |
 | `unsupported_platform_hint` | Optional[str] | 平台不支持自动下载时的友好提示文本（如 Docker 在 Windows 提示用 Docker Desktop；为 None 表示该平台支持） |
 | `artifacts` | list[DownloadArtifact] | 仅「开发工具」用：同一个版本的多种产物（exe 安装器 / zip 便携包），各自带 URL 列表与官方声明字节数。**不要把它和 `url_list_map` 混用** —— 后者是同一个文件的多镜像，前者是两个不同的文件 |
-| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（一键启停 / 开发环境 / 开发软件 / 开发工具；2026-10-14 起「一键启停」排第一）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
+| `category` | str | 界面 Tab 分组名，取值限于 `COMPONENT_CATEGORIES`（一键启停 / 服务端组件 / 开发环境 / 开发工具；2026-10-14 起「一键启停」排第一、「服务端组件」排第二）。**不在构造处手写**：`build_components()` 末尾统一赋值 —— 可启停组件按 `LAUNCH_KEYS` 派生成「一键启停」，其余按 `COMPONENT_CATEGORY_OF[comp.key]`，漏登记即 KeyError |
 | `official_url` | str \| None | 详情页那个可点击官网链接的 href（2026-10-14 新增）。**不在构造处手写**：`build_components()` 末尾按 `COMPONENT_OFFICIAL_URLS[comp.key]` 统一赋值，漏登记即 KeyError。该表 88 条均为人工逐条核实，口径是"有中国大陆官网入口的优先用（含独立 CN 域名与同域名中文路径），否则用真实国际官网首页"。**绝不可从下载 URL 推导** —— 推导会产出 `api.adoptium.net`、`artifacts.elastic.co`、`github.com` 这类非官网域名，详见 DEVELOPMENT.md 规则 R19 |
 
 方法：
@@ -739,7 +739,7 @@ UI 组成：
 搜索条右侧还挂着「▦ 网格 / ☰ 列表」与「📋 日志」两颗按钮——**它们也不放标题栏**：标题栏已有 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽
 4. **主体**：中部卡片区（`QWidget#bodyArea`，吃满中部）按 `COMPONENT_CATEGORIES` 分四个 Tab，Tab 外层
    `QTabWidget`（`objectName="compTabs"`，`setTabPosition(North)` 顶部横向），**标题带组件数量**：
-   `一键启停（15）` / `开发环境（32）` / `开发软件（14）` / `开发工具（26）`（数字由 `len(comps)` 现算，不写死）；
+   `一键启停（15）` / `服务端组件（14）` / `开发环境（32）` / `开发工具（26）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
    - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起四个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 87 项，别写死；`build_components()` 一改就会变）
@@ -1461,7 +1461,7 @@ def fetch_foo_versions() -> List[ComponentVersion]:
 3. 注册到 `FETCHERS`：`"foo": fetch_foo_versions`
 4. 在 `build_components()` 末尾 `components.append(Component(key="foo", ...))`
 5. 若该组件在特定平台不支持自动下载（如 Docker 在 Windows），设 `unsupported_platform_hint="Windows 下请安装 Docker Desktop"`，对应 OS 的 `url_list_map` 返回空列表
-6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`开发环境` / `开发软件` / `开发工具` / `一键启停`；能一键启停的组件会被 `LAUNCH_KEYS` 自动改归「一键启停」，所以这里给它们写的是「退出白名单之后回哪儿」）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
+6. 在 `COMPONENT_CATEGORY_OF` 里登记分类（`CAT_ENV` / `CAT_SERVER` / `CAT_TOOL` / `CAT_LAUNCH` 四个常量；能一键启停的组件会被 `LAUNCH_KEYS` 自动改归「一键启停」，所以这里给它们写的是「退出白名单之后回哪儿」）——**漏登记会直接 KeyError**，界面不会静默少一个 Tab
 7. UI 会自动在对应 Tab 下出现一张新卡片，无需改动布局代码
 
 > **R1 硬性要求**（见 [DEVELOPMENT.md](./DEVELOPMENT.md) R1.1）：新增组件的**下载 URL** 未配置 ≥2 个国内镜像地址，不予合入；确实凑不出 2 个源时（实测国内无该制品镜像，如 MongoDB / PostgreSQL 二进制包），必须在 R1.5 登记实测结论并保留官网单源，不得用猜测的镜像路径凑数。版本**索引页**不适用本要求（见 R1.7 第 4 节，镜像索引版本数残缺）。

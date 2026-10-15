@@ -484,25 +484,51 @@ tmp.replace(self.dest)
 | 分类 | 判定标准 | 组件（含隐藏 erlang） |
 |------|----------|--------------------|
 | **一键启停** | 卡片上有「启动 / 停止」按钮 —— **成员由 `LAUNCH_KEYS` 派生，不另立清单** | activemq、consul、elasticsearch、etcd、jenkins、kafka、minio、nacos、nginx、rabbitmq、redis、rocketmq、seata、tomcat、zookeeper |
-| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码 | ant、bat、bun、cmake、conda、dart、deno、dotnet-sdk、duckdb、eza、fd、fzf、git、go、graalvm、gradle、jdk、jq、kotlin、maven、ninja、node、pnpm、powershell、protoc、python、ripgrep、rust、sqlite、uv、yq、zoxide（+ 隐藏的 erlang） |
-| **开发软件** | 本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）**+ 容器与编排外围** | caddy、docker、docker-compose、helm、jmeter、k9s、kubectl、mongodb、mysql、nats-server、postgresql、pulsar、traefik、trivy |
-| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | android-studio、apifox、apipost、ardm、bruno、clion、datagrip、dbeaver、dbx、eclipse、goland、hbuilderx、heidisql、idea、mongodb-compass、mysql-workbench、navicat、pgadmin4、postman、pycharm、redisinsight、visual-studio、vscode、webstorm、wechat-devtools、windterm |
+| **开发环境** | 装完进 PATH，直接用来写 / 编译 / 打包代码，**跑在本机开发机上** | ant、bat、bun、cmake、conda、dart、deno、dotnet-sdk、duckdb、eza、fd、fzf、git、go、graalvm、gradle、jdk、jq、kotlin、maven、ninja、node、pnpm、powershell、protoc、python、ripgrep、rust、sqlite、uv、yq、zoxide（+ 隐藏的 erlang） |
+| **服务端组件** | 装在**服务器 / 集群**上、命令行操作的后台服务与运维组件（数据库 / 消息队列 / 网关 / 容器与编排 / K8s 运维）—— 原名「开发软件」，2026-10-14 改名 | caddy、docker、docker-compose、helm、jmeter、k9s、kubectl、mongodb、mysql、nats-server、postgresql、pulsar、traefik、trivy |
+| **开发工具** | **只下载**的 GUI 软件：卡片只有「版本下拉 + 下载」，不解压、不配环境变量、不扫盘、不代跑安装器（`Component.download_only`，见 R13） | android-studio、apifox、apipost、ardm、bruno、clion、datagrip、dbeaver、dbx、eclipse、goland、hbuilderx、heidisql、idea、mongodb-compass、mysql-workbench、navicat、pgadmin4、postman、pycharm、redisinsight、visual-studio、vscode、webstorm,wechat-devtools、windterm |
 
-**Tab 顺序 = `COMPONENT_CATEGORIES` 的顺序**，2026-10-14 用户要求把「一键启停」提到**第一个**
-（原先固定最后一个）—— 它是本工具最能干活的一组长，不许被埋在中间。
-`bt_component_category_tests.test_launch_tab_is_the_first_one` 钉住这条；该断言换过三次方向
-（2026-10-08"紧贴「其它软件」"→ 10-10"必须是最后一个"→ 10-14"必须是第一个"），
-**意图始终是"这一组不许被埋没"**。
+**Tab 顺序 = `COMPONENT_CATEGORIES` 的顺序**：
+
+```
+一键启停 → 服务端组件 → 开发环境 → 开发工具
+```
+
+顺序改过两次，都由用户指定：
+- **2026-10-14**「一键启停」提到**第一个**（原先固定最后一个）—— 它是本工具最能干活的一组长，
+  不许被埋在中间。
+- **2026-10-14**「开发软件」改名「服务端组件」并提到**第二位**。
+
+后者为什么排第二：它与「开发环境」的界线是**东西跑在哪** —— 服务端组件装在服务器/集群上，
+开发环境跑在你自己这台机器上。用户装东西时先问的就是"装服务器还是装本机"，
+这个顺序直接对应那个问题。
+
+`bt_component_category_tests` 里 `test_launch_tab_is_the_first_one`、
+`test_server_tab_is_the_second_one`、`test_tab_order_is_exactly_launch_server_env_tool`
+三条把整个顺序钉死。顺序断言换过三次方向（2026-10-08"紧贴「其它软件」"→
+10-10"必须是最后一个"→ 10-14"必须是第一个"+整体序列），**意图始终是"这一组不许被埋没"**。
+
+> **分类名请用 `CAT_LAUNCH` / `CAT_SERVER` / `CAT_ENV` / `CAT_TOOL` 四个常量，不要写裸字符串。**
+> 这四个名字原先散落在 main.py 二十几处、tests 四个文件、六份文档里，改一次名要动 51 处。
+> 其中一处尤其危险：`ComponentCard._render_icon` 的**分类色块**映射是拿分类名当键的，
+> 键对不上**不会报错**，只会安静地落进兜底灰色，整个 Tab 的无图标组件一起变灰块。
+> 现在那里也改用常量，并有 `test_color_map_keys_still_match_the_categories` 盯着。
 
 > **上面这份名单与数字是 2026-10-14 的快照，且只作示例** —— 组件加得很快（2026-10-10 还是 43 个，
 > 四天后就 87 个）。**权威值一律现算**，别照抄本文：
 > `.venv/Scripts/python.exe -c "import _btprelude,main;cs=main.build_components();import collections;print(len(cs), collections.Counter(c.category for c in cs))"`
 > 分类的**真源**始终是 `COMPONENT_CATEGORY_OF` + `LAUNCH_KEYS`（见 R2.3），不是这张表。
 
-边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**要不要设 `XXX_HOME` 进 PATH 才能开工** → 是则开发环境；否则看**是否作为常驻服务被项目依赖** → 是则开发软件。
-（「一键启停」的 **Tab 位置**见上：2026-10-14 起固定**第一个**。）
-（2026-10-10 取消「其它软件」Tab：它只剩 docker、kubectl 两张卡，用户要求并进「开发软件」。注意 `group_components()` 给每个分类都建空列表、建 Tab 的循环**不跳过空组** —— 只挪成员而不从 `COMPONENT_CATEGORIES` 删名字，界面上会多出一个「其它软件（0）」空白页。）
-（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；Tomcat 需要跑起来给项目用，属开发软件；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；Nginx 与 Tomcat 同理，本地跑起来当 Web / 反向代理依赖，属开发软件。）
+边界争议按此顺序裁决：**是不是只下载不配置的 GUI 软件** → 是则开发工具（这一条最先看，它决定卡片形态而不是归属）；否则**能不能在本工具里一键启停** → 是则一键启停（这一条优先，不看性质）；否则**是装在本机还是装在服务器上** → 装本机则开发环境，装服务器则服务端组件。
+
+> 改名的理由（原「开发软件」为什么不行）：那个名字**太空**——"软件"是万金油，四个 Tab 里
+> 唯一一个不描述功能的；而且它和隔壁「开发工具」在中文里近乎同义词，用户根本分不清界线。
+> 「服务端组件」只说一件确凿的事：**这 14 个全是装在服务器上、命令行操作的，没有一个是 GUI**，
+> 正好和「开发工具」（26 个全是 IDE / GUI 客户端）形成清晰对照。
+
+（2026-10-10 取消「其它软件」Tab：它只剩 docker、kubectl 两张卡，用户要求并进服务端组件。注意 `group_components()` 给每个分类都建空列表、建 Tab 的循环**不跳过空组** —— 只挪成员而不从 `COMPONENT_CATEGORIES` 删名字，界面上会多出一个「其它软件（0）」空白页。）
+（例：Maven / Gradle 是命令行构建工具，进 PATH 才能开工，属开发环境而非"服务"；PowerShell 是进 PATH 的 Shell / 脚本运行时，属开发环境；kubectl 虽然操作的是集群，但它是**本地命令行客户端**，按"装在哪"判属服务端组件。）
+（例：Tomcat / Nginx / Jenkins 这类需要跑起来给项目用的服务属**一键启停** —— 能一键起停优先于性质，见上。）
 
 ### R2.2 适用范围
 
@@ -516,12 +542,19 @@ tmp.replace(self.dest)
 可启停那一组**由 `LAUNCH_KEYS` 派生**，不在分类表里重复登记。
 
 ```python
-COMPONENT_CATEGORIES = ("开发环境", "开发软件", "一键启停", "其它软件")   # Tab 顺序即此顺序
+# 分类名一律用常量，不写裸字符串（见 R2.1 的说明）
+CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL = "一键启停", "服务端组件", "开发环境", "开发工具"
+
+COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL)   # Tab 顺序即此顺序
 COMPONENT_CATEGORY_OF = {
     ...
-    "foo": "开发软件",          # 新增组件在这里加一行（它接进 LAUNCH_OF 后会自动进「一键启停」）
+    "foo": CAT_SERVER,        # 新增组件在这里加一行（它接进 LAUNCH_OF 后会自动进「一键启停」）
 }
 ```
+
+> `COMPONENT_CATEGORIES` 这行是**代码片段示意**，不是当前值。Tab 顺序 2026-10-14 调整过两次，
+> 权威值看 `main.COMPONENT_CATEGORIES`，或在测试里用
+> `test_tab_order_is_exactly_launch_server_env_tool` 核对。
 
 `build_components()` 末尾统一执行
 `comp.category = "一键启停" if comp.key in LAUNCH_KEYS else COMPONENT_CATEGORY_OF[comp.key]`——

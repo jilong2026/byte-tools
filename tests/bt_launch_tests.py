@@ -3020,7 +3020,7 @@ class RunningTabMarker(unittest.TestCase):
 
     用户报「启动了 nacos，没看到停止选项」。查下来按钮一直好着：btn_stop 可见、
     可用、文本"停止"，旁边的 label 也写着"● 运行中 · 端口 8848"。
-    真正原因是**三个启动组件分在两个 Tab**（Nacos/ActiveMQ 在「开发软件」、
+    真正原因是**三个启动组件分在两个 Tab**（Nacos/ActiveMQ 在「服务端组件」、
     Jenkins 在「其它软件」），而界面默认停在「开发环境」。
     用户在自己的启动页上找不到刚启动的那个卡片，于是以为停止按钮不存在。
 

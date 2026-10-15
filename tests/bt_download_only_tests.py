@@ -70,11 +70,18 @@ class TabStructure(unittest.TestCase):
         self.components = main.build_components()
         self.groups = main.group_components(self.components)
 
-    def test_new_tab_is_the_third_and_holds_the_eleven_keys(self):
+    def test_dev_tools_tab_is_the_fourth_and_holds_the_eleven_keys(self):
+        """Tab 顺序钉死（2026-10-14 用户两次调整过顺序）。
+
+        变更史：「一键启停」从最后提到第一；随后「开发软件」改名「服务端组件」
+        并提到第二位。本用例原名 test_new_tab_is_the_third_and_holds_the_eleven_keys
+        —— 那是在「开发工具」刚是第三个 Tab 的时候写的，名字里的 "third" 早就不成立了，
+        一并改成按名字断言（按位置断言的用例改顺序后必然失效，得跟着改）。
+        """
         self.assertEqual(list(main.COMPONENT_CATEGORIES),
-                         ["一键启停", "开发环境", "开发软件", "开发工具"],
-                         "「一键启停」在第一个（2026-10-14 用户要求），「开发工具」退到第 4 个")
-        self.assertEqual({c.key for c in self.groups["开发工具"]}, DOWNLOAD_ONLY_KEYS)
+                         [main.CAT_LAUNCH, main.CAT_SERVER, main.CAT_ENV, main.CAT_TOOL],
+                         "Tab 顺序必须是「一键启停 → 服务端组件 → 开发环境 → 开发工具」")
+        self.assertEqual({c.key for c in self.groups[main.CAT_TOOL]}, DOWNLOAD_ONLY_KEYS)
 
     def test_other_software_tab_is_gone(self):
         """用户要求少一个 Tab：「其它软件」整个取消，不是留一张空白页。
@@ -86,11 +93,11 @@ class TabStructure(unittest.TestCase):
         self.assertNotIn("其它软件", main.COMPONENT_CATEGORIES)
         self.assertNotIn("其它软件", {c.category for c in self.components})
 
-    def test_docker_and_kubectl_now_live_in_dev_software(self):
-        """原「其它软件」那两张卡并进「开发软件」，不许变成无家可归。"""
-        dev_soft = {c.key for c in self.groups["开发软件"]}
-        self.assertIn("docker", dev_soft)
-        self.assertIn("kubectl", dev_soft)
+    def test_docker_and_kubectl_now_live_in_server_components(self):
+        """原「其它软件」那两张卡并进「服务端组件」，不许变成无家可归。"""
+        server = {c.key for c in self.groups[main.CAT_SERVER]}
+        self.assertIn("docker", server)
+        self.assertIn("kubectl", server)
 
     def test_eclipse_is_the_one_batch_member_with_real_mainland_mirrors(self):
         """Eclipse 官方 CDN 本机实测只有 25 KB/s（378MB 等于下不动），而清华 2.7–3.9 MB/s。

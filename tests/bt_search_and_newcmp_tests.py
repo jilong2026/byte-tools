@@ -245,7 +245,7 @@ class MainWindowSearchBox(unittest.TestCase):
         return out
 
     def test_search_switches_to_unified_results_panel(self):
-        # sql 命中 mysql + postgresql（都在「开发软件」），外加 2026-10-12 之后
+        # sql 命中 mysql + postgresql（都在「服务端组件」），外加 2026-10-12 之后
         # 进来的三张卡：sqlite / heidisql / mysql-workbench —— 后两张是「开发工具」，
         # 正好用来证明结果面板会跨分类出小标题。
         #
@@ -260,10 +260,10 @@ class MainWindowSearchBox(unittest.TestCase):
         self.assertEqual(visible, {"mysql", "postgresql", "sqlite",
                                    "heidisql", "mysql-workbench",
                                    "duckdb", "datagrip", "dbeaver", "pgadmin4"})
-        # 结果面板里应出现「开发软件」分类小标题
+        # 结果面板里应出现「服务端组件」分类小标题
         headers = [w.text() for w in self._result_widgets()
                    if w.objectName() == "resultCatHeader"]
-        self.assertIn("开发软件", headers)
+        self.assertIn(main.CAT_SERVER, headers)
         # 命中卡片里确实包含 mysql / postgresql
         shown = {w.component.key for w in self._result_widgets()
                  if w in self.win.cards}

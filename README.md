@@ -96,7 +96,7 @@
 
 ## 30 秒上手
 
-1. 打开工具，四个 Tab 页（一键启停 / 开发环境 / 开发软件 / 开发工具）列出全部组件，每张卡片右上角是**当前状态**：
+1. 打开工具，四个 Tab 页（一键启停 / 服务端组件 / 开发环境 / 开发工具）列出全部组件，每张卡片右上角是**当前状态**：
 
    | 状态 | 含义 |
    |---|---|
@@ -132,9 +132,14 @@ node -v
 | Tab | 数量 | 成员 |
 |-----|------|------|
 | 一键启停 | 15 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、etcd、Consul、Apache ZooKeeper、MinIO |
+| 服务端组件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
 | 开发环境 | 32 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant |
-| 开发软件 | 14 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、NATS Server、Caddy、Traefik、Apache JMeter |
 | 开发工具 | 26 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman |
+
+> **四个 Tab 各自按什么分？**「一键启停」按**能力**分（这个工具能不能替你一键起停）；
+> 「服务端组件」与「开发环境」按**装在哪**分 —— 前者装在服务器/集群上、命令行操作，
+> 后者跑在你这台开发机上；「开发工具」按**形态**分 —— 26 个全是带图形界面的软件。
+> 排这个顺序是为了让最常问的那个问题「我是装服务器还是装本机」能一眼对上。
 
 > 想调整归类：普通组件改 `main.py` 里 `COMPONENT_CATEGORY_OF` 的一行即可；「一键启停」那一页不用登记——组件进了启动白名单 `LAUNCH_OF` 就自动出现在那里，退出来就自动回到原分类。
 

@@ -151,7 +151,7 @@
 
 **还没支持（23 个）**：
 - 开发环境：`jdk` `maven` `python` `node` `git` `powershell` `conda` `go` `gradle` `bun`
-- 开发软件：`tomcat` `nginx` `mysql` `mongodb` `postgresql` `rabbitmq` `kafka` `rocketmq` `pulsar` `seata` `elasticsearch`
+- 服务端组件：`tomcat` `nginx` `mysql` `mongodb` `postgresql` `rabbitmq` `kafka` `rocketmq` `pulsar` `seata` `elasticsearch`
 - 其它软件：`docker` `kubectl`
 
 > 注意：`jdk`/`python`/`node` 这类**语言运行时**通常不适合做成"启动/停止"——

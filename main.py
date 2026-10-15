@@ -5560,6 +5560,20 @@ def fetch_postman_versions() -> List[ComponentVersion]:
 #   · `eza` 看着像 Unix-only，实际**有官方 Windows 包**（`eza.exe_x86_64-pc-windows-gnu.zip`）
 #     —— 差点凭印象跳过它，这就是"资产名必须从接口读"的理由。
 #
+# 界面 Tab 的四个分类名（2026-10-14 新增常量）。
+#
+# 为什么提成常量：这些名字原先是散落在 main.py 二十多处、tests 四个文件、
+# 六份文档里的**裸字符串**。改一次「开发软件 → 服务端组件」要动 51 处，
+# 漏掉任何一处就会留下"分类名对不上"的暗坑（Tab 里少组件、或者文档与界面
+# 说法不一致）。提成常量之后，改名只改这一段，字符串比较也不必再靠肉眼核对。
+#
+# 四个分类各自代表什么、以及 Tab 顺序为何是这样，见 COMPONENT_CATEGORIES 处。
+CAT_LAUNCH = "一键启停"       # 卡片上有「启动/停止」按钮的组件（成员由 LAUNCH_KEYS 派生）
+CAT_SERVER = "服务端组件"     # 装在服务器上、命令行操作的后台服务与运维组件
+CAT_ENV = "开发环境"          # 装完进 PATH、直接在开发机上写/编译/打包代码的东西
+CAT_TOOL = "开发工具"         # **只下载**的 GUI 软件（IDE / 数据库客户端 / 接口调试）
+
+
 # 字段：key / name 显示名 / arch 归档类型 / exe 探测用可执行文件名（不含扩展名）
 #       args 版本参数 / v 内置版本 / tag 与 asset 的 {v} 模板 / size 官方字节数
 #       cat 分类 / note 卡片说明（含"为什么不是另一种形态"）
@@ -5570,41 +5584,41 @@ _CLI_TOOLS: tuple = (
     # 两处各加一遍的结果是同一个 key 出现两张卡片（建窗口时不报错，界面上多一格）。
     {"key": "jq", "name": "jq", "arch": "exe", "exe": "jq", "args": ["--version"],
      "v": "1.8.2", "repo": "jqlang/jq", "tag": "jq-{v}", "asset": "jq-windows-amd64.exe",
-     "size": 1035264, "cat": "开发环境",
+     "size": 1035264, "cat": CAT_ENV,
      "note": "JSON 处理器。官方产物就是裸 .exe（不是压缩包），下载后改名成 jq.exe 放进 PATH。"
              "tag 形如 `jq-1.8.2`，与版本号不同形，所以版本号要从 tag 里剥前缀。"},
     {"key": "trivy", "name": "Trivy", "arch": "zip", "exe": "trivy",
      "args": ["--version"], "v": "0.75.0", "repo": "aquasecurity/trivy", "tag": "v{v}",
-     "asset": "trivy_{v}_windows-64bit.zip", "size": 52927180, "cat": "开发软件",
+     "asset": "trivy_{v}_windows-64bit.zip", "size": 52927180, "cat": CAT_SERVER,
      "note": "容器/依赖漏洞扫描。首次 `trivy image` 要下漏洞库（几百 MB），"
              "那一步由 trivy 自己做，本工具不预取。"},
     {"key": "k9s", "name": "k9s", "arch": "zip", "exe": "k9s", "args": ["version"],
      "v": "0.51.0", "repo": "derailed/k9s", "tag": "v{v}",
-     "asset": "k9s_Windows_amd64.zip", "size": 42330705, "cat": "开发软件",
+     "asset": "k9s_Windows_amd64.zip", "size": 42330705, "cat": CAT_SERVER,
      "note": "Kubernetes 终端界面。要能连上一个已配置的集群才有画面。"},
     {"key": "docker-compose", "name": "Docker Compose v2", "arch": "exe",
      "exe": "docker-compose", "args": ["version"], "v": "5.6.0", "repo": "docker/compose",
      "tag": "v{v}", "asset": "docker-compose-windows-x86_64.exe", "size": 33352192,
      "dao": True,      # files.m.daocloud.io 的 github 代理树实测有它（200 + MZ + 整包字节数一致）
-     "cat": "开发软件",
+     "cat": CAT_SERVER,
      "note": "独立二进制版 Compose。**它能装能进 PATH，但要真的跑起来仍然需要一个能用的 "
              "Docker 引擎** —— 而 Docker Desktop 在 Windows 上没有免安装形态（见 Docker 卡片"
              "的引导）。登记它是因为 `docker-compose version` 这类自检不需要引擎。"},
     {"key": "pnpm", "name": "pnpm", "arch": "zip", "exe": "pnpm", "args": ["--version"],
      "v": "12.11.2", "repo": "pnpm/pnpm", "tag": "v{v}", "asset": "pnpm-win32-x64.zip",
-     "size": 22582408, "cat": "开发环境",
+     "size": 22582408, "cat": CAT_ENV,
      "note": "Node 包管理器。zip 顶层直接是 pnpm.exe。"
              "⚠ 本工具只放二进制，**不改 corepack、不动全局 node_modules** —— "
              "要用它接管 `npm` 得你自己 `corepack enable`。"},
     {"key": "helm", "name": "Helm", "arch": "zip", "exe": "helm", "args": ["version"],
      "v": "4.3.0", "repo": None, "tag": None, "asset": None, "size": 20832154,
-     "cat": "开发软件",
+     "cat": CAT_SERVER,
      "note": "Kubernetes 包管理器。**产物不在 GitHub release 上**（那里只挂 .asc/.sha256 "
              "旁证），本体在官方 CDN `get.helm.sh`；zip 顶层是 `windows-amd64/` 一个目录。",
      "url_tmpl": "https://get.helm.sh/helm-v{v}-windows-amd64.zip"},
     {"key": "sqlite", "name": "SQLite", "arch": "zip", "exe": "sqlite3",
      "args": ["--version"], "v": "3.54.0", "repo": None, "tag": None, "asset": None,
-     "size": 6982216, "cat": "开发环境",
+     "size": 6982216, "cat": CAT_ENV,
      "note": "官方 `sqlite-tools-win-x64` 包，里面是 sqlite3.exe / sqldiff.exe / "
              "sqlite3_analyzer.exe / sqlite3_rsync.exe 四个裸文件（实测整包下载列过：0 个顶层目录）。"
              "⚠ 官网把版本号写成**六位无点**形式（3.54.0 → `3540000`），且 URL 里带"
@@ -5612,7 +5626,7 @@ _CLI_TOOLS: tuple = (
      "url_tmpl": "https://sqlite.org/2026/sqlite-tools-win-x64-3540000.zip"},
     {"key": "dotnet-sdk", "name": ".NET SDK", "arch": "zip", "exe": "dotnet",
      "args": ["--version"], "v": "10.0.401", "repo": None, "tag": None, "asset": None,
-     "size": 300608304, "cat": "开发环境",
+     "size": 300608304, "cat": CAT_ENV,
      "note": "微软官方 zip 便携包（300 MB），解压即用 —— 所以**不需要 installer_mode**，"
              "这是计划里点名的本批最高风险项，实测确认可以避开。"
              "⚠ `builds.dotnet.microsoft.com` 本机连不上，`dotnetcli.azureedge.net` 通。",
@@ -5912,43 +5926,58 @@ class VersionFetchWorker(QThread):
             self._gate.release()
 
 
-# 界面 Tab 分组：四个分类的显示顺序（Tab 顺序即此顺序）。
-# 2026-10-14 用户要求把「一键启停」提到第一位 —— 它是本工具最能干活的一组长，
-# 原先压在最右边。原先那条"必须是最后一个 Tab"的护栏随之改写成"必须是第一个"。
-COMPONENT_CATEGORIES = ("一键启停", "开发环境", "开发软件", "开发工具")
+# 界面 Tab 分组：四个分类的**显示顺序**（Tab 顺序即此顺序）。
+#
+# 顺序变更史，两次都记在这儿：
+#   · 2026-10-14 用户要求把「一键启停」提到第一位 —— 它是本工具最能干活的一组长，
+#     原先压在最右边。原先那条"必须是最后一个 Tab"的护栏随之改写成"必须是第一个"。
+#   · 2026-10-14 用户要求「开发软件」改名「服务端组件」并**提到第二位**。
+#     新顺序：一键启停 → 服务端组件 → 开发环境 → 开发工具。
+#
+# 为什么「服务端组件」排在「开发环境」前面：这两个 Tab 的界线是**东西跑在哪**——
+# 服务端组件装在服务器/集群上（数据库、MQ、网关、容器编排、K8s 运维，全是命令行），
+# 开发环境跑在你自己这台开发机上（运行时、编译器、PATH 里的命令行小工具）。
+# 用户装东西时先问的是"装服务器上还是装本机"，这个顺序直接对应那个问题。
+#
+# 四个分类的划分依据彼此正交，不是同一根轴上的四段：
+#   一键启停 —— **能力**维度：这个工具能不能替你一键起停
+#   服务端组件 —— **位置**维度：装在服务器上
+#   开发环境 —— **位置**维度：装在本机开发机上
+#   开发工具 —— **形态**维度：带图形界面的软件（26 个全是 IDE / GUI 客户端）
+COMPONENT_CATEGORIES = (CAT_LAUNCH, CAT_SERVER, CAT_ENV, CAT_TOOL)
 
 # 组件 → 分类。**这是唯一一处**分类登记表：新增组件只在这里加一行，
 # build_components() 末尾统一赋值到 Component.category，界面自动出现在对应 Tab。
 #   开发环境：装完进 PATH、直接用来写 / 编译 / 打包代码
-#   开发软件：本地跑起来给项目当依赖的服务（数据库 / 消息队列 / 注册中心 / 搜索）
-#             + 容器与编排外围（docker / kubectl —— 2026-10-10 原「其它软件」并入，那个 Tab 已删）
+#   服务端组件：装在服务器上、命令行操作的后台服务与运维组件
+#             （数据库 / 消息队列 / 网关 / 容器与编排 / K8s 运维）
 #   开发工具：**只下载**的 GUI 软件（Component.download_only）——只列版本 + 下官方安装包，
 #             不配环境变量、不扫盘、不代跑安装器（见 R13）
 #   一键启停：卡片上有「启动/停止」按钮的组件 —— 成员由 LAUNCH_KEYS 派生，不写在这里
 COMPONENT_CATEGORY_OF = {
-    "jdk": "开发环境", "python": "开发环境", "node": "开发环境", "go": "开发环境",
-    "bun": "开发环境", "conda": "开发环境", "git": "开发环境",
-    "maven": "开发环境", "gradle": "开发环境", "powershell": "开发环境",
+    "jdk": CAT_ENV, "python": CAT_ENV, "node": CAT_ENV, "go": CAT_ENV,
+    "bun": CAT_ENV, "conda": CAT_ENV, "git": CAT_ENV,
+    "maven": CAT_ENV, "gradle": CAT_ENV, "powershell": CAT_ENV,
     # 2026-10-12 新增：语言/编译器工具链一档（rust 的 MSI、kotlin 的 zip 都是解压/提取即用）
-    "kotlin": "开发环境", "graalvm": "开发环境", "rust": "开发环境",
+    "kotlin": CAT_ENV, "graalvm": CAT_ENV, "rust": CAT_ENV,
     # 2026-10-12 B1：protoc / uv（单二进制、没有 XXX_HOME，只把目录放进 PATH）
-    "protoc": "开发环境", "uv": "开发环境",
+    "protoc": CAT_ENV, "uv": CAT_ENV,
     # 2026-10-12 B3/B5：CLI 与构建工具归「开发环境」；etcd / nats / caddy / traefik
-    # 是服务型组件，先落在「开发软件」，哪天接进 LAUNCH_OF 会自动挪到「一键启停」。
-    "deno": "开发环境", "ninja": "开发环境", "duckdb": "开发环境",
-    "cmake": "开发环境", "ripgrep": "开发环境", "fd": "开发环境",
-    "bat": "开发环境", "eza": "开发环境", "zoxide": "开发环境",
-    "fzf": "开发环境", "yq": "开发环境",
-    # 2026-10-12 B7：Ant 归构建工具；JMeter 是压测服务型，先落「开发软件」
-    "ant": "开发环境", "jmeter": "开发软件",
-    "etcd": "开发软件", "nats-server": "开发软件", "caddy": "开发软件",
-    "traefik": "开发软件",
-    "tomcat": "开发软件", "mysql": "开发软件", "mongodb": "开发软件",
-    "postgresql": "开发软件", "elasticsearch": "开发软件", "nacos": "开发软件",
-    "seata": "开发软件", "kafka": "开发软件", "rocketmq": "开发软件",
-    "pulsar": "开发软件", "activemq": "开发软件", "rabbitmq": "开发软件",
-    "nginx": "开发软件", "redis": "开发软件",
-    "docker": "开发软件", "kubectl": "开发软件", "jenkins": "开发软件",
+    # 是服务型组件，先落在「服务端组件」，哪天接进 LAUNCH_OF 会自动挪到「一键启停」。
+    "deno": CAT_ENV, "ninja": CAT_ENV, "duckdb": CAT_ENV,
+    "cmake": CAT_ENV, "ripgrep": CAT_ENV, "fd": CAT_ENV,
+    "bat": CAT_ENV, "eza": CAT_ENV, "zoxide": CAT_ENV,
+    "fzf": CAT_ENV, "yq": CAT_ENV,
+    # 2026-10-12 B7：Ant 归构建工具；JMeter 是压测服务型，先落「服务端组件」
+    "ant": CAT_ENV, "jmeter": CAT_SERVER,
+    "etcd": CAT_SERVER, "nats-server": CAT_SERVER, "caddy": CAT_SERVER,
+    "traefik": CAT_SERVER,
+    "tomcat": CAT_SERVER, "mysql": CAT_SERVER, "mongodb": CAT_SERVER,
+    "postgresql": CAT_SERVER, "elasticsearch": CAT_SERVER, "nacos": CAT_SERVER,
+    "seata": CAT_SERVER, "kafka": CAT_SERVER, "rocketmq": CAT_SERVER,
+    "pulsar": CAT_SERVER, "activemq": CAT_SERVER, "rabbitmq": CAT_SERVER,
+    "nginx": CAT_SERVER, "redis": CAT_SERVER,
+    "docker": CAT_SERVER, "kubectl": CAT_SERVER, "jenkins": CAT_SERVER,
     "idea": "开发工具", "pycharm": "开发工具", "clion": "开发工具",
     "webstorm": "开发工具", "goland": "开发工具", "datagrip": "开发工具",
     "vscode": "开发工具", "dbx": "开发工具", "windterm": "开发工具",
@@ -5961,14 +5990,14 @@ COMPONENT_CATEGORY_OF = {
     "pgadmin4": "开发工具", "mysql-workbench": "开发工具", "postman": "开发工具",
     # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
     # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
-    "consul": "开发软件", "zookeeper": "开发软件",
+    "consul": CAT_SERVER, "zookeeper": CAT_SERVER,
     # 2026-10-12 B4：MinIO / Dart —— 前者进 LAUNCH_OF 自动去「一键启停」，
     # 这行是它退下来时的落点；后者是纯装配组件，直接归「开发环境」。
-    "minio": "开发软件",
-    "dart": "开发环境",
+    "minio": CAT_SERVER,
+    "dart": CAT_ENV,
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
-    "erlang": "开发环境",
+    "erlang": CAT_ENV,
 }
 
 # 2026-10-12 B5/B3 那 19 件的分类**由 _CLI_TOOLS 喂进这张表**，不在这里再抄一遍
@@ -6022,7 +6051,7 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "zoxide": "智能 cd：按使用频率记忆目录，跳转常用路径只敲几个字母（shell 集成需自行配置）。",
     "sqlite": "SQLite 命令行工具。单文件数据库，无需服务端；学习 SQL、调试、小型应用存数据都很方便。",
     "duckdb": "进程内分析型数据库 CLI。直接查询 Parquet/CSV/JSON 等文件，OLAP 聚合比 Pandas 快；数据分析师的轻量工具。",
-    # ---- 开发软件：数据库与基础服务 ----
+    # ---- 服务端组件：数据库与基础服务 ----
     "mysql": "MySQL 关系数据库服务端。Web 后端最常用数据库；本工具负责下载解压与配环境，初始化与运维由官方命令完成。",
     "postgresql": "PostgreSQL 关系数据库服务端。功能最全的开源数据库（JSON/窗口函数/扩展丰富）；本工具仅提供 Windows 免安装包。",
     "mongodb": "MongoDB 文档数据库服务端。JSON 式文档模型，适合结构多变、快速迭代的项目。",
@@ -6411,7 +6440,7 @@ COMPONENT_USAGE: Dict[str, str] = {
               "临时数据用内存库 sqlite3 :memory:。",
     "duckdb": "duckdb -c 查询语句直接写：select count(*) from 'x.parquet'；交互模式更顺手。"
               "进入交互后同一条 SQL 可反复执行。",
-    # ---- 开发软件：数据库与基础服务 ----
+    # ---- 服务端组件：数据库与基础服务 ----
     "mysql": "解压后先 mysqld --initialize 初始化数据目录，再启动服务。"
              "客户端用 mysql -u root -p 连接；本工具不做初始化与密码设置。",
     "postgresql": "Windows 免安装包解压即用：initdb 初始化，pg_ctl start 启动。"
@@ -15515,13 +15544,16 @@ class ComponentCard(QFrame):
             return
 
         # fallback: 使用默认色块（按分类显示不同颜色）
+        # ⚠ 这个字典的**键是分类名字符串**，2026-10-14 分类改名时它必须跟着改 ——
+        # 键对不上不会报错，只会安静地落到下面的兜底灰色 (#757575)，那个 Tab 的
+        # 所有无图标组件会一起变成灰块。所以这里用 CAT_* 常量而不是裸字符串。
         category_map = {
-            "开发环境": ("#4CAF50", "#43A047"),   # 绿色系（编程语言、SDK 等）
-            "开发软件": ("#2196F3", "#1976D2"),   # 蓝色系（数据库、服务器等）
-            "一键启停": ("#FF9800", "#F57C00"),   # 橙色系（服务组件）
-            "开发工具": ("#9C27B0", "#7B1FA2"),   # 紫色系（IDE、客户端等）
+            CAT_ENV: ("#4CAF50", "#43A047"),       # 绿色系（编程语言、SDK 等）
+            CAT_SERVER: ("#2196F3", "#1976D2"),     # 蓝色系（数据库、服务器等）
+            CAT_LAUNCH: ("#FF9800", "#F57C00"),     # 橙色系（服务组件）
+            CAT_TOOL: ("#9C27B0", "#7B1FA2"),       # 紫色系（IDE、客户端等）
         }
-        cat = COMPONENT_CATEGORY_OF.get(key, "开发工具")
+        cat = COMPONENT_CATEGORY_OF.get(key, CAT_TOOL)
         grad_from, grad_to = category_map.get(cat, ("#757575", "#424242"))
 
         self.icon_label.setStyleSheet(f"""
@@ -18570,7 +18602,7 @@ class MainWindow(QMainWindow):
         self._drop_rows(layout)
         layout.row_widgets = []
         # pad_to 必须给：半行不补占位的话，QHBoxLayout 的 addWidget(card, 1) 会把
-        # 末行的卡片**拉伸占满整行** —— 「其它软件」2 张各半行、「开发软件」的 Pulsar
+        # 末行的卡片**拉伸占满整行** —— 「其它软件」2 张各半行、「服务端组件」的 Pulsar
         # 独占一行，跟满行格子的 309px 完全不同宽（真机 2026-10-08 用户截图实测）。
         rows = self._make_rows(root, chunks, pad_to=columns)
         for row in rows:
@@ -19147,7 +19179,7 @@ class MainWindow(QMainWindow):
         """Tab 标题后标 `●` 表示"这一页有组件在运行"，清空搜索/退出搜索时都要重算。
 
         2026-10-06 用户反馈"启动了 nacos，没看到停止选项"—— 按钮一直是好的，
-        但当时三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「开发软件」、Jenkins 在「其它软件」），
+        但当时三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「服务端组件」、Jenkins 在「其它软件」），
         界面默认停在「开发环境」。用户在自己的启动页上找不到刚才那个卡片。
         （2026-10-08 起可启停组件已集中到「一键启停」Tab，这一条分散找卡的起因消了；
         `●` 仍然保留 —— 同时跑着两三个组件时，还是要知道哪一页上有活的。）
@@ -19171,7 +19203,7 @@ class MainWindow(QMainWindow):
         2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。查下来按钮一直是好的
         （btn_stop 可见可用、文本"停止"、label 显示"● 运行中 · 端口 8848"），
         真正的原因是**当时三个启动组件分在两个 Tab**：
-        Jenkins 在「其它软件」，Nacos/ActiveMQ 在「开发软件」，
+        Jenkins 在「其它软件」，Nacos/ActiveMQ 在「服务端组件」，
         而界面默认停在 Tab0「开发环境」。用户自然找不到自己刚启动的那个卡片。
         （2026-10-08 起它们都在「一键启停」一页；跳页与这句说明留着，是因为
         同时跑多个组件、或用户停在别的页上时，症状会一模一样地复发。）
