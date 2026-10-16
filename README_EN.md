@@ -6,8 +6,8 @@
 
 <p align="center">
   Set up a complete development environment on a fresh Windows / macOS / Linux machine<br/>
-  <b>with a few clicks</b>.   <b>61 components</b> are handled end to end (download → unpack → set environment variables),<br/>
-  <b>26 dev tools</b> get official installer direct links (download only), and <b>15 services</b> can be started and stopped in one click.
+  <b>with a few clicks</b>.   <b>80 components</b> are handled end to end (download → unpack → set environment variables),<br/>
+  <b>38 dev tools</b> get official installer direct links (download only), and <b>16 services</b> can be started and stopped in one click.
 </p>
 
 <p align="center">
@@ -80,18 +80,18 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
 ## Highlights
 
 - **One codebase, three platforms**: detects OS and CPU architecture (on Apple Silicon JDK resolves to aarch64, Node to arm64).
-- **61 components installed end to end**: download → unpack → `XXX_HOME` + `PATH`, ready to use immediately.
-- **26 dev tools, download only**: IDEs / database clients / terminals get official installer direct links, with a live version list, downloaded to a directory of your choosing (remembered between runs; you can open the folder afterwards). **This tool does not unpack them, does not set environment variables for them, and does not run installers on your behalf** — licence acceptance and install steps are yours. Where upstream ships both an installer and a portable archive (IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX), the button reads **"Download ▾"** so you can pick which one, sizes shown.
-- **15 services start and stop in one click**: Tomcat, Nginx, ActiveMQ, RocketMQ, Kafka, Elasticsearch, Seata, Nacos, RabbitMQ, Jenkins, Redis, etcd, Consul, Apache ZooKeeper, MinIO. Port conflicts are handled by a documented policy and explained in a confirmation dialog (ports are never silently shifted — shifting them breaks external clients). If "Stop" cannot stop cleanly, the tool only asks whether to force-kill; it never kills behind your back. Liveness is judged by **the whole port cluster listening** (Nacos main port + gRPC, Kafka 9092+9093, RocketMQ namesrv+broker). Running services are still recognised after you close and reopen the tool, and status detection **never executes a start script**. Protocol-port components that cannot be viewed in a browser (Kafka / RocketMQ / RabbitMQ) get a status page served by the tool itself: state, ports, how to connect, credentials and log paths — and it **flips to "stopped" on refresh once the service is gone**, instead of a notice that forever claims success. All of them were verified one by one on a real Windows machine through the full cycle (download/install → start → cluster ports listening → protocol probe, e.g. `rabbitmqctl status`, Kafka `BrokerApiVersions` → stop → ports released). **macOS and Linux are not yet verified on real hardware** (see rule R5 in `DEVELOPMENT.md`).
+- **80 components installed end to end**: download → unpack → `XXX_HOME` + `PATH`, ready to use immediately.
+- **38 dev tools, download only**: IDEs / database clients / terminals get official installer direct links, with a live version list, downloaded to a directory of your choosing (remembered between runs; you can open the folder afterwards). **This tool does not unpack them, does not set environment variables for them, and does not run installers on your behalf** — licence acceptance and install steps are yours. Where upstream ships both an installer and a portable archive (IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX), the button reads **"Download ▾"** so you can pick which one, sizes shown.
+- **16 services start and stop in one click**: Tomcat, Nginx, ActiveMQ, RocketMQ, Kafka, Elasticsearch, Seata, Nacos, RabbitMQ, Jenkins, Redis, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO. Port conflicts are handled by a documented policy and explained in a confirmation dialog (ports are never silently shifted — shifting them breaks external clients). If "Stop" cannot stop cleanly, the tool only asks whether to force-kill; it never kills behind your back. Liveness is judged by **the whole port cluster listening** (Nacos main port + gRPC, Kafka 9092+9093, RocketMQ namesrv+broker). Running services are still recognised after you close and reopen the tool, and status detection **never executes a start script**. Protocol-port components that cannot be viewed in a browser (Kafka / RocketMQ / RabbitMQ) get a status page served by the tool itself: state, ports, how to connect, credentials and log paths — and it **flips to "stopped" on refresh once the service is gone**, instead of a notice that forever claims success. All of them were verified one by one on a real Windows machine through the full cycle (download/install → start → cluster ports listening → protocol probe, e.g. `rabbitmqctl status`, Kafka `BrokerApiVersions` → stop → ports released). **macOS and Linux are not yet verified on real hardware** (see rule R5 in `DEVELOPMENT.md`).
 - **Prerequisite runtimes installed automatically**: components that need a JDK (Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata) will download a suitable JDK first, then continue starting; same for the Erlang/OTP that RabbitMQ needs (27.x / 26.x matched to the RabbitMQ version). You never have to prepare dependencies yourself.
 - **China-first mirrors with multi-source failover**: 11 mainland mirror bases and 3 GitHub accelerators, tried mainland-first, falling back to the official origin last, all narrated in the log. **No URL editing needed** (a few components genuinely have no mainland mirror — see [Platform support and exceptions](#platform-support-and-exceptions)).
-- **Multiple coexisting versions + an explicit "active version"**: all 59 installable components can keep several versions side by side (opened to everything on 2026-06-06), and you name which one is active. A failed switch rolls back automatically, so you never end up with "variable points to A, `PATH` points to B". A **green tick** in the version dropdown means that version is already installed on disk.
+- **Multiple coexisting versions + an explicit "active version"**: all 80 installable components can keep several versions side by side (opened to everything on 2026-06-06), and you name which one is active. A failed switch rolls back automatically, so you never end up with "variable points to A, `PATH` points to B". A **green tick** in the version dropdown means that version is already installed on disk.
 - **Take over installations you put there yourself — and revert with one click**: JDK / Maven / Node etc. already on the machine, outside this tool's directory, can be discovered and made active (the scan is read-only and each candidate is confirmed by actually running its version command). Before touching your system settings the original text is snapshotted, and it can be written back verbatim. Five hard gates (original snapshot / minimal edit / critical-entry validation / re-verification / revertibility) must all pass or the operation is rolled back.
 - **Uninstall removes only the version you selected**: other versions' directories, variables and `PATH` entries are untouched; deleting the active version triggers an automatic re-pick. The title bar's **"🧹 Clean PATH"（清理残留 PATH）** button clears dead entries that point into this tool's directory but no longer exist.
 - **Update check that never replaces itself**: the version chip in the title bar doubles as a status light (six states, see [UI tour](#ui-tour)). When a newer release exists, one click downloads it to your chosen directory — **it never renames or overwrites the running program**, and it uploads nothing about you.
 - **Download reliability**: every request carries a dedicated `byte-tools` User-Agent (several university mirrors 403 the default UA), and the byte count is verified after the download, so a "fake 200 empty file" from a mirror triggers a source switch rather than leaving you a broken archive.
 - **Live version lists + a 24-hour cache**: version lists are fetched from official APIs/indexes at startup and cached on disk for a day (this saves GitHub's anonymous rate budget); when a fetch fails the tool quietly falls back to its built-in list, so it stays usable offline.
-- **Search and filtering**: 87 components do not need page-by-page browsing — the search box above the tabs fuzzy-matches names and keys across all of them and groups hits by category; version dropdowns accept typing (`21`, `3.12`, `LTS`).
+- **Search and filtering**: 182 components do not need page-by-page browsing — the search box above the tabs fuzzy-matches names and keys across all of them and groups hits by category; version dropdowns accept typing (`21`, `3.12`, `LTS`).
 - **Environment variables without `setx`**: Windows writes the registry directly via `winreg` (`setx` truncates at 1024 characters), edits `PATH` entry by entry, and notifies Explorer by name after every write; macOS / Linux write a marked, idempotent block into your shell rc files.
 - **UI**: frameless custom window, cards that re-flow into columns based on window width (toggle "▦ Grid / ☰ List"), gradient progress bars, status capsules, colour-coded Chinese log overlay (collapsed by default, auto-opens on warn/error with an unread counter), window icon visible in the taskbar and Alt+Tab, and remembered per-component version choices.
 - **It says so when a platform is unsupported**: two components have no portable form on Windows (`Docker`, `Pulsar`). The card states why and what to do instead — it will not install something that cannot run and leave you guessing.
@@ -106,7 +106,7 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
    |---|---|
    | 🟢 `✓ Configured (PATH) · openjdk version "17.0.10"` | Already findable by the system; nothing to install (the exact version is filled in asynchronously) |
    | 🟠 `● Downloaded, not configured` | Archive is local, environment variables are not set yet |
-   | 🟢 `● 2 versions installed · active 21 (21, 17)` | All 59 installable components use this form: parenthesised list = what is on disk (newest first); `active 21` = the one in use |
+   | 🟢 `● 2 versions installed · active 21 (21, 17)` | All 80 installable components use this form: parenthesised list = what is on disk (newest first); `active 21` = the one in use |
    | 🟠 `● 2 versions installed · none active (21, 17)` | Versions installed, but the system's `XXX_HOME` / `PATH` points to none of them |
    | 🔴 `○ Not installed` | Nothing installed |
 
@@ -277,7 +277,7 @@ None of these has an `XXX_HOME` concept — the tool unpacks them into `~/.env-t
 | pnpm | `pnpm --version` | 12.x | Node package manager. **Binary only** — it does not touch `corepack` or global `node_modules`; run `corepack enable` yourself if you want it to take over `npm`. |
 | uv | `uv --version` | 0.13.x | Python package / environment manager, see [Python distributions](#python-distributions). |
 | protoc | `protoc --version` | 36.x | See [Build tools](#build-tools). |
-### About those 26 "Dev tools"
+### About those 38 "Dev tools"
 
 They are GUI applications; this tool's only job is to fetch the official installer into the directory you choose. Their cards therefore have **only a version dropdown and a download button** — no green tick, no disk scan, no switch or uninstall buttons, no unpacking, no environment variables.
 
@@ -314,7 +314,7 @@ Auto-download requires that upstream publishes something you can unpack and use.
 
 ### Multiple versions and the active version
 
-All 59 installable components keep one directory per version (the 26 download-only tools put nothing on disk, so they are outside this category): `~/.env-tools/<component>/<component>-<version>/` (e.g. `jdk-21` and `jdk-17` side by side). "Active version" in the UI means "the one the system is currently using".
+All 80 installable components keep one directory per version (the 38 download-only tools put nothing on disk, so they are outside this category): `~/.env-tools/<component>/<component>-<version>/` (e.g. `jdk-21` and `jdk-17` side by side). "Active version" in the UI means "the one the system is currently using".
 
 - **Green tick = installed on disk.** Ticked versions can be uninstalled; unticked ones keep the button disabled (there would be nothing to remove).
 - **Installed versions always reappear in the dropdown.** Live lists change; a version may be dropped upstream while it is still on your disk. The dropdown re-inserts it, sorted by version, with its tick — otherwise that version could not be selected, switched to, or uninstalled except by deleting the directory by hand. The back-fill applies to every installable component alike (since 2026-10-06); before that only multi-version components got it, so jenkins / nacos still hit the case of something installed that the live list no longer carries.
@@ -508,7 +508,7 @@ components.append(
 
 ### Version cache and GitHub's quota
 
-Fetched version lists are **cached on disk** (`~/.env-tools/version_cache.json`, not re-fetched within a day). The reason is concrete: GitHub's anonymous API allows **60 requests/hour per IP**, while one startup would otherwise fetch lists for 77 components (many of them against GitHub) — a second launch inside the same hour, or a few refresh clicks, exhausts the budget and produces a wall of "fetch failed" lines.
+Fetched version lists are **cached on disk** (`~/.env-tools/version_cache.json`, not re-fetched within a day). The reason is concrete: GitHub's anonymous API allows **60 requests/hour per IP**, while one startup would otherwise fetch lists for 100 components (many of them against GitHub) — a second launch inside the same hour, or a few refresh clicks, exhausts the budget and produces a wall of "fetch failed" lines.
 
 - On a cache hit the log says "reusing version lists fetched within 24 hours (N components)" and makes no requests.
 - For genuinely newest numbers, press **"⟳ Refresh versions"** — it bypasses the cache.
@@ -522,7 +522,7 @@ The component working directory defaults to `~/.env-tools/`; change it at the to
 CONFIG_DIR = Path.home() / ".env-tools"
 ```
 
-The **download directory** for the 26 dev tools is a separate preference: remembered from the first download (stored in `config.json`), falling back to the system Downloads folder when unset or deleted. It is not part of the working directory.
+The **download directory** for the 38 dev tools is a separate preference: remembered from the first download (stored in `config.json`), falling back to the system Downloads folder when unset or deleted. It is not part of the working directory.
 
 ---
 
