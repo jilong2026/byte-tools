@@ -397,7 +397,7 @@ where java
 
 | 位置 | 内容 |
 |---|---|
-| 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.1 检查中` = 正在查；`v1.2.1 最新` = 已是最新；`↓ v1.2.2 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.1 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
+| 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.2 检查中` = 正在查；`v1.2.2 最新` = 已是最新；`↓ v1.2.3 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.2 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
 | 标题栏（右） | 「★ GitHub」打开仓库 · 「⟳ 刷新版本」绕过缓存强制重抓在线清单 · 「🧹 清理残留 PATH」清死条目 · 「♥」支持作者 · 最小化 / 最大化 / 关闭 |
 | 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 87 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
 | 卡片区 | 四个横向 Tab（标题带数量）。每张卡片：名称、状态标签（悬停看完整说明）、版本下拉（可搜索，磁盘已装的带绿勾）、操作按钮（安装 / 切换 / 卸载，可启停的还有启动 / 停止 / 控制台或访问页，只下载的只有下载）、渐变进度条。卡片按窗口宽度自动分列 |
@@ -557,8 +557,8 @@ pyinstaller byte-tools.spec --noconfirm --clean
 推一个 tag 到 GitHub，`.github/workflows/release.yml` 会在 Windows / macOS / Linux 三个 runner 上分别打包，自动上传到对应的 GitHub Release，并在 Gitee Release 写好产物直链：
 
 ```bash
-git tag v1.2.1
-git push origin v1.2.1
+git tag v1.2.2
+git push origin v1.2.2
 ```
 
 几分钟后 GitHub Release 是完整的正式版本（3 平台 4 个产物）；Gitee 有同名 Release，正文用表格列出三个平台产物的 GitHub 直链。全自动，无需手动点 Publish。
@@ -569,13 +569,13 @@ git push origin v1.2.1
 
 GitHub 侧全自动，**Gitee 侧要你在本机补一步上传**（境外 runner 传大二进制会挂死，国内链路只需几十秒）。前提：改动已合到 `master`，顺序不能反——workflow 取的是 tag 指向那个 commit 里的代码。
 
-1. **推 tag**：`git tag v1.2.1 && git push origin v1.2.1`
+1. **推 tag**：`git tag v1.2.2 && git push origin v1.2.2`
 2. **等 Actions 全绿**。此时 GitHub Release 有 4 个产物且已正式发布；Gitee 有同名 Release，正文是 GitHub 直链表格，但**附件区还是空的**。
 3. **本机把产物传上 Gitee**（令牌走交互输入，不落命令行历史）：
 
    ```bat
    cd /d E:\file\test\byte-tools
-   同步Gitee产物.bat v1.2.1
+   同步Gitee产物.bat v1.2.2
    ```
 
    就这一条。脚本会自己建 `release-assets/`、走 `gh-proxy.com` 把四个产物下进来、再逐个传上 Gitee，跑完 `[3/3]` 核对四个附件是否都在。产物已经在本地了就不重复下载（除非你手动清过目录）。双击 `同步Gitee产物.bat` 也一样：它只会问 tag 和令牌。
@@ -616,10 +616,10 @@ v1.0.2 这类"GitHub 成功、Gitee 没同步好"的情况不用重发包，两�
 ```bat
 REM Windows：先用 curl（走加速器）取产物，再跑上面第 3 步那条命令
 mkdir release-assets
-curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.1/ByteTools.exe"
-curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.1/ByteTools-windows-x64.zip"
-curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.1/ByteTools-macos-arm64.zip"
-curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.1/ByteTools-linux-x64"
+curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools.exe"
+curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools-windows-x64.zip"
+curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools-macos-arm64.zip"
+curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools-linux-x64"
 dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 ```
 
@@ -627,12 +627,12 @@ dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 # Linux / macOS / Git Bash
 mkdir -p ./release-assets
 for f in ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64; do
-  curl -L -o "./release-assets/$f" "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.1/$f"
+  curl -L -o "./release-assets/$f" "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/$f"
 done
 
 # 令牌用 read -s 现问现用，不落进命令行历史和日志
 read -rsp "Gitee Token: " GITEE_TOKEN; export GITEE_TOKEN; echo
-GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.2.1 \
+GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.2.2 \
 GITHUB_REPO_SLUG=jilong2026/byte-tools ASSETS_DIR=./release-assets \
 "./同步Gitee产物.sh"
 unset GITEE_TOKEN
