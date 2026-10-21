@@ -96,6 +96,11 @@ EXPECTED_MEMBERSHIP = {
                "ant",
                # 2026-10-12 Dart（语言运行时；zip 顶层单目录 dart-sdk/ ⇒ bin）
                "dart",
+               # 2026-10-21 Flutter 与 Android cmdline-tools（都是解压即用的 zip，
+               # 归档布局按远端中央目录验过：顶层单目录 ⇒ bin）
+               "flutter", "android-sdk",
+               # 2026-10-21：WSL 安装向导卡（不是普通可装配组件，见 ui_action）
+               "wsl",
                # 2026-10-15 第六批：语言运行时与开发 CLI（同批，布局已逐个验过）
                "elixir", "scala-cli", "bazelisk", "just", "task", "oxlint",
                "biome", "nushell", "starship", "gh"},
@@ -118,7 +123,9 @@ EXPECTED_MEMBERSHIP = {
                "insomnia", "beekeeper-studio", "obsidian", "zettlr",
                "yaak", "gvim",
                # 2026-10-16：用户点名的两个 AI 编码工具链管理器
-               "cc-switch", "codex-app-manager"},
+               "cc-switch", "codex-app-manager",
+               # 2026-10-21：macOS 独占、只给官网入口的两个
+               "xcode", "xcode-sdk"},
     # 「Agent客户端」：2026-10-15 用户要求新增的第五个 Tab，**放在最后**。
     # 形态与「开发工具」同类 —— 只下载、不配置，登记表在 main.py 的 `_AGENT_CLIENTS`
     # （表驱动，key 从那里来；这里手写一份是为了让"扩表 = 必须同时改这张基线"可见）。
