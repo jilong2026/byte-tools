@@ -1787,7 +1787,7 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R1
 |---|---|---|---|
 | `idle` / `checking` | `v1.2.1` | 默认 | 查一次 |
 | `latest` | `v1.2.1` | 默认 | 再查一次（tooltip 写明"已是最新"） |
-| `update` | `↓ v1.2.2` | 琥珀 | **直接下到 `download_dir`**，不弹确认、不弹目录框 |
+| `update` | `↓ v1.2.3` | 琥珀 | **直接下到 `download_dir`**，不弹确认、不弹目录框 |
 | `downloading` | `↓ 37%` | 琥珀 | 不开第二路，只回一句"正在下载" |
 | `error` | `? v1.2.1` | 灰 + 虚线边 | 再查一次（tooltip 带失败原因） |
 
@@ -2612,6 +2612,40 @@ CAT_SERVER 少一个、CAT_LAUNCH 多一个。（`caddy` / `traefik` 仍未接�
 `prometheus` / `victoriametrics` 同理（单二进制、9090/8428，但要先定配置文件从哪来）。
 这四个是下一批的自然候选，方法同本节。
 
+### R20.10 Flutter SDK 与 Android SDK（2026-10-21）
+
+用户点名接两个：**Flutter SDK（stable）**、**Android SDK**。两者都归「开发环境」，
+登记在 `build_components()` 里（不走 `_CLI_TOOLS` —— 它们有 `XXX_HOME`）。
+
+**这两个包都没下整包**：1.9 GB / 155 MB 的 zip 用远端**中央目录**口径验布局 ——
+Range 取末尾 128 KB 找 EOCD → 按 CD offset 再取目录区 → 逐条读 `PK\x01\x02`。
+结论与实收字节数：
+
+| 组件 | 大小 | 顶层 | 可执行文件 | 源序（byte-tools UA 实测） |
+|------|------|------|-----------|---------------------------|
+| Flutter 3.47.7 | 1,934,624,561 B | 只有 `flutter/` | `flutter/bin/flutter.bat` | 腾讯 817 > 南大 686 > flutter-io.cn 311 > 官方 35 KB/s |
+| cmdline-tools 23.0 (16111833) | 154,957,218 B | 只有 `cmdline-tools/` | `cmdline-tools/bin/sdkmanager.bat` | 腾讯 1747 KB/s；`dl.google.com` 本机整站 **500**（连 repository2-3.xml 都 500） |
+
+两个包的顶层单目录都会被 `extract_archive` 塌掉，所以 `path_subdir="bin"`。
+
+**四个坑（写错都不会报错，只会"看起来能装、用不了"）**：
+
+1. **Flutter 的镜像路径必须带 `/flutter/` 一层**（与 dart 同款）：
+   `mirrors.cloud.tencent.com/flutter/flutter_infra_release/...`；
+   `flutter-io.cn` 是官方中国镜像根，**不带**这一层。清华/中科大/阿里/上交实测 404。
+2. **Android 只有腾讯一个真镜像**（阿里/清华/南大的 `AndroidSDK/` 目录 404），
+   所以登记进 `SINGLE_SOURCE_EXCEPTION["android-sdk"]=1`，官方 `dl.google.com` 末位兜底。
+3. **cmdline-tools 23.0 里的 `sdkmanager` 已是弃用包装**，转调同目录 `android.exe`
+   （新版 Android CLI）。`--version` 在解析 SDK 根目录**之前**返回，所以平铺布局也能探测；
+   但**装包必须显式 `--sdk_root=%ANDROID_HOME%`** —— 脚本只认 `<sdk>\cmdline-tools\<ver>\bin`
+   这个标准位置，否则直接报 `Could not determine SDK root`。这句话写进了 `data_note`
+   与 `COMPONENT_USAGE`，并由 `bt_new_components_tests` 钉住。
+4. **Flutter 版本清单不能取 JSON 前 N 条**：`releases[]` 是时间倒序且混着 hotfix，
+   要按 `channel=="stable"` + `archive` 是 Windows zip 过滤后再用 `_version_parts` 逐段排序。
+
+`ANDROID_HOME` 指向当前生效版本目录 ⇒ 多版本各带一套 SDK 内容（platforms/build-tools
+跟着版本走）。这是本项目"一版本一目录"模型的自然结果，已在 `data_note` 里说明。
+
 ## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
 
 ### R21.1 规则描述
@@ -2800,3 +2834,119 @@ cmdline→CRT 那一层，与 shell 的 locale 无关）。
   **要么就别依赖宿主机上恰好存在的目录**（`bt_external_version_tests` 里那个
   `path_effective_check` 是按真实文件系统找命令的，夹具必须自己造出"压住命令的那个目录"，
   不能指望宿主机装了 `E:\soft\maven\…`）。
+
+## 规则 R25：WSL 环境一键装（2026-10-21）
+
+用户原话：「做装完提示用户重启才生效，不自动帮用户重启」。这条是**红线**，不是建议。
+
+### R25.1 形态
+
+「开发环境」里的 **WSL 卡片**（点「安装向导」）打开 `WslDialog`，两步：
+（标题栏那颗「🐧 WSL」快捷按钮 2026-10-21 按用户要求删掉了 —— 卡片已覆盖，
+两处入口只重复占宽；`_on_wsl_clicked` 保留给卡片的 `wsl_requested` 信号。）
+（2026-10-21 用户反馈「wsl 搜索不到」—— 于是补了一张真正的卡片：`ui_action="wsl"`，
+主按钮「安装向导」；搜索引擎按 key/显示名/summary 自然命中。卡片借
+`download_only=True` 的能力位关掉 PATH/XXX_HOME/卸载那套通用逻辑。）
+
+1. **① 一键安装 WSL**：下载官方运行时 MSI → 一次 UAC 里跑一个固定脚本
+   （`dism` 启用 `Microsoft-Windows-Subsystem-Linux` + `VirtualMachinePlatform`，
+   然后 `msiexec /i wsl.msi /qn /norestart`），脚本把三个退出码写进
+   `~/.env-tools/wsl/install-result.json`。
+2. **② 导入 Ubuntu 24.04**：下载官方 `ubuntu-base-24.04.3-base-amd64.tar.gz`，
+   `wsl --import Ubuntu-24.04 <~/.env-tools/wsl/Ubuntu-24.04> <rootfs> --version 2`；
+   WSL2 失败自动回落 WSL1 并明确告知。
+
+### R25.2 五条硬约束（缺一条就是 bug，`bt_wsl_tests` 钉住）
+
+1. **脚本里不许出现任何重启命令**（`Restart-Computer` / `shutdown` / `reboot`）。
+   装完只写一个 `wsl/needs-reboot` 标记文件并弹一次「需要重启」。
+2. **"等待重启"只认这个标记**，不能用 `windows_reboot_pending()` 当判据 ——
+   本机实测它恒为 True（系统更新在等重启），会让从没装过 WSL 的机器显示
+   "已启用，等待重启生效"。第一版就是这么写错的，对话框截图抓到的。
+3. **不信助手一面之词**：脚本 catch 掉异常也会以 0 退出，所以成功判据是 JSON 里
+   `dism_wsl / dism_vmp / msi` 三个码都在 `{0, 3010}`（3010 = 成功但需重启）。
+4. **`wsl -l -q` 的输出是 UTF-16LE 且不带 BOM**：按 BOM 判会整段乱码，
+   把"已导入"误判成没装。判据用"前 200 字节里有没有 NUL"。
+5. **`wsl --import` 的目标目录必须在 `~/.env-tools/wsl/` 下**：卸载/清理时才能整目录定位，
+   不会把 VHDX 散落到用户目录。
+
+### R25.3 实测口径（2026-10-21，带 `byte-tools` UA，256 KB Range）
+
+| 产物 | 字节数 | 魔数 | 源序 |
+|------|--------|------|------|
+| `wsl.3.0.3.0.x64.msi` | 367,575,040 | `\xd0\xcf\x11\xe0` | 3 个 gh 加速器 → 裸 GitHub |
+| `ubuntu-base-24.04.3-base-amd64.tar.gz` | 29,983,772 | `\x1f\x8b\x08` | nju 703 → ustc 555 → aliyun 387 → tuna 130 → 官方 103 KB/s |
+
+`wsl --install` 被弃用的理由：它会自己去 GitHub 下运行时，不经过本工具的多源故障转移。
+商店路径也不可用：本机 `aka.ms/wslubuntu2404` 会被重定向到 cn.bing.com。
+
+### R25.4 本机没能验到的部分（如实记）
+
+本会话所在 shell **没有交互桌面、也没有管理员权限**，所以：
+
+- UAC 弹窗、`dism` 真实执行、`wsl --import` 真实落盘、重启后的第二步 —— 都**没有真机跑过**；
+- 已验到的是：状态探测（本机 inbox wsl.exe 判为"无运行时"）、对话框在真实字体下的排版
+  （`tools/bt_shot_wsl_dialog.py` 出的截图）、脚本逐字内容、下载源的 206 + 魔数 + 字节数。
+
+第一次真机安装时，重点看 `~/.env-tools/wsl/install-result.json` 里三个退出码与
+Windows 版本（`dism` 在 Server 上对 `Get-WindowsOptionalFeature` 的行为需要再确认一次）。
+
+## 规则 R26：版本抓取渠道与「不烧 GitHub 额度」的网页通道（2026-10-21）
+
+### R26.1 现状：103 个抓取器，两条主线
+
+- **63 个走官方机读入口**：Adoptium API、nodejs.org/dist、python.org 目录、go.dev、
+  Apache 归档列表、HashiCorp releases API、JetBrains、Grafana、Docker Hub、
+  GitHub 之外的各家 CDN / 厂商接口（详见各 fetcher 的 docstring）。
+- **40 个走 GitHub**：其中 **30 个**由 `make_github_asset_fetcher` 统一生成，
+  另外 10 个（git / kubectl / rabbitmq / seata / mongodb / postgresql / powershell /
+  bun / erlang / elasticsearch）有自己的定制抓取器。
+
+GitHub 匿名 API 是 **60 次/小时/IP**；项目原有的三道保护：磁盘缓存 24 小时、
+`GITHUB_TOKEN` / `GH_TOKEN` 把额度提到 5000、以及命中 403 后**整批快速收尾**
+（`_gh_limited_now()`），失败就回退内置清单。
+
+### R26.2 新增：网页兜底（不占 API 额度）
+
+2026-10-21 实测两条普通网页可用（带 `byte-tools` UA，普通 `github.com` 即可，
+不必走加速器）：
+
+| 入口 | 给什么 | 实测 |
+|------|--------|------|
+| `https://github.com/<repo>/releases.atom` | 精确 tag（链接里的 `/releases/tag/<tag>`） | 26–406 KB，200 |
+| `https://github.com/<repo>/releases/expanded_assets/<tag>` | 产物文件名 + 人读体积 | 119–157 KB，200 |
+
+实现：`github_releases_no_api()` / `_gh_parse_asset_page()` / `_gh_human_size()`；
+`make_github_asset_fetcher` 在 API 抛错时自动切过去，两条都失败才报错（错误信息里
+两个原因都带上）。
+
+**三个不能想当然的点**：
+
+1. **tag 不能从 atom 标题里抠**：bun 的标题是 `Bun v1.4.3`、jq 是 `jq 1.8.2`、
+   gh 是 `GitHub CLI 2.102.1` —— 统一从 `<link ... /releases/tag/<tag>>` 取，
+   并且 URL 解码（`@biomejs/biome@2.5.15` 在链接里是 `%40biomejs%2Fbiome%40...`）。
+2. **atom 不带 prerelease 标记**：按 tag 里的 `alpha/beta/rc/pre/preview/dev/
+   snapshot/nightly/canary` 保守过滤（宁可少列一个预发布，也不能把 rc 当正式版）。
+3. **资产页必须按行切块解析**：页面里混着校验值与图标，全局"名字数组 × 体积数组"
+   一漏就整体错位；按 `releases/download/` 切块后取本块第一个体积。
+
+### R26.3 边界
+
+网页通道是**兜底**不是主路径：API 能给出 `prerelease` 与精确 `size`，网页只能给出
+近似体积（`1.87 MB` → 2,000,000 上下），所以 API 可用时仍走 API。
+定制抓取器（那 10 个）暂未接这条兜底 —— 它们的 API 调用里夹着额外字段，
+需要逐个改，等真遇到限流再做。
+
+## 规则 R27：Xcode / Xcode SDK（2026-10-21）
+
+用户点名要接，但两个都**只能跑在 macOS 上**，且 Apple 没有免登录直链
+（App Store / 开发者账号是唯一分发渠道）。因此按 R21 的 `official_page_only` 登记：
+
+- `xcode` → `https://developer.apple.com/xcode/`
+- `xcode-sdk` → `https://developer.apple.com/download/all/`
+  （「Xcode SDK」= Xcode 随附的平台 SDK + Command Line Tools，Apple 不单独分发）
+
+两行都写在 `_DEVTOOLS` 表里、`rows=()`，并在第 6 个位置给了 **platform_hint**
+（`_download_only_components` 为此新增了可选的第 6 项）：默认那句"当前只登记了
+Windows 官方直链"对 macOS 独占组件是假话。
+`DEFERRED_KEYS` 里原先的 `xcode` 条目已移除 —— 它不再是"不敢登记"，而是"登记成官网入口"。

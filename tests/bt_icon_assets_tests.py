@@ -425,6 +425,9 @@ class NoDuplicatedAssets(unittest.TestCase):
         # 2026-10-15 第五批：Kimi 系的第二个客户端。Kimi / Kimi Code / Kimi Work 是同一家
         # （月之暗面）的三个产品，官方共用同一个标识。
         frozenset({"kimi", "kimi-work"}): "Kimi Work 与 Kimi 是同一家（月之暗面）的标识",
+        # 2026-10-21：Xcode SDK 是 Xcode 的一部分，Apple 没有单独标识，
+        # 两者都取 Simple Icons 的同一个 Xcode 条目。
+        frozenset({"xcode", "xcode-sdk"}): "Xcode SDK 随 Xcode 分发，没有独立标识",
     }
 
     def test_no_two_components_share_the_same_icon_bytes(self):

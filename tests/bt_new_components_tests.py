@@ -362,5 +362,106 @@ class _Json(dict):
         return dict(self)
 
 
+class _Text:
+    """让 `.text` 直接返回字符串的最小桩。"""
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class FlutterAndroidSpec(unittest.TestCase):
+    """2026-10-21 Flutter SDK 与 Android cmdline-tools 的规格护栏。
+
+    实测值（带 `byte-tools` UA，远端 zip **中央目录**口径，没下整包）：
+      Flutter     1,934,624,561 B / 顶层单目录 `flutter/` / `bin/flutter.bat` 在包内
+      cmdline-tools 154,957,218 B / 顶层单目录 `cmdline-tools/` / `bin/sdkmanager.bat`
+    源序：Flutter 腾讯 817 > 南大 686 > flutter-io.cn 311 > 官方 35 KB/s；
+          Android 腾讯 1747 KB/s，官方 `dl.google.com` 本机整站 500（只能末位兜底）。
+    """
+
+    def test_land_in_dev_env_with_bin_subdir(self):
+        for key, env, exe in (("flutter", "FLUTTER_HOME", "flutter"),
+                              ("android-sdk", "ANDROID_HOME", "sdkmanager")):
+            with self.subTest(key=key):
+                c = COMPS[key]
+                self.assertEqual(c.category, "开发环境")
+                self.assertEqual(c.path_subdir, "bin",
+                                 "两个包的顶层单目录都被 collapse，可执行文件在 bin/")
+                self.assertEqual(c.exec_name, exe)
+                self.assertEqual(c.env_var, env)
+                self.assertFalse(c.download_only)
+                self.assertTrue(c.multi_version)
+
+    def test_windows_sources_are_mainland_mirrors_then_official_last(self):
+        f = win_urls("flutter")
+        self.assertIn("mirrors.cloud.tencent.com", f[0])
+        self.assertIn("mirrors.nju.edu.cn", f[1])
+        self.assertEqual(f[-1], "https://storage.googleapis.com/flutter_infra_release/"
+                                "releases/stable/windows/flutter_windows_"
+                                f"{COMPS['flutter'].versions[0].version}-stable.zip")
+        for u in f[:2]:
+            self.assertIn("/flutter/flutter_infra_release/", u,
+                          f"镜像站路径必须带 /flutter/ 一层（dart 同款，不带实测 404）：{u}")
+        self.assertIn("storage.flutter-io.cn", f[2],
+                      "flutter-io.cn 是官方中国镜像根，不带 /flutter/ 前缀")
+        a = win_urls("android-sdk")
+        self.assertEqual(len(a), 2, f"Android 只有腾讯一个大陆镜像 + 官方兜底：{a}")
+        self.assertIn("mirrors.cloud.tencent.com/AndroidSDK/", a[0])
+        self.assertTrue(a[-1].startswith("https://dl.google.com/android/repository/"))
+
+    def test_android_build_number_is_pinned_not_guessed(self):
+        """URL 里的 build 号必须来自官方索引（16111833），不许留 latest 别名当版本。"""
+        u = win_urls("android-sdk")[0]
+        self.assertIn("commandlinetools-win-16111833_latest.zip", u)
+        self.assertNotIn("/latest/", u)
+
+    def test_flutter_fetcher_sorts_numerically_and_drops_non_stable(self):
+        payload = _Json({"releases": [
+            {"channel": "stable", "version": "3.9.4",
+             "archive": "stable/windows/flutter_windows_3.9.4-stable.zip"},
+            {"channel": "beta", "version": "3.48.0-1.0.pre",
+             "archive": "stable/windows/flutter_windows_3.48.0-1.0.pre-stable.zip"},
+            {"channel": "stable", "version": "3.10.0",
+             "archive": "stable/windows/flutter_windows_3.10.0-stable.zip"},
+            {"channel": "stable", "version": "3.47.7",
+             "archive": "stable/windows/flutter_windows_3.47.7-stable.zip"},
+            {"channel": "stable", "version": "3.47.8",
+             "archive": "stable/linux/flutter_linux_3.47.8-stable.tar.xz"},
+        ]})
+        orig = main._get
+        main._get = lambda url, timeout=None: payload
+        try:
+            got = [cv.version for cv in main.fetch_flutter_versions()]
+        finally:
+            main._get = orig
+        self.assertEqual(got[:3], ["3.47.7", "3.10.0", "3.9.4"],
+                         "要逐段 int 排序，且只留 Windows stable zip")
+
+    def test_android_fetcher_reads_revision_and_win_build_from_xml(self):
+        xml = (
+            '<sdk:sdk-repository><remotePackage path="cmdline-tools;latest">'
+            "<revision><major>24</major><minor>1</minor></revision>"
+            "<archives><archive><complete><size>1</size><checksum>x</checksum>"
+            "<url>commandlinetools-linux-17000000_latest.zip</url></complete></archive>"
+            "<archive><complete><size>2</size><checksum>y</checksum>"
+            "<url>commandlinetools-win-17000000_latest.zip</url></complete></archive>"
+            "</archives></remotePackage></sdk:sdk-repository>"
+        )
+        orig = main._get
+        main._get = lambda url, timeout=None: _Text(xml)
+        try:
+            cvs = main.fetch_android_cmdline_versions()
+        finally:
+            main._get = orig
+        self.assertEqual([cv.version for cv in cvs], ["24.1"])
+        urls = list((cvs[0].url_list_map or {}).get("Windows") or [])
+        self.assertIn("commandlinetools-win-17000000_latest.zip", urls[0])
+
+    def test_android_note_tells_the_user_to_pass_sdk_root(self):
+        """平铺布局不是 Android 认的标准位置 —— 卡片必须说清 --sdk_root 怎么给。"""
+        note = COMPS["android-sdk"].data_note or ""
+        self.assertIn("--sdk_root=%ANDROID_HOME%", note)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

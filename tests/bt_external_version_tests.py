@@ -1542,5 +1542,74 @@ class WorkspaceMachineFixTests(ExternalSandbox):
         self.assertIn("系统 PATH 最前", card._restore_btn.toolTip())
 
 
+class SwitchLogWordingTests(ExternalSandbox):
+    """2026-10-21 真机反馈「三处切换文案不对」的护栏。
+
+    用户看到的现象有两条，都只在卡片这一层才成立（底层函数的返回值一直是干净的）：
+      1. 每一步打印两遍 —— 底层已经把步骤打进 log，卡片又回放了一遍 res["steps"]，
+         看起来像"这个操作执行了两次"；
+      2. 点「切换」时日志里冒出「已还原到我之前的设置」—— 那是还原按钮的话，
+         会被读成"我点错了按钮/它替我还原了"。
+
+    判据：同一次点击内不许出现两条一模一样的日志；「切换」的日志里不许出现
+    还原按钮的专属确认语。
+    """
+
+    def _jdk_card(self, logs: list):
+        comp = self.comp("jdk")
+        for v in ("21", "17"):
+            _touch_exe(comp.install_dir(v), "java.exe")
+        main.save_active_version("jdk", "21")
+        # 受控系统 PATH：只有 system32（里面没有 java.exe），复验结论不随宿主机漂
+        self.hklm["Path"] = (r"C:\Windows\system32", "REG_EXPAND_SZ")
+        _ensure_app()
+        self._patch(main.ComponentCard, "_schedule_version_probe",
+                    lambda self, exe_path, *a, **k: None)
+        card = main.ComponentCard(comp, lambda lvl, msg: logs.append((lvl, msg)))
+        return comp, card
+
+    @staticmethod
+    def _duplicates(logs) -> list:
+        seen, dup = set(), []
+        for item in logs:
+            if item in seen:
+                dup.append(item)
+            seen.add(item)
+        return dup
+
+    def test_switch_to_external_logs_each_step_once(self):
+        logs: list = []
+        comp, card = self._jdk_card(logs)
+        ext = self.make_home("jdk17-ext", "java.exe")
+        # 系统段里就排着这个外部版本 → 用户级写完后能复验通过（不弹 UAC）
+        self.hklm["Path"] = (r"C:\Windows\system32;" + str(ext / "bin"),
+                             "REG_EXPAND_SZ")
+        card.on_switch_external(self.dv(ext, "17.0.12"))
+        self.assertEqual(self._duplicates(logs), [],
+                         "同一次切换里每一步只许打印一遍")
+        self.assertTrue(any("复验通过" in m for _l, m in logs), logs)
+
+    def test_switch_back_never_borrows_the_restore_wording(self):
+        logs: list = []
+        comp, card = self._jdk_card(logs)
+        ext = self.make_home("jdk17-ext", "java.exe")
+        self.hklm["Path"] = (r"C:\Windows\system32;" + str(ext / "bin"),
+                             "REG_EXPAND_SZ")
+        card.on_switch_external(self.dv(ext, "17.0.12"))
+        self.assertTrue(main.load_takeover_map().get("jdk"), "前提：先有一次接管")
+        # 撤掉外部那条压制的条目，让切回工作区能一次复验通过（本用例只测日志措辞）
+        self.hklm["Path"] = (r"C:\Windows\system32", "REG_EXPAND_SZ")
+        logs.clear()
+        card.on_configure_clicked()
+        self.assertEqual(self._duplicates(logs), [],
+                         "点一次「切换」不许把同一步打印两遍")
+        joined = "\n".join(m for _l, m in logs)
+        self.assertNotIn("已还原到我之前的设置", joined,
+                         "「切换」的日志不许借用还原按钮的措辞，否则像是点错了按钮")
+        self.assertIn("环境变量已还原到接管之前的样子", joined,
+                      "预备还原要如实说，但要用自己的措辞")
+        self.assertEqual(main.load_active_map().get("jdk"), "21")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
