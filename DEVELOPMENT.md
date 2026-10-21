@@ -2950,3 +2950,29 @@ GitHub 匿名 API 是 **60 次/小时/IP**；项目原有的三道保护：磁�
 （`_download_only_components` 为此新增了可选的第 6 项）：默认那句"当前只登记了
 Windows 官方直链"对 macOS 独占组件是假话。
 `DEFERRED_KEYS` 里原先的 `xcode` 条目已移除 —— 它不再是"不敢登记"，而是"登记成官网入口"。
+
+## 规则 R28：第二道测试护栏 —— 真实用户环境变量（2026-10-21）
+
+**事故**：`bt_external_version_tests` 新加的日志文案用例调了
+`ComponentCard.on_configure_clicked` → `_apply_active` → `apply_active_version`，
+而 `ExternalSandbox` 只接了 `*_env_raw` 四个接缝；`EnvManager.write_user_env` /
+`add_path_entry` 走的是**另一组**持久层出口：
+
+    _read_windows_user_path / _write_registry_env / _delete_windows_user_env
+
+于是测试**真把用户 HKCU 的 JAVA_HOME 与 PATH 写成了已删除的 `%TEMP%\tmpXXXX\env-tools\jdk\jdk-21`**。
+症状不是测试红，而是**之后的** `bt_launch_tests` 三连失败：`prereq_components(jenkins)`
+读到"有 JAVA_HOME 但版本读不出" ⇒ 判定缺 JDK ⇒ 点启动先去装前置，不再起 start worker。
+
+**修法两条，缺一不可**：
+
+1. `ExternalSandbox.__init__` 里把上面三条也接进内存（与 `hkcu` 字典共用同一份存储）。
+2. `tests/run_all_tests.py` 每个套件前后快照 `HKCU\Environment`：
+   新增/删除键、或值被写成 `%TEMP%\tmp*` ⇒ 判该套件失败并给出修法。
+   这层护栏**独立于** config.json 护栏 —— 后者只看目录，完全看不见注册表。
+
+**教训**：给测试加沙箱时，先 `grep` 被测函数最终落到哪个 `EnvManager` 静态方法，
+再接**那一层**；"我接了几个 raw 接缝"不等于"写侧被封住了"。
+本机自检手法（不依赖测试）：
+
+    .venv/Scripts/python.exe -c "import winreg;..."   # 快照 Path/JAVA_HOME 前后对比

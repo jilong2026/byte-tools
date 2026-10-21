@@ -124,6 +124,24 @@ class ExternalSandbox(unittest.TestCase):
         self._patch(main.ComponentCard, "_detect_status", lambda self, *a, **k: None)
         self._patch(main, "list_shell_processes", lambda: [])
 
+        # ---- EnvManager 的**写侧**接缝也必须接进内存 ----
+        # 2026-10-21 真机事故：本文件新增的 SwitchLogWordingTests 调了
+        # `_apply_active` → `apply_active_version`，它走的是 EnvManager.write_user_env /
+        # add_path_entry，而不是上面那四个 *_env_raw 接缝 ⇒ 测试把用户真实 HKCU 的
+        # JAVA_HOME 与 PATH 写成了 `%TEMP%\tmpXXXX\env-tools\jdk\jdk-21`。
+        # `_write_registry_env` / `_read_windows_user_path` / `_delete_windows_user_env`
+        # 就是 write_user_env 那条链的全部持久层出口，接上它们才算真沙箱。
+        self._patch(main.EnvManager, "_read_windows_user_path",
+                    staticmethod(lambda: [p for p in (
+                        (self.hkcu.get("Path") or ("", ""))[0]).split(";") if p]))
+        self._patch(main.EnvManager, "_write_registry_env",
+                    staticmethod(lambda name, value: self.hkcu.__setitem__(
+                        name, (value, "REG_EXPAND_SZ" if "%" in value else "REG_SZ"))))
+        self._patch(main.EnvManager, "_delete_windows_user_env",
+                    staticmethod(lambda name: (self.hkcu.pop(name, None), None)[1]))
+        self._patch(main.EnvManager, "_read_windows_user_env",
+                    staticmethod(lambda name: (self.hkcu.get(name) or (None, ""))[0]))
+
     # ------------------------------------------------------------------
     def _patch(self, obj, name, value):
         """打桩并登记还原，且**先断言属性存在**——拼错名字只会静默不生效，

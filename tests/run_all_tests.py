@@ -203,6 +203,59 @@ def home_delta(before: dict, after: dict) -> list[str]:
     return out
 
 
+def _is_temp_env_value(value: str) -> bool:
+    """值是否指向测试用的临时目录（`%TEMP%\\tmpXXXX\\env-tools\\...`）。"""
+    return "/appdata/local/temp/tmp" in value.replace("\\", "/").lower()
+
+
+def snapshot_hkcu_env() -> dict[str, str] | None:
+    """快照真实用户环境变量（HKCU\\Environment 的字符串值）。
+
+    为什么需要这第二道护栏（2026-10-21 真机事故）：`EnvManager.write_user_env`
+    走的是 `_write_registry_env` / `_read_windows_user_path` / `_delete_windows_user_env`
+    这组持久层接缝，而不是 `*_env_raw`。某个套件只接了后者，于是**真的**把用户
+    HKCU 的 JAVA_HOME 与 PATH 写成了已删除的临时目录 —— config.json 护栏完全看不见。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_READ) as key:
+            out: dict[str, str] = {}
+            index = 0
+            while True:
+                try:
+                    name, value, _type = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                index += 1
+                if isinstance(value, str):
+                    out[name] = value
+            return out
+    except OSError:
+        return None
+
+
+def hkcu_env_delta(before: dict[str, str] | None,
+                   after: dict[str, str] | None) -> list[str]:
+    """两次环境变量快照的可疑差异：新增/删除键，或值被写成临时目录。"""
+    if before is None or after is None:
+        return []
+    out = []
+    for name in sorted(set(before) | set(after)):
+        b, a = before.get(name), after.get(name)
+        if b == a:
+            continue
+        if b is None:
+            out.append(f"新增用户环境变量 {name}")
+        elif a is None:
+            out.append(f"删除用户环境变量 {name}")
+        elif _is_temp_env_value(a):
+            out.append(f"{name} 被写成了临时目录：{a[:120]}")
+    return out
+
+
 def run_one(path: Path, python: str, verbose: bool) -> tuple[bool, str, float, int]:
     """跑单个测试文件。
 
@@ -293,8 +346,22 @@ def main() -> int:
         sys.stdout.write(f"  {f.name:<38} ")
         sys.stdout.flush()
         before = snapshot_home(home_dir)
+        env_before = snapshot_hkcu_env()
         ok, detail, elapsed, count = run_one(f, python, args.verbose)
         delta = home_delta(before, snapshot_home(home_dir))
+        env_delta = hkcu_env_delta(env_before, snapshot_hkcu_env())
+        if env_delta:
+            ok = False
+            leaked_env = "\n".join(f"  {line}" for line in env_delta[:12])
+            detail = (
+                "真实用户环境变量（HKCU\\Environment）被这个套件改写了：\n"
+                f"{leaked_env}\n"
+                "  测试只接了 *_env_raw 接缝是不够的：EnvManager.write_user_env 走的是\n"
+                "  _write_registry_env / _read_windows_user_path / _delete_windows_user_env，\n"
+                "  这三条也要打桩（见 bt_external_version_tests.ExternalSandbox）。\n"
+                "  请立即核对 HKCU\\Environment：临时目录条目要删掉、JAVA_HOME 要恢复。\n\n"
+                + detail
+            )
         if delta:
             ok = False
             leaked = "\n".join(f"  {line}" for line in delta[:12])
