@@ -2157,6 +2157,13 @@ worker 连了 `finished → deleteLater`（探测线程、检查更新线程都�
 实现细节坑：`raise RuntimeError(...)` 写在 `try` 里会被下面的 `except Exception` 接去重试 ——
 必须加一条 `except RuntimeError: raise` 让限流这个**终局判断**穿透出去。
 
+2026-10-28 增补：`_github_api_json` 先走国内反向代理 `GH_API_PROXY`（`gh-proxy.com`）。
+起因是本机直连 `api.github.com` 证书校验失败，30 多个只发 GitHub Release 的组件整批降级；
+实测 gh-proxy 能代理 API（200 + JSON + `X-RateLimit`），ghfast / ghproxy.net 对 API 路径 403。
+三条约束：**代理请求不带 Authorization**（不把用户 token 交给第三方）；代理额度见底
+（403 + `remaining=0`）只回落直连、不立全局旗；直连额度见底仍按本节整批快速失败。
+直连最后一次若仍是证书错误，再试一次 `verify=False`（与 `_get` 同策）。
+
 ### R15.4 失败原因要进日志面板，不能只 print 到 stdout
 
 `VersionFetchWorker` 原来把原因 `print` 到 stdout —— **打包成 exe 后没有控制台，那句话永远不会

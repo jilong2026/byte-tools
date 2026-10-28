@@ -1185,7 +1185,7 @@ on_uninstall_clicked()   # main.py:4995
 
 ### 7.3 运行时外部依赖
 
-- **网络**：需访问对应组件的官方下载源（Adoptium API、Apache 归档、python.org、nodejs.org、GitHub API、repo.anaconda.com、go.dev、services.gradle.org、dl.k8s.io、get.jenkins.io、elastic.co 等）。`_get` 自带 3 次重试 + 第 3 次关闭 SSL 校验，应对企业代理 MITM 场景；下载流程额外走 R1 国内镜像优先（MIRROR_BASES）；所有出网请求固定携带 `HTTP_UA`（清华 TUNA / BFSU 实测拒绝默认 UA）
+- **网络**：需访问对应组件的官方下载源（Adoptium API、Apache 归档、python.org、nodejs.org、GitHub API、repo.anaconda.com、go.dev、services.gradle.org、dl.k8s.io、get.jenkins.io、elastic.co 等）。`_get` 自带 3 次重试 + 第 3 次关闭 SSL 校验，应对企业代理 MITM 场景；下载流程额外走 R1 国内镜像优先（MIRROR_BASES）；GitHub API 版本元数据先走 `gh-proxy.com` 反向代理（`GH_API_PROXY`，token 不转发），代理失败再直连；所有出网请求固定携带 `HTTP_UA`（清华 TUNA / BFSU 实测拒绝默认 UA）
 - **磁盘**：建议预留 3 GB 以上
 - **权限**：Windows 写用户级环境变量通常无需管理员；macOS/Linux 需对 `~/.zshrc` 等文件有写权限；macOS/Linux 上单二进制组件（kubectl 等）需 `chmod +x`
 

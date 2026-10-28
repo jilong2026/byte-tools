@@ -2068,6 +2068,9 @@ GH_ACCELERATORS: List[str] = [
     "https://gh-proxy.com/",
     "https://ghproxy.net/",
 ]
+# 2026-10-28 实测：只有 gh-proxy.com 能代理 api.github.com（200 + application/json +
+# X-RateLimit 头）；ghfast.top / ghproxy.net 对 API 路径回 403。版本元数据先走它。
+GH_API_PROXY = "https://gh-proxy.com/"
 
 # 故障转移参数（避免魔法数字）
 DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
@@ -3604,10 +3607,13 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
 
     设计定位：作为各组件版本抓取器的「末位官网」兜底来源。
 
-    - 若环境变量 GITHUB_TOKEN / GH_TOKEN 存在，则带 ``Authorization`` 头，
-      未认证限额（60 次/小时/IP）提升到 5000 次/小时，能显著降低限流失败。
-    - 命中 403 限流（X-RateLimit-Remaining=0）或网络抖动时，按 5s / 10s 退避重试 3 次，
-      尽量自愈；仍失败则向上抛，由 VersionFetchWorker 捕获后降级到内置默认清单。
+    **2026-10-28 起先走国内 GitHub 反向代理**（`GH_API_PROXY`）：本机直连
+    `api.github.com` 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），30 多个
+    只发 GitHub Release 的组件全部降级成内置清单。实测 `gh-proxy.com` 能代理
+    API（200 + `application/json` + `X-RateLimit` 头），而 `ghfast.top` /
+    `ghproxy.net` 对 API 路径回 403。代理请求**不带** Authorization：不把用户的
+    token 交给第三方；直连那一次才带。代理失败立刻回落直连，直连保留原来的
+    5s / 10s 退避，最后再试一次 `verify=False`（与 `_get` 同策）。
 
     入参 url:    完整 GitHub API 地址
     入参 timeout: 单请求超时（秒），缺省取 DOWNLOAD_PROBE_TIMEOUT * 2
@@ -3622,32 +3628,62 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     timeout = timeout or (DOWNLOAD_PROBE_TIMEOUT * 2)
+
+    candidates: List[Tuple[str, Dict[str, str]]] = []
+    if GH_API_PROXY and url.startswith("https://api.github.com/"):
+        proxy_headers = {k: v for k, v in headers.items()
+                         if k.lower() != "authorization"}
+        candidates.append((GH_API_PROXY + url, proxy_headers))
+    candidates.append((url, headers))
+
     last_exc: Optional[Exception] = None
-    for attempt in range(3):
-        if FETCH_ABORT.is_set():
-            raise FetchAborted("应用正在退出，已取消版本抓取")
-        if _gh_limited_now():
-            # 额度旗已立，再发请求就是继续烧额度、继续让界面转圈
-            raise RuntimeError(GH_LIMITED_TEXT)
-        try:
-            r = http_session().get(url, timeout=timeout, headers=headers)
-            # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
-            # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
-            # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
-            if r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0":
-                _gh_mark_limited(r.headers.get("X-RateLimit-Reset"))
-                raise RuntimeError(GH_LIMITED_TEXT)
-            r.raise_for_status()
-            return r.json()
-        except FetchAborted:
-            raise
-        except RuntimeError:
-            # 限流是终局判断（这一小时别再试了），不能被下面的退避重试吞掉重跑
-            raise
-        except Exception as e:  # noqa: BLE001
-            last_exc = e
-            if attempt < 2 and FETCH_ABORT.wait(5 * (attempt + 1)):
+    for idx, (target, hdrs) in enumerate(candidates):
+        direct = idx == len(candidates) - 1
+        # 代理只试一次：失败立刻换直连，不在这里退避。直连保留 3 次 / 5s·10s。
+        attempts = 3 if direct else 1
+        for attempt in range(attempts):
+            if FETCH_ABORT.is_set():
                 raise FetchAborted("应用正在退出，已取消版本抓取")
+            if _gh_limited_now():
+                # 立旗后代理与直连都不再发请求：这是整批级别的快速收尾（R15.3），
+                # 不能因为"代理额度是另一本账"就每个组件再试一次。
+                raise RuntimeError(GH_LIMITED_TEXT)
+            try:
+                r = http_session().get(target, timeout=timeout, headers=hdrs)
+                # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
+                # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
+                # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
+                if r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0":
+                    if direct:
+                        _gh_mark_limited(r.headers.get("X-RateLimit-Reset"))
+                        raise RuntimeError(GH_LIMITED_TEXT)
+                    # 代理额度见底：不立全局旗（直连还有 60 次/小时），换直连。
+                    last_exc = RuntimeError("GitHub 代理额度已用完")
+                    break
+                r.raise_for_status()
+                return r.json()
+            except FetchAborted:
+                raise
+            except RuntimeError:
+                # 限流是终局判断（这一小时别再试了），不能被下面的退避重试吞掉重跑
+                raise
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                if direct and attempt < attempts - 1 \
+                        and FETCH_ABORT.wait(5 * (attempt + 1)):
+                    raise FetchAborted("应用正在退出，已取消版本抓取")
+        # 直连仍失败且原因就是证书校验：再试一次 verify=False（与 _get 的 SSL 降级一致）。
+        if direct and last_exc is not None \
+                and "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                r = http_session().get(target, timeout=timeout, headers=hdrs,
+                                       verify=False)
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
     assert last_exc is not None
     raise last_exc
 
@@ -18402,7 +18438,7 @@ class ComponentCard(QFrame):
                     preferred_label = self._display_label(cv)
                     break
         self._reload_combo_items(preferred=preferred_label)
-        self._log("ok", f"已从官网获取 {len(versions)} 个版本")
+        self._log("ok", f"已获取 {len(versions)} 个版本")
 
     # ------------------------------------------------------------------
     def _current_version(self) -> ComponentVersion:

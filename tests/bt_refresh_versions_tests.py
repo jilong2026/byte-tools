@@ -536,6 +536,77 @@ class FetchGateContract(unittest.TestCase):
                       "永远归不了零，右上角会一直停在「⟳ 抓取中…」")
 
 
+class GitHubApiProxy(unittest.TestCase):
+    """GitHub API 先走国内反向代理，失败再直连；token 不交给第三方。
+
+    2026-10-28 真机：直连 api.github.com 证书校验失败，30 多个只发 GitHub Release
+    的组件全部降级成内置清单。实测 gh-proxy.com 能代理 API（200 + JSON + X-RateLimit），
+    ghfast / ghproxy.net 对 API 路径 403。
+    """
+
+    URL = "https://api.github.com/repos/demo/demo/releases?per_page=1"
+
+    class _Resp:
+        def __init__(self, code=200, headers=None, payload=None):
+            self.status_code = code
+            self.headers = headers or {}
+            self._payload = payload if payload is not None else {"ok": True}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                # 不能用 RuntimeError：产品代码把 RuntimeError 当作"限流终局"，
+                # 那会让代理 404 被误判成额度用尽。requests 真实抛的是 HTTPError。
+                raise ValueError(f"HTTP {self.status_code}")
+
+        def json(self):
+            return self._payload
+
+    def setUp(self):
+        self._orig_session = main.http_session
+        self._orig_limit = main._GH_LIMITED_UNTIL
+        main._GH_LIMITED_UNTIL = 0.0
+        main.FETCH_ABORT.clear()
+        self.addCleanup(setattr, main, "http_session", self._orig_session)
+        self.addCleanup(setattr, main, "_GH_LIMITED_UNTIL", self._orig_limit)
+        self.addCleanup(main.FETCH_ABORT.clear)
+
+    def _session(self, behavior):
+        calls = []
+
+        class _S:
+            def get(self, url, **kw):
+                calls.append((url, kw.get("headers") or {}))
+                return behavior(url)
+
+        main.http_session = lambda: _S()
+        return calls
+
+    def test_proxy_is_tried_before_direct_and_falls_back(self):
+        def behavior(url):
+            if url.startswith(main.GH_API_PROXY):
+                return self._Resp(404)
+            return self._Resp(200, payload={"ok": "direct"})
+        calls = self._session(behavior)
+        got = main._github_api_json(self.URL)
+        self.assertEqual(got, {"ok": "direct"})
+        self.assertTrue(calls[0][0].startswith(main.GH_API_PROXY), calls)
+        self.assertEqual(calls[1][0], self.URL, calls)
+
+    def test_token_is_not_forwarded_to_the_proxy(self):
+        def behavior(url):
+            if url.startswith(main.GH_API_PROXY):
+                return self._Resp(404)
+            return self._Resp(200)
+        calls = self._session(behavior)
+        import os
+        os.environ["GITHUB_TOKEN"] = "secret-token"
+        self.addCleanup(os.environ.pop, "GITHUB_TOKEN", None)
+        main._github_api_json(self.URL)
+        self.assertNotIn("Authorization", calls[0][1],
+                         "代理请求不许带用户的 token")
+        self.assertEqual(calls[1][1].get("Authorization"), "Bearer secret-token")
+
+
 class WorkerFailureReason(unittest.TestCase):
     """抓取失败的真实原因必须留在 worker 上，界面才写得出一句人话。"""
 
