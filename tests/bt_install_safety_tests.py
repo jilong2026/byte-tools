@@ -623,6 +623,42 @@ class ArchiveTraversalGuard(unittest.TestCase):
         root = main.extract_archive(arc, out)
         self.assertTrue((root / "bin" / "tool").exists(), f"tar 解压后根不对：{root}")
 
+    def test_7z_sfx_is_extracted_not_copied_as_a_binary(self):
+        """PortableGit 是 `.7z.exe` 自解压包：必须走 `-o<dir> -y` 展开。
+
+        分支顺序是承重的：`.7z.exe` 也以 `.exe` 结尾，若排在通用 `.exe` 分支之后，
+        会被当成"单文件"原样拷进安装目录 —— PATH 里永远找不到 git.exe，界面判成没装。
+        这里不真跑 63 MB 的包，用桩确认"调对了展开器、且没有把它当二进制拷走"。
+        """
+        out = self._out("sfx")
+        archive = self.tmp / "git-2.47.1.7z.exe"
+        archive.write_bytes(b"MZfake")
+        calls = []
+        orig_run = main.subprocess.run
+
+        def fake_run(cmd, check=False, **kw):
+            calls.append(list(cmd))
+            target = Path(str(cmd[1])[2:])      # 去掉 -o 前缀
+            (target / "cmd").mkdir(parents=True, exist_ok=True)
+            (target / "cmd" / "git.exe").write_bytes(b"MZ")
+
+            class _R:
+                returncode = 0
+            return _R()
+
+        main.subprocess.run = fake_run
+        self.addCleanup(setattr, main.subprocess, "run", orig_run)
+
+        root = main.extract_archive(archive, out)
+        self.assertEqual(root, out, "自解压包应直接展开到目标目录，不该有额外的顶层目录")
+        self.assertTrue((out / "cmd" / "git.exe").exists(), "桩展开的 git.exe 没落地")
+        self.assertEqual(len(calls), 1, f"应只调用一次展开器：{calls}")
+        self.assertTrue(str(calls[0][0]).endswith(".7z.exe"), calls)
+        self.assertEqual(calls[0][1], f"-o{out}", calls)
+        self.assertEqual(calls[0][2], "-y", calls)
+        self.assertFalse((out / archive.name).exists(),
+                         "自解压包被当成单文件原样拷进了安装目录")
+
 
 # ---------------------------------------------------------------------------
 # 日志浮层：绝不自动弹开（2026-10-14 用户要求"默认不打开"且"偶尔自己弹"要修掉）

@@ -162,11 +162,12 @@ class TabStructure(unittest.TestCase):
         → 180（同日第六批 19 个：9 个服务端/运维 + 10 个语言与开发 CLI，
         全部"解压即用"、归档布局已用 bt_archive_layout_audit 逐个验过）
         → **182（2026-10-16 用户点名的 CC-Switch 与 CodexAppManager，都是开发工具）。**
+        → **184（2026-10-28 用户点名的 DevSidecar 开发工具 + Qoder CLI Agent 客户端）。**
         方法名里的 127 是历史名，不改 —— 改名的收益抵不上一次全仓库检索。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 182)
-        self.assertEqual(len(self.components), 183, "182 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 184)
+        self.assertEqual(len(self.components), 185, "184 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -1168,6 +1169,19 @@ class ArtifactMenu(_EnvSandbox):
         card.on_download_clicked()
         self.assertTrue(_FakeWorker.last.dest.name.endswith(".zip"))
 
+    def test_cli_artifacts_download_as_zip_not_dot_cli(self):
+        """CLI 产物（claude-code / qoder-cli）本体是 zip，落盘名必须是 .zip。
+
+        原来按 `f".{art.fmt}"` 拼，CLI 会存成 `xxx.cli` —— 用户双击打不开、解压器也不认，
+        而且魔数校验一直是关着的。现在 cli → .zip + `PK` 校验。
+        """
+        main.pick_download_artifact = self._orig_pick
+        card = self._card("qoder-cli")
+        card.on_download_clicked()
+        w = _FakeWorker.last
+        self.assertTrue(w.dest.name.endswith(".zip"), f"CLI 被存成了 {w.dest.name}")
+        self.assertEqual(w.expect_magic, b"PK")
+
     def test_every_artifact_url_is_a_measured_host(self):
         """产物列表里的每个域名都必须是实测过的 —— 包括"另一种产物"那条。
 
@@ -1236,7 +1250,10 @@ class ArtifactMenu(_EnvSandbox):
                    "appsupport.kimi.ai",         # kimi-work：滚动下载端点，302 到版本化文件
                    "1.as.dl.wireshark.org",      # wireshark：官方按平台分目录（win64/）
                    "release.gitkraken.com",      # gitkraken：稳定别名 GitKrakenSetup.exe
-                   "product-downloads.atlassian.com")  # sourcetree：Atlassian GA 目录
+                   "product-downloads.atlassian.com",  # sourcetree：Atlassian GA 目录
+                   # 2026-10-28：Qoder CLI 的原生 zip 在阿里云 OSS 加速域
+                   # （实测 200 + `PK`，1.1.80 = 98,569,960 B；manifest 在 /channels/manifest.json）。
+                   "qoder-ide.oss-accelerate.aliyuncs.com")
         for comp in main.build_components():
             if not comp.download_only:
                 continue

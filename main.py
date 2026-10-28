@@ -115,7 +115,7 @@ APP_NAME = "字节工具箱"
 # 界面与 macOS bundle 都显示它；**发版前必须和要打的 tag 一起改**。
 # release.yml 第一步会拿 tag 比对，不一致就直接红 —— 因为发出去的 exe 上写的版本
 # 骗人，比没有版本号更糟（用户报问题时给的是 v1.1.1，实际装的是 v1.2.0 的修复）。
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.4"
 GITHUB_URL = "https://github.com/jilong2026/byte-tools"
 CONFIG_DIR = Path.home() / ".env-tools"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -2068,6 +2068,9 @@ GH_ACCELERATORS: List[str] = [
     "https://gh-proxy.com/",
     "https://ghproxy.net/",
 ]
+# 2026-10-28 实测：只有 gh-proxy.com 能代理 api.github.com（200 + application/json +
+# X-RateLimit 头）；ghfast.top / ghproxy.net 对 API 路径回 403。版本元数据先走它。
+GH_API_PROXY = "https://gh-proxy.com/"
 
 # 故障转移参数（避免魔法数字）
 DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
@@ -2424,24 +2427,33 @@ def _mysql_urls(v: str) -> Dict[str, List[str]]:
 
 def _python_urls(v: str) -> Dict[str, List[str]]:
     """
-    Python 下载 URL 列表：Windows 用 embed zip，其它平台用源码 tgz（与官方 ftp 同名）。
+    Python 下载 URL 列表。
 
-    华为云的 Python 发行包在 mirrors 子域（不是 repo 子域），故用 huaweicloud-py 基址。
+    **Windows 用官方 NuGet 完整包，不再用 embeddable 精简包**（2026-10-28 用户要求）：
+      · embeddable zip 没有 Lib/、venv、ensurepip —— `python -m venv` 必失败，
+        卡片却写着「pip 包管理」，功能与承诺不符；
+      · 官方 exe 安装器是 Burn 单实例（provider key `CPython-3.12` 全局唯一），
+        本机已有同 minor 版本时装不进第二个目录，与多版本并存冲突；
+      · NuGet 包 `python.<v>.nupkg` 里的 `tools/` 是完整解释器 + 完整标准库 +
+        pip + venv，本身是 zip，直接解压即可，不写注册表、不抢全局单实例。
+    镜像（2026-10-28 实测 200 + `PK` 头）：华为云两个子域在前，nuget.org 官方末位。
+    macOS / Linux 仍是官方源码包（本次未改，见 DEVELOPMENT.md R1.5 例外）。
     """
-    win_name = f"python-{v}-embed-amd64.zip"
-    src_name = f"Python-{v}.tgz"
-    hwpy = _mb("huaweicloud-py")[0]
+    hwm, hw = _mb("huaweicloud", "huaweicloud-py")
     npmm = _mb("npmmirror")[0]
+    src_name = f"Python-{v}.tgz"
+    nuget_rel = f"python/{v}/python.{v}.nupkg"
+    nuget_hw1 = f"{hwm}/artifactory/api/nuget/v3/nuget-remote/{nuget_rel}"
+    nuget_hw2 = f"{hw}/artifactory/api/nuget/v3/nuget-remote/{nuget_rel}"
     official = "https://www.python.org/ftp/python"
     return {
-        "Windows": [f"{hwpy}/python/{v}/{win_name}",
-                    f"{npmm}/-/binary/python/{v}/{win_name}",
-                    f"{official}/{v}/{win_name}"],
+        "Windows": [nuget_hw1, nuget_hw2,
+                    f"https://api.nuget.org/v3-flatcontainer/{nuget_rel}"],
         "Darwin":  [f"{npmm}/-/binary/python/{v}/{src_name}",
-                    f"{hwpy}/python/{v}/{src_name}",
+                    f"{hw}/python/{v}/{src_name}",
                     f"{official}/{v}/{src_name}"],
         "Linux":   [f"{npmm}/-/binary/python/{v}/{src_name}",
-                    f"{hwpy}/python/{v}/{src_name}",
+                    f"{hw}/python/{v}/{src_name}",
                     f"{official}/{v}/{src_name}"],
     }
 
@@ -2465,11 +2477,16 @@ def _node_urls(v: str) -> Dict[str, List[str]]:
 
 def _git_urls(v: str) -> Dict[str, List[str]]:
     """
-    Git 下载：Windows 用 MinGit（便携版，解压即用）。
+    Git 下载：Windows 用 PortableGit **完整版**（含 Git Bash / Perl / OpenSSH）。
 
-    实测（2026-09-28）Windows 有真镜像：华为云 repo/mirrors 两个子域都同步了
-    git-for-windows，npmmirror 的 registry 布局也有同名目录；所以镜像在前、
-    GitHub 加速器居中、裸地址末位。
+    2026-10-28 用户要求把 MinGit 精简版换掉：MinGit 只有最小命令集，没有 Git Bash，
+    与卡片上"版本控制系统客户端"的承诺不符。PortableGit 是官方完整便携包，解压即用、
+    不写注册表，和本工具的多版本/卸载模型一致。
+
+    镜像（实测 200）：华为云 repo/mirrors 两个子域都同步了 git-for-windows，
+    npmmirror 的 registry 布局也有同名目录；所以镜像在前、GitHub 加速器居中、
+    裸地址末位。PortableGit 是 7-Zip 自解压包（`.7z.exe`），由 extract_archive
+    用 `-o<dir> -y` 静默展开 —— 不是安装器，不弹向导、不碰注册表。
 
     macOS/Linux **不给任何 URL**：GitHub 上只有 git/git 的源码 tar.gz，解压后
     没有可执行的 git（要自己 configure + make），列出来只会让用户下一个用不了
@@ -2478,7 +2495,7 @@ def _git_urls(v: str) -> Dict[str, List[str]]:
     hwm, hw = _mb("huaweicloud", "huaweicloud-py")
     npmm = _mb("npmmirror")[0]
     win_tag = f"v{v}.windows.1"
-    win_name = f"MinGit-{v}-64-bit.zip"
+    win_name = f"PortableGit-{v}-64-bit.7z.exe"
     win = (f"https://github.com/git-for-windows/git/releases/download/"
            f"{win_tag}/{win_name}")
     win_list = [f"{hwm}/git-for-windows/{win_tag}/{win_name}",
@@ -3590,10 +3607,13 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
 
     设计定位：作为各组件版本抓取器的「末位官网」兜底来源。
 
-    - 若环境变量 GITHUB_TOKEN / GH_TOKEN 存在，则带 ``Authorization`` 头，
-      未认证限额（60 次/小时/IP）提升到 5000 次/小时，能显著降低限流失败。
-    - 命中 403 限流（X-RateLimit-Remaining=0）或网络抖动时，按 5s / 10s 退避重试 3 次，
-      尽量自愈；仍失败则向上抛，由 VersionFetchWorker 捕获后降级到内置默认清单。
+    **2026-10-28 起先走国内 GitHub 反向代理**（`GH_API_PROXY`）：本机直连
+    `api.github.com` 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），30 多个
+    只发 GitHub Release 的组件全部降级成内置清单。实测 `gh-proxy.com` 能代理
+    API（200 + `application/json` + `X-RateLimit` 头），而 `ghfast.top` /
+    `ghproxy.net` 对 API 路径回 403。代理请求**不带** Authorization：不把用户的
+    token 交给第三方；直连那一次才带。代理失败立刻回落直连，直连保留原来的
+    5s / 10s 退避，最后再试一次 `verify=False`（与 `_get` 同策）。
 
     入参 url:    完整 GitHub API 地址
     入参 timeout: 单请求超时（秒），缺省取 DOWNLOAD_PROBE_TIMEOUT * 2
@@ -3608,32 +3628,62 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     timeout = timeout or (DOWNLOAD_PROBE_TIMEOUT * 2)
+
+    candidates: List[Tuple[str, Dict[str, str]]] = []
+    if GH_API_PROXY and url.startswith("https://api.github.com/"):
+        proxy_headers = {k: v for k, v in headers.items()
+                         if k.lower() != "authorization"}
+        candidates.append((GH_API_PROXY + url, proxy_headers))
+    candidates.append((url, headers))
+
     last_exc: Optional[Exception] = None
-    for attempt in range(3):
-        if FETCH_ABORT.is_set():
-            raise FetchAborted("应用正在退出，已取消版本抓取")
-        if _gh_limited_now():
-            # 额度旗已立，再发请求就是继续烧额度、继续让界面转圈
-            raise RuntimeError(GH_LIMITED_TEXT)
-        try:
-            r = http_session().get(url, timeout=timeout, headers=headers)
-            # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
-            # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
-            # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
-            if r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0":
-                _gh_mark_limited(r.headers.get("X-RateLimit-Reset"))
-                raise RuntimeError(GH_LIMITED_TEXT)
-            r.raise_for_status()
-            return r.json()
-        except FetchAborted:
-            raise
-        except RuntimeError:
-            # 限流是终局判断（这一小时别再试了），不能被下面的退避重试吞掉重跑
-            raise
-        except Exception as e:  # noqa: BLE001
-            last_exc = e
-            if attempt < 2 and FETCH_ABORT.wait(5 * (attempt + 1)):
+    for idx, (target, hdrs) in enumerate(candidates):
+        direct = idx == len(candidates) - 1
+        # 代理只试一次：失败立刻换直连，不在这里退避。直连保留 3 次 / 5s·10s。
+        attempts = 3 if direct else 1
+        for attempt in range(attempts):
+            if FETCH_ABORT.is_set():
                 raise FetchAborted("应用正在退出，已取消版本抓取")
+            if _gh_limited_now():
+                # 立旗后代理与直连都不再发请求：这是整批级别的快速收尾（R15.3），
+                # 不能因为"代理额度是另一本账"就每个组件再试一次。
+                raise RuntimeError(GH_LIMITED_TEXT)
+            try:
+                r = http_session().get(target, timeout=timeout, headers=hdrs)
+                # 限流：remaining=0 时立即重试没有意义（实测每个组件要白等 31 秒），
+                # 所以立旗让整批快速收尾；短退避只留给"突发被临时拒绝"那种没带
+                # remaining 头的 403。有 GITHUB_TOKEN 时限额提到 5000 次/小时，一般不会走到这儿。
+                if r.status_code == 403 and r.headers.get("X-RateLimit-Remaining") == "0":
+                    if direct:
+                        _gh_mark_limited(r.headers.get("X-RateLimit-Reset"))
+                        raise RuntimeError(GH_LIMITED_TEXT)
+                    # 代理额度见底：不立全局旗（直连还有 60 次/小时），换直连。
+                    last_exc = RuntimeError("GitHub 代理额度已用完")
+                    break
+                r.raise_for_status()
+                return r.json()
+            except FetchAborted:
+                raise
+            except RuntimeError:
+                # 限流是终局判断（这一小时别再试了），不能被下面的退避重试吞掉重跑
+                raise
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                if direct and attempt < attempts - 1 \
+                        and FETCH_ABORT.wait(5 * (attempt + 1)):
+                    raise FetchAborted("应用正在退出，已取消版本抓取")
+        # 直连仍失败且原因就是证书校验：再试一次 verify=False（与 _get 的 SSL 降级一致）。
+        if direct and last_exc is not None \
+                and "CERTIFICATE_VERIFY_FAILED" in str(last_exc):
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                r = http_session().get(target, timeout=timeout, headers=hdrs,
+                                       verify=False)
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
     assert last_exc is not None
     raise last_exc
 
@@ -5963,6 +6013,47 @@ def fetch_dotnet_sdk_versions() -> List[ComponentVersion]:
     return sorted(out, key=lambda cv: order[cv.version])[:20]
 
 
+_QODERCLI_BASE = "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli"
+
+
+def fetch_qodercli_versions() -> List[ComponentVersion]:
+    """Qoder CLI：官方 manifest 给最新版本与 Windows 原生 zip 直链（阿里云 OSS 加速）。
+
+    manifest（2026-10-28 实测）形如：
+      {"latest": "1.1.80",
+       "files": [{"os": "windows", "arch": "amd64", "variant": "standard",
+                  "url": ".../releases/1.1.80/qodercli-windows-x64.zip", ...}]}
+    只收 x64 的 standard 包；legacy 是给 1809 以前系统的 node-sea 变体，arm64 另列。
+    """
+    try:
+        data = _get(f"{_QODERCLI_BASE}/channels/manifest.json",
+                    timeout=DOWNLOAD_PROBE_TIMEOUT * 4).json()
+    except Exception as exc:
+        raise RuntimeError(f"Qoder CLI 版本列表抓取失败：manifest 不可用：{exc}") from exc
+    latest = str(data.get("latest") or "")
+    if _version_parts(latest) is None:
+        raise RuntimeError(f"Qoder CLI manifest 里的版本号不可解析：{latest!r}")
+    files = [f for f in (data.get("files") or [])
+             if str(f.get("os") or "") == "windows"
+             and str(f.get("arch") or "").lower() in ("amd64", "x64")
+             and str(f.get("variant") or "") != "legacy"]
+    if not files:
+        raise RuntimeError("Qoder CLI manifest 里没有 Windows x64 原生包")
+    f = next((x for x in files if str(x.get("variant") or "") == "standard"), files[0])
+    url = str(f.get("url") or "")
+    if not url.startswith("https://"):
+        raise RuntimeError(f"Qoder CLI 下载地址不是 HTTPS：{url!r}")
+    size = 0
+    try:
+        head = http_session().head(url, timeout=DOWNLOAD_PROBE_TIMEOUT * 2)
+        size = int(head.headers.get("Content-Length") or 0)
+    except Exception:          # 拿不到体积不影响下载，只是菜单里不显示大小
+        pass
+    cv = _cv(latest, {"Windows": [url]}, {"Windows": "cli"})
+    cv.artifacts = [DownloadArtifact("cli", ARTIFACT_LABELS["cli"], [url], size)]
+    return [cv]
+
+
 _CLI_CUSTOM_FETCHERS = {
     "helm": fetch_helm_versions,
     "sqlite": fetch_sqlite_versions,
@@ -6061,6 +6152,10 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     # 版本入口分别是官方 releases 索引页与 Apache 目录页。
     "consul": fetch_consul_versions,
     "zookeeper": fetch_zookeeper_versions,
+    # 2026-10-28 用户点名接入：DevSidecar（GitHub 产物，加速器优先）与 Qoder CLI
+    "dev-sidecar": make_github_asset_fetcher(
+        "dev-sidecar", "docmirror/dev-sidecar", (("exe", "-windows-x86_64.exe"),)),
+    "qoder-cli": fetch_qodercli_versions,
 }
 
 # B5/B3 那 19 件的刷新器**由表派生**，不再手写第二份清单：漏登记的唯一症状是
@@ -6097,10 +6192,15 @@ class VersionFetchWorker(QThread):
         self.error_text: str = ""
 
     def run(self) -> None:  # noqa: D401
-        # 闸门：并发上限见类 docstring。acquire 可被 FETCH_ABORT 打断，
-        # 所以关窗时排队中的 worker 不会干等到轮到自己。
-        if not self._gate.acquire(timeout=FETCH_ABORT_POLL_SEC):
-            return
+        # 闸门：并发上限见类 docstring。**等不到槽位必须继续等，不能放弃** ——
+        # 每个派发出去的 worker 都欠 `done` 一次，`_fetch_pending` 才能归零；
+        # 一旦这里静默 return，刷新按钮会永远停在「⟳ 抓取中…」而且被禁用。
+        # 2026-10-28 真机复现：0.25s 超时放弃后，70 多个里只有 14 个报了结果，
+        # 右上角从此再没恢复。轮询只为让关窗时的 FETCH_ABORT 能立刻打断。
+        while not self._gate.acquire(timeout=FETCH_ABORT_POLL_SEC):
+            if FETCH_ABORT.is_set():
+                self.done.emit(self.key, None)
+                return
         try:
             if FETCH_ABORT.is_set():
                 self.done.emit(self.key, None)
@@ -6189,6 +6289,7 @@ COMPONENT_CATEGORY_OF = {
     "sourcetree": "开发工具", "insomnia": "开发工具", "beekeeper-studio": "开发工具",
     "obsidian": "开发工具", "zettlr": "开发工具", "yaak": "开发工具", "gvim": "开发工具",
     "cc-switch": "开发工具", "codex-app-manager": "开发工具",
+    "dev-sidecar": CAT_TOOL,
     # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
     # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
     "consul": CAT_SERVER, "zookeeper": CAT_SERVER,
@@ -6594,6 +6695,12 @@ _AGENT_CLIENTS: tuple = (
      "Google 的 Gemini 桌面客户端。**gemini.google 在大陆不可达**，下载直链同样拿不到 —— "
      "只给官网入口，能不能下取决于你的网络环境。",
      ()),
+    ("qoder-cli", "Qoder CLI", "cli",
+     "Qoder 的命令行 AI 编程 Agent（**不是 Qoder IDE，也不是 QoderWork**）：在终端里读整库、"
+     "改代码、跑命令。官方原生 zip，解压得到 qodercli.exe；下载走阿里云 OSS 加速地址"
+     "（国内可达，不需要科学上网）。",
+     (("1.1.80", "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/releases/1.1.80/"
+                  "qodercli-windows-x64.zip", 98569960),)),
 )
 COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})
 
@@ -6610,7 +6717,7 @@ COMPONENT_CATEGORY_OF.update({s[0]: CAT_AGENT for s in _AGENT_CLIENTS})
 COMPONENT_SUMMARY: Dict[str, str] = {
     # ---- 开发环境：语言运行时与编译器 ----
     "jdk": "Java 运行与编译环境（Adoptium Temurin 发行版）。后端服务、Android、Spring 生态的开发与运行都依赖它；Maven/Gradle/Tomcat 也需要它来跑。",
-    "python": "Python 解释器与 pip 包管理。数据脚本、Web 开发（Django/FastAPI）、自动化与 AI/ML 生态的最通用语言；本工具装的是官方 embeddable 便携包，独立于系统 Python。",
+    "python": "Python 解释器与 pip 包管理，数据脚本 / Web / 自动化 / AI 生态最通用的语言；Windows 装官方 NuGet 完整包（含 pip / venv）。",
     "node": "JavaScript/TypeScript 运行时。前端工程（Vite/Webpack/Next.js）构建、Node 后端、npm 生态的地基。",
     "go": "Go 语言工具链：编译器 + 依赖管理 + 构建一体。云原生（K8s 生态大量 Go 编写）、CLI 工具、高并发网络服务的主力语言。",
     "bun": "新一代 JS 运行时 + 包管理器 + 打包器三合一。兼容 npm 生态，启动与装包比 Node 快一个量级；适合新项目直接选用。",
@@ -6631,7 +6738,7 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "protoc": "Protocol Buffers 编译器。把 .proto 定义生成 Java/C++/Go/Python 等各语言代码；gRPC 服务端与客户端都从它开始。",
     "uv": "Python 包与环境管理器（Rust 编写）。pip + venv 的加速替代，装包与创建环境快一个量级；新一代 Python 项目推荐。",
     "pnpm": "Node 包管理器。用硬链接共享依赖，省磁盘、装 monorepo 与大型前端项目更快；npm/yarn 的可迁移替代。",
-    "git": "版本控制系统客户端。Windows 用官方 MinGit 免安装版；克隆、提交、分支、协作都靠它。",
+    "git": "版本控制系统客户端。Windows 用官方 PortableGit 完整版（含 Git Bash / Perl / OpenSSH）；克隆、提交、分支、协作都靠它。",
     # ---- 开发环境：命令行小工具 ----
     "jq": "命令行 JSON 处理器：提取字段、过滤、改写。处理 API 响应、配置 JSON 的日常瑞士军刀。",
     "yq": "命令行 YAML/XML/TOML 处理器，语法与 jq 一致。Kubernetes 配置、CI 文件常是 YAML，用它改字段比手改可靠。",
@@ -6773,6 +6880,8 @@ COMPONENT_SUMMARY: Dict[str, str] = {
               "官方限制大陆区域，本工具只给官网入口（见卡片说明）。",
     "qoder": "Qoder IDE：阿里的 AI 编程 IDE。整库理解、Agent 式改代码、行内补全；"
              "与「QoderWork CN」不是一个产品（那个偏办公）。",
+    "qoder-cli": "Qoder CLI：Qoder 的命令行 AI 编程 Agent（与 Qoder IDE、QoderWork 是三个产品）。",
+    "dev-sidecar": "DevSidecar：给 GitHub / git clone / npm 等开发资源做本地加速的桌面工具。",
     "marvis": "Marvis（马维斯）：腾讯的 AI 桌面助手，偏日常问答与轻办公。安装包很小，能力多在服务端。",
     "wukong": "悟空：钉钉（阿里）的企业级 AI 工作平台桌面端，面向团队办公与钉钉生态。",
     "lobsterai": "LobsterAI（龙虾）：网易有道的桌面 AI 助手，主打日常任务与内容处理。",
@@ -7117,6 +7226,8 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "windsurf": "https://devin.ai/download",                  # INT  windsurf.com 已 308 跳 devin.ai
     "claude": "https://claude.com/download",                  # INT  官方下载页（大陆区域受限）
     "qoder": "https://qoder.com/",                            # INT  Qoder 主站（IDE）
+    "qoder-cli": "https://qoder.com/cli",                     # INT  Qoder CLI 官方页
+    "dev-sidecar": "https://github.com/docmirror/dev-sidecar",  # 官方仓库（下载入口）
     "marvis": "https://marvis.qq.com/",                       # CN
     "wukong": "https://wukong.dingtalk.com/",                 # CN
     "lobsterai": "https://lobsterai.youdao.com/",             # CN
@@ -7434,6 +7545,10 @@ COMPONENT_USAGE: Dict[str, str] = {
     "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
     "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",
     "qoder": "装完启动登录阿里账号，打开项目目录后即可对话改代码；它是 IDE，写代码用这一个。",
+    "qoder-cli": "解压后把 qodercli.exe 所在目录加进 PATH，终端里执行 `qodercli --help`；"
+                 "首次运行登录 Qoder 账号。它与 Qoder IDE / QoderWork 是三个独立产品。",
+    "dev-sidecar": "装完启动，按界面引导开启加速；它会改系统代理并安装证书，按提示确认。"
+                   "不需要加速时在它自己的界面里关掉。",
     "marvis": "装完启动登录微信/QQ 账号即可用；以问答与轻办公为主。",
     "wukong": "装完启动用钉钉扫码登录；团队协作与办公任务都从它的工作台进。",
     "lobsterai": "装完启动登录有道账号；按它的任务面板发起日常任务即可。",
@@ -7789,6 +7904,12 @@ _DEVTOOLS: tuple = (
      "GitHub 产物，下载走加速器优先。",
      (("0.5.14", "https://github.com/Wangnov/Codex-App-Manager/releases/download/v0.5.14/"
                  "CodexAppManager_0.5.14_x64-setup.exe", 5281355),)),
+    ("dev-sidecar", "DevSidecar", "exe",
+     "开发者边车：给 GitHub / git clone / npm 等开发资源做本地加速的桌面工具（Electron）。"
+     "安装后常驻托盘，按它自己的向导配置系统代理与证书。官方只有 GitHub 一个源，"
+     "下载走加速器优先。",
+     (("2.3.3", "https://github.com/docmirror/dev-sidecar/releases/download/v2.3.3/"
+                 "DevSidecar-2.3.3-windows-x86_64.exe", 135132134),)),
 )
 
 
@@ -7964,6 +8085,10 @@ class LaunchSpec:
     # 一个持久化的 cluster.id —— 换 uuid 会 `rc=1 Invalid cluster.id`，
     # 所以这个命令的产物要落在 data_dir 里由我们管。
     pre_start: List[str] = field(default_factory=list)
+    # pre_start 只在"这个路径还不存在"时跑。MySQL 的 `--initialize-insecure` 只能
+    # 跑在空数据目录上，第二次启动再跑会直接失败 —— 用 `<data_dir>/mysql`（初始化后
+    # 必有的系统库目录）当哨兵，重复点启动就是幂等的。
+    pre_start_if_missing: str = ""
     # 前置依赖（rabbitmq → Erlang）。为空表示不需要外部运行时。
     prereq: Optional["PrereqSpec"] = None
     # **协议级服务探活**（不是 HTTP）。
@@ -8843,6 +8968,58 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         ),
     ),
 
+    # ---------------- 2026-10-28：MySQL（用户报"装了却看不到启动状态"） ----------------
+    # 之前 MySQL 只在「服务端组件」里下载/配 PATH，没有登记进 LAUNCH_OF，所以卡片上
+    # 根本没有启动/停止。下面每条都是 2026-10-28 在本机 %TEMP% 用 8.0.37 真机跑出来的：
+    #   · --initialize-insecure 在空目录上约 2 秒，root 无密码；
+    #   · 启动约 1 秒就 ready for connections（3306 由 --port 决定）；
+    #   · mysqladmin shutdown 能优雅停（日志里是 Normal shutdown），端口随即释放；
+    #   · --mysqlx=0 关掉 33060，避免多占一个口。
+    "mysql": LaunchSpec(
+        commands={
+            "Windows": ["{home}/bin/mysqld.exe", "--basedir={home}",
+                        "--datadir={data_dir}", "--port={port}",
+                        "--bind-address=127.0.0.1", "--mysqlx=0", "--console"],
+            "Linux":   ["{home}/bin/mysqld", "--basedir={home}",
+                        "--datadir={data_dir}", "--port={port}",
+                        "--bind-address=127.0.0.1", "--mysqlx=0"],
+            "Darwin":  ["{home}/bin/mysqld", "--basedir={home}",
+                        "--datadir={data_dir}", "--port={port}",
+                        "--bind-address=127.0.0.1", "--mysqlx=0"],
+        },
+        stop_kind="shutdown_command",
+        shutdown_commands={
+            "Windows": ["{home}/bin/mysqladmin.exe", "--protocol=tcp",
+                        "-h", "127.0.0.1", "-P", "{port}", "-u", "root", "shutdown"],
+            "Linux":   ["{home}/bin/mysqladmin", "--protocol=tcp",
+                        "-h", "127.0.0.1", "-P", "{port}", "-u", "root", "shutdown"],
+            "Darwin":  ["{home}/bin/mysqladmin", "--protocol=tcp",
+                        "-h", "127.0.0.1", "-P", "{port}", "-u", "root", "shutdown"],
+        },
+        main_port=3306,
+        port_search_span=99,
+        port_writeback="cli_only",
+        # 3306 说的是 MySQL 协议，浏览器打不开；判活只看 TCP。
+        console_path=None,
+        health_path=None,
+        startup_timeout=60,
+        # 首次启动才初始化；`<data_dir>/mysql` 是 --initialize-insecure 建出来的系统库。
+        # `--console` 只在 Windows 有意义（Unix 默认把初始化日志写到 stderr，已由
+        # run_pre_start 捕获）；带上它在 Unix 是未知选项。
+        pre_start=["{home}/bin/mysqld" + (".exe" if CURRENT_OS == "Windows" else ""),
+                   "--initialize-insecure", "--basedir={home}",
+                   "--datadir={data_dir}"]
+                  + (["--console"] if CURRENT_OS == "Windows" else []),
+        pre_start_if_missing="{data_dir}/mysql",
+        risk_note=("首次启动会用 `--initialize-insecure` 初始化数据目录：**root 无密码**、"
+                   "只监听 127.0.0.1。要用于生产请自己设 root 密码并改 bind-address。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/mysql-data（--datadir 指过去）。"
+                   "切换生效版本与卸载都不碰它。"),
+        credentials_hint=("root 用户**无密码**（初始化参数是 --initialize-insecure）；"
+                          "只监听 127.0.0.1。验证连接："
+                          "`bin/mysql.exe -h 127.0.0.1 -P <端口> -u root`。"),
+    ),
+
     # ---------------- 2026-10-12 B4 补：MinIO（对象存储 + 自带 Web 控制台） ----------------
     # 这一条推翻了我自己上一轮的结论。报告写"MinIO 拿不到直链"，依据是
     # `dl.min.io` 一律 410 **且 `/releases/latest` 那个 tag 的 assets 数为 0** ——
@@ -9163,14 +9340,13 @@ def build_components() -> List[Component]:
             key="python",
             display_name="Python",
             env_var=None,
-            # **Windows 必须用安装根目录，不能写 "Scripts"**（2026-10-09 真机踩到）：
-            # Windows 下装的是 embeddable 包（python-3.x.x-embed-amd64.zip），
-            # python.exe 就在解压根目录，包里**压根没有 Scripts 目录**。写成 "Scripts"
-            # 会让 PATH 指向一个不含解释器的目录 —— 于是 `python` 永远命中机器上自己装
-            # 的那份（本机 C:\Program Files\python），切换、乃至提权插到系统 PATH 最前
-            # 都白做：复验只会一直报"仍会先命中 …"，然后自动回滚。
+            # **Windows 必须是 tools 子目录**（2026-10-28 换完整版后）：
+            # 官方 NuGet 包把完整解释器放在 `tools/`（python.exe + Lib/ +
+            # site-packages/pip + venv + ensurepip）。embeddable 那种"根目录就是
+            # 解释器"的布局已经不适用；path_subdir 指错，PATH 里就找不到 python，
+            # 界面会一直显示"未安装"或"切了但没生效"。
             # Unix 的官方包解释器在 bin/，保持原样。
-            path_subdir="" if CURRENT_OS == "Windows" else "bin",
+            path_subdir="tools" if CURRENT_OS == "Windows" else "bin",
             exec_name="python3" if CURRENT_OS != "Windows" else "python",
             version_args=["--version"],
             versions=[_cv(v, _python_urls(v)) for v in ("3.12.4", "3.11.9", "3.10.11", "3.9.13")],
@@ -9197,7 +9373,10 @@ def build_components() -> List[Component]:
     )
 
     # ------------------ Git ------------------
-    # Windows 用 MinGit 便携版；macOS/Linux 上游只有源码包（解压不能用），
+    # Windows 用 PortableGit **完整版**（含 Git Bash / Perl / OpenSSH）：
+    # 2026-10-28 用户要求把 MinGit 精简版换掉。PortableGit 是 7-Zip 自解压包
+    # （`.7z.exe`），解压后 `cmd/git.exe` 在 PATH 上，`git-bash.exe` 在安装根。
+    # macOS/Linux 上游只有源码包（解压不能用），
     # 所以不提供自动下载，改由 unsupported_platform_hint 引导用系统包管理器
     components.append(
         Component(
@@ -9214,7 +9393,8 @@ def build_components() -> List[Component]:
                 "RHEL/CentOS/Anolis 执行 sudo dnf install git 或 sudo yum install git；"
                 "macOS 执行 brew install git（或先装 Xcode Command Line Tools）。"
             ),
-            versions=[_cv(v, _git_urls(v)) for v in ("2.47.1", "2.45.2", "2.44.0")],
+            versions=[_cv(v, _git_urls(v), {"Windows": "7z.exe"})
+                      for v in ("2.47.1", "2.45.2", "2.44.0")],
         )
     )
 
@@ -10033,7 +10213,9 @@ def uninstall_confirm_text(comp: Component) -> str:
 # ---------------------------------------------------------------------------
 # 归档类型 → 文件头魔数。只下载型组件下载完不解压，"内容对不对"只能靠文件头判；
 # 表里没有的类型（war / 裸二进制）不校验，宁可不判也不要误判成失败。
-_MAGIC_BY_EXT: Dict[str, bytes] = {"zip": b"PK", "exe": b"MZ", "msi": b"\xd0\xcf"}
+_MAGIC_BY_EXT: Dict[str, bytes] = {"zip": b"PK", "exe": b"MZ", "msi": b"\xd0\xcf",
+                                   # CLI 产物在只下载类里都是 zip（claude-code / qoder-cli 等）
+                                   "cli": b"PK"}
 
 
 def _safe_download_name(name: object, *, fallback: str = "download.bin") -> str:
@@ -11209,134 +11391,265 @@ def _atomic_write_config(data: Dict[str, object]) -> None:
 # 服务已停时页面会明说"已停止"，不会变成一张永久说"成功"的假告示。
 # 只监听 127.0.0.1，不对外网暴露；端口取 OS 分配的空闲口（绝不撞用户端口）。
 # ---------------------------------------------------------------------------
-PAGE_SERVER_PORT: int = 0            # 0 = 让 OS 分配；运行期不改
-_PAGE_SERVER: Optional["ComponentPageServer"] = None
+PAGE_SERVER_FLAG = "--bt-page-server"
+PAGE_SERVER_INPROC_ENV = "BYTE_TOOLS_PAGE_SERVER"
+_PAGE_SERVER: Optional["ComponentPageServer"] = None      # 测试/回退用的进程内实现
+_PAGE_DAEMON: Optional["PageServerDaemon"] = None         # 生产用的独立守护进程
+_PAGE_COMPS: Optional[Dict[str, "Component"]] = None
+
+
+def _page_server_state_path() -> Path:
+    """守护进程把 {port, pid} 写在这里；CONFIG_DIR 可被测试重定向，所以必须是函数。"""
+    return CONFIG_DIR / "page-server.json"
+
+
+def _read_page_server_state() -> Optional[dict]:
+    try:
+        data = json.loads(_page_server_state_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _page_server_alive(port: int) -> bool:
+    """用 /healthz 认这个端口上的是不是我们的页服务（端口可能被别的进程复用）。"""
+    if not port:
+        return False
+    try:
+        import urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{int(port)}/healthz", timeout=1.0) as resp:
+            return resp.status == 200 and resp.read(32).startswith(b"byte-tools-page")
+    except Exception:
+        return False
+
+
+def _page_components() -> Dict[str, "Component"]:
+    """页服务要用到的组件表。主程序已建过卡就直接复用注册表，避免重复构建。"""
+    global _PAGE_COMPS
+    if _PAGE_COMPS is None:
+        reg = component_registry()
+        if not reg:
+            build_components()
+            reg = component_registry()
+        _PAGE_COMPS = dict(reg)
+    return _PAGE_COMPS
+
+
+def _render_component_page(key: str) -> Optional[str]:
+    """按运行登记现渲染一页；没有登记（已停止）返回 None。"""
+    comp = _page_components().get(key)
+    spec = getattr(comp, "launch", None) if comp is not None else None
+    if comp is None or spec is None:
+        return None
+    rec = load_running_map().get(key)
+    if rec is None:
+        return None
+    return launch_page_html(comp, spec, rec)
+
+
+def _live_page_keys() -> List[str]:
+    out: List[str] = []
+    for key in load_running_map():
+        try:
+            if _render_component_page(key):
+                out.append(key)
+        except Exception:      # noqa: BLE001  首页不许被一个坏页面带崩
+            continue
+    return sorted(out)
+
+
+def _page_index_html() -> str:
+    keys = _live_page_keys()
+    if not keys:
+        return error_page("还没有正在运行的组件",
+                          "启动一个组件后，这里会列出它的访问页。")
+    cards = "".join(
+        f'<li><a href="/page/{html_escape(k)}">{html_escape(k)}</a></li>' for k in keys)
+    return page_shell("正在运行的组件", f"<ul class='links'>{cards}</ul>")
+
+
+def _make_page_http_server(host: str = "127.0.0.1", port: int = 0):
+    """构造页服务的 HTTP server（进程内与独立进程共用同一份路由）。"""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "byte-tools-page/1.0"
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
+            path = self.path.split("?", 1)[0]
+            if path == "/healthz":
+                return self._send(200, "byte-tools-page/1.0",
+                                  content_type="text/plain; charset=utf-8")
+            if path in ("/", "/index.html", "/index.htm"):
+                return self._send(200, _page_index_html())
+            name = path[len("/page/"):] if path.startswith("/page/") else path.lstrip("/")
+            if name.endswith(".html"):
+                name = name[:-len(".html")]
+            if not name:
+                return self._send(404, error_page(
+                    "没有这个组件的访问页", "路径里没有组件名。"))
+            comp = _page_components().get(name)
+            spec = getattr(comp, "launch", None) if comp is not None else None
+            if comp is None or spec is None:
+                return self._send(404, error_page(
+                    "没有这个组件的访问页", f"{name} 不是可启停组件。"))
+            rec = load_running_map().get(name)
+            if rec is None:
+                return self._send(404, error_page(
+                    "这个组件已经停止",
+                    f"{name} 已经没有运行记录了，这一页不再有意义。"
+                    "要再看它，请回工具里点「启动」。"))
+            try:
+                body = launch_page_html(comp, spec, rec)
+            except Exception as exc:   # noqa: BLE001
+                return self._send(500, error_page(
+                    "页面生成失败",
+                    f"这一页在生成时出错：{type(exc).__name__}: {exc}"))
+            return self._send(200, body)
+
+        def _send(self, code: int, body: str,
+                  content_type: str = "text/html; charset=utf-8") -> None:
+            raw = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, fmt: str, *args) -> None:  # noqa: A002
+            return None          # 别把访问日志刷到用户终端
+
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+class PageServerDaemon:
+    """独立页服务的句柄：只记端口，URL 由端口现拼。"""
+
+    def __init__(self, port: int) -> None:
+        self.port = int(port)
+
+    def url_for(self, key: str) -> str:
+        return f"http://127.0.0.1:{self.port}/page/{key}"
 
 
 class ComponentPageServer:
-    """工具自带的"启动成功"页服务（仅 127.0.0.1，随机空闲端口）。
+    """**进程内**的页服务（测试与独立进程起不来时的回退）。
 
-    用法：`show_launch_page(...)` 拿 URL；URL 形如
-    `http://127.0.0.1:<port>/page/<key>`，`/page/<key>.html` 是同一个页面，
-    `/<key>.html` 也能打开（把"HTML 文件"这个习惯也兼容掉）。
+    生产路径走 PageServerDaemon：主程序退出后页面仍然可访问。
+    保留这个实现是为了测试能直接建一个真 HTTP 服务，不必每个用例都起子进程。
     """
 
     def __init__(self, host: str = "127.0.0.1") -> None:
-        import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
         self.host = host
-        self._lock = threading.Lock()
-        self._pages: Dict[str, object] = {}   # key → 渲染回调（每次请求现渲染）
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            server_version = "byte-tools-page/1.0"
-            protocol_version = "HTTP/1.1"
-
-            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
-                path = self.path.split("?", 1)[0]
-                name = ""
-                if path.startswith("/page/"):
-                    name = path[len("/page/"):]
-                elif path in ("/", "/index.html", "/index.htm"):
-                    name = "index"
-                else:
-                    name = path.lstrip("/")
-                if name.endswith(".html"):
-                    name = name[:-len(".html")]
-                if name == "index":
-                    return self._send(200, outer._index_html())
-                body, code = outer._page_and_code(name)
-                if body is None:
-                    body = error_page("没有这个组件的访问页",
-                                      f"路径 {path} 不对。当前有内容可看的组件页："
-                                      f"{'、'.join(sorted(outer._live_keys())) or '（还没有）'}。")
-                    return self._send(404, body)
-                return self._send(code, body)
-
-            def _send(self, code: int, body: str) -> None:
-                raw = body.encode("utf-8")
-                self.send_response(code)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(raw)
-
-            def log_message(self, fmt: str, *args) -> None:  # noqa: A002
-                return None          # 别把访问日志刷到用户终端
-
+        self._httpd = None
         try:
-            self._httpd = ThreadingHTTPServer((host, PAGE_SERVER_PORT), Handler)
+            self._httpd = _make_page_http_server(host, 0)
         except OSError:
-            # 起不来也不该拖累启动流程：调用方拿不到 URL 会退化成"只打日志"
-            self._httpd = None
             return
         self.port = self._httpd.server_address[1]
         threading.Thread(target=self._httpd.serve_forever,
                          name="byte-tools-page-server", daemon=True).start()
 
-    # -- 对外 ---------------------------------------------------------------
-    def register(self, key: str, render) -> Optional[str]:
-        """登记一个组件页的**渲染回调**，返回可访问 URL；服务没起来返回 None。
+    def url_for(self, key: str) -> Optional[str]:
+        return f"http://{self.host}:{self.port}/page/{key}" if self._httpd else None
 
-        存回调而不是存启动那一刻渲染好的 HTML（2026-10-10 改）：这一页由本工具进程内
-        的小服务提供，成品 HTML 会一直挂着 —— 组件停了、端口换了、甚至重启成另一个版本，
-        页面上还写着"正在运行 · 端口 N"。用户报的现象就是这么来的：
-        「停止组件后浏览器还能访问，直到关掉软件才真停」。
-        现在每次请求现渲染，没有运行记录就返回"已停止"，页面不再撒谎。
-        """
-        if self._httpd is None:
-            return None
-        with self._lock:
-            self._pages[key] = render
-        return f"http://{self.host}:{self.port}/page/{key}"
+    def register(self, key: str, render=None) -> Optional[str]:
+        """兼容旧调用点：页面现在按 running.json 现渲染，不再存回调。"""
+        return self.url_for(key)
 
     def shutdown(self) -> None:
         if self._httpd is not None:
             self._httpd.shutdown()
 
-    # -- 页面渲染 -----------------------------------------------------------
-    def _live_keys(self) -> List[str]:
-        """此刻真的能出内容的组件页（停了的那些不算）。"""
-        with self._lock:
-            items = list(self._pages.items())
-        out: List[str] = []
-        for key, render in items:
-            try:
-                if render():
-                    out.append(key)
-            except Exception:      # noqa: BLE001  首页不许被一个坏页面带崩
-                continue
-        return out
 
-    def _index_html(self) -> str:
-        keys = sorted(self._live_keys())
-        if not keys:
-            return error_page("还没有正在运行的组件",
-                              "启动一个组件后，这里会列出它的访问页。")
-        cards = "".join(
-            f'<li><a href="/page/{k}">{html_escape(k)}</a></li>' for k in keys)
-        return page_shell("正在运行的组件", f"<ul class='links'>{cards}</ul>")
+def serve_page_server(config_dir: str = "") -> int:
+    """独立页服务进程的入口（`main.py --bt-page-server [配置目录]`）。
 
-    def _page_and_code(self, key: str) -> Tuple[Optional[str], int]:
-        """(正文, HTTP 状态)。从未登记 → (None, 404)；登记了但已停 → 说明页 + 404。"""
-        with self._lock:
-            render = self._pages.get(key)
-        if render is None:
-            return None, 404
+    只监听 127.0.0.1，端口交给 OS 分配，再把 {port, pid} 写到
+    `<CONFIG_DIR>/page-server.json`。这个进程**不随主程序退出**：
+    用户关了工具，服务还在跑，访问页还得能打开（2026-10-28 用户反馈）。
+
+    `config_dir` 由父进程传进来，而不是让子进程自己 `Path.home()` ——
+    测试/将来若支持自定义工作目录，父子两边必须看到同一份 running.json。
+    """
+    global CONFIG_DIR, CONFIG_FILE, RUNNING_FILE
+    if config_dir:
+        CONFIG_DIR = Path(config_dir)
+        CONFIG_FILE = CONFIG_DIR / "config.json"
+        RUNNING_FILE = CONFIG_DIR / "running.json"
+    ensure_dir(CONFIG_DIR)
+    httpd = _make_page_http_server("127.0.0.1", 0)
+    port = int(httpd.server_address[1])
+    state_path = _page_server_state_path()
+    tmp = state_path.parent / (state_path.name + ".tmp")
+    tmp.write_text(json.dumps({"port": port, "pid": os.getpid(),
+                               "started_at": time.time()}), encoding="utf-8")
+    os.replace(tmp, state_path)
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+    return 0
+
+
+def _spawn_page_daemon() -> int:
+    """拉起独立页服务，返回端口；起不来返回 0。"""
+    ensure_dir(CONFIG_DIR / "logs")
+    log_path = CONFIG_DIR / "logs" / "page-server.log"
+    argv = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        argv.append(str(Path(__file__).resolve()))
+    argv.append(PAGE_SERVER_FLAG)
+    argv.append(str(CONFIG_DIR))
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        with open(log_path, "ab", buffering=0) as log_fh:
+            kw = dict(stdin=subprocess.DEVNULL, stdout=log_fh,
+                      stderr=subprocess.STDOUT, cwd=str(CONFIG_DIR), env=env)
+            if CURRENT_OS == "Windows":
+                kw["creationflags"] = DETACH_FLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
+                if CREATE_NO_WINDOW:
+                    kw["creationflags"] |= CREATE_NO_WINDOW
+            else:
+                kw["start_new_session"] = True
+            subprocess.Popen(argv, **kw)
+    except OSError:
+        return 0
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        st = _read_page_server_state()
         try:
-            body = render()
-        except Exception as exc:   # noqa: BLE001
-            return error_page("页面生成失败",
-                              f"这一页在生成时出错：{type(exc).__name__}: {exc}"), 500
-        if body is None:
-            return error_page(
-                "这个组件已经停止",
-                f"{key} 已经没有运行记录了，这一页不再有意义。"
-                "要再看它，请回工具里点「启动」。"), 404
-        return body, 200
+            port = int((st or {}).get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if port and _page_server_alive(port):
+            return port
+        time.sleep(0.1)
+    return 0
+
+
+def get_page_daemon() -> Optional[PageServerDaemon]:
+    """取独立页服务：先复用已活的，没有就拉起一个。"""
+    global _PAGE_DAEMON
+    if _PAGE_DAEMON is not None and _page_server_alive(_PAGE_DAEMON.port):
+        return _PAGE_DAEMON
+    st = _read_page_server_state()
+    try:
+        port = int((st or {}).get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port and _page_server_alive(port):
+        _PAGE_DAEMON = PageServerDaemon(port)
+        return _PAGE_DAEMON
+    port = _spawn_page_daemon()
+    if not port:
+        return None
+    _PAGE_DAEMON = PageServerDaemon(port)
+    return _PAGE_DAEMON
 
 
 def launch_success_lines(comp: "Component", spec: "LaunchSpec", rec: "RunRecord",
@@ -11488,44 +11801,39 @@ def _access_hint_for(comp: "Component", spec: "LaunchSpec", port: int) -> str:
             f"RabbitMQ 的 {port} 说 AMQP 协议，浏览器打不开是正常的。"
             f"客户端连接串：amqp://guest:guest@127.0.0.1:{port}/"
             f"（guest 默认只允许本机）；查状态用 sbin/rabbitmqctl.bat status。",
+        "mysql":
+            f"MySQL 的 {port} 说 MySQL 协议，浏览器打不开是正常的。"
+            f"用安装目录 bin/mysql.exe -h 127.0.0.1 -P {port} -u root 连接"
+            f"（首次初始化 root 无密码）。",
     }.get(comp.key, f"该组件在端口 {port} 上服务，请用对应的客户端工具访问。")
 
 
-def get_page_server() -> Optional["ComponentPageServer"]:
-    """惰性取页服务：失败返回 None（调用方要能接受"没有页面"这条路）。"""
-    global _PAGE_SERVER
-    if _PAGE_SERVER is None:
-        try:
+def get_page_server():
+    """惰性取页服务：优先独立进程（关掉主程序后页面仍可访问），失败退回进程内。"""
+    if os.environ.get(PAGE_SERVER_INPROC_ENV) == "inproc":
+        global _PAGE_SERVER
+        if _PAGE_SERVER is None:
             _PAGE_SERVER = ComponentPageServer()
-        except Exception:
-            return None
-        if _PAGE_SERVER._httpd is None:      # 端口被占/权限问题：不重试、不报错
-            return None
-    return _PAGE_SERVER
+        return _PAGE_SERVER if _PAGE_SERVER._httpd is not None else None
+    daemon = get_page_daemon()
+    if daemon is not None:
+        return daemon
+    if _PAGE_SERVER is None:
+        _PAGE_SERVER = ComponentPageServer()
+    return _PAGE_SERVER if _PAGE_SERVER._httpd is not None else None
 
 
 def show_launch_page(comp: "Component", spec: "LaunchSpec", rec: "RunRecord") -> Optional[str]:
-    """登记该组件的访问页并返回 URL；服务起不来返回 None。
+    """该组件"启动成功页"的 URL；自带 Web 界面时直接用它自己的地址。
 
-    **每个可启停组件都会拿到一个 URL**：
-      - 自带 Web 界面（含 ES 的 JSON 根路径）：URL 就是该组件自己的地址；
-      - 没有 Web 界面：URL 指向本工具自带的"启动成功"页。
-    所以"启动后一定有个能打开的页面"这件事对 10 个组件都成立。
+    没有 Web 界面的组件（Redis / Kafka / RocketMQ / RabbitMQ 等）由独立页服务渲染，
+    URL 形如 `http://127.0.0.1:<port>/page/<key>`，每次请求现算运行状态。
+    这个页服务**不随主程序退出**，所以关掉工具后访问页仍然打得开。
     """
     if spec.console_path:
         return rec.console_url
     server = get_page_server()
-    if server is None:
-        return None
-
-    def _render() -> Optional[str]:
-        # 每次请求现查运行记录：停了就没了，端口换了就跟着换。
-        rec_now = load_running_map().get(comp.key)
-        if rec_now is None:
-            return None
-        return launch_page_html(comp, spec, rec_now)
-
-    return server.register(comp.key, _render)
+    return server.url_for(comp.key) if server is not None else None
 
 
 @dataclass
@@ -13026,6 +13334,11 @@ def run_pre_start(comp: Component, spec: LaunchSpec, plan: LaunchPlan,
     if not spec.pre_start:
         return True, "", notes
     mapping = _plan_mapping(comp, spec, plan)
+    if spec.pre_start_if_missing:
+        guard = Path(spec.pre_start_if_missing.format(**mapping))
+        if guard.exists():
+            notes.append(f"已初始化过（{guard.name} 已存在），跳过前置准备。")
+            return True, "", notes
     argv = [t.format(**mapping) for t in spec.pre_start]
     try:
         proc = subprocess.run(argv, cwd=plan.cwd, env=plan.env,
@@ -13056,6 +13369,22 @@ def _launch_mapping(comp: Component, java_home: str, port: int,
     version = resolve_launch_version(comp) or comp.versions[0].version
     home = comp.install_dir(version)
     data_dir = CONFIG_DIR / f"{comp.key}-data"
+    spec = comp.launch
+    # `cluster_id` 只有 Kafka 的 KRaft format 用得到。**不能无条件写**：
+    # read_or_create_cluster_id() 会往 data_dir 里落一个 cluster.id，而 MySQL 的
+    # `--initialize-insecure` 要求数据目录为空 —— 2026-10-28 真机就是这么把
+    # 初始化打成 "directory is unusable" 的。只在实际引用时才算/才写。
+    texts: List[str] = list(spec.pre_start) if spec is not None else []
+    if spec is not None:
+        for table in (spec.commands, spec.shutdown_commands):
+            for argv in table.values():
+                texts.extend(argv)
+        for extra in spec.extra_processes:
+            for argv in extra.values():
+                texts.extend(argv)
+        texts.extend(spec.extra_env.values())
+    cluster_id = (read_or_create_cluster_id(data_dir)
+                  if any("{cluster_id}" in t for t in texts) else "")
     return {
         "java": str(Path(java_home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")),
         "war": str(home / "jenkins.war"),
@@ -13070,8 +13399,8 @@ def _launch_mapping(comp: Component, java_home: str, port: int,
         "peer": str((port or 0) + 1),
         "log_file": str(log_file),
         # kafka 的 KRaft format 需要一个**持久化**的 cluster.id：换 uuid 会被拒
-        # （Invalid cluster.id）。所以它进 mapping 而不是每次现生成。
-        "cluster_id": read_or_create_cluster_id(data_dir),
+        # （Invalid cluster.id）。所以它进 mapping 而不是每次现生成；只在真用到时才算。
+        "cluster_id": cluster_id,
     }
 
 
@@ -13269,7 +13598,10 @@ class ServiceManager:
 
         data_dir = CONFIG_DIR / f"{comp.key}-data"
         log_file = data_dir / "logs" / "byte-tools.out"
-        ensure_dir(log_file.parent)
+        # 只建数据目录本身，**不在 pre_start 之前建 logs/**：MySQL 的
+        # --initialize-insecure 要求数据目录为空，多一个 logs/ 就报 "directory is unusable"。
+        # 日志目录等前置准备跑完、真正 open 日志之前再建（见下面 with open 之前）。
+        ensure_dir(data_dir)
         # 端口回写必须在 spawn 之前做完：改了配置却没起进程、或起进程时配置没生效，
         # 两边状态对不上时比"没启动"更难归因。
         ok, why, notes = prepare_ports(comp, spec, port_plan, data_dir)
@@ -13290,6 +13622,7 @@ class ServiceManager:
         # 重定向句柄在 Popen 把它交给子进程后立刻由父进程关掉（with 退出）：
         # Windows 上父进程留着一个打开的日志句柄，既漏句柄又会让临时目录删不掉；
         # 子进程拿到的是 CreateProcess 复制过去的一份，关自己这份不影响它。
+        ensure_dir(log_file.parent)
         with open(plan.log_file, "ab", buffering=0) as log_fh:
             popen_kw = dict(cwd=str(plan.cwd), env=plan.env,
                             stdout=log_fh,
@@ -15744,6 +16077,7 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
       - .tar.gz / .tgz：gzip 压缩 tar（JDK / Go / Docker / Kafka 等）
       - .tar.xz：xz 压缩 tar（Python 部分版本）
       - .msi：Windows 安装包，用 `msiexec /a` 管理性提取成统一 prefix（Rust）
+      - .7z.exe：7-Zip 自解压包（PortableGit），`-o<dir> -y` 静默展开到目标目录
       - .exe / .war / 无扩展名：单二进制 / 单文件（kubectl.exe / kubectl / jenkins.war），
         直接拷贝到 extract_to 根目录；Linux/Mac 上无扩展名单二进制赋予 0o755 执行权限
 
@@ -15778,6 +16112,16 @@ def extract_archive(archive: Path, extract_to: Path) -> Path:
             raise RuntimeError(f"msiexec 提取 {archive.name} 失败（退出码非 0）")
         for stray in extract_to.glob("*.msi"):
             stray.unlink(missing_ok=True)
+    elif name.endswith(".7z.exe"):
+        # 7-Zip 自解压包（PortableGit 的官方形态）：`-o<dir> -y` 静默展开到目标目录，
+        # 不弹向导、不写注册表。**必须排在通用 .exe 分支之前** —— 否则会被当成
+        # "单文件"原样拷进安装目录，PATH 里找不到 git.exe，界面判成没装。
+        # 子进程用 list 传参、不经 shell；存档来自我们自己的下载目录。
+        proc = subprocess.run([str(archive), f"-o{extract_to}", "-y"], check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"7-Zip 自解压包 {archive.name} 展开失败（退出码 {proc.returncode}）")
+        return extract_to
     elif name.endswith(".exe") or name.endswith(".war") or "." not in archive.name:
         # 单二进制 / 单文件（kubectl.exe / kubectl / jenkins.war 等），
         # 直接拷贝到目标目录根目录；这类文件没有"解压后根目录"概念，
@@ -17252,7 +17596,7 @@ class ComponentCard(QFrame):
             return f".{ext}"
         ext = cv.archive_for_current()
         return {"zip": ".zip", "tar.gz": ".tar.gz", "tgz": ".tar.gz", "exe": ".exe",
-                "war": ".war", "": "", "bin": ""}.get(ext, f".{ext}")
+                "war": ".war", "": "", "bin": "", "cli": ".zip"}.get(ext, f".{ext}")
 
     def _on_prereq_progress(self, done: int, total: int) -> None:
         if total > 0:
@@ -17495,6 +17839,14 @@ class ComponentCard(QFrame):
         if st.record is None:
             return
         target = st.record.console_url
+        spec = getattr(self.component, "launch", None)
+        if spec is not None and not spec.console_path:
+            # 协议端口型：页服务可能因重启换了端口（或刚从旧版本升级上来），
+            # 登记里那条 URL 不一定还能用。点开的这一刻取一次当前端口。
+            server = get_page_server()
+            fresh = server.url_for(self.component.key) if server is not None else None
+            if fresh:
+                target = fresh
         if not self._has_console():
             QMessageBox.information(
                 self,
@@ -18086,7 +18438,7 @@ class ComponentCard(QFrame):
                     preferred_label = self._display_label(cv)
                     break
         self._reload_combo_items(preferred=preferred_label)
-        self._log("ok", f"已从官网获取 {len(versions)} 个版本")
+        self._log("ok", f"已获取 {len(versions)} 个版本")
 
     # ------------------------------------------------------------------
     def _current_version(self) -> ComponentVersion:
@@ -18216,7 +18568,8 @@ class ComponentCard(QFrame):
         if not chosen:
             return          # 用户点了取消：什么都不该发生
         dest_dir = Path(chosen)
-        suffix = f".{art.fmt}" if art.fmt and art.fmt != "bin" else ""
+        suffix = (".zip" if art.fmt == "cli"
+                  else f".{art.fmt}" if art.fmt and art.fmt != "bin" else "")
         dest = _unique_download_path(dest_dir / f"{self.component.key}-{cv.version}{suffix}")
         save_download_dir(dest_dir)
 
@@ -20988,6 +21341,28 @@ class MainWindow(QMainWindow):
                     # 用户重开工具时界面上没有任何地方能看到"怎么登进去"，
                     # 逼着他去翻文件或搜官方文档。
                     self._log_credentials_of(key, st.record.port)
+            # 访问页服务已经改成独立进程：旧登记里的 console_url 指向的可能是
+            # 上一次主进程内的老服务（已随进程退出）。没有自带控制台的组件，
+            # 把登记刷新成当前页服务的地址，卡片按钮才不会打开一个死链接。
+            try:
+                if any(st.state == "running" for st in states.values()):
+                    server = get_page_server()
+                    records = load_running_map()
+                    comps = self.current_components()
+                    changed = False
+                    if server is not None:
+                        for key, rec in records.items():
+                            comp = comps.get(key)
+                            spec = getattr(comp, "launch", None)
+                            if spec is not None and not spec.console_path:
+                                url = server.url_for(key)
+                                if url and rec.console_url != url:
+                                    rec.console_url = url
+                                    changed = True
+                    if changed:
+                        save_running_map(records)
+            except Exception as exc:      # noqa: BLE001
+                self._append_log("warn", f"刷新访问页地址失败（不影响使用）：{exc}")
             # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
             # 否则窗口里会留一句已经没有依据的"残留登记"。
             for card in self.cards:
@@ -21096,6 +21471,10 @@ def main() -> int:
         if len(argv) < 2:
             return 2
         return elevate_helper_main(argv[1])
+    # 独立页服务分支：同样必须早于 QApplication。主程序退出后它要继续存活，
+    # 所以由主程序用 DETACHED_PROCESS 拉起，而不是在进程内开一个 daemon 线程。
+    if argv and argv[0] == PAGE_SERVER_FLAG:
+        return serve_page_server(argv[1] if len(argv) > 1 else "")
 
     # 2026-10-13：立刻关掉 PyInstaller 的 Tk splash 引导窗（onefile 打包 + Splash
     # target 时 bootloader 会开一个标题为 "tk" 的 TkTopLevel 窗口显示 assets/splash.png）。

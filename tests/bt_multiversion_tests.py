@@ -976,23 +976,24 @@ class VersionComboPopupReopens(unittest.TestCase):
 
 
 class PythonPathDirHoldsTheInterpreter(EnvSandbox):
-    r"""Windows 的 Python 是 embeddable 包：解释器在**安装根目录**，不在 Scripts。
+    r"""Windows 的 Python 是官方 NuGet 完整包：解释器在 `tools/` 下。
 
-    2026-10-09 真机踩到：path_subdir 写成 "Scripts"，于是
-      · PATH 被指向 .../python-3.15.0/Scripts —— 这个目录里没有 python.exe
-        （embeddable 包连这个目录都没有）；
-      · `python` 因此永远命中机器上自己装的那份（本机 C:\Program Files\python）；
-      · 连带后果：R3.19 的提权把这条**没用的**目录插到系统 PATH 最前，复验照样
-        命中 C:\Program Files\python → 自动回滚，用户看到"切了但没生效"。
-    判据不是"path_subdir 等于什么字符串"，而是**我们放进 PATH 的那个目录必须真有解释器**。
+    2026-10-09 真机踩过一次 path_subdir 错位（写成 "Scripts"）：
+      · PATH 被指向一个没有 python.exe 的目录；
+      · `python` 因此永远命中机器上自己装的那份；
+      · 连带 R3.19 的提权复验照样失败，用户看到"切了但没生效"。
+    2026-10-28 换完整版后布局又变了一次：embeddable 的"根目录" →
+    NuGet 的 `tools/python.exe`，path_subdir 必须跟着改成 "tools"。
+    判据始终不是字符串本身，而是**放进 PATH 的那个目录必须真有解释器**。
     """
 
     def _python(self):
         comp = next(c for c in main.build_components() if c.key == "python")
         home = comp.install_dir("3.15.0")
         home.mkdir(parents=True, exist_ok=True)
-        # 复刻 embeddable 包的真实布局：python.exe 在根目录，没有 Scripts
-        (home / "python.exe").write_bytes(b"\x00")
+        # 复刻 NuGet 完整包的真实布局：python.exe / Lib / pip 都在 tools/ 下
+        (home / "tools").mkdir()
+        (home / "tools" / "python.exe").write_bytes(b"\x00")
         return comp, home
 
     def test_windows_python_path_dir_contains_the_interpreter(self):
@@ -1002,10 +1003,10 @@ class PythonPathDirHoldsTheInterpreter(EnvSandbox):
         self.assertTrue((Path(bin_dir) / "python.exe").exists(),
                         f"要放进 PATH 的目录必须真有 python.exe，实际指向 {bin_dir}")
 
-    def test_windows_python_path_dir_is_the_install_root(self):
+    def test_windows_python_path_dir_is_the_tools_subdir(self):
         self.as_windows()
         comp, home = self._python()
-        self.assertEqual(main._external_bin_dir(comp, home), str(home))
+        self.assertEqual(main._external_bin_dir(comp, home), str(home / "tools"))
 
     def test_unix_python_still_uses_bin(self):
         """Unix 官方包解释器在 bin/，别被 Windows 的改动带偏。"""
@@ -1042,7 +1043,7 @@ class WindowsPathDirsMatchTheRealArchives(EnvSandbox):
         "postgresql": "bin", "rocketmq": "bin", "activemq": "bin",
         "nacos": "bin", "elasticsearch": "bin", "erlang": "bin",
         "rabbitmq": "sbin", "conda": "Scripts",
-        "nginx": "", "python": "", "node": "", "powershell": "", "bun": "",
+        "nginx": "", "python": "tools", "node": "", "powershell": "", "bun": "",
         "kubectl": "", "jenkins": "",
         # 2026-10-12 新增四件。kotlin / graalvm / redis 由本工具实测过归档清单：
         #   kotlinc/bin、graalvm-community-25.4.4.1.1+1.1/bin(java.exe)、

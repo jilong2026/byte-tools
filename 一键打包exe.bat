@@ -66,6 +66,7 @@ set "BASE_PY="
 if "%VENV_USABLE%"=="1" goto :step1_done
 call :discover_python
 if defined BASE_PY goto :step1_got
+if defined EMBED_SKIPPED call :say step1_embed "      Found only a portable Python without venv or pip, skipped it, installing a full one ..."
 call :bootstrap_python
 :step1_got
 if defined BASE_PY set "BASE_PY_SHOW=%BASE_PY:"=%"
@@ -242,7 +243,14 @@ REM command with arguments must not be wrapped in quotes and a path containing
 REM spaces must be.
 if defined BASE_PY goto :eof
 call %~1 -c "import sys;sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,14) else 1)" >nul 2>&1
-if %errorlevel% equ 0 set "BASE_PY=%~1"
+if %errorlevel% neq 0 goto :eof
+REM A matching version is not enough: it must also be able to create .venv.
+REM The ByteTools Python component installs the official embeddable zip on
+REM Windows, which has no Lib, no venv and no ensurepip, so "python -m venv"
+REM always fails there. Skip it and remember why, so the bootstrap can say so.
+call %~1 -c "import venv,ensurepip" >nul 2>&1
+if errorlevel 1 set "EMBED_SKIPPED=1"
+if not errorlevel 1 set "BASE_PY=%~1"
 goto :eof
 
 :try_exe
@@ -252,7 +260,11 @@ REM step is a dead end the user would then be asked to fix by hand.
 if defined BASE_PY goto :eof
 if not exist "%~1" goto :eof
 call "%~1" -c "import sys;sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,14) else 1)" >nul 2>&1
-if %errorlevel% equ 0 set BASE_PY="%~1"
+if %errorlevel% neq 0 goto :eof
+REM Same venv/ensurepip requirement as :try_cmd, for the same embeddable reason.
+call "%~1" -c "import venv,ensurepip" >nul 2>&1
+if errorlevel 1 set "EMBED_SKIPPED=1"
+if not errorlevel 1 set BASE_PY="%~1"
 goto :eof
 
 REM ==========================================================================

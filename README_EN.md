@@ -7,7 +7,7 @@
 <p align="center">
   Set up a complete development environment on a fresh Windows / macOS / Linux machine<br/>
   <b>with a few clicks</b>.   <b>80 components</b> are handled end to end (download → unpack → set environment variables),<br/>
-  <b>38 dev tools</b> get official installer direct links (download only), and <b>16 services</b> can be started and stopped in one click.
+  <b>39 dev tools</b> get official installer direct links (download only), and <b>17 services</b> can be started and stopped in one click.
 </p>
 
 <p align="center">
@@ -82,7 +82,7 @@ Your OS may block the app on first launch. That is a "nobody paid for a code sig
 - **One codebase, three platforms**: detects OS and CPU architecture (on Apple Silicon JDK resolves to aarch64, Node to arm64).
 - **80 components installed end to end**: download → unpack → `XXX_HOME` + `PATH`, ready to use immediately.
 - **38 dev tools, download only**: IDEs / database clients / terminals get official installer direct links, with a live version list, downloaded to a directory of your choosing (remembered between runs; you can open the folder afterwards). **This tool does not unpack them, does not set environment variables for them, and does not run installers on your behalf** — licence acceptance and install steps are yours. Where upstream ships both an installer and a portable archive (IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX), the button reads **"Download ▾"** so you can pick which one, sizes shown.
-- **16 services start and stop in one click**: Tomcat, Nginx, ActiveMQ, RocketMQ, Kafka, Elasticsearch, Seata, Nacos, RabbitMQ, Jenkins, Redis, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO. Port conflicts are handled by a documented policy and explained in a confirmation dialog (ports are never silently shifted — shifting them breaks external clients). If "Stop" cannot stop cleanly, the tool only asks whether to force-kill; it never kills behind your back. Liveness is judged by **the whole port cluster listening** (Nacos main port + gRPC, Kafka 9092+9093, RocketMQ namesrv+broker). Running services are still recognised after you close and reopen the tool, and status detection **never executes a start script**. Protocol-port components that cannot be viewed in a browser (Kafka / RocketMQ / RabbitMQ) get a status page served by the tool itself: state, ports, how to connect, credentials and log paths — and it **flips to "stopped" on refresh once the service is gone**, instead of a notice that forever claims success. All of them were verified one by one on a real Windows machine through the full cycle (download/install → start → cluster ports listening → protocol probe, e.g. `rabbitmqctl status`, Kafka `BrokerApiVersions` → stop → ports released). **macOS and Linux are not yet verified on real hardware** (see rule R5 in `DEVELOPMENT.md`).
+- **17 services start and stop in one click**: Tomcat, Nginx, ActiveMQ, RocketMQ, Kafka, Elasticsearch, Seata, Nacos, RabbitMQ, Jenkins, Redis, MySQL, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO. Port conflicts are handled by a documented policy and explained in a confirmation dialog (ports are never silently shifted — shifting them breaks external clients). If "Stop" cannot stop cleanly, the tool only asks whether to force-kill; it never kills behind your back. Liveness is judged by **the whole port cluster listening** (Nacos main port + gRPC, Kafka 9092+9093, RocketMQ namesrv+broker). Running services are still recognised after you close and reopen the tool, and status detection **never executes a start script**. Protocol-port components that cannot be viewed in a browser (Kafka / RocketMQ / RabbitMQ) get a status page served by a **detached helper process**: state, ports, how to connect, credentials and log paths — and it **flips to "stopped" on refresh once the service is gone**, instead of a notice that forever claims success. Because the page server is a separate process, **the page still opens after you close the tool**. All of them were verified one by one on a real Windows machine through the full cycle (download/install → start → cluster ports listening → protocol probe, e.g. `rabbitmqctl status`, Kafka `BrokerApiVersions` → stop → ports released). **macOS and Linux are not yet verified on real hardware** (see rule R5 in `DEVELOPMENT.md`).
 - **Prerequisite runtimes installed automatically**: components that need a JDK (Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata) will download a suitable JDK first, then continue starting; same for the Erlang/OTP that RabbitMQ needs (27.x / 26.x matched to the RabbitMQ version). You never have to prepare dependencies yourself.
 - **China-first mirrors with multi-source failover**: 11 mainland mirror bases and 3 GitHub accelerators, tried mainland-first, falling back to the official origin last, all narrated in the log. **No URL editing needed** (a few components genuinely have no mainland mirror — see [Platform support and exceptions](#platform-support-and-exceptions)).
 - **Multiple coexisting versions + an explicit "active version"**: all 80 installable components can keep several versions side by side (opened to everything on 2026-06-06), and you name which one is active. A failed switch rolls back automatically, so you never end up with "variable points to A, `PATH` points to B". A **green tick** in the version dropdown means that version is already installed on disk.
@@ -131,19 +131,19 @@ node -v
 
 ## Supported components
 
-**182 in total**: **80 installable end to end** + **102 download-only** (102 = 38 GUI tools + 64 agent clients; 15 of the 61 additionally support one-click start/stop). The tabs carry their counts in their titles:
+**184 in total**: **80 installable end to end** + **104 download-only** (104 = 39 GUI tools + 65 agent clients; 17 of the 80 additionally support one-click start/stop). The tabs carry their counts in their titles:
 
 | Tab | Count | Members |
 |-----|-------|---------|
-| Start-stop | 16 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO |
+| Start-stop | 17 | Tomcat, Nginx, RabbitMQ, Kafka, RocketMQ, ActiveMQ, Nacos, Seata, Elasticsearch, Jenkins, Redis, MySQL, NATS Server, etcd, Consul, Apache ZooKeeper, MinIO |
 | Dev environment | 42 | JDK, Python, Node.js, Go, Bun, Miniconda, Git, Maven, Gradle, PowerShell 7, Kotlin, GraalVM, Rust, Dart, protoc, uv, .NET SDK, SQLite, jq, pnpm, Deno, Ninja, DuckDB CLI, CMake, ripgrep, fd, bat, eza, zoxide, fzf, yq, Apache Ant, Elixir, Scala CLI, Bazelisk, Just, Task, Oxlint, Biome, Nushell, Starship, GitHub CLI |
-| Server components | 22 | MySQL, MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, Caddy, Traefik, Apache JMeter, Terraform, OpenTofu, Argo CD CLI, Prometheus, VictoriaMetrics, k6, Pulumi, Istio CLI, Talos Linux CLI |
-| Dev tools | 38 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman, Notepad++, Wireshark, GitKraken, SourceTree, Insomnia, Beekeeper Studio, Obsidian, Zettlr, Yaak, Vim (gVim), CC-Switch, CodexAppManager |
-| Agent clients | 64 | Cursor, ZCode, Claude Code, Codex CLI, opencode, OpenHands, Cherry Studio, Goose, Qwen Code, Crush, Kiro, Jan, OpenClaw, Hermes Agent, Gemini CLI, Aider, Ollama, LM Studio, GPT4All, AnythingLLM, LobeHub, GitHub Copilot CLI, ima (Tencent), Kilo Code, Wave Terminal, Msty Studio, Mistral Vibe, Kimi Work, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark |
+| Server components | 21 | MongoDB, PostgreSQL, Pulsar, Docker, kubectl, Trivy, k9s, Docker Compose v2, Helm, Caddy, Traefik, Apache JMeter, Terraform, OpenTofu, Argo CD CLI, Prometheus, VictoriaMetrics, k6, Pulumi, Istio CLI, Talos Linux CLI |
+| Dev tools | 39 | IntelliJ IDEA, PyCharm, CLion, WebStorm, GoLand, DataGrip, VS Code, DBX, WindTerm, WeChat DevTools, Eclipse IDE, Apipost, Apifox, HBuilderX, Android Studio, Visual Studio, Navicat, DBeaver, HeidiSQL, Bruno, RedisInsight, Another Redis Desktop Manager, MongoDB Compass, pgAdmin 4, MySQL Workbench, Postman, Notepad++, Wireshark, GitKraken, SourceTree, Insomnia, Beekeeper Studio, Obsidian, Zettlr, Yaak, Vim (gVim), CC-Switch, CodexAppManager, DevSidecar |
+| Agent clients | 65 | Cursor, ZCode, Claude Code, Codex CLI, opencode, OpenHands, Cherry Studio, Goose, Qwen Code, Crush, Kiro, Jan, OpenClaw, Hermes Agent, Gemini CLI, Aider, Ollama, LM Studio, GPT4All, AnythingLLM, LobeHub, GitHub Copilot CLI, ima (Tencent), Kilo Code, Wave Terminal, Msty Studio, Mistral Vibe, Kimi Work, QoderWork CN, Trae, Trae CN, Qoder IDE, Tencent CodeBuddy, Zed, Cline, Reasonix, ChatGPT, Claude Desktop, Google Gemini, Google Antigravity, Windsurf (Devin), Marvis (Tencent), Wukong (DingTalk), Kimi, Kimi Code, MiniMax Code, StepFun Desktop, Nano AI, Tiangong AI, DeepSeek Harness, Metaso, LobsterAI (Youdao), AutoClaw (Zhipu), Baidu DuMate, OpenWorker, Orkas, WorkBuddy, Doubao, Tencent Yuanbao, Tongyi Qianwen, Tongyi Lingma, ERNIE (Wenxiaoyan), ChatGLM, iFlytek Spark, Qoder CLI |
 
-> **This tab has two tiers.** 34 of the 40 have a measured official direct link, so the card's main
-> button says **Download**. The other 6 (Windsurf (Devin), Claude Desktop, Google Antigravity,
-> Google Gemini, Metaso, iFlytek Spark) have no stable link we could register, so the button says
+> **This tab has two tiers.** 57 of the 65 have a measured official direct link, so the card's main
+> button says **Download**. The other 8 (Windsurf (Devin), Claude Desktop, Google Antigravity,
+> Google Gemini, Metaso, iFlytek Spark, Gemini CLI, Aider) have no stable link we could register, so the button says
 > **"Open official site"** — it opens the vendor's download page in your browser and you download
 > there. **Neither tier downloads, installs, or runs an installer for you.**
 
@@ -156,7 +156,7 @@ Details by technical category below (environment variable, detection command, de
 | Component | Env var | Detection | Default versions |
 |---|---|---|---|
 | JDK (Temurin) | `JAVA_HOME` | `java -version` | 21 / 17 (LTS) / 11 / 8. Exact filenames on TUNA / NJU mirrors carry a build number — **refresh before downloading** |
-| Python | — (PATH) | `python --version` | 3.12 / 3.11 / 3.10 / 3.9. Linux / macOS: see [exceptions](#platform-support-and-exceptions) |
+| Python | — (PATH) | `python --version` | 3.12 / 3.11 / 3.10 / 3.9. On Windows installs the official **NuGet full package** (full stdlib / pip / venv; the NuGet form does not include tkinter / IDLE); Linux / macOS: see [exceptions](#platform-support-and-exceptions) |
 | Node.js | `NODE_HOME` | `node --version` | 20 LTS / 18 LTS / 16 |
 | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | Bun | — (PATH) | `bun --version` | 1.x |
@@ -190,7 +190,7 @@ Details by technical category below (environment variable, detection command, de
 
 | Component | Env var | Detection | Default versions |
 |---|---|---|---|
-| MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x (Aliyun / Huawei Cloud mirrors + official). **After unpacking you still must run `mysqld --initialize`** — this tool does not initialise databases |
+| MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x (Aliyun / Huawei Cloud mirrors + official). **Supports one-click start/stop**: the first start runs `--initialize-insecure` (root with an empty password), data lives in `~/.env-tools/mysql-data`, listens on 127.0.0.1 only; stop uses `mysqladmin shutdown` |
 | MongoDB | — (PATH) | `mongod --version` | 8.0.x / 8.0.0 (Windows / Linux; macOS has no portable binary) |
 | PostgreSQL | `PG_HOME` | `psql --version` | 17.x / 16.x (auto-download on Windows only) |
 | SQLite (CLI) | — (PATH) | `sqlite3 --version` | 3.5x. Official `sqlite-tools-win-x64-<six-digit>.zip` (3.54.0 → `3540000`, with the year in the path); `sqlite3.exe` at the unpack root. **sqlite.org is the only source** (TUNA 404; the Huawei `sqlite/` page answers 200 but serves a 12 KB portal shell — a fake source). |
@@ -250,7 +250,7 @@ Details by technical category below (environment variable, detection command, de
 
 | Component | Env var | Detection | Default versions |
 |---|---|---|---|
-| Git | — | `git --version` | MinGit on Windows (Huawei Cloud / npmmirror first); no auto-download on macOS / Linux (upstream ships source only — use apt / dnf / yum / brew) |
+| Git | — | `git --version` | Windows uses the **full PortableGit** (includes Git Bash / Perl / OpenSSH; Huawei Cloud / npmmirror first); no auto-download on macOS / Linux (upstream ships source only — use apt / dnf / yum / brew) |
 
 ### Python distributions
 

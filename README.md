@@ -7,7 +7,7 @@
 <p align="center">
   一台新 Windows / macOS / Linux 机器，<b>点几下鼠标就装好整套开发环境</b>。<br/>
   <b>80 个</b>常用组件全流程自动（下载 → 解压 → 写环境变量 → 自检），<br/>
-  <b>38 个</b>常用开发工具给官方安装包直链（只下载），<b>16 个</b>服务另支持一键启停与访问页直达。
+  <b>39 个</b>常用开发工具给官方安装包直链（只下载），<b>17 个</b>服务另支持一键启停与访问页直达。
 </p>
 
 <p align="center">
@@ -77,8 +77,8 @@
 
 - **一份代码三平台**：自动判断系统与 CPU 架构（Apple Silicon 下 JDK 走 aarch64、Node 走 arm64）。
 - **80 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
-- **38 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
-- **16 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的小服务给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
+- **39 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
+- **17 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、MySQL、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的**独立小服务**给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示；这个页服务是独立进程，**关掉工具后访问页仍然打得开**。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
 - **前置运行时自动就位**：需要 JDK 的组件（Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata）在本机没有 JDK 或版本太低时，点「启动」会先自动下载安装一个够用的 JDK 再继续；RabbitMQ 需要的 Erlang/OTP 同理（按 RabbitMQ 版本自动配 27.x / 26.x）。用户不需要自己准备任何前置依赖，也不用手改文件。
 - **国内镜像优先 + 多源故障转移**：内置 11 家大陆镜像基址与 3 个 GitHub 加速器，按"大陆源在前 → 逐个换源 → 末位回退官网"走，全程中文日志，**无需手动改 URL**（少数组件只有官网一个源，见[平台支持与例外](#平台支持与例外)）。
 - **多版本并存 + 生效版本切换**：80 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
@@ -87,7 +87,7 @@
 - **检查更新，但不替换自己**：标题栏那颗版本号兼任状态灯（六种状态见[界面导览](#界面导览)）。发现新版点一下就直接下到你选的目录，**不会改名或覆盖正在运行的程序**，也不上传任何用户信息。
 - **下载可靠性**：所有请求固定携带专用 User-Agent（部分高校镜像站会屏蔽默认 UA 返回 403）；下载完成后校验实际字节数，遇到"假 200 空文件"自动换下一个源，不会留下坏包。
 - **动态版本清单 + 24 小时缓存**：启动后从各家官方 API / 索引拉最新版本，拉到的清单落盘缓存一天（省 GitHub 的匿名额度），拉不到就安静回退内置清单，离线也能用。
-- **搜索与过滤**：182 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
+- **搜索与过滤**：184 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
 - **环境变量写入不用 `setx`**：Windows 用 `winreg` 直写注册表（`setx` 有 1024 字符截断），按单条目增删 `PATH`，写完点名通知资源管理器；macOS / Linux 写入带标记的 shell 配置块，幂等更新。
 - **界面**：无边框自定义窗口、卡片按窗口宽度自动分列（可切「▦ 网格 / ☰ 列表」）、渐变进度条、状态胶囊标签、彩色分级中文日志（浮层可收起，**不会自己弹出来**——出现 warn / error 只在「📋 日志」按钮上挂一个未读条数）、窗口图标在任务栏与 Alt+Tab 可见、记住上次每个组件选中的版本。
 - **平台不支持时会说清楚**：有 2 个组件在 Windows 上没有可用的免安装形态（`Docker`、`Pulsar`），卡片上会写明原因并给替代做法，**不会**先装一个跑不起来的东西再让你自己猜。
@@ -127,25 +127,25 @@ node -v
 
 ## 支持的组件
 
-共 **182 个**：**80 个可一键装配** + **102 个只提供官方安装包下载**（102 = 38 个 GUI 工具 + 64 个 Agent 客户端；80 个里有 16 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
+共 **184 个**：**80 个可一键装配** + **104 个只提供官方安装包下载**（104 = 39 个 GUI 工具 + 65 个 Agent 客户端；80 个里有 17 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
-| 一键启停 | 16 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO |
-| 服务端组件 | 22 | MySQL、MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、Caddy、Traefik、Apache JMeter、Terraform、OpenTofu、Argo CD CLI、Prometheus、VictoriaMetrics、k6、Pulumi、Istio CLI、Talos Linux CLI |
+| 一键启停 | 17 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、MySQL、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO |
+| 服务端组件 | 21 | MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、Caddy、Traefik、Apache JMeter、Terraform、OpenTofu、Argo CD CLI、Prometheus、VictoriaMetrics、k6、Pulumi、Istio CLI、Talos Linux CLI |
 | 开发环境 | 42 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant、Elixir、Scala CLI、Bazelisk、Just、Task、Oxlint、Biome、Nushell、Starship、GitHub CLI |
-| 开发工具 | 38 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim)、CC-Switch、CodexAppManager |
-| Agent客户端 | 64 | Cursor、ZCode、Claude Code、Codex CLI、opencode、OpenHands、Cherry Studio、Goose、Qwen Code、Crush、Kiro、Jan、OpenClaw、Hermes Agent、Gemini CLI、Aider、Ollama、LM Studio、GPT4All、AnythingLLM、LobeHub、GitHub Copilot CLI、ima（腾讯）、Kilo Code、Wave Terminal、Msty Studio、Mistral Vibe、Kimi Work、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火 |
+| 开发工具 | 39 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim)、CC-Switch、CodexAppManager、DevSidecar |
+| Agent客户端 | 65 | Cursor、ZCode、Claude Code、Codex CLI、opencode、OpenHands、Cherry Studio、Goose、Qwen Code、Crush、Kiro、Jan、OpenClaw、Hermes Agent、Gemini CLI、Aider、Ollama、LM Studio、GPT4All、AnythingLLM、LobeHub、GitHub Copilot CLI、ima（腾讯）、Kilo Code、Wave Terminal、Msty Studio、Mistral Vibe、Kimi Work、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火、Qoder CLI |
 
-> **Agent客户端这一 Tab 有两档**：64 个里 **56 个**有实测过的官方直链，卡片主按钮是「下载」；
+> **Agent客户端这一 Tab 有两档**：65 个里 **57 个**有实测过的官方直链，卡片主按钮是「下载」；
 > 另 **8 个**（Windsurf (Devin)、Claude 桌面版、Google Antigravity、Google Gemini、秘塔AI搜索、
 > 讯飞星火、Gemini CLI、Aider）官方没有可登记的稳定直链，主按钮是**「官网下载」**——点一下在浏览器里打开它的官网，
 > 你自己在那里下。**两档都不代下、不代装、不代跑安装器。**
 
 > **五个 Tab 各自按什么分？**「一键启停」按**能力**分（这个工具能不能替你一键起停）；
 > 「服务端组件」与「开发环境」按**装在哪**分 —— 前者装在服务器/集群上、命令行操作，
-> 后者跑在你这台开发机上；「开发工具」按**形态**分 —— 36 个全是带图形界面的软件；
-> 「Agent客户端」按**品类**分 —— 全是 AI 客户端，其中 56 个有直链可下、8 个只能去官网下。
+> 后者跑在你这台开发机上；「开发工具」按**形态**分 —— 39 个全是带图形界面的软件；
+> 「Agent客户端」按**品类**分 —— 全是 AI 客户端，其中 57 个有直链可下、8 个只能去官网下。
 > 排这个顺序是为了让最常问的那个问题「我是装服务器还是装本机」能一眼对上。
 
 > 想调整归类：普通组件改 `main.py` 里 `COMPONENT_CATEGORY_OF` 的一行即可；「一键启停」那一页不用登记——组件进了启动白名单 `LAUNCH_OF` 就自动出现在那里，退出来就自动回到原分类。
@@ -157,7 +157,7 @@ node -v
 | 组件 | 环境变量 | 检测命令 | 默认可用版本 |
 |------|----------|----------|--------------|
 | JDK (Temurin) | `JAVA_HOME` | `java -version` | 21 / 17 (LTS) / 11 / 8。清华 / 南大镜像上的确切文件名带 build 号，**先点「⟳ 刷新版本」再下载** |
-| Python | —（走 PATH） | `python --version` | 3.12 / 3.11 / 3.10 / 3.9。Linux / macOS 见[平台支持与例外](#平台支持与例外) |
+| Python | —（走 PATH） | `python --version` | 3.12 / 3.11 / 3.10 / 3.9。Windows 装**官方 NuGet 完整包**（完整标准库 / pip / venv；NuGet 发行形态不含 tkinter / IDLE）；Linux / macOS 见[平台支持与例外](#平台支持与例外) |
 | Node.js | `NODE_HOME` | `node --version` | 20 LTS / 18 LTS / 16 |
 | Go (golang) | `GOPATH` / `GOROOT` | `go version` | 1.24.x / 1.22.x |
 | Bun | —（走 PATH） | `bun --version` | 1.x |
@@ -191,7 +191,7 @@ node -v
 
 | 组件 | 环境变量 | 检测命令 | 默认可用版本 |
 |------|----------|----------|--------------|
-| MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x（阿里 / 华为云镜像 + 官网）。**解压后还需自己执行 `mysqld --initialize`**，本工具不做数据库初始化 |
+| MySQL Server | `MYSQL_HOME` | `mysql --version` | 8.0.x（阿里 / 华为云镜像 + 官网）。**支持一键启停**：首次启动自动 `--initialize-insecure`（root 无密码），数据在 `~/.env-tools/mysql-data`，只监听 127.0.0.1；停止走 `mysqladmin shutdown` |
 | MongoDB | —（走 PATH） | `mongod --version` | 8.0.x / 8.0.0（Windows / Linux；macOS 无免安装二进制） |
 | PostgreSQL | `PG_HOME` | `psql --version` | 17.x / 16.x（仅 Windows 支持自动下载） |
 | SQLite（命令行） | —（走 PATH） | `sqlite3 --version` | 3.5x。官方 `sqlite-tools-win-x64-<六位版本>.zip`（3.54.0 → `3540000`，路径还带年份目录），解压根就是 `sqlite3.exe`。**只有 sqlite.org 一个源**（清华 404、华为那个 `sqlite/` 目录回 200 但只有 12 KB 门户壳，是假源） |
@@ -251,7 +251,7 @@ node -v
 
 | 组件 | 环境变量 | 检测命令 | 默认可用版本 |
 |------|----------|----------|--------------|
-| Git | — | `git --version` | Windows 走 MinGit（华为云 / npmmirror 优先）；macOS、Linux 不提供自动下载（上游只有源码包，界面提示用 apt / dnf / yum / brew） |
+| Git | — | `git --version` | Windows 走 **PortableGit 完整版**（含 Git Bash / Perl / OpenSSH；华为云 / npmmirror 优先）；macOS、Linux 不提供自动下载（上游只有源码包，界面提示用 apt / dnf / yum / brew） |
 
 ### Python 发行版
 
@@ -399,7 +399,7 @@ where java
 |---|---|
 | 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.2 检查中` = 正在查；`v1.2.2 最新` = 已是最新；`↓ v1.2.3 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.2 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
 | 标题栏（右） | 「★ GitHub」打开仓库 · 「⟳ 刷新版本」绕过缓存强制重抓在线清单 · 「🧹 清理残留 PATH」清死条目 · 「♥」支持作者 · 最小化 / 最大化 / 关闭 |
-| 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 182 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
+| 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 184 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
 | 卡片区 | 四个横向 Tab（标题带数量）。每张卡片：名称、状态标签（悬停看完整说明）、版本下拉（可搜索，磁盘已装的带绿勾）、操作按钮（安装 / 切换 / 卸载，可启停的还有启动 / 停止 / 控制台或访问页，只下载的只有下载）、渐变进度条。卡片按窗口宽度自动分列 |
 | 日志浮层 | 默认收起、浮在卡片区下方；点「📋 日志」展开、再点收起。**不会自动弹开**——出现 warn / error 时只在按钮上挂未读条数（`📋 日志 (N)`），想看才点。浮层里可「导出诊断」（诊断报告 + 本次会话日志，反馈问题时附上它）。四色分级（info 灰、ok 绿、warn 橙、error 红），全程中文（含镜像切换与故障转移过程） |
 | 底部状态栏 | 系统信息、**可点开的工作目录**（点一下在资源管理器里打开）、组件计数。版本号不在这里，在标题栏那颗 chip |
@@ -515,7 +515,7 @@ components.append(
 
 ### 版本清单缓存与 GitHub 额度
 
-在线版本清单**抓成功会落盘**（`~/.env-tools/version_cache.json`，一天内不重抓）。原因很实际：GitHub 匿名 API 的额度是**每个 IP 每小时 60 次**，而本工具一次启动要替 100 个组件各抓一次版本清单（其中一大批打的正是 GitHub API）——一小时内第二次打开工具、或者连点几次刷新，额度就会见底，日志里就会出现成片的"获取失败"。
+在线版本清单**抓成功会落盘**（`~/.env-tools/version_cache.json`，一天内不重抓）。原因很实际：GitHub 匿名 API 的额度是**每个 IP 每小时 60 次**，而本工具一次启动要替 100 个组件各抓一次版本清单（其中一大批打的正是 GitHub API）——一小时内第二次打开工具、或者连点几次刷新，额度就会见底，日志里就会出现成片的"获取失败"。GitHub-only 组件的版本元数据现在**先走国内反向代理** `gh-proxy.com`（不转发你的 token），代理失败再回直连。
 
 - 命中缓存时日志会写"沿用 24 小时内抓到的版本清单（N 个组件）"，这次不打网络。
 - 想要最新版本号，点 **「⟳ 刷新版本」**——它绕过缓存强制重抓。
