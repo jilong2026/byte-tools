@@ -54,7 +54,10 @@ _APP = QApplication.instance() or QApplication([])
 # 所以基线必须是**并集**：只写"开发工具"会让新 Tab 的 5 个组件被下面
 # `test_flag_defaults_to_false_for_the_established_twenty_six` 误判成"不该标只下载"。
 DOWNLOAD_ONLY_KEYS = (set(EXPECTED_MEMBERSHIP["开发工具"])
-                      | set(EXPECTED_MEMBERSHIP["Agent客户端"]))
+                      | set(EXPECTED_MEMBERSHIP["Agent客户端"])
+                      # 2026-10-21：WSL 向导卡也借这个能力位（不碰 PATH / XXX_HOME /
+                      # 卸载），但它的主按钮由 ui_action 覆写成「安装向导」。
+                      | {c.key for c in main.build_components() if c.ui_action})
 
 # 用户点名要、但这一版**没进表**的候选。登记一个没实测过的源违反 R1（200 也可能是
 # 拿 HTML 应付的假源），所以宁可少几个也不硬凑；这张表存在的意义是别让人以为"漏了"。
@@ -65,7 +68,6 @@ DEFERRED_KEYS = {
     "xshell": "netsarang.com / cdn.netsarang.net 本机全域 http=000，取不到任何证据",
     "xftp": "同上（同一家厂商、同一组域名）",
     "fleet": "JetBrains 官方产品目录 82 个产品里没有 Fleet，?code=FLEET 回空对象 —— 独立版已停",
-    "xcode": "macOS 独占且只走 Mac App Store / Apple 开发者账号，Windows 侧无可下直链",
     "lithe": "官方仓库 1lck/Lithe-IDEA 经 API 已 404，新仓库 0 个 release",
 }
 
@@ -161,13 +163,16 @@ class TabStructure(unittest.TestCase):
         → 161（同日第五批 22 个：12 个 Agent + 10 个开发工具，全部有实测直链）
         → 180（同日第六批 19 个：9 个服务端/运维 + 10 个语言与开发 CLI，
         全部"解压即用"、归档布局已用 bt_archive_layout_audit 逐个验过）
-        → **182（2026-10-16 用户点名的 CC-Switch 与 CodexAppManager，都是开发工具）。**
-        → **184（2026-10-28 用户点名的 DevSidecar 开发工具 + Qoder CLI Agent 客户端）。**
+        → 182（2026-10-16 用户点名的 CC-Switch 与 CodexAppManager，都是开发工具）
+        → 184（2026-10-21 Flutter SDK 与 Android SDK，都归「开发环境」）
+        → 186（2026-10-21 Xcode 与 Xcode SDK，都归「开发工具」、只给官网入口）
+        → 187（2026-10-21 WSL 向导卡，归「开发环境」）
+        → **189（2026-10-28 用户点名的 DevSidecar 开发工具 + Qoder CLI Agent 客户端）。**
         方法名里的 127 是历史名，不改 —— 改名的收益抵不上一次全仓库检索。
         """
         visible = sum(len(v) for v in self.groups.values())
-        self.assertEqual(visible, 184)
-        self.assertEqual(len(self.components), 185, "184 可见 + 隐藏的 erlang")
+        self.assertEqual(visible, 189)
+        self.assertEqual(len(self.components), 190, "189 可见 + 隐藏的 erlang")
 
 
 class CapabilityFlag(unittest.TestCase):
@@ -1365,6 +1370,36 @@ class WorkerRobustness(unittest.TestCase):
         w.run()
         self.assertEqual(len(hits), 1, f"取消只该发一次终态：{hits}")
         self.assertIn("取消", hits[0], f"取消不该被说成源不可用：{hits}")
+
+
+class MacOnlyOfficialPageEntries(unittest.TestCase):
+    """2026-10-21：Xcode 与 Xcode SDK —— macOS 独占，只给官方入口。
+
+    它们**不是**"忘了登记直链"：Apple 只通过 App Store / 开发者账号分发，
+    抓不到免登录 URL，所以刻意走 R21 的 official_page_only 档。
+    """
+
+    def test_both_are_official_page_only_without_versions(self):
+        comps = {c.key: c for c in main.build_components()}
+        for key in ("xcode", "xcode-sdk"):
+            with self.subTest(key=key):
+                c = comps[key]
+                self.assertTrue(c.download_only, key)
+                self.assertTrue(c.official_page_only,
+                                f"{key} 没有直链，必须走「官网下载」档")
+                self.assertEqual(c.versions, [], f"{key} 不该有版本表")
+                self.assertEqual(c.category, "开发工具")
+
+    def test_platform_hint_says_macos_only(self):
+        comps = {c.key: c for c in main.build_components()}
+        for key in ("xcode", "xcode-sdk"):
+            self.assertIn("macOS", comps[key].unsupported_platform_hint or "")
+
+    def test_official_urls_are_apple_owned(self):
+        self.assertEqual(main.COMPONENT_OFFICIAL_URLS["xcode"],
+                         "https://developer.apple.com/xcode/")
+        self.assertEqual(main.COMPONENT_OFFICIAL_URLS["xcode-sdk"],
+                         "https://developer.apple.com/download/all/")
 
 
 if __name__ == "__main__":

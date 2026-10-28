@@ -33,6 +33,7 @@ import uuid
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -90,6 +91,7 @@ try:
         QMenu,
         QMainWindow,
         QMessageBox,
+        QPlainTextEdit,
         QProgressBar,
         QPushButton,
         QScrollArea,
@@ -1494,6 +1496,13 @@ class Component:
     # `bt_download_only_tests.WebFallback` 的两条用例钉住；版本表通常为空
     # （表里那一行的版本行写成空元组即可，见 `_download_only_components`）。
     official_page_only: bool = False
+    # **不是"下载型"、也不是"解压型"的本地动作**（2026-10-21 为 WSL 加的）。
+    # 取值目前只有 "wsl"：卡片主按钮改成「安装向导」，点了打开 WslDialog；
+    # 版本行换成一行静态说明（它没有"可选版本"这个概念）。
+    # 借 `download_only=True` 的能力位来关掉所有会碰 PATH / XXX_HOME / 卸载的通用逻辑，
+    # 但它**不是**只下载 —— 真实动作是提权装系统功能 + 导入发行版。
+    # 之所以做成卡片而不是只在标题栏放按钮：用户要求"搜索 wsl 能搜到"（2026-10-21）。
+    ui_action: str = ""
     # 一句话说清"这个组件是干嘛的"（2026-10-12 用户要求：详情功能）。
     # 由 build_components() 末尾按 COMPONENT_SUMMARY 统一赋值，不在构造处手写
     # —— 与 category / launch 同一套"单一真源"做法。
@@ -3697,6 +3706,94 @@ def _semver_key(v: str):
     return Version.legacy_semver_key(v)
 
 
+# --- GitHub 的「不烧 API 额度」通道（2026-10-21） -----------------------------
+#
+# 背景：匿名 GitHub API 是 60 次/小时/IP，而本工具一次启动要给 30 个 GitHub 托管
+# 组件各抓一次。额度耗尽时 API 会 403（X-RateLimit-Remaining=0），整批抓取直接
+# 降级成内置清单 —— 宁可旧，不可错，但用户会觉得"刷新没反应"。
+#
+# 这两条都是**普通网页**，不占 API 额度（实测 2026-10-21，带 byte-tools UA）：
+#   · https://github.com/<repo>/releases.atom
+#       XML，条目里的 `/releases/tag/<tag>` 就是精确 tag（标题格式各家不同，
+#       不能拿标题当 tag：bun 是 "Bun v1.4.3"、jq 是 "jq 1.8.2"）。
+#   · https://github.com/<repo>/releases/expanded_assets/<tag>
+#       HTML，每个产物一个 href（/releases/download/<tag>/<name>）与一个人读体积。
+#
+# 定位是**兜底**，不是主路径：API 能给 size 与 prerelease 标记，网页只能给出
+# 名字与近似体积；所以 API 可用时仍走 API，只有它失败（限流/网络）才切过来。
+
+_GH_TAG_RE = _re.compile(r"/releases/tag/([^\"'<>\s]+)")
+_GH_DOWNLOAD_RE = _re.compile(r"/releases/download/[^\"'<>\s]+")
+_GH_SIZE_RE = _re.compile(r"(\d+(?:\.\d+)?)\s*(Bytes|KB|MB|GB)\b")
+_GH_PRE_MARK = _re.compile(r"(?i)(alpha|beta|rc|pre|preview|dev|snapshot|nightly|canary)n?\d*")
+
+
+def _gh_human_size(text: str) -> int:
+    m = _GH_SIZE_RE.search(text or "")
+    if not m:
+        return 0
+    unit = {"Bytes": 1, "KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3}[m.group(2)]
+    return int(float(m.group(1)) * unit)
+
+
+def _gh_parse_asset_page(html: str, repo: str, tag: str) -> List[Dict[str, object]]:
+    """从 expanded_assets 页面解析产物（名字/体积/下载地址）。
+
+    按 `releases/download/` 切块而不是全局正则配对：页面里还混着校验值与图标，
+    全局配对一旦漏掉一个体积就会让后面所有产物**整体错位**（体积永远对不上）。
+    """
+    parts = _GH_DOWNLOAD_RE.split(html)
+    hrefs = _GH_DOWNLOAD_RE.findall(html)
+    assets: List[Dict[str, object]] = []
+    for i, href in enumerate(hrefs):
+        name = href.rsplit("/", 1)[-1]
+        if not name:
+            continue
+        chunk = parts[i + 1] if i + 1 < len(parts) else ""
+        # 只取本行（下一次 download 之前的片段）里的第一个体积
+        assets.append({
+            "name": name,
+            "size": _gh_human_size(chunk),
+            "browser_download_url": (
+                f"https://github.com/{repo}/releases/download/"
+                f"{urllib.parse.quote(tag, safe='')}/{name}"),
+        })
+    return assets
+
+
+def github_releases_no_api(repo: str, max_tags: int = 12) -> List[dict]:
+    """不消耗 GitHub API 额度的 releases 列表（形状与 API 的返回兼容）。
+
+    返回的每项只有 `tag_name` / `prerelease` / `draft` / `assets` 四个键 ——
+    正好是 `make_github_asset_fetcher` 用到的全部字段。
+    """
+    feed = _get(f"https://github.com/{repo}/releases.atom",
+                timeout=DEVTOOL_FETCH_TIMEOUT).text
+    tags: List[str] = []
+    for raw in _GH_TAG_RE.findall(feed or ""):
+        tag = urllib.parse.unquote(raw)
+        if tag and tag not in tags:
+            tags.append(tag)
+    releases: List[dict] = []
+    for tag in tags[:max_tags]:
+        if _GH_PRE_MARK.search(tag):
+            # atom 不带 prerelease 标记，只能按 tag 里的预发布字样保守过滤。
+            # 宁可少列一个预发布，也不能把 rc 当成正式版塞进下拉框。
+            continue
+        try:
+            page = _get(
+                "https://github.com/{}/releases/expanded_assets/{}".format(
+                    repo, urllib.parse.quote(tag, safe="")),
+                timeout=DEVTOOL_FETCH_TIMEOUT).text
+        except Exception:  # noqa: BLE001
+            continue
+        assets = _gh_parse_asset_page(page or "", repo, tag)
+        if assets:
+            releases.append({"tag_name": tag, "prerelease": False, "draft": False,
+                             "assets": assets})
+    return releases
+
+
 def _sort_semver_desc(vs) -> list:
     return sorted(set(vs), key=_semver_key, reverse=True)
 
@@ -4644,11 +4741,20 @@ def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple,
     """
 
     def _fetch() -> List[ComponentVersion]:
+        api_exc: Optional[Exception] = None
         try:
             data = _github_api_json(
                 f"https://api.github.com/repos/{repo}/releases?per_page=30")
-        except Exception as exc:
-            raise RuntimeError(f"{key} 版本列表抓取失败：GitHub API 不可用：{exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            # API 被限流/不可达时切到「网页通道」：releases.atom + expanded_assets，
+            # 不占 60 次/小时的 API 额度（2026-10-21 新增，见 github_releases_no_api）。
+            api_exc = exc
+            try:
+                data = github_releases_no_api(repo)
+            except Exception as web_exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"{key} 版本列表抓取失败：GitHub API 不可用（{api_exc}）；"
+                    f"网页兜底也失败（{web_exc}）") from api_exc
         found: Dict[str, List[DownloadArtifact]] = {}
         for rel in (data if isinstance(data, list) else []):
             if not rel or rel.get("prerelease") or rel.get("draft"):
@@ -5228,6 +5334,139 @@ def fetch_dart_versions() -> List[ComponentVersion]:
         if name != latest_v and _version_parts(name) is not None:
             found.setdefault(name, []).append(_dart_cv(name))
     return _flatten_newest(found)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-21 Flutter SDK 与 Android SDK（cmdline-tools）
+#
+# ## Flutter
+# 归档形态（**不看整包、只读远端 zip 中央目录**实测 3.47.7）：
+#   1,934,624,561 B / `PK\x03\x04` / 23,088 条 / 顶层只有 `flutter/` 一个目录，
+#   `flutter/bin/flutter.bat` 在其中 ⇒ collapse 后 install_dir 就是 flutter 目录，
+#   `path_subdir="bin"`。整包 1.9 GB 里含 Dart SDK 与各平台 engine 产物，
+#   所以它比 Dart SDK（220 MB）大一个量级，下载耗时是主要成本。
+# 源序（带 `byte-tools` UA、各取 256 KB 实测）：腾讯云 817 KB/s > 南大 686 >
+#   flutter-io.cn 311 > 官方 35；镜像路径必须带 `/flutter/` 那一层（与 dart 同规矩）。
+# 版本入口：官方 `releases_windows.json`（腾讯云/南大/官方三处同字节数 269,875 B），
+#   里面 `current_release.stable` 给最新版，`releases[]` 给全量历史。
+#
+# ## Android cmdline-tools
+# 归档形态（同样只读中央目录实测 23.0 / build 16111833）：
+#   154,957,218 B / `PK\x03\x04` / 328 条 / 顶层只有 `cmdline-tools/`，
+#   `cmdline-tools/bin/sdkmanager.bat` ⇒ collapse 后 `path_subdir="bin"`。
+# ⚠ 23.0 起 `sdkmanager` 已是**弃用包装**：它转调同目录的 `android.exe`
+#   （新版 Android CLI）。`--version` 在解析 SDK 根目录**之前**就返回，
+#   所以在我们这套"平铺"布局里也能正常探测；但真正装包必须给
+#   `--sdk_root=%ANDROID_HOME%`（脚本只认 `<sdk>\cmdline-tools\<ver>\bin` 这个标准位置）。
+#   这一点写进 data_note / usage，不能让用户以为直接 `sdkmanager platform-tools` 就行。
+# 源序：腾讯云镜像 `mirrors.cloud.tencent.com/AndroidSDK/` 1747 KB/s + `PK`；
+#   `dl.google.com` 本机整站 500（连 repository2-3.xml 都 500），只能作末位兜底。
+#   阿里云/清华/南大的 AndroidSDK 目录实测 404。所以它是"恰好 1 个大陆源"。
+# ---------------------------------------------------------------------------
+
+_FLUTTER_PATH_TMPL = "flutter_infra_release/releases/stable/windows/flutter_windows_{v}-stable.zip"
+_FLUTTER_INDEX_TAIL = "flutter_infra_release/releases/releases_windows.json"
+
+
+def _flutter_urls(v: str) -> Dict[str, List[str]]:
+    """腾讯云 / 南大镜像在前，flutter-io.cn（官方中国镜像）居中，官方 GCS 末位。"""
+    path = _FLUTTER_PATH_TMPL.format(v=v)
+    cn = [f"{base}/flutter/{path}" for base in _mb("tencent", "nju")]
+    return {"Windows": cn + [
+        f"https://storage.flutter-io.cn/{path}",
+        f"https://storage.googleapis.com/{path}",
+    ]}
+
+
+def _flutter_cv(v: str) -> ComponentVersion:
+    return ComponentVersion(version=v, url_map={}, url_list_map=_flutter_urls(v),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_flutter_versions() -> List[ComponentVersion]:
+    """Flutter：读官方 releases_windows.json（腾讯云 → 官方，镜像只是加速同一个文件）。
+
+    只取 channel == "stable" 且 archive 是 Windows zip 的条目；按 `_version_parts`
+    逐段转 int 排序（JSON 里是时间倒序，不能直接取前 N 后当成"最新 N 个"——
+    中间夹着 hotfix 与已回滚的版本，实测 3.47.x 段就混着非连续号）。
+    """
+    urls = [
+        f"{_mb('tencent')[0]}/flutter/{_FLUTTER_INDEX_TAIL}",
+        f"https://storage.flutter-io.cn/{_FLUTTER_INDEX_TAIL}",
+        f"https://storage.googleapis.com/{_FLUTTER_INDEX_TAIL}",
+    ]
+    last_exc: Optional[Exception] = None
+    data = None
+    for u in urls:
+        try:
+            data = _get(u, timeout=DEVTOOL_FETCH_TIMEOUT).json()
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Flutter 版本列表抓取失败：releases_windows.json 不可用：{last_exc}")
+
+    versions = set()
+    for rel in (data.get("releases") or []):
+        if not isinstance(rel, dict):
+            continue
+        if rel.get("channel") != "stable":
+            continue
+        arch = str(rel.get("archive") or "")
+        if not arch.endswith("-stable.zip") or "/windows/" not in arch:
+            continue
+        ver = str(rel.get("version") or "").strip()
+        if ver and _version_parts(ver) is not None:
+            versions.add(ver)
+    if not versions:
+        raise RuntimeError("Flutter 官方 JSON 里没有可用的 Windows stable 版本")
+    ordered = sorted(versions, key=lambda v: _version_parts(v) or (0,), reverse=True)
+    return [_flutter_cv(v) for v in ordered[:6]]
+
+
+def _android_cmdline_urls(build: str) -> Dict[str, List[str]]:
+    name = f"commandlinetools-win-{build}_latest.zip"
+    return {"Windows": [
+        f"{_mb('tencent')[0]}/AndroidSDK/{name}",
+        f"https://dl.google.com/android/repository/{name}",
+    ]}
+
+
+def _android_cv(version: str, build: str) -> ComponentVersion:
+    return ComponentVersion(version=version, url_map={},
+                            url_list_map=_android_cmdline_urls(build),
+                            archive_map={"Windows": "zip"})
+
+
+def fetch_android_cmdline_versions() -> List[ComponentVersion]:
+    """Android cmdline-tools：从官方 repository2-3.xml（腾讯云镜像）读 `cmdline-tools;latest`。
+
+    只返回**最新一档**：官方索引里 cmdline-tools 只挂 `latest` 一个 remotePackage，
+    历史 build 没有稳定可拼的索引（按数字猜 URL 等于瞎猜，R1 明令禁止）。
+    版本号用 revision（23.0），URL 里要的是 build 号（16111833），两者分别取。
+    """
+    data = None
+    last_exc: Optional[Exception] = None
+    for u in (f"{_mb('tencent')[0]}/AndroidSDK/repository2-3.xml",
+              "https://dl.google.com/android/repository/repository2-3.xml"):
+        try:
+            data = _get(u, timeout=DEVTOOL_FETCH_TIMEOUT).text
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    if not data:
+        raise RuntimeError(f"Android SDK 版本列表抓取失败：repository2-3.xml 不可用：{last_exc}")
+    block = _re.search(r'<remotePackage path="cmdline-tools;latest">(.*?)</remotePackage>',
+                       data, _re.S)
+    if not block:
+        raise RuntimeError("repository2-3.xml 里找不到 cmdline-tools;latest")
+    body = block.group(1)
+    rev = _re.search(r"<major>(\d+)</major>\s*<minor>(\d+)</minor>", body, _re.S)
+    win = _re.search(r"<url>commandlinetools-win-(\d+)_latest\.zip</url>", body)
+    if not rev or not win:
+        raise RuntimeError("cmdline-tools;latest 的 revision 或 Windows 产物读不出来")
+    version = f"{int(rev.group(1))}.{int(rev.group(2))}"
+    return [_android_cv(version, win.group(1))]
 
 
 # ---------------------------------------------------------------------------
@@ -6107,6 +6346,10 @@ FETCHERS: Dict[str, Callable[[], List[ComponentVersion]]] = {
     "minio": fetch_minio_versions,
     # 2026-10-12 Dart（官方 VERSION JSON + GCS 列目录，南大/腾讯镜像）
     "dart": fetch_dart_versions,
+    # 2026-10-21 Flutter（官方 releases_windows.json，腾讯/南大镜像）与
+    # Android cmdline-tools（官方 repository2-3.xml，腾讯镜像）
+    "flutter": fetch_flutter_versions,
+    "android-sdk": fetch_android_cmdline_versions,
     # 2026-10-12 B3/B5：GitHub Releases 单二进制批（表驱动，见 GH_BIN_COMPONENTS）
     **GH_BIN_FETCHERS,
     # 「开发工具」：只下载型组件。**没注册 fetcher 的那几个是故意的** ——
@@ -6290,6 +6533,8 @@ COMPONENT_CATEGORY_OF = {
     "obsidian": "开发工具", "zettlr": "开发工具", "yaak": "开发工具", "gvim": "开发工具",
     "cc-switch": "开发工具", "codex-app-manager": "开发工具",
     "dev-sidecar": CAT_TOOL,
+    # 2026-10-21：Xcode 与 Xcode SDK（macOS 独占，只给「官网下载」入口）
+    "xcode": CAT_TOOL, "xcode-sdk": CAT_TOOL,
     # 2026-10-12 B4 / B2：这两个会因 LAUNCH_OF 自动归到「一键启停」，这里登记的是
     # 它们从白名单退下来时的落点（同 tomcat / nacos 那一行的理由）。
     "consul": CAT_SERVER, "zookeeper": CAT_SERVER,
@@ -6297,6 +6542,9 @@ COMPONENT_CATEGORY_OF = {
     # 这行是它退下来时的落点；后者是纯装配组件，直接归「开发环境」。
     "minio": CAT_SERVER,
     "dart": CAT_ENV,
+    "flutter": CAT_ENV, "android-sdk": CAT_ENV,
+    # 2026-10-21：WSL 的安装向导卡片（不是普通组件，见 Component.ui_action）
+    "wsl": CAT_ENV,
     # erlang 是隐藏组件（不出现在界面），但分类表是"每个 key 都要有"的硬约束，
     # 漏登记会在 build_components() 末尾直接 KeyError —— 所以它也得在这一行。
     "erlang": CAT_ENV,
@@ -6724,6 +6972,9 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "deno": "TypeScript 优先的 JS 运行时，单二进制、默认安全沙箱。免去 package.json 与打包步骤，适合脚本与服务端 TS。",
     "graalvm": "多语言高性能 JVM：Java + JavaScript + Python + Ruby 等。可编译成原生镜像（native-image），启动快、内存省；与 JDK (Temurin) 互不干扰地并存。",
     "dart": "Dart 语言工具链：编译器 + dart pub 包管理。Flutter 跨端开发的必配，也可单独写命令行与服务端程序（官方 zip 解压即用）。",
+    "flutter": "Flutter 跨端 UI 框架完整 SDK（stable，zip 解压即用）：一套 Dart 代码出 Windows/Android/iOS/Web；含 Dart SDK 与 engine（约 1.9 GB）。",
+    "android-sdk": "Android SDK 命令行工具（cmdline-tools）：sdkmanager/avdmanager 与新版 android CLI，用于装 platform-tools 等组件。",
+    "wsl": "把 WSL2（Windows 子系统）+ Ubuntu 24.04 装成本地 Linux：一键启用系统功能、装官方运行时并导入发行版；装完提示重启，不自动重启。",
     "kotlin": "Kotlin 编译器。JVM/Android 生态的主流语言，Android 官方推荐；后端也可用它写 Spring Boot。",
     "rust": "Rust 编译器与 cargo 包管理。以内存安全著称的系统级语言，WebAssembly、CLI 工具、性能敏感组件的热门选择。",
     "dotnet-sdk": ".NET 开发套件：C#/F# 编译器 + CLI + 运行时。Windows 桌面、ASP.NET 后端、云函数与微服务的统一平台。",
@@ -6871,6 +7122,8 @@ COMPONENT_SUMMARY: Dict[str, str] = {
     "gh": "GitHub CLI：GitHub 官方命令行，开 PR/看 issue/跑 workflow 不用开浏览器。",
     "cc-switch": "CC-Switch：Claude Code / Codex / OpenCode 等 CLI 的统一配置管理器。",
     "codex-app-manager": "CodexAppManager：官方 Codex 桌面应用的安装/更新/卸载管理器。",
+    "xcode": "Apple 的 macOS / iOS 开发环境：写 Swift、做 App、上架 App Store 都在这里。仅 macOS 可用，官方无免登录直链。",
+    "xcode-sdk": "Xcode 随附的 iOS / macOS 等平台 SDK 与 Command Line Tools：编译打包工具链，没有独立安装包。",
     "qoderwork-cn": "QoderWork CN：Qoder 的办公 Agent 中文版，面向本地文档与日常办公任务。",
     "trae": "Trae：字节跳动的 AI 编程 IDE（国际版）。整库理解、多文件改写、Builder 模式从需求直出工程。",
     "trae-cn": "Trae CN：Trae 的中国大陆版。功能与界面同国际版，独立站点、国内直连不需要科学上网。",
@@ -7062,6 +7315,9 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "bun": "https://bun.sh/",                          # INT
     "deno": "https://deno.com/",                       # INT
     "dart": "https://dart.dev/",                       # INT
+    "flutter": "https://docs.flutter.dev/get-started/install/windows",  # INT 官方 Windows 安装说明
+    "android-sdk": "https://developer.android.com/tools/sdkmanager",  # INT 官方 sdkmanager 文档
+    "wsl": "https://learn.microsoft.com/zh-cn/windows/wsl/install",  # CN 微软官方中文文档
     "kotlin": "https://kotlinlang.org/",               # INT
     "graalvm": "https://www.graalvm.org/",             # INT
     "dotnet-sdk": "https://dotnet.microsoft.com/zh-cn/download/dotnet",  # CN  微软自带 zh-cn 路径
@@ -7220,6 +7476,8 @@ COMPONENT_OFFICIAL_URLS: Dict[str, str] = {
     "gh": "https://cli.github.com/",                          # INT 官网（下载入口同页）
     "cc-switch": "https://ccswitch.io/",                      # CN/INT 官方站（作者声明这是唯一官网）
     "codex-app-manager": "https://github.com/Wangnov/Codex-App-Manager/releases",  # 只在 GitHub 发版
+    "xcode": "https://developer.apple.com/xcode/",     # INT 官方页面（下载需 Apple ID）
+    "xcode-sdk": "https://developer.apple.com/download/all/",  # INT 开发者下载中心
     "qoderwork-cn": "https://qoder.com.cn/",                  # CN   Qoder 中文站
     "trae": "https://www.trae.ai/",                           # INT  国际站
     "trae-cn": "https://www.trae.cn/",                        # CN   大陆站
@@ -7292,6 +7550,12 @@ COMPONENT_USAGE: Dict[str, str] = {
     "graalvm": "当高级 JDK 用：java 即 GraalVM。native-image 编译原生二进制："
                "native-image -jar app.jar（需先配好 PATH）。",
     "dart": "dart pub get 拉依赖、dart run 跑脚本、dart compile exe 打独立可执行。写 Flutter 前先配好它。",
+    "flutter": "flutter doctor 先体检（看还缺哪套工具链），flutter create myapp 建工程，flutter run -d windows 跑桌面版。国内网络先设 FLUTTER_STORAGE_BASE_URL 与 PUB_HOSTED_URL 两个镜像变量（见「数据去处」）。",
+    "android-sdk": "先装好 JDK。sdkmanager --sdk_root=%ANDROID_HOME% --list 看包，"
+                   "再带同样参数装 \"platform-tools\" \"platforms;android-36\"；"
+                   "Flutter / Gradle 通过 ANDROID_HOME 找到它。",
+    "wsl": "点卡片上的「安装向导」：第一步装运行时（要管理员权限），重启后回来做第二步导入 Ubuntu；"
+           "之后在向导里直接开 Ubuntu 终端。",
     "kotlin": "kotlinc Hello.kt -include-runtime -d h.jar 编译，java -jar h.jar 运行。"
               "IDE 里写 Kotlin 用 JDK 那份即可。",
     "rust": "cargo new 项目名 建项目，cargo build 编译，cargo run 直接跑。"
@@ -7541,6 +7805,10 @@ COMPONENT_USAGE: Dict[str, str] = {
                  "它会去改对应 CLI 自己的配置文件，所以**先装好目标 CLI** 再切。",
     "codex-app-manager": "装完启动，界面里选 Codex 桌面端的版本并安装；后续更新与卸载也在同一处。"
                          "它只管那个桌面应用本体。",
+    "xcode": "在 Mac 上装好后，先 xcode-select --install 补命令行工具，用 xcodebuild -showsdks 看已装 SDK；"
+            "xcodebuild -downloadPlatform iOS 可补模拟器运行时。",
+    "xcode-sdk": "xcode-select -s /Applications/Xcode.app 切换工具链；xcodebuild -showsdks 列平台 SDK；"
+                 "命令行工具也可单独用 xcode-select --install 安装。",
     "qoderwork-cn": "装完启动登录 Qoder 账号；它主要处理本地文档与办公任务，跟着界面引导走即可。",
     "trae": "装完启动登录账号，打开项目目录后即可对话改代码；Builder 模式能从一句话起个工程。",
     "trae-cn": "装完启动登录字节账号；用法同国际版，国内直连、不需要科学上网。",
@@ -7910,6 +8178,27 @@ _DEVTOOLS: tuple = (
      "下载走加速器优先。",
      (("2.3.3", "https://github.com/docmirror/dev-sidecar/releases/download/v2.3.3/"
                  "DevSidecar-2.3.3-windows-x86_64.exe", 135132134),)),
+    # 2026-10-21 用户点名：Xcode 与「Xcode SDK」。两者都**只能跑在 macOS 上**，
+    # 且官方没有免登录直链（App Store / Apple 开发者账号是唯一分发渠道），
+    # 所以走 R21 的「官网下载」档：卡片不代下、不代装，只把官方入口摆出来。
+    # 之所以仍然登记：用户要的是"在我的工具箱里能看到它、点了能到对的地方"，
+    # 而不是在本机装一个跑不起来的 Xcode。
+    ("xcode", "Xcode", "xcode",
+     "Apple 的 macOS / iOS 集成开发环境（约 10–40 GB，随版本膨胀）。官方只通过 "
+     "Mac App Store 或 Apple 开发者账号分发，**没有免登录直链**，本工具不代下。"
+     "首次启动还要补 Command Line Tools 与模拟器运行时（几百 MB～数 GB）。",
+     (),
+     "Xcode 只能在 macOS 上安装：它依赖 Apple 的签名工具链，Windows / Linux 上"
+     "没有可运行形态。这张卡片只提供「官网下载」入口，点一下在浏览器里打开 Apple "
+     "的页面，请在那台 Mac 上用 Apple ID 下载。"),
+    ("xcode-sdk", "Xcode SDK", "pkg",
+     "Xcode 随附的 iOS / macOS / watchOS / tvOS SDK 与 Command Line Tools —— "
+     "编译、打包、签名要用的那一整套工具链。Apple **没有独立的 SDK 安装包**："
+     "要么随 Xcode 装，要么在 Mac 上用 xcode-select --install 补命令行工具。",
+     (),
+     "「Xcode SDK」在 Windows / Linux 上没有安装形态，Apple 也不单独分发。"
+     "这张卡片只提供官方下载入口：macOS 上的 Command Line Tools 与各版本 SDK 都挂在 "
+     "developer.apple.com/download/all/（需 Apple ID 登录）。"),
 )
 
 
@@ -7929,10 +8218,16 @@ def _download_only_components(table: tuple) -> List["Component"]:
 
     入参 table: 行格式为
         (key, 显示名, 主产物格式, data_note, ((版本, URL, 字节数[, 备用产物]), ...))
+        末尾可再追加第 6 项 platform_hint（字符串）：给"仅某平台可用"的组件
+        （如 Xcode）换掉默认的"当前只登记了 Windows…"那句说明。
     返回:       组件列表（顺序即表内顺序）。
     """
     out: List[Component] = []
-    for key, name, arch, note, rows in table:
+    for row_spec in table:
+        key, name, arch, note, rows = row_spec[:5]
+        platform_hint = (row_spec[5] if len(row_spec) > 5 else
+                         "当前只登记了实测过的 Windows 官方直链；"
+                         "macOS / Linux 官方也有包，但未按 R1 实测，暂不提供")
         versions = []
         for row in rows:
             ver, src, size = row[0], row[1], row[2]
@@ -7962,8 +8257,7 @@ def _download_only_components(table: tuple) -> List["Component"]:
             # → 卡片主按钮改成「官网下载」，点开浏览器由用户自己去下（见 R21 与
             # ComponentCard.on_open_official_page_clicked）。
             official_page_only=not rows,
-            unsupported_platform_hint="当前只登记了实测过的 Windows 官方直链；"
-                                      "macOS / Linux 官方也有包，但未按 R1 实测，暂不提供",
+            unsupported_platform_hint=platform_hint,
             data_note=note,
         ))
     return out
@@ -10140,6 +10434,95 @@ def build_components() -> List[Component]:
             data_note=(
                 "纯语言运行时：本工具不落任何数据目录，卸载只删 "
                 "~/.env-tools/dart/dart-<版本>。你自己的 pub 包与项目在别处，不受影响。"
+            ),
+        )
+    )
+
+    # ------------------ Flutter SDK（2026-10-21） ------------------
+    # 归档实测（远端中央目录）：1,934,624,561 B / 顶层单目录 flutter/、0 散文件
+    # ⇒ collapse 后 install_dir 即 flutter 目录，bin/flutter.bat 在 bin/。
+    components.append(
+        Component(
+            key="flutter",
+            display_name="Flutter SDK",
+            env_var="FLUTTER_HOME",
+            path_subdir="bin",
+            exec_name="flutter",
+            version_args=["--version"],
+            versions=[_flutter_cv(v) for v in ("3.47.7", "3.47.6", "3.47.5")],
+            unsupported_platform_hint=(
+                "官方对 macOS / Linux 也发同形态的 stable zip，但本工具没按 R1 "
+                "实测那两个平台的解压布局与可执行性，故本轮只登记 Windows。"
+                "macOS 用 brew install --cask flutter，Linux 按官方文档装。"
+            ),
+            data_note=(
+                "装完第一次跑 `flutter --version` / `flutter doctor` 时，Flutter 会自己"
+                "把 Dart SDK 与各平台产物补进包内 cache（几百 MB），那一步由 Flutter "
+                "自己做、本工具不预取。国内网络建议先设两个镜像环境变量："
+                "FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn、"
+                "PUB_HOSTED_URL=https://pub.flutter-io.cn。"
+                "SDK 本体在 ~/.env-tools/flutter/flutter-<版本>，卸载只删该目录；"
+                "你的工程与 pub cache 在别处，不受影响。"
+            ),
+        )
+    )
+
+    # ------------------ Android SDK cmdline-tools（2026-10-21） ------------------
+    # 归档实测（远端中央目录）：154,957,218 B / 顶层单目录 cmdline-tools/，
+    # bin/sdkmanager.bat 在其中 ⇒ collapse 后 path_subdir="bin"。
+    # ⚠ 平铺布局不是 Android 认的标准位置，装包必须带 --sdk_root（见 data_note）。
+    components.append(
+        Component(
+            key="android-sdk",
+            display_name="Android SDK",
+            env_var="ANDROID_HOME",
+            path_subdir="bin",
+            exec_name="sdkmanager",
+            version_args=["--version"],
+            versions=[_android_cv("23.0", "16111833")],
+            unsupported_platform_hint=(
+                "官方对 macOS / Linux 也发同形态的 cmdline-tools zip，但本工具没按 R1 "
+                "实测那两个平台的解压布局与可执行性，故本轮只登记 Windows。"
+                "macOS / Linux 请按官方文档解压到 <sdk>/cmdline-tools/latest/。"
+            ),
+            data_note=(
+                "这里装的是**命令行工具**（cmdline-tools），不含 platforms / build-tools；"
+                "它们由你运行 sdkmanager 自己下。⚠ 因为本工具把包平铺在版本目录里，"
+                "装包要显式给根目录："
+                "sdkmanager --sdk_root=%ANDROID_HOME% \"platform-tools\" "
+                "\"platforms;android-36\" \"build-tools;36.0.0\"。"
+                "23.0 起 sdkmanager 只是旧包装，真正干活的是同目录的 android.exe；"
+                "旧版 sdkmanager 的 --licenses 交互已被取消（官方提示不再需要）。"
+                "ANDROID_HOME 指向当前生效版本的目录，装了多个版本时各自带一套 SDK 内容。"
+            ),
+        )
+    )
+
+    # ------------------ WSL 环境（2026-10-21，用户要求"搜索能搜到"） ------------------
+    # 真实的安装动作在 WslDialog（提权启用系统功能 + 装运行时 + 导入 Ubuntu），
+    # 这里只是把它摆成一张可搜索的卡片。`download_only=True` 只借能力位来关掉
+    # PATH / XXX_HOME / 卸载那套通用逻辑；`official_page_only=True` 表示"没有可直链
+    # 的安装包"，主按钮会被 ui_action 覆写成「安装向导」。
+    components.append(
+        Component(
+            key="wsl",
+            display_name="WSL (Ubuntu 24.04)",
+            env_var=None,
+            path_subdir="",
+            exec_name=None,
+            version_probe=False,
+            versions=[],
+            download_only=True,
+            official_page_only=True,
+            ui_action="wsl",
+            unsupported_platform_hint=(
+                "仅 Windows 10 2004+ / Windows 11（需要启用 WSL 与虚拟机平台可选功能）。"
+                "安装需要管理员权限，且**装完必须重启**才生效 —— 本工具只提示，不会替你重启。"
+            ),
+            data_note=(
+                "发行版导入到 ~/.env-tools/wsl/Ubuntu-24.04（虚拟磁盘也在这个目录），"
+                "下载的安装包与基础镜像临时放在 ~/.env-tools/wsl/，安装成功后会删掉。"
+                "Ubuntu 内部的数据都在那块虚拟磁盘里，卸载发行版要你自己在 WSL 里处理。"
             ),
         )
     )
@@ -15261,6 +15644,7 @@ def apply_external_version_user(comp: Component, dv: "DiscoveredVersion",
         if comp.env_var:
             write_user_env_raw(comp.env_var, str(home))
             steps.append(f"已把 {comp.env_var} 设为 {home}（用户级）")
+            _log("info", steps[-1])
     except Exception as exc:  # noqa: BLE001
         steps.append(f"写用户环境变量失败：{exc}")
         _log("error", steps[-1])
@@ -15273,6 +15657,7 @@ def apply_external_version_user(comp: Component, dv: "DiscoveredVersion",
             if prepend_user_path_entry(bin_dir):
                 added.append(bin_dir)
                 steps.append(f"已把 {bin_dir} 提到用户 PATH 最前")
+                _log("info", steps[-1])
                 verdict, shadow = path_effective_check(comp, bin_dir)
         except Exception as exc:  # noqa: BLE001
             steps.append(f"调整用户 PATH 顺序失败：{exc}")
@@ -15379,6 +15764,7 @@ def apply_external_version_machine(comp: Component, dv: "DiscoveredVersion",
     request = build_machine_request(comp, dv, backup_file=backup_abs)
     steps.append(f"需要管理员权限：把 {bin_dir} 插入系统 PATH 最前"
                  + (f"、把 {comp.env_var} 设为 {home}" if comp.env_var else ""))
+    _log("info", steps[-1])
     _log("info", "正在请求管理员权限……")
     outcome = _run_elevated_helper(request)
     stage = str(outcome.get("stage") or "")
@@ -15570,6 +15956,7 @@ def apply_workspace_machine(comp: Component, version: str,
 
     steps.append(f"需要管理员权限：把 {bin_dir} 插入系统 PATH 最前"
                  + (f"、把 {comp.env_var} 设为 {home}" if comp.env_var else ""))
+    _log("info", steps[-1])
     _log("info", "正在请求管理员权限……")
     outcome = _run_elevated_helper(request)
     stage = str(outcome.get("stage") or "")
@@ -15642,13 +16029,19 @@ def revert_machine_fix(comp: Component,
         return {"ok": True, "error": "", "steps": [], "cancelled": False}
     before = (entry.get("snapshot") or {}).get("HKLM") or {}
     steps = [f"按改动前的原文把系统变量写回（{entry.get('version')} 那次提权改动）……"]
+    if log:
+        log(steps[0])
     res = revert_machine_only(comp, before, log=log)
     if not res.get("ok"):
         steps.append("还原未完成：" + str(res.get("error") or ""))
+        if log:
+            log(steps[-1])
         return {"ok": False, "error": str(res.get("error") or ""),
                 "steps": steps, "cancelled": False}
     drop_machine_fix_entry(comp.key)
     steps.append("系统变量已按原文写回")
+    if log:
+        log(steps[-1])
     return {"ok": True, "error": "", "steps": steps, "cancelled": False}
 
 
@@ -15769,7 +16162,10 @@ def revert_external_version(comp: Component,
         pass
     drop_takeover_entry(comp.key)
     result["ok"] = True
-    steps.append("已还原到我之前的设置")
+    # 措辞**不能**用「还原到我之前的设置」：那句话是卡片上还原按钮的专属确认语。
+    # 这条路径也常被「切换」当预备步骤调用，用户点的是切换，日志里却冒出还原按钮的话，
+    # 看起来像点错了按钮（2026-10-21 真机反馈的"三处切换文案不对"）。
+    steps.append("环境变量已还原到接管之前的样子")
     _log("ok", steps[-1])
     return result
 
@@ -16584,6 +16980,376 @@ def chunk_visible(cards, columns) -> list:
     return [visible[i:i + cols] for i in range(0, len(visible), cols)]
 
 
+# ===========================================================================
+# WSL 环境（2026-10-21 用户要求，方案档位 C：全自动）
+#
+# 用户当时的原话是"做装完提示用户重启才生效，不自动帮用户重启"。所以这里的
+# **硬边界**有三条，改代码前先看清楚：
+#   1. 只提示重启，**绝不调用关机/重启**（脚本里也不许出现 Restart-Computer）；
+#   2. 动系统的东西（启用可选功能、装运行时 MSI）只在一次 UAC 里做完，脚本
+#      把每一步的退出码写进结果 JSON，主进程读结果而不是信"助手说成功了"；
+#   3. 装 Ubuntu 走 `wsl --import`（ubuntu-base rootfs），不走应用商店 ——
+#      实测本机 `aka.ms/wslubuntu2404` 会被重定向到 cn.bing.com，商店这条路不可用。
+#
+# 为什么不用 `wsl --install`：它会自己去 GitHub 下运行时，不经过我们的多源
+# 故障转移（实测 350MB 的 MSI 在 gh-proxy 上 8~10MB/s，官方直连常年在几十 KB/s）。
+# 所以拆成"我们下、我们装"。
+#
+# 实测数据（带 `byte-tools` UA，256KB Range）：
+#   WSL 运行时 wsl.3.0.3.0.x64.msi  367,575,040 B  `\xd0\xcf\x11\xe0`
+#     GitHub API 显示 3.0.3 为当前 stable（3.0.4 仍是 prerelease）
+#   ubuntu-base 24.04.3            29,983,772 B   `\x1f\x8b\x08\x00`
+#     nju 703 > ustc 555 > aliyun 387 > tuna 130 > 官方 103 KB/s
+# ===========================================================================
+
+WSL_DISTRO = "Ubuntu-24.04"
+WSL_UBUNTU_SERIES = "24.04"
+WSL_UBUNTU_VERSION = "24.04.3"
+WSL_ROOTFS_FILE = f"ubuntu-base-{WSL_UBUNTU_VERSION}-base-amd64.tar.gz"
+WSL_ROOTFS_SIZE = 29_983_772
+WSL_RUNTIME_TAG = "3.0.3"
+WSL_RUNTIME_FILE = "wsl.3.0.3.0.x64.msi"
+WSL_RUNTIME_SIZE = 367_575_040
+WSL_RUNTIME_MAGIC = b"\xd0\xcf\x11\xe0"      # OLE/CFBF：MSI 的真实文件头
+WSL_ROOTFS_MAGIC = b"\x1f\x8b\x08"           # gzip
+
+
+def wsl_work_dir() -> Path:
+    """WSL 相关文件的统一落点（在工具工作目录下，卸载/清理时可整目录定位）。"""
+    return CONFIG_DIR / "wsl"
+
+
+def wsl_runtime_urls() -> List[str]:
+    """运行时 MSI：三个加速器在前、裸 GitHub 末位（与项目其他 GitHub 产物同规矩）。"""
+    return _gh_accelerated(
+        f"https://github.com/microsoft/WSL/releases/download/"
+        f"{WSL_RUNTIME_TAG}/{WSL_RUNTIME_FILE}")
+
+
+def wsl_rootfs_urls() -> List[str]:
+    """Ubuntu base rootfs：按 2026-10-21 实测速度排序（nju > ustc > aliyun > tuna > 官方）。"""
+    tail = (f"ubuntu-base/releases/{WSL_UBUNTU_SERIES}/release/{WSL_ROOTFS_FILE}")
+    return ([f"{base}/ubuntu-cdimage/{tail}" for base in _mb("nju", "ustc", "aliyun", "tuna")]
+            + [f"https://cdimage.ubuntu.com/{tail}"])
+
+
+def wsl_exe() -> Optional[str]:
+    """找 wsl.exe。装在 System32；打包成 GUI 进程后 PATH 里也未必有它，所以写死系统目录。"""
+    if CURRENT_OS != "Windows":
+        return None
+    for cand in (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wsl.exe",
+                 Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Sysnative" / "wsl.exe"):
+        if cand.is_file():
+            return str(cand)
+    return shutil.which("wsl")
+
+
+def wsl_decode(raw: bytes) -> str:
+    """wsl.exe 的输出是 UTF-16LE（无 BOM），个别子命令是 UTF-8 —— 两种都要能解。
+
+    判据用"有没有 NUL 字节"而不是找 BOM：实测 `wsl -l -q` 的 UTF-16 输出**不带 BOM**，
+    按 BOM 判会把整段输出解成乱码，进而把"已装 Ubuntu-24.04"误判成没装。
+    """
+    if not raw:
+        return ""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", errors="replace")
+    if b"\x00" in raw[:200]:
+        return raw.decode("utf-16-le", errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
+def wsl_run(args: List[str], timeout: float = 120.0) -> Tuple[int, str]:
+    """跑一次 wsl.exe，返回 (退出码, 解码后的合并输出)。找不到 wsl.exe 时返回 (127, "")。"""
+    exe = wsl_exe()
+    if not exe:
+        return 127, ""
+    flags = 0x08000000 if CURRENT_OS == "Windows" else 0     # CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run([exe] + list(args), capture_output=True,
+                              timeout=timeout, creationflags=flags)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, f"{exc}"
+    text = wsl_decode(proc.stdout) + wsl_decode(proc.stderr)
+    return int(proc.returncode), text.strip()
+
+
+def parse_wsl_distros(text: str) -> List[str]:
+    """从 `wsl -l -q` 的输出里挑出发行版名。
+
+    兼容三件事：UTF-16 解码后残留的 `\\x00`、行尾 `\\r`、以及"没有已安装的发行版"
+    这类本地化提示语（旧版会把它打到 stdout 且退出码是 0）。
+    """
+    names = []
+    for line in (text or "").replace("\x00", "").splitlines():
+        name = line.strip().strip("*").strip()
+        if not name or name.lower().startswith("windows subsystem"):
+            continue
+        if name.startswith("适用于 Linux") or "没有已安装" in name:
+            continue
+        names.append(name)
+    return names
+
+
+def wsl_distro_base_path(name: str) -> Optional[str]:
+    """从 Lxss 注册表读发行版的安装目录（只读；读不到返回 None）。
+
+    路径在注册表里是 `\\\\?\\C:\\...` 形式，这里只剥前缀、不 resolve —— resolve 会把
+    WSL 的虚拟盘路径改成别名，和 `wsl -l -v` 之外的任何地方都对不上。
+    """
+    if CURRENT_OS != "Windows":
+        return None
+    import winreg  # type: ignore
+
+    root = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, root) as key:
+            idx = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(key, idx)
+                except OSError:
+                    break
+                idx += 1
+                try:
+                    with winreg.OpenKey(key, sub) as item:
+                        dist = str(winreg.QueryValueEx(item, "DistributionName")[0] or "")
+                        if dist.lower() != name.lower():
+                            continue
+                        base = str(winreg.QueryValueEx(item, "BasePath")[0] or "")
+                        return base[4:] if base.startswith("\\\\?\\") else base
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return None
+
+
+def wsl_state() -> Dict[str, object]:
+    """当前机器上 WSL 的三段状态：运行时 / 发行版 / Ubuntu 是否已导入。
+
+    `runtime_ok` 用 `wsl --version` 的退出码判定：inbox 的 wsl.exe 没有这个参数
+    （会回"无效命令行参数"并返回非 0），只有 Store/MSI 装的新版运行时才支持。
+    """
+    exe = wsl_exe()
+    state: Dict[str, object] = {"exe": exe or "", "runtime_ok": False,
+                                "runtime_version": "", "distros": [],
+                                "ubuntu_installed": False, "ubuntu_path": None}
+    if not exe:
+        return state
+    rc, out = wsl_run(["--version"], timeout=20)
+    if rc == 0:
+        state["runtime_ok"] = True
+        state["runtime_version"] = out.splitlines()[0].strip() if out else ""
+    rc, out = wsl_run(["-l", "-q"], timeout=30)
+    if rc == 0:
+        distros = parse_wsl_distros(out)
+        state["distros"] = distros
+        state["ubuntu_installed"] = any(d.lower() == WSL_DISTRO.lower() for d in distros)
+        if state["ubuntu_installed"]:
+            state["ubuntu_path"] = wsl_distro_base_path(WSL_DISTRO)
+    return state
+
+
+def windows_reboot_pending() -> bool:
+    """系统是否在等重启（只读注册表，不需要管理员）。"""
+    if CURRENT_OS != "Windows":
+        return False
+    import winreg  # type: ignore
+
+    checks = [
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
+         ""),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+         ""),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager",
+         "PendingFileRenameOperations"),
+    ]
+    for hive, path, value in checks:
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                if value:
+                    winreg.QueryValueEx(key, value)
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def wsl_elevated_script(msi: Path, result: Path) -> str:
+    """生成一次提权要做完的三件事的 PowerShell 脚本（纯函数，便于逐字测试）。
+
+    三步：启用 WSL 功能 → 启用虚拟机平台（WSL2 需要）→ 静默装运行时 MSI。
+    退出码全部写进 result JSON；**脚本里不许出现任何重启命令**（用户明确要求）。
+    """
+    msi_q = str(msi).replace('"', '""')
+    res_q = str(result).replace("'", "''")
+    return f"""$ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'
+$result = [ordered]@{{
+  dism_wsl = -1; dism_vmp = -1; msi = -1;
+  wsl_feature = 'Unknown'; vmp_feature = 'Unknown'; error = ''
+}}
+function Get-FeatureState([string]$name) {{
+  try {{ (Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction Stop).State }}
+  catch {{ 'Unknown' }}
+}}
+try {{
+  $p = Start-Process -FilePath "$env:SystemRoot\\System32\\dism.exe" -ArgumentList @('/online','/enable-feature','/featurename:Microsoft-Windows-Subsystem-Linux','/all','/norestart') -Wait -PassThru -WindowStyle Hidden
+  $result.dism_wsl = [int]$p.ExitCode
+  $p = Start-Process -FilePath "$env:SystemRoot\\System32\\dism.exe" -ArgumentList @('/online','/enable-feature','/featurename:VirtualMachinePlatform','/all','/norestart') -Wait -PassThru -WindowStyle Hidden
+  $result.dism_vmp = [int]$p.ExitCode
+  $p = Start-Process -FilePath "$env:SystemRoot\\System32\\msiexec.exe" -ArgumentList @('/i','"{msi_q}"','/qn','/norestart') -Wait -PassThru -WindowStyle Hidden
+  $result.msi = [int]$p.ExitCode
+  $result.wsl_feature = Get-FeatureState 'Microsoft-Windows-Subsystem-Linux'
+  $result.vmp_feature = Get-FeatureState 'VirtualMachinePlatform'
+}} catch {{
+  $result.error = "$_"
+}}
+$result | ConvertTo-Json -Compress | Set-Content -LiteralPath '{res_q}' -Encoding UTF8
+"""
+
+
+def run_elevated_process(exe: str, params: str, timeout: float = 1800.0) -> Dict[str, object]:
+    """以管理员身份启动一个进程并等它结束，返回 {ok, cancelled, exit_code, error}。
+
+    与 `_run_elevated_helper` 的区别：那个只接"改环境变量"的 JSON 请求（刻意不许
+    任意命令）；这里跑的是**我们生成的、内容固定的**安装脚本，脚本路径由本进程写盘，
+    调用方无法注入参数。仍然只有一次 UAC。
+    """
+    if CURRENT_OS != "Windows":
+        return {"ok": False, "cancelled": False, "exit_code": -1,
+                "error": "WSL 安装仅支持 Windows"}
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _SEI(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", ctypes.c_ulong),
+                    ("hwnd", wintypes.HWND), ("lpVerb", wintypes.LPCWSTR),
+                    ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int),
+                    ("hInstApp", wintypes.HINSTANCE), ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE)]
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SEE_MASK_NOASYNC = 0x00000100
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    sei = _SEI()
+    sei.cbSize = ctypes.sizeof(_SEI)
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC
+    sei.lpVerb = "runas"
+    sei.lpFile = exe
+    sei.lpParameters = params
+    sei.nShow = 0            # SW_HIDE：提权窗口不闪，进度全在我们的对话框里
+    if not shell32.ShellExecuteExW(ctypes.byref(sei)):
+        err = ctypes.get_last_error()
+        if err == 1223:      # ERROR_CANCELLED
+            return {"ok": False, "cancelled": True, "exit_code": -1,
+                    "error": "已取消管理员权限请求，系统未做任何改动"}
+        return {"ok": False, "cancelled": False, "exit_code": -1,
+                "error": f"无法启动提权进程（ShellExecuteExW 错误 {err}）"}
+
+    try:
+        wait_ms = int(max(1.0, timeout) * 1000)
+        kernel32.WaitForSingleObject(sei.hProcess, wintypes.DWORD(wait_ms))
+        code = wintypes.DWORD(0xFFFFFFFF)
+        kernel32.GetExitCodeProcess(sei.hProcess, ctypes.byref(code))
+        return {"ok": int(code.value) == 0, "cancelled": False,
+                "exit_code": int(code.value), "error": ""}
+    finally:
+        kernel32.CloseHandle(sei.hProcess)
+
+
+def wsl_install_runtime(msi: Path, log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """提权跑一次安装脚本，读回它写的 JSON。
+
+    判据不接受"脚本进程退出码 0"就完事：脚本自己会 catch 掉异常并以 0 退出，
+    真正的结果在 JSON 的 dism_*/msi 三个码里。只有这三个都是 0 或 3010
+    （成功但需重启）才算通过 —— 这与项目的"不信助手一面之词"是同一条纪律。
+    """
+    def _emit(text: str) -> None:
+        if log:
+            log(text)
+
+    work = wsl_work_dir()
+    ensure_dir(work)
+    result_file = work / "install-result.json"
+    script_file = work / "install-wsl.ps1"
+    for stale in (result_file,):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    # UTF-8 **带 BOM**：PowerShell 5.1 读无 BOM 的 UTF-8 会按 ANSI 解，中文注释变乱码
+    script_file.write_text(wsl_elevated_script(msi, result_file), encoding="utf-8-sig")
+
+    params = subprocess.list2cmdline(
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+         "-File", str(script_file)])
+    _emit("正在请求管理员权限（启用 WSL 功能 + 安装运行时）……")
+    outcome = run_elevated_process("powershell.exe", params, timeout=1800)
+    if outcome.get("cancelled"):
+        return {"ok": False, "cancelled": True, "error": str(outcome.get("error") or "")}
+    if not (result_file.is_file()):
+        return {"ok": False, "cancelled": False,
+                "error": f"提权进程没有写出结果文件（退出码 {outcome.get('exit_code')}）："
+                         + str(outcome.get("error") or "")}
+    try:
+        data = json.loads(result_file.read_text(encoding="utf-8-sig"))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "cancelled": False, "error": f"结果文件读不出来：{exc}"}
+    codes = {k: int(data.get(k, -1)) for k in ("dism_wsl", "dism_vmp", "msi")}
+    bad = {k: v for k, v in codes.items() if v not in (0, 3010)}
+    info = {"codes": codes,
+            "features": {"wsl": data.get("wsl_feature"), "vmp": data.get("vmp_feature")},
+            "reboot_needed": 3010 in codes.values()}
+    if data.get("error"):
+        _emit(f"脚本报错：{data.get('error')}")
+    if bad:
+        return {"ok": False, "cancelled": False, "error": f"安装步骤失败：{bad}", **info}
+    _emit(f"系统功能已启用（WSL={info['features']['wsl']}，"
+          f"虚拟机平台={info['features']['vmp']}）")
+    return {"ok": True, "cancelled": False, "error": "", **info}
+
+
+def wsl_import_distro(rootfs: Path,
+                      log: Optional[Callable[[str], None]] = None) -> Dict[str, object]:
+    """把 rootfs 导入成名为 Ubuntu-24.04 的发行版；WSL2 不可用时回落 WSL1。
+
+    回落是**明确报出来**的：装机环境没开虚拟化（BIOS 里 VT-x）时 `--version 2`
+    会失败，WSL1 仍能跑很多场景，比直接失败强 —— 但用户必须知道自己在 WSL1 上。
+    """
+    def _emit(text: str) -> None:
+        if log:
+            log(text)
+
+    if not rootfs.is_file():
+        return {"ok": False, "error": f"rootfs 不存在：{rootfs}"}
+    dest = wsl_work_dir() / WSL_DISTRO
+    ensure_dir(dest)
+    errors = []
+    for version in ("2", "1"):
+        _emit(f"导入 Ubuntu {WSL_UBUNTU_SERIES}（WSL{version}）到 {dest} ……")
+        rc, out = wsl_run(["--import", WSL_DISTRO, str(dest), str(rootfs),
+                           "--version", version], timeout=1800)
+        if rc == 0:
+            _emit(f"导入完成（WSL{version}）")
+            if version == "1":
+                _emit("注意：这台机器没能启用 WSL2（多半是 BIOS 里没开虚拟化），"
+                      "当前发行版运行在 WSL1 上。")
+            return {"ok": True, "error": "", "version": version, "path": str(dest)}
+        errors.append(f"WSL{version}: {out.strip()[:300] or f'退出码 {rc}'}")
+        _emit(f"WSL{version} 导入失败：{errors[-1]}")
+    return {"ok": False, "error": " / ".join(errors)}
+
+
 # ---------------------------------------------------------------------------
 # UI 组件：卡片
 # ---------------------------------------------------------------------------
@@ -16621,6 +17387,8 @@ class ComponentCard(QFrame):
     """展示一个组件的卡片。"""
 
     request_log = Signal(str, str)
+    # 向导型卡片（ui_action="wsl"）请求打开安装向导：由 MainWindow 建卡时接线。
+    wsl_requested = Signal()
 
     def __init__(self, component: Component, log_cb: Callable[[str, str], None], parent=None) -> None:
         super().__init__(parent)
@@ -16805,6 +17573,14 @@ class ComponentCard(QFrame):
         self.version_combo.setFixedWidth(150)
         self.version_combo.setFixedHeight(30)
         self.version_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        # 向导型卡片（ui_action）没有"可选版本"：留一个不可点的占位，
+        # 免得用户看到一个空下拉框以为是加载失败。
+        if self.component.ui_action:
+            self.version_combo.blockSignals(True)
+            self.version_combo.clear()
+            self.version_combo.addItem("内置安装器")
+            self.version_combo.setEnabled(False)
+            self.version_combo.blockSignals(False)
         # 换选中就要重算切换/卸载按钮：不连这条，切一次生效版本后按钮会一直灰着
         # （2026-09-30 真机反馈）。只做按钮同步，不重跑探测、不起版本探测子进程。
         self.version_combo.currentIndexChanged.connect(
@@ -16824,7 +17600,14 @@ class ComponentCard(QFrame):
         # 只下载型组件：同一颗主按钮、同一个属性名，但文案是「下载」、槽位是
         # on_download_clicked。不改属性名是因为 _sync_action_buttons、布局与一批用例
         # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
-        if self.component.download_only:
+        if self.component.ui_action == "wsl":
+            # 向导型卡片：主按钮既不是下载也不是安装包，而是打开 WslDialog。
+            self.btn_install.setText("安装向导")
+            self.btn_install.setToolTip(
+                "打开 WSL 安装向导：启用 WSL 与虚拟机平台、安装官方运行时、"
+                "导入 Ubuntu 24.04。系统功能装完会提示你手动重启 —— 本工具不会替你重启。")
+            self.btn_install.clicked.connect(self._open_wsl_wizard)
+        elif self.component.download_only:
             if self.component.official_page_only:
                 # 更弱的一档：没有可直链的安装包 → 给「官网下载」，点开浏览器自己去下。
                 # 文案要说清"本工具不代下不代装"，否则用户会以为点了就开始下。
@@ -17235,8 +18018,7 @@ class ComponentCard(QFrame):
         res = switch_to_external_version(
             self.component, dv,
             confirm_machine=self._confirm_machine_takeover, log=_sink)
-        for step in res.get("steps") or []:
-            _sink(step)
+        # 步骤已由 _sink 逐条实时打出，不再回放 res["steps"]（否则每条日志两遍）。
         if res.get("ok"):
             self._log("ok", f"已切换到系统里的 {dv.version}；"
                             "新开的终端/IDE 才会读到新值")
@@ -17300,8 +18082,6 @@ class ComponentCard(QFrame):
         did = False
         if has_machine_fix(self.component):
             fix = revert_machine_fix(self.component, log=_sink)
-            for step in fix.get("steps") or []:
-                _sink(step)
             if fix.get("ok"):
                 did = True
             else:
@@ -17310,8 +18090,6 @@ class ComponentCard(QFrame):
 
         if has_external_takeover(self.component):
             res = revert_external_version(self.component, log=_sink)
-            for step in res.get("steps") or []:
-                _sink(step)
             if res.get("ok"):
                 did = True
             elif res.get("cancelled"):
@@ -18118,6 +18896,27 @@ class ComponentCard(QFrame):
         本方法在窗口构建卡片时就会被调用，因此绝不同步执行组件命令：detect 只判定
         存在（probe_version=False），版本号交给 VersionProbeWorker 异步回填。
         """
+        # 向导型卡片（WSL）：只报"装没装"，不启动任何提权/探测子进程。
+        # 判据用目录存在性而不是 `wsl --version`：建卡发生在启动期，186 张卡里
+        # 这一张不该额外拉两个子进程。
+        if self.component.ui_action == "wsl":
+            imported = (wsl_work_dir() / WSL_DISTRO).is_dir()
+            if imported:
+                full = (f"WSL2 已就绪：Ubuntu {WSL_UBUNTU_SERIES} 已导入到 "
+                        f"{wsl_work_dir() / WSL_DISTRO}。点「安装向导」可查看详情或重新导入。")
+                short = "● WSL 已就绪"
+                style = ("color:#2e7d32;font-weight:600;padding:2px 8px;"
+                         "background:#e8f5e9;border-radius:10px;")
+            else:
+                full = ("点「安装向导」：启用 WSL 与虚拟机平台 → 安装官方运行时 → "
+                        "导入 Ubuntu 24.04。系统功能装完必须重启才生效，"
+                        "本工具只提示、不会替你重启。")
+                short = "● 未安装 · 点「安装向导」"
+                style = ("color:#5b6b7a;font-weight:600;padding:2px 8px;"
+                         "background:#eef2f6;border-radius:10px;")
+            self._set_status(full, short)
+            self.status_label.setStyleSheet(style)
+            return
         # 只下载型组件（「开发工具」）磁盘上根本不会有它，任何"已配置 / 未安装"的结论
         # 都是假的，而且算这些结论要扫盘。胶囊只说清它能干什么，中性灰 —— 不用绿色
         # （绿色在本界面里等于"已配置"）也不用橙色（等于"出问题了"）。
@@ -18730,8 +19529,6 @@ class ComponentCard(QFrame):
                     self.component,
                     log=lambda m: self._log("error" if ("失败" in m or "未完成" in m)
                                             else "info", m))
-                for step in back.get("steps") or []:
-                    self._log("info", step)
                 if not back.get("ok"):
                     self._log("error", "系统变量还原未完成，已中止卸载以免留下失效条目："
                               + str(back.get("error") or ""))
@@ -18862,6 +19659,10 @@ class ComponentCard(QFrame):
             out.append(("平台说明", comp.unsupported_platform_hint))
         return out
 
+    def _open_wsl_wizard(self) -> None:
+        """打开主窗的 WSL 向导（卡片与标题栏共用同一个对话框实例）。"""
+        self.wsl_requested.emit()
+
     def on_detail_clicked(self) -> None:
         """打开详情对话框。无副作用：只读地展示登记表里已有的事实。"""
         dlg = ComponentDetailDialog(self.component, self.detail_lines(), self)
@@ -18927,11 +19728,18 @@ class ComponentCard(QFrame):
         # §4.3 两条键互斥 + R3.19：接管过外部版本、或为系统变量做过提权改动时，
         # 都要先原样还原再切工作区版本，否则系统 PATH 最前还插着旧那条，
         # 切完命令行仍是旧版本。
+        def _release_sink(text: str) -> None:
+            low = str(text)
+            level = ("error" if ("失败" in low or "未完成" in low or "未通过" in low)
+                     else "warn" if ("取消" in low or "未能" in low or "仍" in low)
+                     else "info")
+            self._log(level, low)
+
         release = release_machine_state(
-            self.component, log=lambda m: self._log("info", m),
+            self.component, log=_release_sink,
             reason="切回工作区版本")
-        for step in release.get("steps") or []:
-            self._log("error" if ("失败" in step or "未完成" in step) else "info", step)
+        # 不再回放 release["steps"]：底层各函数已把每一步打进 log（2026-10-21 修
+        # "同一步打印两遍"）。这里只处理终态。
         if not release.get("ok"):
             self._log("error", "接管/系统变量还原未完成，已中止本次切换以免留下半截状态："
                       + str(release.get("error") or ""))
@@ -19002,9 +19810,11 @@ class ComponentCard(QFrame):
             res = apply_workspace_machine(
                 self.component, version,
                 confirm_machine=self._confirm_machine_takeover,
-                log=lambda m: self._log("info", m))
-            for step in res.get("steps") or []:
-                self._log("error" if ("失败" in step or "未通过" in step) else "info", step)
+                log=lambda m: self._log(
+                    "error" if ("失败" in str(m) or "未通过" in str(m)
+                                or "未完成" in str(m))
+                    else "warn" if ("取消" in str(m) or "未能" in str(m))
+                    else "info", m))
             if res.get("ok"):
                 self._log("ok", "已在系统级生效；新开的终端/IDE 才会读到新值")
                 self._log_verification_hint(since_epoch)
@@ -19493,6 +20303,326 @@ class UpdateCheckWorker(QThread):
                             "error": f"{type(exc).__name__}: {exc}"})
 
 
+class _WslTask(QThread):
+    """把一段阻塞工作丢进后台线程；`log` 用来把进度句打到对话框里。"""
+
+    log = Signal(str, str)
+    done = Signal(bool, str, dict)
+
+    def __init__(self, fn: Callable[[Callable[[str], None]], Dict[str, object]],
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self) -> None:  # noqa: D401
+        # 与 DownloadWorker 同一条纪律：异常绝不逃出 run()，否则 Windows 上是进程级 abort
+        try:
+            res = self._fn(lambda text: self.log.emit("info", text))
+        except Exception as exc:  # noqa: BLE001
+            self.log.emit("error", f"后台任务异常：{exc}")
+            self.done.emit(False, str(exc), {})
+            return
+        self.done.emit(bool(res.get("ok")), str(res.get("error") or ""), dict(res))
+
+
+class WslDialog(QDialog):
+    """WSL 环境的一键安装/配置向导（2026-10-21，方案档位 C）。
+
+    边界写在模块注释里：**只提示重启、绝不自动重启**；提权只弹一次 UAC；
+    下载全部走工具自己的多源故障转移（镜像在前）。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("WSL 环境（Ubuntu 24.04）")
+        self.setMinimumWidth(580)
+        self._worker = None
+        self._task = None
+        self._step = ""
+        self._state: Dict[str, object] = {}
+        self._build_ui()
+        self._refresh()
+
+    # ---- UI ----
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(8)
+
+        title = QLabel("把 WSL2 + Ubuntu 24.04 装成「解压即用」的本地 Linux")
+        title.setObjectName("detailTitle")
+        root.addWidget(title)
+
+        self.lbl_features = QLabel()
+        self.lbl_runtime = QLabel()
+        self.lbl_distro = QLabel()
+        for w in (self.lbl_features, self.lbl_runtime, self.lbl_distro):
+            w.setMinimumWidth(1)
+            w.setWordWrap(True)
+            root.addWidget(w)
+
+        tip = QLabel(
+            "· 系统功能装好后**必须重启**才生效 —— 本工具不会替你重启，重启后回来点第二步。\n"
+            f"· 下载落在 {wsl_work_dir()}（运行时约 350 MB，Ubuntu 基础包约 30 MB）。\n"
+            "· 提权只用于「启用可选功能 + 安装 WSL 运行时」这一次，之后都是普通权限。")
+        tip.setObjectName("externalHint")
+        tip.setMinimumWidth(1)
+        tip.setWordWrap(True)
+        root.addWidget(tip)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(True)
+        root.addWidget(self.progress)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_primary = QPushButton("① 一键安装 WSL")
+        self.btn_primary.setObjectName("primaryBtn")
+        self.btn_primary.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_primary.clicked.connect(self._on_primary)
+        row.addWidget(self.btn_primary)
+
+        self.btn_terminal = QPushButton("打开 Ubuntu 终端")
+        self.btn_terminal.setObjectName("secondaryBtn")
+        self.btn_terminal.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_terminal.clicked.connect(self._open_terminal)
+        row.addWidget(self.btn_terminal)
+
+        self.btn_refresh = QPushButton("重新检测")
+        self.btn_refresh.setObjectName("secondaryBtn")
+        self.btn_refresh.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_refresh.clicked.connect(self._refresh)
+        row.addWidget(self.btn_refresh)
+
+        row.addStretch(1)
+        btn_close = QPushButton("关闭")
+        btn_close.setObjectName("secondaryBtn")
+        btn_close.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_close.clicked.connect(self.close)
+        row.addWidget(btn_close)
+        root.addLayout(row)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setMinimumHeight(150)
+        self.log_view.setObjectName("wslLog")
+        root.addWidget(self.log_view)
+
+    def _log(self, level: str, msg: str) -> None:
+        prefix = {"error": "[失败] ", "warn": "[注意] ", "ok": "[完成] "}.get(level, "")
+        self.log_view.appendPlainText(prefix + str(msg))
+
+    # ---- 状态 ----
+    def _restart_marker(self) -> Path:
+        return wsl_work_dir() / "needs-reboot"
+
+    def _refresh(self) -> None:
+        try:
+            self._state = wsl_state()
+        except Exception as exc:  # noqa: BLE001
+            self._state = {}
+            self._log("warn", f"状态检测失败：{exc}")
+        st = self._state
+        runtime_ok = bool(st.get("runtime_ok"))
+        ubuntu = bool(st.get("ubuntu_installed"))
+
+        # "等待重启"只认**我们装完写下的标记**，不能用 windows_reboot_pending()：
+        # 那台机器可能因为别的原因（系统更新）本来就在等重启，会让从没装过 WSL 的人
+        # 看到"已启用，等待重启生效"——实测本机就是这样。
+        marker = self._restart_marker()
+        if runtime_ok and marker.is_file():
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+        waiting_reboot = (not runtime_ok) and marker.is_file()
+
+        self.lbl_features.setText(
+            "● 系统功能（WSL + 虚拟机平台）："
+            + ("已启用（运行时可用）" if runtime_ok else
+               ("已启用，等待重启生效" if waiting_reboot else "未启用")))
+        self.lbl_runtime.setText(
+            "● WSL 运行时：" + (f"已安装 {st.get('runtime_version') or ''}".rstrip()
+                              if runtime_ok else "未安装"))
+        self.lbl_distro.setText(
+            "● Ubuntu 24.04：" + (f"已导入（{st.get('ubuntu_path') or wsl_work_dir() / WSL_DISTRO}）"
+                                  if ubuntu else "未导入"))
+
+        for lbl in (self.lbl_features, self.lbl_runtime, self.lbl_distro):
+            lbl.setStyleSheet("color:#2e7d32;" if runtime_ok and ubuntu else "color:#455a64;")
+        self.btn_terminal.setEnabled(ubuntu)
+        if ubuntu:
+            self.btn_primary.setText("已就绪")
+            self.btn_primary.setEnabled(False)
+        elif not runtime_ok:
+            self.btn_primary.setText("① 一键安装 WSL（需要管理员权限）")
+            self.btn_primary.setEnabled(True)
+        else:
+            self.btn_primary.setText("② 导入 Ubuntu 24.04")
+            self.btn_primary.setEnabled(True)
+        if not self._busy():
+            self.progress.setValue(0)
+
+    def _busy(self) -> bool:
+        return bool((self._worker is not None and self._worker.isRunning())
+                    or (self._task is not None and self._task.isRunning()))
+
+    def _set_busy(self, busy: bool, text: str = "") -> None:
+        for b in (self.btn_primary, self.btn_terminal, self.btn_refresh):
+            b.setEnabled(not busy and (b is not self.btn_terminal
+                                       or bool(self._state.get("ubuntu_installed"))))
+        if text:
+            self.progress.setRange(0, 0)
+            self.progress.setFormat(text)
+
+    # ---- 主流程 ----
+    def _on_primary(self) -> None:
+        if self._busy():
+            return
+        st = wsl_state()
+        self._state = st
+        if not st.get("runtime_ok"):
+            self._start_msi()
+        elif not st.get("ubuntu_installed"):
+            self._start_rootfs()
+
+    def _download(self, urls: List[str], dest: Path, magic: bytes, size_hint: int,
+                  step: str, label: str) -> None:
+        if dest.is_file() and dest.stat().st_size == size_hint:
+            self._log("info", f"{label} 已存在且字节数一致，跳过下载：{dest}")
+            self._after_download(step, dest)
+            return
+        self._step = step
+        self.progress.setRange(0, 100)
+        self.progress.setFormat(f"下载 {label} %p%")
+        self._set_busy(True)
+        worker = DownloadWorker(urls, dest, self, expect_magic=magic)
+        worker.progress.connect(self._on_progress)
+        worker.log.connect(self._log)
+        worker.finished_ok.connect(lambda path: self._after_download(step, Path(path)))
+        worker.finished_fail.connect(lambda err: self._on_task_failed(step, err))
+        self._worker = worker
+        worker.start()
+
+    def _on_progress(self, done: int, total: int) -> None:
+        if total:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(int(done * 100 / total))
+            self.progress.setFormat(
+                f"{human_size(done)} / {human_size(total)}（{int(done * 100 / total)}%）")
+        else:
+            self.progress.setValue(0)
+
+    def _start_msi(self) -> None:
+        self._download(wsl_runtime_urls(), wsl_work_dir() / WSL_RUNTIME_FILE,
+                       WSL_RUNTIME_MAGIC, WSL_RUNTIME_SIZE, "msi", "WSL 运行时")
+
+    def _start_rootfs(self) -> None:
+        self._download(wsl_rootfs_urls(), wsl_work_dir() / WSL_ROOTFS_FILE,
+                       WSL_ROOTFS_MAGIC, WSL_ROOTFS_SIZE, "rootfs",
+                       f"Ubuntu {WSL_UBUNTU_SERIES} 基础包")
+
+    def _after_download(self, step: str, path: Path) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        if step == "msi":
+            self._run_task(lambda emit: wsl_install_runtime(path, emit),
+                           self._after_install)
+        else:
+            self._run_task(lambda emit: wsl_import_distro(path, emit),
+                           self._after_import)
+
+    def _run_task(self, fn, on_done) -> None:
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("处理中……")
+        self._set_busy(True)
+        task = _WslTask(fn, self)
+        task.log.connect(self._log)
+        task.done.connect(on_done)
+        self._task = task
+        task.start()
+
+    def _finish(self) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("")
+        self._set_busy(False)
+        self._refresh()
+
+    def _after_install(self, ok: bool, err: str, res: dict) -> None:
+        msi = wsl_work_dir() / WSL_RUNTIME_FILE
+        if ok:
+            if msi.is_file():
+                try:
+                    msi.unlink()
+                except OSError:
+                    pass
+            if res.get("reboot_needed") or windows_reboot_pending():
+                ensure_dir(wsl_work_dir())
+                try:
+                    self._restart_marker().write_text(
+                        time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+                except OSError:
+                    pass
+                self._log("warn", "系统功能已启用，但**需要重启才生效**。"
+                                  "本工具不会替你重启：请手动重启，然后回来点「重新检测」再导入 Ubuntu。")
+                self._finish()
+                QMessageBox.information(
+                    self, "需要重启",
+                    "WSL 的系统功能已经启用，但必须重启 Windows 才会生效。\n\n"
+                    "本工具不会替你重启。请手动重启，重新打开本工具后点「重新检测」，"
+                    "再点「② 导入 Ubuntu 24.04」。")
+                return
+            self._log("ok", "WSL 运行时安装完成，继续导入 Ubuntu。")
+            self._finish()
+            self._start_rootfs()
+            return
+        if res.get("cancelled"):
+            self._log("warn", err or "已取消管理员权限请求")
+        else:
+            self._log("error", err or "WSL 运行时安装失败")
+            QMessageBox.warning(self, "安装未完成", err or "未拿到可用的结果")
+        self._finish()
+
+    def _after_import(self, ok: bool, err: str, res: dict) -> None:
+        rootfs = wsl_work_dir() / WSL_ROOTFS_FILE
+        if ok:
+            if rootfs.is_file():
+                try:
+                    rootfs.unlink()
+                except OSError:
+                    pass
+            self._log("ok", f"Ubuntu {WSL_UBUNTU_SERIES} 已导入（WSL{res.get('version')}）："
+                            f"{res.get('path')}")
+            self._finish()
+            QMessageBox.information(
+                self, "安装完成",
+                f"Ubuntu {WSL_UBUNTU_SERIES} 已可用。\n\n"
+                f"安装位置：{res.get('path')}\n"
+                "点「打开 Ubuntu 终端」即可进入（默认是 root；腾讯/阿里云镜像等按需自行配置）。")
+            return
+        self._log("error", err or "导入失败")
+        QMessageBox.warning(self, "导入未完成", err or "导入失败")
+        self._finish()
+
+    def _on_task_failed(self, step: str, err: str) -> None:
+        self._log("error", f"{'运行时' if step == 'msi' else 'Ubuntu 基础包'}下载失败：{err}")
+        self._finish()
+
+    def _open_terminal(self) -> None:
+        exe = wsl_exe()
+        if not exe:
+            QMessageBox.warning(self, "找不到 wsl.exe", "系统里没有 wsl.exe，先完成安装。")
+            return
+        try:
+            subprocess.Popen([exe, "-d", WSL_DISTRO], creationflags=0x00000010)
+        except OSError as exc:
+            QMessageBox.warning(self, "打开失败", f"{exc}")
+
+
 class MainWindow(QMainWindow):
     @staticmethod
     def current_components() -> Dict[str, "Component"]:
@@ -19587,6 +20717,10 @@ class MainWindow(QMainWindow):
             for i in range(start, end):
                 cat_name, comp, wrap = self._pending_cards[i]
                 card = ComponentCard(comp, self._append_log)
+                # 向导型卡片（WSL）把"打开向导"做成信号：卡片不该沿父指针爬回窗口
+                # 去调私有方法（bt_install_safety_tests 的依赖方向断言钉着这条）。
+                if comp.ui_action == "wsl":
+                    card.wsl_requested.connect(self._on_wsl_clicked)
                 card.setParent(wrap)
                 # 填充到 cards 与 _tab_cards（建完前它们是空列表）
                 self.cards.append(card)
@@ -19686,6 +20820,10 @@ class MainWindow(QMainWindow):
         )
         self.btn_cleanup_path.clicked.connect(self._on_cleanup_path_clicked)
         tb.addWidget(self.btn_cleanup_path)
+
+        # 2026-10-21：WSL 曾经在标题栏有一个「🐧 WSL」快捷按钮，用户要求删掉 ——
+        # 「开发环境」里已经有同名卡片（点「安装向导」），两处入口只重复占宽。
+        # `_on_wsl_clicked` 保留：卡片的 wsl_requested 信号仍然接到它。
 
         # 2026-10-14 按用户要求移除标题栏的两个按钮：
         #   「🖥 开验证终端」「🩺 导出诊断」
@@ -20979,6 +22117,17 @@ class MainWindow(QMainWindow):
             self.btn_max.setText("❐")
 
     # ------------------------------------------------------------------
+    def _on_wsl_clicked(self) -> None:
+        """打开 WSL 安装向导（非模态：下载/提权期间主窗口还能用）。"""
+        dlg = getattr(self, "_wsl_dialog", None)
+        if dlg is not None and dlg.isVisible():
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        self._wsl_dialog = WslDialog(self)
+        self._wsl_dialog.setModal(False)
+        self._wsl_dialog.show()
+
     def _on_cleanup_path_clicked(self) -> None:
         """扫描并清理 PATH 中指向本工具目录、但已不存在的残留条目。"""
         dead = find_dead_tool_path_entries()

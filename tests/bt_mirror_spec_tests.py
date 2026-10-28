@@ -136,6 +136,10 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                # （qoder-ide.oss-accelerate.aliyuncs.com），
                                # is_mainland() 认成 1 个大陆源；没有第二个可复用镜像。
                                "qoder-cli": 1,
+                               # 2026-10-21：Android cmdline-tools 只有腾讯一个
+                               # 大陆镜像（阿里/清华/南大实测 404），官方 dl.google.com
+                               # 本机整站 500，只能末位兜底。
+                               "android-sdk": 1,
                                "lingma": 1}
 
     # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具，
@@ -211,7 +215,12 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                 # 2026-10-15 第四批：这两个官方**不发 Windows 安装包**（只有 npm / pip），
                 # 卡片给「官网下载」——实测过：gemini-cli 的 release 资产只有
                 # bundle.zip + 两个 darwin 包；aider 官方装法只有 pip/pipx。
-                "gemini-cli", "aider"}
+                "gemini-cli", "aider",
+                # 2026-10-21：Xcode / Xcode SDK 只能在 macOS 上用，Apple 也没有
+                # 免登录直链（App Store / 开发者账号是唯一分发渠道）。
+                "xcode", "xcode-sdk",
+                # 2026-10-21：WSL 卡片没有版本表/直链，动作在本工具自己的向导里。
+                "wsl"}
 
     def test_counts(self):
         for key, comp in COMPS.items():
@@ -326,6 +335,10 @@ class OfficialIsLast(unittest.TestCase):
         # Dart：官方 storage.googleapis.com 末位，南大 / 腾讯云镜像在前
         #（镜像路径必须带 /flutter/ 一层，不带实测 404）。
         "dart": "storage.googleapis.com",
+        # 2026-10-21 Flutter：官方 GCS 末位，腾讯/南大/flutter-io.cn 在前；
+        # Android cmdline-tools 的官方域是 dl.google.com。
+        "flutter": "storage.googleapis.com",
+        "android-sdk": "dl.google.com",
     }
 
     # Python 是三平台里唯一"官网按平台不同"的：Windows 用 NuGet 完整包
