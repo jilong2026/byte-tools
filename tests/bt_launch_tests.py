@@ -5,6 +5,7 @@ import os
 import platform as _platform
 import re
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -49,7 +50,12 @@ class LaunchSpecTable(unittest.TestCase):
              # （2.15.1 官方 zip）：`-p` 改口生效、`-js -sd <dir>` 会建出 jetstream/、
              # terminate 后 4224 从"在听"变"不在听"。⚠ 只给 `-sd` 不带 `-js` 时
              # **数据目录不会被创建** —— 这条是实测出来的，别凭直觉写。
-             "nats-server"},
+             "nats-server",
+             # 2026-10-28 由 16 扩到 17：mysql。用户报"装了看不到启动状态"；当天在
+             # %TEMP% 用 8.0.37 实测：--initialize-insecure 约 2s、root 无密码，
+             # 启动约 1s ready，mysqladmin shutdown 优雅停且端口随即释放；
+             # --mysqlx=0 关掉 33060，避免多占一个口。
+             "mysql"},
             "白名单只能按批次扩：多一个组件就要多一份实测事实与一份风险说明")
         self.assertEqual(main.LAUNCH_KEYS, set(main.LAUNCH_OF))
 
@@ -3474,6 +3480,41 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         self.assertTrue(any("前置准备" in n for n in notes),
                         f"成功时要告诉用户前置准备做了什么：notes={notes}")
 
+    def _ready_mysql(self):
+        comp = self.comps["mysql"]
+        version = comp.versions[0].version
+        home = Path(self.dir.name) / "mysql" / f"mysql-{version}"
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        comp.install_dir = lambda v: home
+        orig = main.resolve_launch_version
+        main.resolve_launch_version = lambda c: version
+        self.addCleanup(setattr, main, "resolve_launch_version", orig)
+        plan = main.build_launch_plan(
+            comp, comp.launch, str(Path(self.dir.name) / "jdk-17"), 3306,
+            Path(self.dir.name) / "byte-tools.out")
+        mapping = main._plan_mapping(comp, comp.launch, plan)
+        guard = Path(comp.launch.pre_start_if_missing.format(**mapping))
+        return comp, plan, guard
+
+    def test_mysql_pre_start_runs_initialize_only_when_schema_is_missing(self):
+        """MySQL 的 --initialize-insecure 只能跑在空目录；第二次启动必须跳过。
+
+        哨兵是 `<data_dir>/mysql`（初始化后必有的系统库目录）。不跳过的话，
+        用户第二次点启动会看到"前置准备失败（退出码 1）"，明明数据已经好了。
+        """
+        comp, plan, guard = self._ready_mysql()
+        ok, why, _notes = main.run_pre_start(comp, comp.launch, plan)
+        self.assertTrue(ok, why)
+        self.assertEqual(len(self.runs), 1, f"首次应跑一次初始化：{self.runs}")
+        self.assertIn("--initialize-insecure", self.runs[0][0])
+
+        guard.mkdir(parents=True, exist_ok=True)
+        before = len(self.runs)
+        ok, why, notes = main.run_pre_start(comp, comp.launch, plan)
+        self.assertTrue(ok, why)
+        self.assertEqual(len(self.runs), before, "哨兵存在后不该再跑初始化")
+        self.assertTrue(any("已初始化" in n for n in notes), notes)
+
     def test_pre_start_failure_carries_the_output_tail_into_the_reason(self):
         """前置失败必须把输出末尾带进原因，否则用户只看到"失败"两个字。
 
@@ -4102,14 +4143,16 @@ class NewSixComponents(unittest.TestCase):
         同日 B4 补扩到 15 个（minio：真机量过启动耗时、PID 归属、停止与端口释放）。
         2026-10-16 扩到 16 个（nats-server：%TEMP% 真机实测改口、JetStream 落盘、
         停止后端口释放；实测教训是"只给 -sd 不带 -js 数据目录不会建"）。
+        2026-10-28 扩到 17 个（mysql：真机实测 --initialize-insecure / 启动 /
+        mysqladmin shutdown 全链路，首次初始化约 2s、root 无密码）。
         """
         self.assertEqual(
             main.LAUNCH_KEYS,
             {"jenkins", "nacos", "activemq",
              "rocketmq", "nginx", "kafka", "tomcat",
              "elasticsearch", "rabbitmq", "seata", "redis",
-             "etcd", "consul", "zookeeper", "minio", "nats-server"})
-        self.assertEqual(len(main.LAUNCH_KEYS), 16)
+             "etcd", "consul", "zookeeper", "minio", "nats-server", "mysql"})
+        self.assertEqual(len(main.LAUNCH_KEYS), 17)
         # 登记表与 key 集合不许脱节（多一个 key 却没有 spec 就查不到）。
         self.assertEqual(set(main.LAUNCH_OF), main.LAUNCH_KEYS)
 
@@ -5263,6 +5306,10 @@ class AccessPageStopsAnsweringAfterStop(unittest.TestCase):
 
     def setUp(self):
         self.app = QApplication.instance() or QApplication([])
+        # 生产路径是独立页服务进程；单元测试里用进程内实现，避免每个用例都起子进程
+        # （独立进程有一条专门的用例，见 DetachedPageServer）。这里不设 cleanup 把它删掉：
+        # _btprelude 给整个测试进程设了 inproc，删掉会让后面的用例又去拉真子进程。
+        os.environ[main.PAGE_SERVER_INPROC_ENV] = "inproc"
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self._orig_file, self._orig_dir = main.RUNNING_FILE, main.CONFIG_DIR
@@ -5320,6 +5367,103 @@ class AccessPageStopsAnsweringAfterStop(unittest.TestCase):
         main.save_running_map({})
         self.assertNotIn("/page/rocketmq", self._get(root)[1],
                          "首页还挂着已停止的组件 = 点进去是一张假告示")
+
+
+class DetachedPageServer(unittest.TestCase):
+    """独立页服务：主程序之外的一个进程，关掉主程序它仍在。
+
+    2026-10-28 用户报：Redis 启动后关掉工具，访问页就打不开了。根因是页服务原本是
+    主进程里的一个 daemon 线程 —— 组件进程被 DETACHED_PROCESS 留下了，页面却没有。
+    这里用子进程真跑 `main.py --bt-page-server`，在临时 HOME 下验证它：
+      · 写出 page-server.json（端口 + pid）；
+      · /healthz 回签名（父进程据此判断能否复用）；
+      · /page/<key> 按 running.json 现渲染，停止后变成 404「已经停止」。
+    "关掉父进程后还活着"由 DETACHED_PROCESS 启动参数保证，真机演练另记。
+    """
+
+    def setUp(self):
+        self.app = QApplication.instance() or QApplication([])
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.conf = Path(self.home.name) / ".env-tools"
+        self.conf.mkdir(parents=True)
+        # 占住一个端口，冒充"正在运行的 rocketmq"
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.addCleanup(self.sock.close)
+        rec = main.RunRecord(
+            key="rocketmq", version="5.3.1", home=str(self.conf / "rocketmq"),
+            data_dir=str(self.conf / "rocketmq-data"), port=self.port,
+            console_url="", pid=1, pid_role="launcher", started_at=0.0,
+            launcher_cmd=[])
+        (self.conf / "running.json").write_text(
+            json.dumps({"rocketmq": rec.to_dict()}), encoding="utf-8")
+        self.env = dict(os.environ)
+        self.env["USERPROFILE"] = self.home.name
+        self.env["HOME"] = self.home.name
+        self.env["PYTHONIOENCODING"] = "utf-8"
+        self.env.pop(main.PAGE_SERVER_INPROC_ENV, None)
+        self._orig_inproc = os.environ.pop(main.PAGE_SERVER_INPROC_ENV, None)
+        self.addCleanup(
+            lambda: os.environ.__setitem__(main.PAGE_SERVER_INPROC_ENV, self._orig_inproc)
+            if self._orig_inproc is not None
+            else os.environ.pop(main.PAGE_SERVER_INPROC_ENV, None))
+        self.proc = None
+
+    def tearDown(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(10)
+            except Exception:      # noqa: BLE001
+                self.proc.kill()
+
+    def _start(self) -> int:
+        argv = [sys.executable, str(Path(main.__file__).resolve()),
+                main.PAGE_SERVER_FLAG, str(self.conf)]
+        self.proc = subprocess.Popen(
+            argv, env=self.env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, cwd=self.home.name)
+        state = self.conf / "page-server.json"
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if state.exists():
+                try:
+                    port = int(json.loads(state.read_text(encoding="utf-8"))["port"])
+                except Exception:  # noqa: BLE001
+                    port = 0
+                if port and main._page_server_alive(port):
+                    return port
+            time.sleep(0.1)
+        self.fail("独立页服务没有在 30 秒内起来；日志见 "
+                  f"{self.conf / 'logs' / 'page-server.log'}")
+
+    def _get(self, url):
+        import urllib.error
+        import urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(url, timeout=10) as r:
+                return r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def test_daemon_serves_status_from_running_json(self):
+        port = self._start()
+        code, body = self._get(f"http://127.0.0.1:{port}/healthz")
+        self.assertEqual(code, 200)
+        self.assertIn("byte-tools-page", body)
+
+        code, body = self._get(f"http://127.0.0.1:{port}/page/rocketmq")
+        self.assertEqual(code, 200, body[:200])
+        self.assertIn("正在运行", body)
+
+        (self.conf / "running.json").write_text("{}", encoding="utf-8")
+        code, body = self._get(f"http://127.0.0.1:{port}/page/rocketmq")
+        self.assertEqual(code, 404, "登记清空后同一地址仍在 200 = 假告示")
+        self.assertIn("已经停止", body)
 
 
 class LaunchMappingCoversEveryPlaceholder(unittest.TestCase):

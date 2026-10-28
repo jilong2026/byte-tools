@@ -60,6 +60,9 @@ def bootstrap() -> None:
         _platform.uname.cache_clear()
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    # 访问页服务在生产里是独立进程；测试进程绝不许为它拉起子进程（会污染真实
+    # ~/.env-tools 与进程表）。唯一需要真子进程的 DetachedPageServer 会临时摘掉它。
+    os.environ.setdefault("BYTE_TOOLS_PAGE_SERVER", "inproc")
 
     root = str(REPO_ROOT)
     if root not in sys.path:

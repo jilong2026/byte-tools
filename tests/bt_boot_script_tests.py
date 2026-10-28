@@ -181,6 +181,23 @@ class BootstrapChainPresent(unittest.TestCase):
             self.assertIn("PrependPath=0", body, f"{name} 的安装参数缺 PrependPath=0")
             self.assertNotIn("PrependPath=1", body, f"{name} 仍在往 PATH 里写")
 
+    def test_discovery_rejects_interpreters_that_cannot_create_a_venv(self):
+        """版本号在区间也不等于可用：embeddable 包没有 venv / ensurepip。
+
+        旧版 ByteTools 的 Python 组件在 Windows 装的就是官方 embeddable zip，而且
+        会留在 PATH 上（2026-10-28 起组件已换 NuGet 完整包，但用户机器上仍可能残留
+        旧目录）。2026-10-28 真机：旧逻辑只看版本号，选中它之后 `python -m venv`
+        报 `No module named venv`，一键配置在第一步就断了。
+        所以两个探测口都必须再问一句 `import venv,ensurepip`。
+        """
+        for name in BATS:
+            body = self._body(name)
+            self.assertEqual(
+                body.count("import venv,ensurepip"), 2,
+                f"{name}: :try_cmd 与 :try_exe 都要检查 venv/ensurepip，"
+                "否则会选中只能跑、不能建虚拟环境的口袋版 Python",
+            )
+
     def test_discovery_sweeps_directories_not_only_fixed_names(self):
         for name in BATS:
             body = self._body(name)

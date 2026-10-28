@@ -58,8 +58,11 @@ EXPECTED_MEMBERSHIP = {
                 # 2026-10-16：nats-server（消息/流服务，单 exe，4222；当天真机实测
                 # 改口 / JetStream 落盘 / 停止后端口释放）—— 它一进 LAUNCH_KEYS
                 # 就自动从「服务端组件」挪到这里（本表随之更新）。
-                "nats-server"},
-    CAT_SERVER: {"mysql", "mongodb", "postgresql", "pulsar", "docker", "kubectl",
+                "nats-server",
+                # 2026-10-28：mysql（用户报"装了却看不到启动状态"；真机实测
+                # --initialize-insecure / 启动 / mysqladmin shutdown 全链路）。
+                "mysql"},
+    CAT_SERVER: {"mongodb", "postgresql", "pulsar", "docker", "kubectl",
                # 2026-10-12 B3/B5：caddy / traefik 是服务型，先落这里，
                # 接进 LAUNCH_OF 后会自动挪到「一键启停」（nats-server 已于 2026-10-16
                # 接进去、挪走了；etcd 同理）。
@@ -118,7 +121,9 @@ EXPECTED_MEMBERSHIP = {
                "insomnia", "beekeeper-studio", "obsidian", "zettlr",
                "yaak", "gvim",
                # 2026-10-16：用户点名的两个 AI 编码工具链管理器
-               "cc-switch", "codex-app-manager"},
+               "cc-switch", "codex-app-manager",
+               # 2026-10-28：用户点名接入的开发者边车（GUI，只下载）
+               "dev-sidecar"},
     # 「Agent客户端」：2026-10-15 用户要求新增的第五个 Tab，**放在最后**。
     # 形态与「开发工具」同类 —— 只下载、不配置，登记表在 main.py 的 `_AGENT_CLIENTS`
     # （表驱动，key 从那里来；这里手写一份是为了让"扩表 = 必须同时改这张基线"可见）。
@@ -153,6 +158,8 @@ EXPECTED_MEMBERSHIP = {
         "doubao", "yuanbao", "tongyi-qianwen", "lingma", "ernie", "chatglm", "xinghuo",
         # —— 第二批：办公 Agent / 开源 ——
         "lobsterai", "autoclaw", "dumate", "openworker", "orkas", "workbuddy",
+        # —— 2026-10-28：Qoder CLI（命令行的 Qoder，与 IDE / QoderWork 三个产品）——
+        "qoder-cli",
     },
 }
 

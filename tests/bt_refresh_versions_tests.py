@@ -13,6 +13,7 @@
 import os
 import platform as _platform
 import sys
+import threading
 import time
 import unittest
 
@@ -480,6 +481,59 @@ class VersionListCache(unittest.TestCase):
         self.assertIn("QTimer.singleShot(0, win._start_fetch_versions)",
                       inspect.getsource(main.main),
                       "生产入口没接启动抓取，打开工具就看不到在线版本号")
+
+
+class FetchGateContract(unittest.TestCase):
+    """并发闸门：排队等槽位的 worker 也必须发 `done`。
+
+    2026-10-28 真机复现：开工具后右上角永远停在「⟳ 抓取中…」且按钮禁用。
+    根因是 `_gate.acquire(timeout=0.25)` 等不到就 return，连 `done` 都没发 ——
+    每个 worker 欠 `_fetch_pending` 一次减一，70 多个组件里只有 14 个报了结果，
+    计数器再也归不了零，`_fetch_finished()` 永远不执行。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self._orig_abort = main.FETCH_ABORT.is_set()
+        main.FETCH_ABORT.clear()
+        self.addCleanup(lambda: main.FETCH_ABORT.set() if self._orig_abort
+                        else main.FETCH_ABORT.clear())
+        self._orig_gate = main.VersionFetchWorker._gate
+        main.VersionFetchWorker._gate = threading.Semaphore(1)
+        self.addCleanup(setattr, main.VersionFetchWorker, "_gate", self._orig_gate)
+
+    def test_worker_queued_at_the_gate_still_reports_done(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow():
+            started.set()
+            release.wait(5)
+            return []
+
+        done = []
+        blocking = main.VersionFetchWorker("slow", slow)
+        queued = main.VersionFetchWorker("queued", lambda: [])
+        for w in (blocking, queued):
+            w.done.connect(lambda key, _vs: done.append(key))
+        blocking.start()
+        self.assertTrue(started.wait(2), "慢 fetcher 没进闸门")
+        queued.start()
+        time.sleep(0.6)          # 超过 FETCH_ABORT_POLL_SEC：旧实现到这里已经放弃了
+        release.set()
+        self.assertTrue(blocking.wait(5000), "慢 worker 没在 5 秒内收尾")
+        self.assertTrue(queued.wait(5000), "排队 worker 没在 5 秒内收尾")
+        deadline = time.time() + 2
+        while len(done) < 2 and time.time() < deadline:
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.assertIn("slow", done)
+        self.assertIn("queued", done,
+                      "排队等闸门的 worker 也必须发 done：否则 _fetch_pending "
+                      "永远归不了零，右上角会一直停在「⟳ 抓取中…」")
 
 
 class WorkerFailureReason(unittest.TestCase):

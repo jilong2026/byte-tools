@@ -33,7 +33,7 @@
 | 分类 | 组件 | 内部 key | 环境变量 | 默认版本来源 |
 |------|------|---------|---------|-------------|
 | 语言运行时 | JDK (Temurin) | `jdk` | `JAVA_HOME` | Adoptium API |
-| 语言运行时 | Python | `python` | —（走 PATH） | python.org FTP 索引 |
+| 语言运行时 | Python | `python` | —（走 PATH） | Windows：NuGet 完整包；mac/Linux：python.org FTP 索引 |
 | 语言运行时 | Node.js | `node` | `NODE_HOME` | Node.js dist/index.json |
 | 语言运行时 | Go | `go` | `GOROOT` | go.dev/dl 索引 |
 | 语言运行时 | Bun | `bun` | —（走 PATH） | GitHub Releases |
@@ -59,7 +59,7 @@
 | 版本控制 | Git | `git` | — | Git for Windows Releases API |
 | Python 发行版 | Miniconda | `conda` | `CONDA_HOME` | Anaconda Repo 索引（安装器模式） |
 
-> 平台支持差异（2026-09-28 实测）：Docker / RabbitMQ 在 Windows 下不提供自动下载（需用 Docker Desktop / 手动安装 Erlang）；PostgreSQL 仅 Windows 支持（Linux/Darwin 提示用发行版包管理器 / brew）；MongoDB 支持 Windows/Linux（macOS 不提供自动下载）；Git 仅 Windows 提供便携包（Linux/macOS 上游只有源码包，提示用 apt/dnf/yum/brew）。详见各组件 `unsupported_platform_hint` 字段与「十、已知约束与注意事项」。
+> 平台支持差异（2026-09-28 实测）：Docker / RabbitMQ 在 Windows 下不提供自动下载（需用 Docker Desktop / 手动安装 Erlang）；PostgreSQL 仅 Windows 支持（Linux/Darwin 提示用发行版包管理器 / brew）；MongoDB 支持 Windows/Linux（macOS 不提供自动下载）；Git 仅 Windows 提供**完整便携包 PortableGit**（Linux/macOS 上游只有源码包，提示用 apt/dnf/yum/brew）。详见各组件 `unsupported_platform_hint` 字段与「十、已知约束与注意事项」。
 
 技术栈速览：
 
@@ -360,9 +360,9 @@ byte-tools/
 | `_tomcat_urls(v)` | Tomcat | 按主版本号 `v.split(".", 1)[0]` 拼接 tomcat-<major> 路径；华为 / 清华 / 阿里 / 南大 / 北外 / 腾讯 / 中科大 七家镜像 `/apache/tomcat/tomcat-<major>/v<v>/bin/` + 末位归档官网（共 8 源） |
 | `_nginx_urls(v)` | Nginx | **只返回 `Windows` 一个键**（共 3 源）：`mirrors.huaweicloud.com/nginx/nginx-<v>.zip` + `repo.huaweicloud.com/nginx/…` + 末位 `nginx.org/download/…`（实测 2026-09-28：清华 / 北外 / 南大 / 阿里 / 腾讯对同一文件名一律 404，它们的 `nginx/` 目录是 apt/yum 包仓库，没有 nginx.org 那套 zip）；Linux/Darwin **不给 URL**——上游只发源码 `.tar.gz`（要自己 configure + make），改由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew |
 | `_mysql_urls(v)` | MySQL | Windows/Linux/macOS 三平台都有阿里 `/mysql/MySQL-<maj.min>/` + 华为 `/mysql/Downloads/MySQL-<maj.min>/` 两家镜像，末位 `cdn.mysql.com`（`dev.mysql.com/get` 对任何 UA 都 403，不能用）；Windows `mysql-<v>-winx64.zip`，Linux 走 `.tar.xz`（镜像站文件名是 glibc2.12，官网新包是 glibc2.28），macOS 用 `macos11`/`macos12` 命名走镜像、`macos14` 走 CDN（老版本 CDN 恒 404），按 `IS_ARM` 选 arch |
-| `_python_urls(v)` | Python | 华为 `mirrors.huaweicloud.com/python/` + npmmirror `-/binary/python/` + 末位 `python.org/ftp`；Windows 走 embed-amd64.zip，mac/Linux 走 .tgz |
+| `_python_urls(v)` | Python | **Windows 完整版**：华为 `repo.huaweicloud.com` / `mirrors.huaweicloud.com` 的 NuGet 端点 `artifactory/api/nuget/v3/nuget-remote/python/<v>/python.<v>.nupkg` 在前、`api.nuget.org` 末位（完整包 14.6 MB，含完整标准库 / pip / venv；**不再用 embed-amd64.zip**）；mac/Linux 仍 npmmirror / 华为 `/python/` + 末位 `python.org/ftp` 的 27 MB 源码 .tgz |
 | `_node_urls(v)` | Node.js | 清华 / 南大 / 北外 `/nodejs-release/v<v>/` + 华为 `/nodejs/v<v>/` + npmmirror `-/binary/node/v<v>/` + 末位 `nodejs.org/dist`（共 6 源）；按 `IS_ARM` 选择 macOS arm64/x64 包 |
-| `_git_urls(v)` | Git | **只返回 `Windows` 一个键**（共 7 源）：华为 `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/`、`repo.huaweicloud.com` 同路径 + npmmirror `-/binary/git-for-windows/…` 的 `MinGit-<v>-64-bit.zip`（三家实测 200），加速器只是补充（`_gh_accelerated()`），末位 `github.com/git-for-windows`；Linux/Darwin **不给 URL**——上游只有 `git/git` 源码 tar.gz（解压后无可执行文件，需自行编译），改由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew |
+| `_git_urls(v)` | Git | **只返回 `Windows` 一个键**（共 7 源）：华为 `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/`、`repo.huaweicloud.com` 同路径 + npmmirror `-/binary/git-for-windows/…` 的 `PortableGit-<v>-64-bit.7z.exe`（三家实测 200 / 63 MB；**2026-10-28 起用完整版，不再用 MinGit**），加速器只是补充（`_gh_accelerated()`），末位 `github.com/git-for-windows`；Linux/Darwin **不给 URL**——上游只有 `git/git` 源码 tar.gz（解压后无可执行文件，需自行编译），改由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew |
 | `_conda_urls(v)` | Miniconda | 清华 / 南大 / 北外 / 中科大 `/anaconda/miniconda/` + 末位 `repo.anaconda.com`（华为 `repo.huaweicloud.com/anaconda/` 对任意路径 301 到软 404 HTML 页，属假成功，已删除）；按 `IS_ARM` 选择 macOS arm64/x86_64 .sh |
 | `_pwsh_urls(v)` | PowerShell 7 | 三平台都有官方便携包，上游只在 GitHub Releases 发版、国内无真镜像（清华 / 南大 / npmmirror 的 `powershell` 目录一律 404），故与 RabbitMQ 同策：`_gh_accelerated()` 三个加速器在前、`github.com/PowerShell/PowerShell/releases/download/v<v>/` 末位（每平台 4 源）；资产名大小写不统一——Windows 是 `PowerShell-<v>-win-<arch>.zip`，Linux/macOS 是 `powershell-<v>-linux/osx-<arch>.tar.gz`，按 `IS_ARM` 选 x64/arm64 |
 | `_go_urls(v)` | Go | 只剩阿里 `/golang/` + 南大 `/golang/` 两家镜像 + 末位 `go.dev/dl/`（华为/清华对 `go<ver>.linux-amd64.tar.gz` 这类包名恒 404；中科大只是 302 跳回 `dl.google.com`，本机 TLS 失败，同样不算镜像） |
@@ -717,7 +717,7 @@ UI 组成（自上而下，四行 + 进度条；这么切是为了塞进 300px �
   - `_launch_status()` / `_refresh_launch_state()` — 只读地按端口实况刷新按钮与 `launch_label`（运行中→启动置灰、停止/打开控制台启用、**卸载锁死**；zombie→显示残留登记但启动仍可点），全程一次都不拉起进程；`_uninstall_locked_by_launch` 只在"运行"这条边上解冻卸载，不无条件点亮
   - `on_start_clicked()` — 先弹确认（带 `spec.main_port` 与 `risk_note`），确认后起 `LaunchWorker("start", …, parent=self)`
   - `on_stop_clicked()` / `_on_need_force()` — 停止；`need_force` 触发时弹一次"要强制结束吗"，**用户确认才起 `force_stop` worker**（不自动强杀）
-  - `on_console_clicked()` — `QDesktopServices.openUrl(登记的 console_url)`（用实际端口）
+  - `on_console_clicked()` — `QDesktopServices.openUrl(...)`：自带页面用登记的 console_url；协议端口型现取独立页服务的 `url_for(key)`
   - `_on_launch_worker_done()` — 按 `sender()` 身份收尾（老 worker 的 `finished` 晚于新 worker 起跑时不误清刚起的 force_stop worker 引用）+ `deleteLater()`
 
 #### `DonateDialog(QDialog)`
@@ -742,7 +742,7 @@ UI 组成：
    `一键启停（15）` / `服务端组件（14）` / `开发环境（32）` / `开发工具（26）` / `Agent客户端（40）`（数字由 `len(comps)` 现算，不写死）；
    每个 Tab 内一条独立 `QScrollArea` 挂该分类的 `ComponentCard`。卡片在 Tab 里是**网格**：列数只由视口宽度决定
    （见下方「卡片网格」一节），不再是一行一张占满宽
-   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起五个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 182 项可见 + 1 个隐藏的 `erlang`，别写死；`build_components()` 一改就会变）
+   - **搜索过滤**由 `component_matches(comp, query)` 判定（显示名或 key 的子串，忽略大小写与首尾空白；空查询不过滤）：命中的 `card.setVisible(True)`，其余隐藏。搜索时 `QStackedWidget#topStack` 收起五个 Tab、切到统一结果页 `QScrollArea#resultsArea`，把所有命中组件**按分类归并到同一滚动列表**（每类前有 `QLabel#resultCatHeader` 小标题），清空后切回 Tab 浏览态、卡片各自归位。这是"全组件搜索、而非只搜单个 table"的呈现。过滤**只改可见性与归属**，`MainWindow.cards` 平铺列表始终是全量（现为 184 项可见 + 1 个隐藏的 `erlang`，别写死；`build_components()` 一改就会变）
 5. **日志浮层**：`QWidget#logOverlay`（内含 `QTextEdit#logView`，深色主题），与卡片区同 parent、靠 `raise_()` 叠在上面，几何随 `resizeEvent` 跟随；默认收起，由搜索条上的「📋 日志」按钮 toggle。展开时**遮住**最下面一行格子，而不是把网格压扁（见下方「日志浮层」一节）
 6. **底部状态栏**：显示当前系统信息、可点开的工作目录与 `组件：N`（N=界面可见数，现 43；只写数字不写句子，版本号在标题栏 chip 上不重复）
 
@@ -1104,7 +1104,9 @@ on_uninstall_clicked()   # main.py:4995
        │    ├─ cli_only / cli_flag → 直接放行，一个文件都不碰
        │    └─ conf_copy → 官方 conf 整目录拷进 ~/.env-tools/<key>-data/conf，只改这份副本
        │         └─ 锚不到官方默认那一行 → StartResult(False,"writeback",指名改哪一行)，不 spawn
-       ├─ 建 ~/.env-tools/<key>-data/logs，把 stdout/stderr 重定向到 byte-tools.out
+       ├─ pre_start（Kafka format / MySQL --initialize-insecure）→ 之后才建 <key>-data/logs
+       │    （MySQL 初始化要求数据目录为空，logs 不能在它之前建）
+       ├─ 把 stdout/stderr 重定向到 byte-tools.out
        ├─ subprocess.Popen(argv, DETACHED…)  # 这是"启动"动作，唯一允许拉进程的地方
        ├─ 有界轮次探活（每轮 sleeper(1.0)，最多 startup_timeout 轮）
        │    ├─ **整簇端口都在听** → 写 running.json（RunRecord：ports 整簇、port 是真相、pid_role=server/launcher）
@@ -1126,8 +1128,9 @@ on_uninstall_clicked()   # main.py:4995
             │    └─ 归属有歧义（同口多 PID）或指向我们自己 → 一个都不杀，当场说清为什么并返回
             └─ os.kill → 整簇端口确认释放才清登记
 
-点"打开控制台"（on_console_clicked）
-  └─ QDesktopServices.openUrl(登记的 console_url)   # 用的是实际端口，不是默认 8080
+点"打开控制台 / 访问页"（on_console_clicked）
+  ├─ 自带 Web 界面 → openUrl(登记的 console_url)（实际端口）
+  └─ 协议端口型 → 现取独立页服务的 url_for(key)（页服务可能已换端口）
 
 关窗（MainWindow.closeEvent）
   └─ _cancel_launch_workers()：先全部 cancel 再统一 wait → 才走原有版本线程收尾
@@ -1604,3 +1607,6 @@ CONFIG_DIR = Path.home() / ".env-tools"  # ← 改这一行
 | 忽略规则 | [.gitignore](./.gitignore) |
 | MIT 许可证 | [LICENSE](./LICENSE) |
 | 静态资源（窗口图标 + 收款码） | [assets/](./assets) |
+
+> **访问页服务是独立进程**（`--bt-page-server`，见 DEVELOPMENT.md R5.7）：主程序退出后它仍存活，
+> 页面每次请求都从 `running.json` 现算状态；`page-server.json` 记端口，下次启动用 `/healthz` 复用。

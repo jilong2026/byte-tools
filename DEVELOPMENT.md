@@ -37,6 +37,11 @@
 - [规则 R18：冷启动预算——建卡不许逐个扫 PATH](#规则-r18冷启动预算建卡不许逐个扫-path2026-10-13)
 - [规则 R19：官网地址必须人工登记，不许从下载 URL 推导](#规则-r19官网地址必须人工登记不许从下载-url-推导2026-10-14)
 - [规则 R20：「Agent客户端」是第五个只下载的 Tab](#规则-r20agent客户端是第五个只下载的-tab2026-10-15)
+- [规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"](#规则-r21官网下载是只下载里更弱的一档为的是先把组件都收进来2026-10-15)
+- [规则 R22：每个 Tab 内的卡片按显示名 a→z 排](#规则-r22每个-tab-内的卡片按显示名-az-排2026-10-15)
+- [规则 R23：网格多余的**行高**必须落到布局末尾的 stretch 上](#规则-r23网格多余的行高必须落到布局末尾的-stretch-上2026-10-15)
+- [规则 R24：Windows 上中文**不许走命令行 argv**](#规则-r24windows-上中文不许走命令行-argv2026-10-15)
+- [规则 R25：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包](#规则-r25可装配组件必须是官方完整发行版不许用-embeddable--mini-精简包2026-10-28)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -205,9 +210,9 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 | `maven` | Apache Maven | M1 `repo.huaweicloud.com/apache/maven/maven-3/`、M2 清华、M3 阿里、M4 南大、M6 北外、M7 腾讯、M5 中科大（高校站只留最新版本，旧版 404 由故障转移兜住） | `archive.apache.org/dist/maven/maven-3/` | 3.9.16：7/7 家 200（9 MB）；3.9.6 只剩华为云 + archive |
 | `tomcat` | Apache Tomcat | 同上七家 `apache/tomcat/tomcat-<major>/v<v>/bin/` | `archive.apache.org/dist/tomcat/` | 10.1.60：7/7 家 200（14~15 MB） |
 | `mysql` | MySQL Server | Windows/Linux：M3 `mirrors.aliyun.com/mysql/MySQL-<maj.min>/`、M1 `repo.huaweicloud.com/mysql/Downloads/MySQL-<maj.min>/`。macOS 也有这两家镜像，但文件名用**当年命名**：8.0.28→`macos11-<arch>.tar.gz`（阿里+华为都 200/177 MB）、8.0.29→`macos12-<arch>`（华为 200/176 MB） | `cdn.mysql.com/Downloads/`（**不是** `dev.mysql.com` 的 get 跳转入口，后者对任何 UA 都回 403）；macOS 用 `macos14-<arch>` | Windows 2/2、Linux 2/2、macOS 2/4（8.0.37 这一档镜像站还没同步，只有 CDN 200/173 MB） |
-| `python` | Python | M1b `mirrors.huaweicloud.com/python/`、N1 `registry.npmmirror.com/-/binary/python/` | `www.python.org/ftp/python/` | 2/2 家 200（Windows embed 11 MB、Unix 27 MB） |
+| `python` | Python | **Windows 完整版**：M1 `repo.huaweicloud.com/artifactory/api/nuget/v3/nuget-remote/python/<v>/python.<v>.nupkg`、M1b `mirrors.huaweicloud.com` 同路径；macOS/Linux 仍 M1b `/python/`、N1 `registry.npmmirror.com/-/binary/python/` | Windows `api.nuget.org`；Unix `www.python.org/ftp/python/` | 2026-10-28 实测：华为双域 200 + `PK`（NuGet 完整包 14.6 MB）；Unix 2/2 家 200（源码 27 MB）。**Windows 不再用 embeddable**，见 R25 |
 | `node` | Node.js | M2/M4/M6 `…/nodejs-release/v<v>/`、M1 `repo.huaweicloud.com/nodejs/v<v>/`、N1 `registry.npmmirror.com/-/binary/node/v<v>/` | `nodejs.org/dist/` | 5/5 家 200（29~47 MB） |
-| `git` | Git for Windows | **Windows 有真镜像**：M1b `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/MinGit-<v>-64-bit.zip`、M1 `repo.huaweicloud.com/…`、N1 `registry.npmmirror.com/-/binary/git-for-windows/…`（三家实测 200/47 MB），再补 `GH_ACCELERATORS` | `github.com/git-for-windows/git/releases/download/` | Windows 3 家镜像 + 3 加速器全 200；Linux/macOS **不再给 URL**，`_git_urls()` 只返回 `Windows` 键，由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
+| `git` | Git for Windows | **Windows 有真镜像**：M1b `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/PortableGit-<v>-64-bit.7z.exe`、M1 `repo.huaweicloud.com/…`、N1 `registry.npmmirror.com/-/binary/git-for-windows/…`（三家实测 200 / 63 MB），再补 `GH_ACCELERATORS` | `github.com/git-for-windows/git/releases/download/` | 2026-10-28 起用 **PortableGit 完整版**（含 Git Bash / Perl / OpenSSH），不再用 MinGit；Linux/macOS **不再给 URL**，`_git_urls()` 只返回 `Windows` 键，由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
 | `conda` | Miniconda | M2 清华、M4 南大、M6 北外、M5 中科大 `…/anaconda/miniconda/`（文件名与官方一致）。华为 `repo.huaweicloud.com/anaconda/` 对任意路径都 301 到软 404 HTML 页（假成功），已删除 | `repo.anaconda.com/miniconda/` | 4/4 家 200（90~149 MB） |
 
 #### 新增 18 个组件镜像清单（2026-09-28 全部按实测重写）
@@ -1186,11 +1191,13 @@ HKLM 的，主进程拿到回报后只做了复验和登记，**一声没出**�
 
 **真机证据（两连击）**：
 
-- 2026-10-09 Python：Windows 装的是 embeddable 包（`python-3.x-embed-amd64.zip`），
+- 2026-10-09 Python：当时 Windows 装的是 embeddable 包（`python-3.x-embed-amd64.zip`），
   `python.exe` 就在解压根目录、包里**压根没有 `Scripts`**，而组件声明写的是 `path_subdir="Scripts"`。
   后果不是"显示不好看"，是**整条切换链白做**：PATH 指向一个没有解释器的目录 →
   `python` 永远命中机器上自己装的那份 → R3.19 提权把这条没用的目录插到系统 PATH 最前，
   复验照样命中机器上原有那个 → 自动回滚，用户连着看到两次"系统变量已改，但复验未通过"。
+  （2026-10-28 起 Windows 已换成 NuGet 完整包，布局变成 `tools/python.exe`，
+  `path_subdir="tools"`；**布局会随发行形态变，所以这条实测纪律不能省**。）
 - 2026-10-10 全量实测又抓一个同类的 **Node**：官方 `node-v20.15.0-win-x64.zip` 里
   `node.exe` 同样在 `node-vX.Y.Z-win-x64/` 这一层，**没有 `bin` 子目录**，而声明写的是 `"bin"`。
 
@@ -1286,6 +1293,12 @@ HKLM 的，主进程拿到回报后只做了复验和登记，**一声没出**�
 7. **下载结果必须校验体积**：`< 5 MB` 判该源无效并换下一个。镜像会用 200 + 小 HTML 应付缺失文件，不校验就装出一个坏解释器，比失败更难查
 8. **自动安装不写 PATH**：`InstallAllUsers=0 PrependPath=0 Include_launcher=0`。发现逻辑读安装目录，写 PATH 既不必要也违背"不修改系统环境"
 9. **`.bat` 必须 CRLF**：LF-only 会让标签查找失败（实测 `cannot find the batch label specified`）
+10. **版本号够 ≠ 可用：还必须能建 venv**。`-c "import venv,ensurepip"` 不通过的一律跳过
+    （记 `EMBED_SKIPPED`，继续走后面的发现 / 自举链，并打印 `step1_embed` 说明原因）。
+    2026-10-28 真机：ByteTools 的 Python 组件在 Windows 装的是官方 **embeddable** zip
+    （无 `Lib/`、无 `venv`、无 `ensurepip`），并且就在 PATH 上；旧发现逻辑只看版本号，
+    选中它之后 `python -m venv` 直接 `No module named venv`，一键配置在第一步就断了。
+    两个探测口（`:try_cmd` 与 `:try_exe`）必须都问这一句
 
 ### R4.4 失败处理
 
@@ -1453,8 +1466,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 全部恢复后 133 条回绿。
 
 > 这条护栏是 Task 11 变异自检第 3 项查出来并当场补上的（补之前是空护栏：把 `prepare_ports`
-> 的 `conf_copy` 分支改成"忽略回写失败、照样返回 True"时 129 条全绿）。原因是原有用例只分别钉住两端 ——
-> `ConfCopyWriteback` 钉 `set_property_line` / `set_openwire_port` 单独调用时会拒改，
+> 的 `conf_copy` 分支改成"忽略回写失败、照样返回 True"时 129 条全绿）。原因是原有用例只分别钉住两端 ——> `ConfCopyWriteback` 钉 `set_property_line` / `set_openwire_port` 单独调用时会拒改，
 > `StartFlow.test_start_carries_the_conf_copy_notice_to_the_card` 把 `prepare_ports` 整个桩成成功，
 > **"回写失败 → `start()` 拒绝 spawn、不留登记" 这条接缝谁也没钉**。
 > 现由 `PortPlanning.test_start_refuses_to_spawn_when_writeback_fails` 守住，它走真实 `start()`：
@@ -1473,6 +1485,43 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 > 后续新增的开发规则以「规则 R6 / R7 / ...」形式追加到本文件，并在「规则索引」中登记。
 > 每条规则必须包含：规则描述、适用范围、实施指引、checklist 四节。
+
+### R5.7 访问页服务必须独立于主进程；MySQL 的初始化只在空目录上跑（2026-10-28）
+
+**问题一（Redis 访问页随工具退出）**：访问页原先由主进程里的一个 daemon HTTP 线程提供。
+组件进程是 `DETACHED_PROCESS` 拉起的，关掉工具它还在；页面却跟着主进程没了 ——
+用户看到的是"服务还活着，访问页打不开"。
+
+现在的结构：
+
+- 页服务是一个**独立进程**：`ByteTools.exe --bt-page-server`（源码下是
+  `python main.py --bt-page-server`），由 `_spawn_page_daemon()` 用
+  `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` 拉起，**不随主程序退出**。
+- 端口由 OS 分配，`{port, pid}` 写到 `~/.env-tools/page-server.json`；
+  下次启动先读它、用 `/healthz` 确认是不是我们的服务，活着就复用，不再起第二个。
+- 页面内容每次请求都从 `running.json` 现算（`_render_component_page`），
+  不存回调、不存渲染好的 HTML；服务停了页面自己变成「已停止」。
+- 卡片点「访问页」时**现取** `get_page_daemon().url_for(key)`，所以页服务换过端口
+  （重启、崩溃后重拉）也不会给用户一个死链接。
+- 进程内实现 `ComponentPageServer` 保留给单元测试（`BYTE_TOOLS_PAGE_SERVER=inproc`），
+  独立进程起不来时也退回它（至少本次会话内页面可用）。
+- 护栏：`bt_launch_tests.DetachedPageServer`（真起子进程、临时 HOME、/healthz、
+  running.json 现渲染、停止后 404）。
+
+**问题二（MySQL 启动状态 + 初始化）**：MySQL 之前不在 `LAUNCH_OF`，所以卡片没有启动/停止。
+2026-10-28 接进「一键启停」，实测链路：`--initialize-insecure`（约 2s，root 无密码）→
+启动（约 1s ready）→ `mysqladmin shutdown`（Normal shutdown，端口立即释放）。
+两条硬约束：
+
+1. **`--initialize-insecure` 只能跑在空数据目录上**。`start()` 不许在 pre_start 之前
+   建 `data_dir/logs`（已改成先只建 `data_dir`，日志目录等 init 完再建）。
+2. **`cluster.id` 只在模板真的引用 `{cluster_id}` 时才写**。`_launch_mapping` 原来
+   无条件 `read_or_create_cluster_id()`，会给 MySQL 的数据目录塞一个 `cluster.id`，
+   初始化当场报 `directory ... is unusable`。现在先扫所有模板，只有 Kafka 会落这个文件。
+3. 首次初始化用 `LaunchSpec.pre_start_if_missing = "{data_dir}/mysql"` 做幂等哨兵；
+   第二次点启动直接跳过 pre_start（护栏 `test_mysql_pre_start_runs_initialize_only_when_schema_is_missing`）。
+
+---
 
 ## 规则 R6：前置运行时自举契约（缺 JDK / Erlang 由本工具装好）
 
@@ -2119,6 +2168,24 @@ worker 连了 `finished → deleteLater`（探测线程、检查更新线程都�
 外加原有 4 条刷新流程）。`RefreshVersionsFlow` 现在也 redirect 了 `CONFIG_DIR` 并在
 `setUp` 里清缓存 —— 抓成功会写盘之后，不隔离的用例会写用户的
 `~/.env-tools/version_cache.json`（R12 的教训再来一遍）。
+
+### R15.5 并发闸门等不到槽位必须继续等，每个 worker 恰好发一次 `done`
+
+右上角「⟳ 刷新版本」的收尾只靠 `_fetch_pending` 归零，而它只在
+`_on_versions_fetched()` 里减一。所以**每一个派发出去的 `VersionFetchWorker` 都欠一次 `done`**。
+
+原实现是 `if not self._gate.acquire(timeout=0.25): return` —— 等不到槽位就**静默退出**，
+连 `done` 都不发。2026-10-28 真机复现：首启 70 多个抓取任务、并发上限 6，
+只有 14 个报了结果，其余全部被丢掉；`_fetch_pending` 停在 N-6，`_fetch_finished()`
+永不执行，按钮永远灰着、文字永远是「⟳ 抓取中…」，看起来就是卡死（进程和界面其实都活着）。
+
+现在的写法是 `while not acquire(timeout=FETCH_ABORT_POLL_SEC)`：等不到就继续等，
+只有 `FETCH_ABORT`（关窗）才退出。轮询只为让关窗能立刻打断，**不是放弃的理由**。
+护栏：`bt_refresh_versions_tests.FetchGateContract.test_worker_queued_at_the_gate_still_reports_done`
+（把闸门压到 1 个槽位、让第一个 worker 占住，断言排队的那个也必须发 `done`）。
+
+同一族的坑：任何"收尾计数器"都要保证**派发数 == 完成数**。凡是提前 `return` 的分支，
+要么先补一次通知，要么证明它走不到收尾逻辑。
 
 ---
 
@@ -2800,3 +2867,63 @@ cmdline→CRT 那一层，与 shell 的 locale 无关）。
   **要么就别依赖宿主机上恰好存在的目录**（`bt_external_version_tests` 里那个
   `path_effective_check` 是按真实文件系统找命令的，夹具必须自己造出"压住命令的那个目录"，
   不能指望宿主机装了 `E:\soft\maven\…`）。
+
+---
+
+## 规则 R25：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包（2026-10-28）
+
+### R25.1 规则描述
+
+用户 2026-10-28 要求：盘点全部可装配组件，凡是"便携版 / 精简版"一律换成官方完整版。
+
+**准入规则（自本条起生效）：新接入组件只允许官方完整发行版；embeddable / Mini / 精简版一律不收。**
+官方只发便携包的组件（Node / JDK 等）可以接，但必须是官方完整发行版；
+「只下载」类同样适用（有安装器时默认形态必须是完整安装器，便携包只能作为备选）。
+接新组件时先回答一句：**"这是官方完整发行版，还是为了省体积砍过功能的精简包？"**
+答不上来就不许合入。
+
+盘点结论：80 个可装配组件里只有两个是真正的精简形态，其余虽然多以 zip / tar 交付，
+但都是官方完整发行版（Node / JDK / Maven / MongoDB 等上游本来就只有压缩包形态）。
+要换的两个：
+
+| 组件 | 旧（精简） | 新（完整） | 为什么必须换 |
+|---|---|---|---|---|
+| Python（Windows） | `python-<v>-embed-amd64.zip`（embeddable） | 官方 NuGet 包 `python.<v>.nupkg` 的 `tools/`（完整标准库 + pip + venv；NuGet 发行形态**不含 tkinter / IDLE**） | embeddable 没有 `Lib/`、`venv`、`ensurepip`；卡片写着"pip 包管理"，实际 `python -m pip` / `python -m venv` 都不可用 |
+| Git（Windows） | `MinGit-<v>-64-bit.zip` | `PortableGit-<v>-64-bit.7z.exe` | MinGit 只有最小命令集，没有 Git Bash / Perl / OpenSSH |
+
+### R25.2 硬约束
+
+1. **判据是"官方发行形态是否完整"，不是"包是不是 zip"**。官方只发 zip 的组件（Node / JDK…）
+   不算精简版，不许为了"完整"去换第三方安装器。
+2. Python Windows 只许用 NuGet 完整包，**不许回到 embeddable**，也不许改用 exe 安装器：
+   Burn 安装器的 provider key（`CPython-3.12`）是全局单实例，机器上已有同 minor 版本时
+   装不进第二个目录，与多版本并存直接冲突（2026-10-28 实测退出码 0x642）。
+3. Python 的 `path_subdir` 必须跟着发行形态走：NuGet 完整包是 `tools`
+   （实测 `tools/python.exe`、`tools/Lib/site-packages/pip`）；
+   `python -m pip` 与 `python -m venv` 都要真跑通之后才算接完。
+4. Git Windows 只许用 PortableGit 完整包，**不许回到 MinGit**。归档后缀是 `.7z.exe`，
+   由 `extract_archive` 的 `-o<dir> -y` 分支静默展开；**该分支必须排在通用 `.exe`
+   单文件分支之前**，否则会被原样拷进安装目录，PATH 里永远找不到 git.exe。
+5. 换发行形态必须同步四件事：`path_subdir`、`archive_map`、R1.5 镜像表、护栏用例。
+6. 完整包同样遵守 R1。Python NuGet 目前只有华为云一个提供方（两个子域都实测
+   200 + `PK`），nuget.org 官方末位；这是**已登记的源数量例外**，不许用假镜像凑数。
+7. **旧版精简包不做自动迁移**：目录名相同（`python-3.12.4` / `git-2.47.1`）、布局不同，
+   卡片仍会把它当成"已装"，安装按钮是灰的。用户要先点「卸载」再点「安装」
+   （同版本安装本来就会覆盖目录）。不做自动删除/替换是有意的：未经确认删用户目录
+   风险太高，且无法判断用户是否还在用那份旧环境。
+
+### R25.3 真机验收（2026-10-28 实测记录）
+
+- Python 3.12.4 NuGet：`tools/python.exe` → 3.12.4；`python -m pip --version` → pip 24.0；
+  `python -m venv <tmp>` 建出的 venv 里 `python -m pip --version` → pip 24.0。
+- Git 2.47.1 PortableGit：`cmd/git.exe --version` → `git version 2.47.1.windows.1`；
+  `usr/bin/bash.exe --version` → `GNU bash, version 5.2.37(1)-release`。
+- 两条都走 `install_downloaded()` 的完整落位路径（下载 → 解压 → move 到 install_dir），
+  不是只解压到临时目录。
+
+### R25.4 护栏
+
+- `bt_mirror_spec_tests.test_python_versions_use_the_full_nuget_package`
+- `bt_mirror_spec_tests.test_git_versions_use_portablegit_not_mingit`
+- `bt_multiversion_tests.PythonPathDirHoldsTheInterpreter`
+- `bt_install_safety_tests.ArchiveTraversalGuard.test_7z_sfx_is_extracted_not_copied_as_a_binary`

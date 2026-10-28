@@ -132,6 +132,10 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
                                #  都是 404 —— 它们只同步最新版，而 1.10.18 / 5.6.3 已不是），
                                # 末位 archive.apache.org 属官方。
                                "ant": 1, "jmeter": 1,
+                               # 2026-10-28：Qoder CLI 的官方源就在阿里云 OSS 加速域
+                               # （qoder-ide.oss-accelerate.aliyuncs.com），
+                               # is_mainland() 认成 1 个大陆源；没有第二个可复用镜像。
+                               "qoder-cli": 1,
                                "lingma": 1}
 
     # 「开发工具」里**实测没有任何大陆镜像或加速器可用**的那几个：JetBrains 六件 + VS Code + 微信开发者工具，
@@ -243,7 +247,7 @@ class WindowsDefaultMustHaveTwoMainlandSources(unittest.TestCase):
 # 目前只有 lingma：它的唯一官方地址在阿里云内地 OSS（`…aliyuncs.com`），域名里的
 # `aliyun` 命中 `MAINLAND_MARKERS`，`OfficialIsLast` 与末位断言都会误判。
 # 点名列出而不是让断言"自动跳过"，是要逼以后遇到同类组件时来这里登记一句。
-OFFICIAL_IS_MAINLAND_MARKED = {"lingma"}
+OFFICIAL_IS_MAINLAND_MARKED = {"lingma", "qoder-cli"}
 
 
 class OfficialIsLast(unittest.TestCase):
@@ -254,6 +258,9 @@ class OfficialIsLast(unittest.TestCase):
         "gradle": "services.gradle.org", "go": "go.dev",
         "jenkins": "get.jenkins.io", "python": "python.org",
         "node": "nodejs.org", "git": "github.com", "conda": "repo.anaconda.com",
+        # 2026-10-28 新接入：DevSidecar 是 GitHub 产物（加速器在前、裸地址末位）；
+        # Qoder CLI 的官方源在阿里云 OSS 加速域（见 OFFICIAL_IS_MAINLAND_MARKED）。
+        "dev-sidecar": "github.com", "qoder-cli": "aliyuncs.com",
         "mysql": "cdn.mysql.com", "jdk": "adoptium.net", "mongodb": "mongodb.org",
         "postgresql": "enterprisedb.com", "kubectl": "dl.k8s.io",
         "elasticsearch": "elastic.co", "nacos": "github.com", "rabbitmq": "github.com",
@@ -321,14 +328,19 @@ class OfficialIsLast(unittest.TestCase):
         "dart": "storage.googleapis.com",
     }
 
+    # Python 是三平台里唯一"官网按平台不同"的：Windows 用 NuGet 完整包
+    # （api.nuget.org），macOS/Linux 仍是 python.org 的源码包。
+    OFFICIAL_HOST_BY_OS = {("python", "Windows"): "nuget.org"}
+
     def test_official_last(self):
         for key, host in self.OFFICIAL_HOST.items():
             for cv in COMPS[key].versions:
                 for os_key, lst in (cv.url_list_map or {}).items():
                     if not lst:
                         continue
-                    self.assertIn(host, lst[-1],
-                                  f"{key}/{cv.version}/{os_key} 末位应是 {host}，"
+                    expect = self.OFFICIAL_HOST_BY_OS.get((key, os_key), host)
+                    self.assertIn(expect, lst[-1],
+                                  f"{key}/{cv.version}/{os_key} 末位应是 {expect}，"
                                   f"实际 {lst[-1]}")
 
     def test_no_component_escapes_this_table(self):
@@ -536,11 +548,37 @@ class MeasuredAssetNames(unittest.TestCase):
         # 1.0.20/1.0.29/1.0.30 的 release 里没有 Windows 包
         self.assertNotIn(default_cv("bun").version, ("1.0.30", "1.0.29", "1.0.20"))
 
-    def test_python_default_versions_have_embed(self):
-        # 3.10.14 / 3.9.19 是 security-only 发布，官方 ftp 里没有 embed 包
-        vers = [cv.version for cv in COMPS["python"].versions]
-        self.assertNotIn("3.10.14", vers)
-        self.assertNotIn("3.9.19", vers)
+    def test_python_versions_use_the_full_nuget_package(self):
+        """Python 必须装完整版：embeddable 包没有 pip / venv，`python -m venv` 必失败。
+
+        2026-10-28 用户要求把 embeddable 换成完整版。官方 exe 安装器是 Burn 单实例
+        （provider key `CPython-3.12` 全局唯一），与多版本模型冲突；NuGet 包是完整
+        zip，含完整标准库 / pip / venv，且华为云两个子域都有镜像。
+        """
+        for cv in COMPS["python"].versions:
+            lst = cv_urls(cv, "Windows")
+            self.assertTrue(lst, cv.version)
+            self.assertTrue(all("nuget" in u for u in lst),
+                            f"python {cv.version} 还有非 NuGet 源：{lst}")
+            self.assertFalse(any("embed" in u for u in lst),
+                             f"python {cv.version} 又跑回 embeddable：{lst}")
+            self.assertTrue(any("huaweicloud" in u for u in lst[:2]),
+                            f"python {cv.version} 前两源必须是华为云：{lst}")
+            self.assertIn("api.nuget.org", lst[-1], f"官网末位丢了：{lst}")
+
+    def test_git_versions_use_portablegit_not_mingit(self):
+        """Git 必须装完整版 PortableGit（含 Git Bash / Perl / OpenSSH），不是 MinGit。
+
+        MinGit 只有最小命令集，连 Git Bash 都没有 —— 与卡片上"版本控制客户端"
+        的承诺不符（2026-10-28 用户要求换掉）。
+        """
+        for cv in COMPS["git"].versions:
+            lst = cv_urls(cv, "Windows")
+            self.assertTrue(lst, cv.version)
+            self.assertTrue(all("PortableGit-" in u for u in lst),
+                            f"git {cv.version} 还混着精简包：{lst}")
+            self.assertFalse(any("MinGit" in u for u in lst),
+                             f"git {cv.version} 又跑回 MinGit：{lst}")
 
     def test_kubectl_uses_daocloud_then_official(self):
         lst = urls("kubectl", "Windows")
