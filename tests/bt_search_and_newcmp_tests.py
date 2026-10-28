@@ -288,12 +288,13 @@ class MainWindowSearchBox(unittest.TestCase):
         # 2026-10-14 起另外五张卡也命中，且都是**该命中的**：Jenkins 以 JDK 运行、
         # JMeter 需要 JDK、GraalVM 是 JVM、Kotlin 是 JVM 语言、IDEA 是 Java IDE。
         # 用户搜「jdk」往往正是想知道"哪些东西要我先装 JDK"，把它们挡在外面
-        # 反而答非所问。
+        # 反而答非所问。2026-10-21 起 Android SDK 也命中 —— 它的用法里写着
+        # "先装好 JDK"，同属"要先装 JDK"的那一类。
         self.win.search_box.setText("jdk")
         self.assertEqual(self.win.top_stack.currentIndex(), 1)
         visible = {c.component.key for c in self.win.cards if not c.isHidden()}
         self.assertEqual(visible, {"jdk", "jenkins", "jmeter",
-                                   "graalvm", "kotlin", "idea"})
+                                   "graalvm", "kotlin", "idea", "android-sdk"})
         self.win.search_box.setText("")
 
     def test_clearing_search_restores_tabs(self):

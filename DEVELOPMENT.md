@@ -41,7 +41,11 @@
 - [规则 R22：每个 Tab 内的卡片按显示名 a→z 排](#规则-r22每个-tab-内的卡片按显示名-az-排2026-10-15)
 - [规则 R23：网格多余的**行高**必须落到布局末尾的 stretch 上](#规则-r23网格多余的行高必须落到布局末尾的-stretch-上2026-10-15)
 - [规则 R24：Windows 上中文**不许走命令行 argv**](#规则-r24windows-上中文不许走命令行-argv2026-10-15)
-- [规则 R25：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包](#规则-r25可装配组件必须是官方完整发行版不许用-embeddable--mini-精简包2026-10-28)
+- [规则 R25：WSL 环境一键装](#规则-r25wsl-环境一键装2026-10-21)
+- [规则 R26：版本抓取渠道与「不烧 GitHub 额度」的网页通道](#规则-r26版本抓取渠道与不烧-github-额度的网页通道2026-10-21)
+- [规则 R27：Xcode / Xcode SDK](#规则-r27xcode--xcode-sdk2026-10-21)
+- [规则 R28：第二道测试护栏 —— 真实用户环境变量](#规则-r28第二道测试护栏--真实用户环境变量2026-10-21)
+- [规则 R29：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包](#规则-r29可装配组件必须是官方完整发行版不许用-embeddable--mini-精简包2026-10-28)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -210,7 +214,7 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 | `maven` | Apache Maven | M1 `repo.huaweicloud.com/apache/maven/maven-3/`、M2 清华、M3 阿里、M4 南大、M6 北外、M7 腾讯、M5 中科大（高校站只留最新版本，旧版 404 由故障转移兜住） | `archive.apache.org/dist/maven/maven-3/` | 3.9.16：7/7 家 200（9 MB）；3.9.6 只剩华为云 + archive |
 | `tomcat` | Apache Tomcat | 同上七家 `apache/tomcat/tomcat-<major>/v<v>/bin/` | `archive.apache.org/dist/tomcat/` | 10.1.60：7/7 家 200（14~15 MB） |
 | `mysql` | MySQL Server | Windows/Linux：M3 `mirrors.aliyun.com/mysql/MySQL-<maj.min>/`、M1 `repo.huaweicloud.com/mysql/Downloads/MySQL-<maj.min>/`。macOS 也有这两家镜像，但文件名用**当年命名**：8.0.28→`macos11-<arch>.tar.gz`（阿里+华为都 200/177 MB）、8.0.29→`macos12-<arch>`（华为 200/176 MB） | `cdn.mysql.com/Downloads/`（**不是** `dev.mysql.com` 的 get 跳转入口，后者对任何 UA 都回 403）；macOS 用 `macos14-<arch>` | Windows 2/2、Linux 2/2、macOS 2/4（8.0.37 这一档镜像站还没同步，只有 CDN 200/173 MB） |
-| `python` | Python | **Windows 完整版**：M1 `repo.huaweicloud.com/artifactory/api/nuget/v3/nuget-remote/python/<v>/python.<v>.nupkg`、M1b `mirrors.huaweicloud.com` 同路径；macOS/Linux 仍 M1b `/python/`、N1 `registry.npmmirror.com/-/binary/python/` | Windows `api.nuget.org`；Unix `www.python.org/ftp/python/` | 2026-10-28 实测：华为双域 200 + `PK`（NuGet 完整包 14.6 MB）；Unix 2/2 家 200（源码 27 MB）。**Windows 不再用 embeddable**，见 R25 |
+| `python` | Python | **Windows 完整版**：M1 `repo.huaweicloud.com/artifactory/api/nuget/v3/nuget-remote/python/<v>/python.<v>.nupkg`、M1b `mirrors.huaweicloud.com` 同路径；macOS/Linux 仍 M1b `/python/`、N1 `registry.npmmirror.com/-/binary/python/` | Windows `api.nuget.org`；Unix `www.python.org/ftp/python/` | 2026-10-28 实测：华为双域 200 + `PK`（NuGet 完整包 14.6 MB）；Unix 2/2 家 200（源码 27 MB）。**Windows 不再用 embeddable**，见 R29 |
 | `node` | Node.js | M2/M4/M6 `…/nodejs-release/v<v>/`、M1 `repo.huaweicloud.com/nodejs/v<v>/`、N1 `registry.npmmirror.com/-/binary/node/v<v>/` | `nodejs.org/dist/` | 5/5 家 200（29~47 MB） |
 | `git` | Git for Windows | **Windows 有真镜像**：M1b `mirrors.huaweicloud.com/git-for-windows/<v>.windows.1/PortableGit-<v>-64-bit.7z.exe`、M1 `repo.huaweicloud.com/…`、N1 `registry.npmmirror.com/-/binary/git-for-windows/…`（三家实测 200 / 63 MB），再补 `GH_ACCELERATORS` | `github.com/git-for-windows/git/releases/download/` | 2026-10-28 起用 **PortableGit 完整版**（含 Git Bash / Perl / OpenSSH），不再用 MinGit；Linux/macOS **不再给 URL**，`_git_urls()` 只返回 `Windows` 键，由 `unsupported_platform_hint` 引导 apt/dnf/yum/brew（R1.1 例外） |
 | `conda` | Miniconda | M2 清华、M4 南大、M6 北外、M5 中科大 `…/anaconda/miniconda/`（文件名与官方一致）。华为 `repo.huaweicloud.com/anaconda/` 对任意路径都 301 到软 404 HTML 页（假成功），已删除 | `repo.anaconda.com/miniconda/` | 4/4 家 200（90~149 MB） |
@@ -1836,7 +1840,7 @@ chip 初始文字、自动失败不写日志 / 手动失败要回答，外加 R1
 |---|---|---|---|
 | `idle` / `checking` | `v1.2.1` | 默认 | 查一次 |
 | `latest` | `v1.2.1` | 默认 | 再查一次（tooltip 写明"已是最新"） |
-| `update` | `↓ v1.2.2` | 琥珀 | **直接下到 `download_dir`**，不弹确认、不弹目录框 |
+| `update` | `↓ v1.2.3` | 琥珀 | **直接下到 `download_dir`**，不弹确认、不弹目录框 |
 | `downloading` | `↓ 37%` | 琥珀 | 不开第二路，只回一句"正在下载" |
 | `error` | `? v1.2.1` | 灰 + 虚线边 | 再查一次（tooltip 带失败原因） |
 
@@ -2686,6 +2690,40 @@ CAT_SERVER 少一个、CAT_LAUNCH 多一个。（`caddy` / `traefik` 仍未接�
 `prometheus` / `victoriametrics` 同理（单二进制、9090/8428，但要先定配置文件从哪来）。
 这四个是下一批的自然候选，方法同本节。
 
+### R20.10 Flutter SDK 与 Android SDK（2026-10-21）
+
+用户点名接两个：**Flutter SDK（stable）**、**Android SDK**。两者都归「开发环境」，
+登记在 `build_components()` 里（不走 `_CLI_TOOLS` —— 它们有 `XXX_HOME`）。
+
+**这两个包都没下整包**：1.9 GB / 155 MB 的 zip 用远端**中央目录**口径验布局 ——
+Range 取末尾 128 KB 找 EOCD → 按 CD offset 再取目录区 → 逐条读 `PK\x01\x02`。
+结论与实收字节数：
+
+| 组件 | 大小 | 顶层 | 可执行文件 | 源序（byte-tools UA 实测） |
+|------|------|------|-----------|---------------------------|
+| Flutter 3.47.7 | 1,934,624,561 B | 只有 `flutter/` | `flutter/bin/flutter.bat` | 腾讯 817 > 南大 686 > flutter-io.cn 311 > 官方 35 KB/s |
+| cmdline-tools 23.0 (16111833) | 154,957,218 B | 只有 `cmdline-tools/` | `cmdline-tools/bin/sdkmanager.bat` | 腾讯 1747 KB/s；`dl.google.com` 本机整站 **500**（连 repository2-3.xml 都 500） |
+
+两个包的顶层单目录都会被 `extract_archive` 塌掉，所以 `path_subdir="bin"`。
+
+**四个坑（写错都不会报错，只会"看起来能装、用不了"）**：
+
+1. **Flutter 的镜像路径必须带 `/flutter/` 一层**（与 dart 同款）：
+   `mirrors.cloud.tencent.com/flutter/flutter_infra_release/...`；
+   `flutter-io.cn` 是官方中国镜像根，**不带**这一层。清华/中科大/阿里/上交实测 404。
+2. **Android 只有腾讯一个真镜像**（阿里/清华/南大的 `AndroidSDK/` 目录 404），
+   所以登记进 `SINGLE_SOURCE_EXCEPTION["android-sdk"]=1`，官方 `dl.google.com` 末位兜底。
+3. **cmdline-tools 23.0 里的 `sdkmanager` 已是弃用包装**，转调同目录 `android.exe`
+   （新版 Android CLI）。`--version` 在解析 SDK 根目录**之前**返回，所以平铺布局也能探测；
+   但**装包必须显式 `--sdk_root=%ANDROID_HOME%`** —— 脚本只认 `<sdk>\cmdline-tools\<ver>\bin`
+   这个标准位置，否则直接报 `Could not determine SDK root`。这句话写进了 `data_note`
+   与 `COMPONENT_USAGE`，并由 `bt_new_components_tests` 钉住。
+4. **Flutter 版本清单不能取 JSON 前 N 条**：`releases[]` 是时间倒序且混着 hotfix，
+   要按 `channel=="stable"` + `archive` 是 Windows zip 过滤后再用 `_version_parts` 逐段排序。
+
+`ANDROID_HOME` 指向当前生效版本目录 ⇒ 多版本各带一套 SDK 内容（platforms/build-tools
+跟着版本走）。这是本项目"一版本一目录"模型的自然结果，已在 `data_note` 里说明。
+
 ## 规则 R21：「官网下载」是只下载里更弱的一档，为的是"先把组件都收进来"（2026-10-15）
 
 ### R21.1 规则描述
@@ -2875,11 +2913,153 @@ cmdline→CRT 那一层，与 shell 的 locale 无关）。
   `path_effective_check` 是按真实文件系统找命令的，夹具必须自己造出"压住命令的那个目录"，
   不能指望宿主机装了 `E:\soft\maven\…`）。
 
+## 规则 R25：WSL 环境一键装（2026-10-21）
+
+用户原话：「做装完提示用户重启才生效，不自动帮用户重启」。这条是**红线**，不是建议。
+
+### R25.1 形态
+
+「开发环境」里的 **WSL 卡片**（点「安装向导」）打开 `WslDialog`，两步：
+（标题栏那颗「🐧 WSL」快捷按钮 2026-10-21 按用户要求删掉了 —— 卡片已覆盖，
+两处入口只重复占宽；`_on_wsl_clicked` 保留给卡片的 `wsl_requested` 信号。）
+（2026-10-21 用户反馈「wsl 搜索不到」—— 于是补了一张真正的卡片：`ui_action="wsl"`，
+主按钮「安装向导」；搜索引擎按 key/显示名/summary 自然命中。卡片借
+`download_only=True` 的能力位关掉 PATH/XXX_HOME/卸载那套通用逻辑。）
+
+1. **① 一键安装 WSL**：下载官方运行时 MSI → 一次 UAC 里跑一个固定脚本
+   （`dism` 启用 `Microsoft-Windows-Subsystem-Linux` + `VirtualMachinePlatform`，
+   然后 `msiexec /i wsl.msi /qn /norestart`），脚本把三个退出码写进
+   `~/.env-tools/wsl/install-result.json`。
+2. **② 导入 Ubuntu 24.04**：下载官方 `ubuntu-base-24.04.3-base-amd64.tar.gz`，
+   `wsl --import Ubuntu-24.04 <~/.env-tools/wsl/Ubuntu-24.04> <rootfs> --version 2`；
+   WSL2 失败自动回落 WSL1 并明确告知。
+
+### R25.2 五条硬约束（缺一条就是 bug，`bt_wsl_tests` 钉住）
+
+1. **脚本里不许出现任何重启命令**（`Restart-Computer` / `shutdown` / `reboot`）。
+   装完只写一个 `wsl/needs-reboot` 标记文件并弹一次「需要重启」。
+2. **"等待重启"只认这个标记**，不能用 `windows_reboot_pending()` 当判据 ——
+   本机实测它恒为 True（系统更新在等重启），会让从没装过 WSL 的机器显示
+   "已启用，等待重启生效"。第一版就是这么写错的，对话框截图抓到的。
+3. **不信助手一面之词**：脚本 catch 掉异常也会以 0 退出，所以成功判据是 JSON 里
+   `dism_wsl / dism_vmp / msi` 三个码都在 `{0, 3010}`（3010 = 成功但需重启）。
+4. **`wsl -l -q` 的输出是 UTF-16LE 且不带 BOM**：按 BOM 判会整段乱码，
+   把"已导入"误判成没装。判据用"前 200 字节里有没有 NUL"。
+5. **`wsl --import` 的目标目录必须在 `~/.env-tools/wsl/` 下**：卸载/清理时才能整目录定位，
+   不会把 VHDX 散落到用户目录。
+
+### R25.3 实测口径（2026-10-21，带 `byte-tools` UA，256 KB Range）
+
+| 产物 | 字节数 | 魔数 | 源序 |
+|------|--------|------|------|
+| `wsl.3.0.3.0.x64.msi` | 367,575,040 | `\xd0\xcf\x11\xe0` | 3 个 gh 加速器 → 裸 GitHub |
+| `ubuntu-base-24.04.3-base-amd64.tar.gz` | 29,983,772 | `\x1f\x8b\x08` | nju 703 → ustc 555 → aliyun 387 → tuna 130 → 官方 103 KB/s |
+
+`wsl --install` 被弃用的理由：它会自己去 GitHub 下运行时，不经过本工具的多源故障转移。
+商店路径也不可用：本机 `aka.ms/wslubuntu2404` 会被重定向到 cn.bing.com。
+
+### R25.4 本机没能验到的部分（如实记）
+
+本会话所在 shell **没有交互桌面、也没有管理员权限**，所以：
+
+- UAC 弹窗、`dism` 真实执行、`wsl --import` 真实落盘、重启后的第二步 —— 都**没有真机跑过**；
+- 已验到的是：状态探测（本机 inbox wsl.exe 判为"无运行时"）、对话框在真实字体下的排版
+  （`tools/bt_shot_wsl_dialog.py` 出的截图）、脚本逐字内容、下载源的 206 + 魔数 + 字节数。
+
+第一次真机安装时，重点看 `~/.env-tools/wsl/install-result.json` 里三个退出码与
+Windows 版本（`dism` 在 Server 上对 `Get-WindowsOptionalFeature` 的行为需要再确认一次）。
+
+## 规则 R26：版本抓取渠道与「不烧 GitHub 额度」的网页通道（2026-10-21）
+
+### R26.1 现状：103 个抓取器，两条主线
+
+- **63 个走官方机读入口**：Adoptium API、nodejs.org/dist、python.org 目录、go.dev、
+  Apache 归档列表、HashiCorp releases API、JetBrains、Grafana、Docker Hub、
+  GitHub 之外的各家 CDN / 厂商接口（详见各 fetcher 的 docstring）。
+- **40 个走 GitHub**：其中 **30 个**由 `make_github_asset_fetcher` 统一生成，
+  另外 10 个（git / kubectl / rabbitmq / seata / mongodb / postgresql / powershell /
+  bun / erlang / elasticsearch）有自己的定制抓取器。
+
+GitHub 匿名 API 是 **60 次/小时/IP**；项目原有的三道保护：磁盘缓存 24 小时、
+`GITHUB_TOKEN` / `GH_TOKEN` 把额度提到 5000、以及命中 403 后**整批快速收尾**
+（`_gh_limited_now()`），失败就回退内置清单。
+
+### R26.2 新增：网页兜底（不占 API 额度）
+
+2026-10-21 实测两条普通网页可用（带 `byte-tools` UA，普通 `github.com` 即可，
+不必走加速器）：
+
+| 入口 | 给什么 | 实测 |
+|------|--------|------|
+| `https://github.com/<repo>/releases.atom` | 精确 tag（链接里的 `/releases/tag/<tag>`） | 26–406 KB，200 |
+| `https://github.com/<repo>/releases/expanded_assets/<tag>` | 产物文件名 + 人读体积 | 119–157 KB，200 |
+
+实现：`github_releases_no_api()` / `_gh_parse_asset_page()` / `_gh_human_size()`；
+`make_github_asset_fetcher` 在 API 抛错时自动切过去，两条都失败才报错（错误信息里
+两个原因都带上）。
+
+**三个不能想当然的点**：
+
+1. **tag 不能从 atom 标题里抠**：bun 的标题是 `Bun v1.4.3`、jq 是 `jq 1.8.2`、
+   gh 是 `GitHub CLI 2.102.1` —— 统一从 `<link ... /releases/tag/<tag>>` 取，
+   并且 URL 解码（`@biomejs/biome@2.5.15` 在链接里是 `%40biomejs%2Fbiome%40...`）。
+2. **atom 不带 prerelease 标记**：按 tag 里的 `alpha/beta/rc/pre/preview/dev/
+   snapshot/nightly/canary` 保守过滤（宁可少列一个预发布，也不能把 rc 当正式版）。
+3. **资产页必须按行切块解析**：页面里混着校验值与图标，全局"名字数组 × 体积数组"
+   一漏就整体错位；按 `releases/download/` 切块后取本块第一个体积。
+
+### R26.3 边界
+
+网页通道是**兜底**不是主路径：API 能给出 `prerelease` 与精确 `size`，网页只能给出
+近似体积（`1.87 MB` → 2,000,000 上下），所以 API 可用时仍走 API。
+定制抓取器（那 10 个）暂未接这条兜底 —— 它们的 API 调用里夹着额外字段，
+需要逐个改，等真遇到限流再做。
+
+## 规则 R27：Xcode / Xcode SDK（2026-10-21）
+
+用户点名要接，但两个都**只能跑在 macOS 上**，且 Apple 没有免登录直链
+（App Store / 开发者账号是唯一分发渠道）。因此按 R21 的 `official_page_only` 登记：
+
+- `xcode` → `https://developer.apple.com/xcode/`
+- `xcode-sdk` → `https://developer.apple.com/download/all/`
+  （「Xcode SDK」= Xcode 随附的平台 SDK + Command Line Tools，Apple 不单独分发）
+
+两行都写在 `_DEVTOOLS` 表里、`rows=()`，并在第 6 个位置给了 **platform_hint**
+（`_download_only_components` 为此新增了可选的第 6 项）：默认那句"当前只登记了
+Windows 官方直链"对 macOS 独占组件是假话。
+`DEFERRED_KEYS` 里原先的 `xcode` 条目已移除 —— 它不再是"不敢登记"，而是"登记成官网入口"。
+
+## 规则 R28：第二道测试护栏 —— 真实用户环境变量（2026-10-21）
+
+**事故**：`bt_external_version_tests` 新加的日志文案用例调了
+`ComponentCard.on_configure_clicked` → `_apply_active` → `apply_active_version`，
+而 `ExternalSandbox` 只接了 `*_env_raw` 四个接缝；`EnvManager.write_user_env` /
+`add_path_entry` 走的是**另一组**持久层出口：
+
+    _read_windows_user_path / _write_registry_env / _delete_windows_user_env
+
+于是测试**真把用户 HKCU 的 JAVA_HOME 与 PATH 写成了已删除的 `%TEMP%\tmpXXXX\env-tools\jdk\jdk-21`**。
+症状不是测试红，而是**之后的** `bt_launch_tests` 三连失败：`prereq_components(jenkins)`
+读到"有 JAVA_HOME 但版本读不出" ⇒ 判定缺 JDK ⇒ 点启动先去装前置，不再起 start worker。
+
+**修法两条，缺一不可**：
+
+1. `ExternalSandbox.__init__` 里把上面三条也接进内存（与 `hkcu` 字典共用同一份存储）。
+2. `tests/run_all_tests.py` 每个套件前后快照 `HKCU\Environment`：
+   新增/删除键、或值被写成 `%TEMP%\tmp*` ⇒ 判该套件失败并给出修法。
+   这层护栏**独立于** config.json 护栏 —— 后者只看目录，完全看不见注册表。
+
+**教训**：给测试加沙箱时，先 `grep` 被测函数最终落到哪个 `EnvManager` 静态方法，
+再接**那一层**；"我接了几个 raw 接缝"不等于"写侧被封住了"。
+本机自检手法（不依赖测试）：
+
+    .venv/Scripts/python.exe -c "import winreg;..."   # 快照 Path/JAVA_HOME 前后对比
+
 ---
 
-## 规则 R25：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包（2026-10-28）
+## 规则 R29：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包（2026-10-28）
 
-### R25.1 规则描述
+### R29.1 规则描述
 
 用户 2026-10-28 要求：盘点全部可装配组件，凡是"便携版 / 精简版"一律换成官方完整版。
 
@@ -2898,7 +3078,7 @@ cmdline→CRT 那一层，与 shell 的 locale 无关）。
 | Python（Windows） | `python-<v>-embed-amd64.zip`（embeddable） | 官方 NuGet 包 `python.<v>.nupkg` 的 `tools/`（完整标准库 + pip + venv；NuGet 发行形态**不含 tkinter / IDLE**） | embeddable 没有 `Lib/`、`venv`、`ensurepip`；卡片写着"pip 包管理"，实际 `python -m pip` / `python -m venv` 都不可用 |
 | Git（Windows） | `MinGit-<v>-64-bit.zip` | `PortableGit-<v>-64-bit.7z.exe` | MinGit 只有最小命令集，没有 Git Bash / Perl / OpenSSH |
 
-### R25.2 硬约束
+### R29.2 硬约束
 
 1. **判据是"官方发行形态是否完整"，不是"包是不是 zip"**。官方只发 zip 的组件（Node / JDK…）
    不算精简版，不许为了"完整"去换第三方安装器。
@@ -2919,7 +3099,7 @@ cmdline→CRT 那一层，与 shell 的 locale 无关）。
    （同版本安装本来就会覆盖目录）。不做自动删除/替换是有意的：未经确认删用户目录
    风险太高，且无法判断用户是否还在用那份旧环境。
 
-### R25.3 真机验收（2026-10-28 实测记录）
+### R29.3 真机验收（2026-10-28 实测记录）
 
 - Python 3.12.4 NuGet：`tools/python.exe` → 3.12.4；`python -m pip --version` → pip 24.0；
   `python -m venv <tmp>` 建出的 venv 里 `python -m pip --version` → pip 24.0。
@@ -2928,9 +3108,10 @@ cmdline→CRT 那一层，与 shell 的 locale 无关）。
 - 两条都走 `install_downloaded()` 的完整落位路径（下载 → 解压 → move 到 install_dir），
   不是只解压到临时目录。
 
-### R25.4 护栏
+### R29.4 护栏
 
 - `bt_mirror_spec_tests.test_python_versions_use_the_full_nuget_package`
 - `bt_mirror_spec_tests.test_git_versions_use_portablegit_not_mingit`
 - `bt_multiversion_tests.PythonPathDirHoldsTheInterpreter`
 - `bt_install_safety_tests.ArchiveTraversalGuard.test_7z_sfx_is_extracted_not_copied_as_a_binary`
+

@@ -6,8 +6,8 @@
 
 <p align="center">
   一台新 Windows / macOS / Linux 机器，<b>点几下鼠标就装好整套开发环境</b>。<br/>
-  <b>80 个</b>常用组件全流程自动（下载 → 解压 → 写环境变量 → 自检），<br/>
-  <b>39 个</b>常用开发工具给官方安装包直链（只下载），<b>17 个</b>服务另支持一键启停与访问页直达。
+  <b>82 个</b>常用组件全流程自动（下载 → 解压 → 写环境变量 → 自检），<br/>
+  <b>41 个</b>常用开发工具给官方安装包直链（只下载），<b>17 个</b>服务另支持一键启停与访问页直达。
 </p>
 
 <p align="center">
@@ -76,18 +76,19 @@
 ## 亮点
 
 - **一份代码三平台**：自动判断系统与 CPU 架构（Apple Silicon 下 JDK 走 aarch64、Node 走 arm64）。
-- **80 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
-- **39 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
+- **82 个组件一键装配**：下载 → 解压 → `XXX_HOME` + `PATH` 全流程自动，装完即用。
+- **41 个开发工具只下载**：IDE / 数据库客户端 / API 工具 / 终端类给官方安装包直链，能看版本清单、点「下载」下到你选的目录（记住上次位置，下完可打开所在文件夹）。**本工具不解压、不配环境变量、不代跑安装程序**——授权与安装步骤由你自己确认。官方同时发安装器与便携包的（IDEA / PyCharm / CLion / WebStorm / GoLand / DataGrip / VS Code / DBX，以及 HeidiSQL / Bruno / Another Redis Desktop Manager / MongoDB Compass / MySQL Workbench），按钮写成「下载 ▾」，点开让你挑哪一种、并标着体积。
 - **17 个服务一键启停**：Tomcat、Nginx、ActiveMQ、RocketMQ、Kafka、Elasticsearch、Seata、Nacos、RabbitMQ、Jenkins、Redis、MySQL、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO 不必再自己敲启动脚本。端口被占用时按既定策略处理并在确认框里说清楚（不平移端口——平移会让外部客户端连不上）；「停止」停不下来时只询问是否强制结束，不会背着你强杀。状态以**端口整簇是否都在听**为准（Nacos 的主口 + gRPC、Kafka 的 9092+9093、RocketMQ 的 namesrv+broker、etcd 的 2379+2380 都算），关掉工具重开也认得出正在跑什么，且识别状态的过程**绝不执行任何启动脚本**。Kafka / RocketMQ / RabbitMQ 这类"浏览器打开必然失败"的协议端口型组件，由工具自带的**独立小服务**给一张状态页——写着运行状态、端口、访问方式、登录信息与日志路径，**服务停掉后刷新会自动变成"已停止"**，不会留一张永远说"成功"的假告示；这个页服务是独立进程，**关掉工具后访问页仍然打得开**。已在 Windows 真机逐个跑完「下载安装 → 启动 → 整簇端口监听 → 协议探活（如 `rabbitmqctl status`、Kafka `BrokerApiVersions`）→ 停止 → 端口释放」；**macOS 与 Linux 尚未真机验证**（见 `DEVELOPMENT.md` 规则 R5）。
 - **前置运行时自动就位**：需要 JDK 的组件（Jenkins / Nacos / Kafka / RocketMQ / ActiveMQ / Tomcat / Seata）在本机没有 JDK 或版本太低时，点「启动」会先自动下载安装一个够用的 JDK 再继续；RabbitMQ 需要的 Erlang/OTP 同理（按 RabbitMQ 版本自动配 27.x / 26.x）。用户不需要自己准备任何前置依赖，也不用手改文件。
 - **国内镜像优先 + 多源故障转移**：内置 11 家大陆镜像基址与 3 个 GitHub 加速器，按"大陆源在前 → 逐个换源 → 末位回退官网"走，全程中文日志，**无需手动改 URL**（少数组件只有官网一个源，见[平台支持与例外](#平台支持与例外)）。
-- **多版本并存 + 生效版本切换**：80 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
+- **多版本并存 + 生效版本切换**：82 个可装配组件都可以同时装多个版本（2026-06-06 起全量开放，不再限那几个），并在界面上显式指定哪个生效。切换中途失败自动回滚，不会留下"变量指 A、`PATH` 指 B"的半套配置；下拉框里带**绿色对勾**的版本 = 磁盘上已经装好。
 - **接管你自己装的那一份 + 一键还原**：机器上原有、放在本工具目录之外的 JDK / Maven / Node 等也能被扫描出来设为生效版本（扫描只读，逐个真跑版本命令确认）。动你的系统设置之前先存原文快照，改动后可按原文逐字还原。五道硬规则（原文快照 / 最小编辑 / 关键条目校验 / 复验 / 可还原）缺一不执行。
 - **卸载只删你选中的那个版本**：同组件其它版本的目录、环境变量、`PATH` 条目一概不碰；删掉的正是生效版本时会自动重排。另有标题栏「🧹 清理残留 PATH」清掉指向本工具目录但已不存在的死条目。
+- **WSL 环境一键装（Windows）**：「开发环境」里那张 **WSL (Ubuntu 24.04)** 卡片，点「安装向导」一键启用系统功能、装官方运行时，再把 Ubuntu 24.04 的官方基础镜像导入成本地 Linux（约 380 MB，走镜像加速）。**系统功能装完会提示你手动重启，工具不会替你重启**；重启回来点第二步即可导入，装完可直接开终端。
 - **检查更新，但不替换自己**：标题栏那颗版本号兼任状态灯（六种状态见[界面导览](#界面导览)）。发现新版点一下就直接下到你选的目录，**不会改名或覆盖正在运行的程序**，也不上传任何用户信息。
 - **下载可靠性**：所有请求固定携带专用 User-Agent（部分高校镜像站会屏蔽默认 UA 返回 403）；下载完成后校验实际字节数，遇到"假 200 空文件"自动换下一个源，不会留下坏包。
 - **动态版本清单 + 24 小时缓存**：启动后从各家官方 API / 索引拉最新版本，拉到的清单落盘缓存一天（省 GitHub 的匿名额度），拉不到就安静回退内置清单，离线也能用。
-- **搜索与过滤**：184 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
+- **搜索与过滤**：189 个组件不必逐页翻——顶部搜索框按名称 / 标识全组件模糊过滤，命中项按分类归并到同一结果列表（带分类小标题），清空即恢复；版本下拉框可直接键入 `21` / `3.12` / `LTS` 实时过滤。
 - **环境变量写入不用 `setx`**：Windows 用 `winreg` 直写注册表（`setx` 有 1024 字符截断），按单条目增删 `PATH`，写完点名通知资源管理器；macOS / Linux 写入带标记的 shell 配置块，幂等更新。
 - **界面**：无边框自定义窗口、卡片按窗口宽度自动分列（可切「▦ 网格 / ☰ 列表」）、渐变进度条、状态胶囊标签、彩色分级中文日志（浮层可收起，**不会自己弹出来**——出现 warn / error 只在「📋 日志」按钮上挂一个未读条数）、窗口图标在任务栏与 Alt+Tab 可见、记住上次每个组件选中的版本。
 - **平台不支持时会说清楚**：有 2 个组件在 Windows 上没有可用的免安装形态（`Docker`、`Pulsar`），卡片上会写明原因并给替代做法，**不会**先装一个跑不起来的东西再让你自己猜。
@@ -102,7 +103,7 @@
    |---|---|
    | 🟢 `✓ 已配置（PATH）· openjdk version "17.0.10"` | 系统已能找到，无需再装（末尾的版本号是后台异步探测补上的） |
    | 🟠 `● 已下载，未配置` | 本地已有安装包，但环境变量还没设 |
-   | 🟢 `● 已装 2 个版本 · 生效 21（21、17）` | 80 个可装配组件都用这套标签：括号内是磁盘上已装的版本（新→旧），`生效 21` 是当前生效版本 |
+   | 🟢 `● 已装 2 个版本 · 生效 21（21、17）` | 82 个可装配组件都用这套标签：括号内是磁盘上已装的版本（新→旧），`生效 21` 是当前生效版本 |
    | 🟠 `● 已装 2 个版本 · 均未生效（21、17）` | 装了版本，但系统的 `XXX_HOME` / `PATH` 没指向其中任何一个 |
    | 🔴 `○ 未安装` | 一个版本都没装 |
 
@@ -112,7 +113,7 @@
 3. 点「安装」，工具依次做：流式下载到 `~/.env-tools/<组件>/downloads/`（镜像优先、失败自动换源、可随时取消）→ 解压到 `~/.env-tools/<组件>/<组件>-<版本>/`（Miniconda 走静默安装器）→ 写 `XXX_HOME` 并把 `bin` 加进 `PATH` → 刷新该卡片状态。同一组件的旧版本目录**不会被删**，装第二个版本就是多版本并存。
 4. 想看每一步细节，点搜索条上的「📋 日志」。
 
-按钮的两条可用性规则：**下拉框选中的版本磁盘上已经装着时，「安装」是灰的**（悬停提示"要重新安装请先点「卸载」"，避免覆盖已装好的目录；想重装就先卸载再装。「开发工具」那 38 个是「下载」按钮，不适用这条）；**选中的版本已经是生效版本时，「切换」是灰的**（悬停提示"要换版本先在下拉框里选中"）。
+按钮的两条可用性规则：**下拉框选中的版本磁盘上已经装着时，「安装」是灰的**（悬停提示"要重新安装请先点「卸载」"，避免覆盖已装好的目录；想重装就先卸载再装。「开发工具」那 40 个是「下载」按钮，不适用这条）；**选中的版本已经是生效版本时，「切换」是灰的**（悬停提示"要换版本先在下拉框里选中"）。
 
 装完之后**新开一个终端**验证：
 
@@ -127,14 +128,14 @@ node -v
 
 ## 支持的组件
 
-共 **184 个**：**80 个可一键装配** + **104 个只提供官方安装包下载**（104 = 39 个 GUI 工具 + 65 个 Agent 客户端；80 个里有 17 个还额外支持一键启停）。界面按五个 Tab 分组，Tab 标题自带数量：
+共 **189 个**：**82 个可一键装配** + **106 个只提供官方安装包下载**（106 = 41 个 GUI 工具 + 65 个 Agent 客户端）+ **1 个 WSL 安装向导**（「开发环境」里那张 WSL 卡）；82 个里有 17 个还额外支持一键启停。界面按五个 Tab 分组，Tab 标题自带数量：
 
 | Tab | 数量 | 成员 |
 |-----|------|------|
 | 一键启停 | 17 | Tomcat、Nginx、RabbitMQ、Kafka、RocketMQ、ActiveMQ、Nacos、Seata、Elasticsearch、Jenkins、Redis、MySQL、NATS Server、etcd、Consul、Apache ZooKeeper、MinIO |
 | 服务端组件 | 21 | MongoDB、PostgreSQL、Pulsar、Docker、kubectl、Trivy、k9s、Docker Compose v2、Helm、Caddy、Traefik、Apache JMeter、Terraform、OpenTofu、Argo CD CLI、Prometheus、VictoriaMetrics、k6、Pulumi、Istio CLI、Talos Linux CLI |
-| 开发环境 | 42 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant、Elixir、Scala CLI、Bazelisk、Just、Task、Oxlint、Biome、Nushell、Starship、GitHub CLI |
-| 开发工具 | 39 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim)、CC-Switch、CodexAppManager、DevSidecar |
+| 开发环境 | 45 | JDK、Python、Node.js、Go、Bun、Miniconda、Git、Maven、Gradle、PowerShell 7、Kotlin、GraalVM、Rust、Dart、Flutter SDK、Android SDK、WSL (Ubuntu 24.04)、protoc、uv、.NET SDK、SQLite、jq、pnpm、Deno、Ninja、DuckDB CLI、CMake、ripgrep、fd、bat、eza、zoxide、fzf、yq、Apache Ant、Elixir、Scala CLI、Bazelisk、Just、Task、Oxlint、Biome、Nushell、Starship、GitHub CLI |
+| 开发工具 | 41 | IntelliJ IDEA、PyCharm、CLion、WebStorm、GoLand、DataGrip、VS Code、DBX、WindTerm、微信开发者工具、Eclipse IDE、Apipost、Apifox、HBuilderX、Android Studio、Visual Studio、Navicat、DBeaver、HeidiSQL、Bruno、RedisInsight、Another Redis Desktop Manager、MongoDB Compass、pgAdmin 4、MySQL Workbench、Postman、Notepad++、Wireshark、GitKraken、SourceTree、Insomnia、Beekeeper Studio、Obsidian、Zettlr、Yaak、Vim (gVim)、CC-Switch、CodexAppManager、DevSidecar、Xcode、Xcode SDK（后两个仅 macOS） |
 | Agent客户端 | 65 | Cursor、ZCode、Claude Code、Codex CLI、opencode、OpenHands、Cherry Studio、Goose、Qwen Code、Crush、Kiro、Jan、OpenClaw、Hermes Agent、Gemini CLI、Aider、Ollama、LM Studio、GPT4All、AnythingLLM、LobeHub、GitHub Copilot CLI、ima（腾讯）、Kilo Code、Wave Terminal、Msty Studio、Mistral Vibe、Kimi Work、QoderWork CN、Trae、Trae CN、Qoder IDE、腾讯 CodeBuddy、Zed、Cline、Reasonix、ChatGPT、Claude 桌面版、Google Gemini、Google Antigravity、Windsurf (Devin)、Marvis（腾讯）、悟空（钉钉）、Kimi、Kimi Code、MiniMax Code、阶跃AI 桌面伙伴、纳米AI、天工 AI、DeepSeek Harness、秘塔AI搜索、LobsterAI（有道）、AutoClaw（智谱）、百度搭子 DuMate、OpenWorker、Orkas、WorkBuddy、豆包、腾讯元宝、通义千问、通义灵码、文心（文小言）、智谱清言、讯飞星火、Qoder CLI |
 
 > **Agent客户端这一 Tab 有两档**：65 个里 **57 个**有实测过的官方直链，卡片主按钮是「下载」；
@@ -279,7 +280,7 @@ node -v
 | uv | `uv --version` | 0.13.x | Python 包 / 环境管理器，见上面 [Python 发行版](#python-发行版) |
 | protoc | `protoc --version` | 36.x | 见上面 [构建工具](#构建工具) |
 
-### 关于那 38 个「开发工具」
+### 关于那 40 个「开发工具」
 
 它们是 GUI 软件，本工具只负责"把官方安装包下到你选的目录"，所以卡片上**只有版本下拉框和下载按钮**——没有绿勾、不扫你的磁盘、没有切换与卸载按钮，也不会解压或写环境变量。
 
@@ -316,7 +317,7 @@ node -v
 
 ### 同一组件装多个版本，切换「生效版本」
 
-80 个可装配组件全都支持多版本并存（只下载的 102 个磁盘上不落东西，不在这一类），每个版本一个目录：`~/.env-tools/<组件>/<组件>-<版本>/`（例如 `jdk-21` 与 `jdk-17` 并存）。界面上的「生效版本」指明"系统现在实际在用哪一个"。
+82 个可装配组件全都支持多版本并存（只下载的 104 个磁盘上不落东西，不在这一类），每个版本一个目录：`~/.env-tools/<组件>/<组件>-<版本>/`（例如 `jdk-21` 与 `jdk-17` 并存）。界面上的「生效版本」指明"系统现在实际在用哪一个"。
 
 - **绿色对勾 = 磁盘上已装**。带勾的版本可以直接点「卸载」；没勾的点了也没东西可删，所以「卸载」是灰的。
 - **已装版本一定会出现在下拉框里**。在线清单会更新，某个版本可能已被挪出清单但你磁盘上还装着——这时下拉框会按版本号大小把它补回原位并带上绿勾；否则这种版本既选不中、也切不了、还卸不掉，只能手工删目录。补录对所有可装配组件一视同仁（2026-10-06 起）——原先只给多版本组件补，jenkins / nacos 这类照样会遇到「清单里没有、磁盘上装着」。
@@ -397,10 +398,10 @@ where java
 
 | 位置 | 内容 |
 |---|---|
-| 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.2 检查中` = 正在查；`v1.2.2 最新` = 已是最新；`↓ v1.2.3 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.2 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
+| 标题栏（左） | 图标 + 软件名 + **版本号 chip**。chip 兼任状态灯：普通 = 还没查；`⟳ v1.2.3 检查中` = 正在查；`v1.2.3 最新` = 已是最新；`↓ v1.2.4 待更新`（琥珀色）= 有新版，**点一下直接下载**；`↓ 37%` = 正在下载；`? v1.2.3 未查到`（灰色虚线）= 没查到，tooltip 写明失败原因。**任何时刻版本号都在**——报问题第一眼要能对上版本 |
 | 标题栏（右） | 「★ GitHub」打开仓库 · 「⟳ 刷新版本」绕过缓存强制重抓在线清单 · 「🧹 清理残留 PATH」清死条目 · 「♥」支持作者 · 最小化 / 最大化 / 关闭 |
-| 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 184 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
-| 卡片区 | 四个横向 Tab（标题带数量）。每张卡片：名称、状态标签（悬停看完整说明）、版本下拉（可搜索，磁盘已装的带绿勾）、操作按钮（安装 / 切换 / 卸载，可启停的还有启动 / 停止 / 控制台或访问页，只下载的只有下载）、渐变进度条。卡片按窗口宽度自动分列 |
+| 搜索条 | 组件搜索框（按名称 / 标识模糊过滤，右侧实时显示"匹配 N / 189 个组件"）；搜索时收起 Tab，把命中组件按分类归并到同一结果列表（带分类小标题），一眼看全、不用切页，清空即恢复；旁边是「▦ 网格 / ☰ 列表」视图切换与「📋 日志」开关 |
+| 卡片区 | 五个横向 Tab（标题带数量）。每张卡片：名称、状态标签（悬停看完整说明）、版本下拉（可搜索，磁盘已装的带绿勾）、操作按钮（安装 / 切换 / 卸载，可启停的还有启动 / 停止 / 控制台或访问页，只下载的只有下载）、渐变进度条。卡片按窗口宽度自动分列 |
 | 日志浮层 | 默认收起、浮在卡片区下方；点「📋 日志」展开、再点收起。**不会自动弹开**——出现 warn / error 时只在按钮上挂未读条数（`📋 日志 (N)`），想看才点。浮层里可「导出诊断」（诊断报告 + 本次会话日志，反馈问题时附上它）。四色分级（info 灰、ok 绿、warn 橙、error 红），全程中文（含镜像切换与故障转移过程） |
 | 底部状态栏 | 系统信息、**可点开的工作目录**（点一下在资源管理器里打开）、组件计数。版本号不在这里，在标题栏那颗 chip |
 
@@ -515,7 +516,7 @@ components.append(
 
 ### 版本清单缓存与 GitHub 额度
 
-在线版本清单**抓成功会落盘**（`~/.env-tools/version_cache.json`，一天内不重抓）。原因很实际：GitHub 匿名 API 的额度是**每个 IP 每小时 60 次**，而本工具一次启动要替 100 个组件各抓一次版本清单（其中一大批打的正是 GitHub API）——一小时内第二次打开工具、或者连点几次刷新，额度就会见底，日志里就会出现成片的"获取失败"。GitHub-only 组件的版本元数据现在**先走国内反向代理** `gh-proxy.com`（不转发你的 token），代理失败再回直连。
+在线版本清单**抓成功会落盘**（`~/.env-tools/version_cache.json`，一天内不重抓）。原因很实际：GitHub 匿名 API 的额度是**每个 IP 每小时 60 次**，而本工具一次启动要替近 190 个组件各抓一次版本清单（其中一大批打的正是 GitHub API）。额度见底时不会只剩"获取失败"：**2026-10-21 起会自动切到网页通道**（`releases.atom` 取 tag + 资产页取文件名与体积，这两条都是普通网页、不占 API 额度），所以额度耗尽时版本照样能刷新，只是列表可能略旧。GitHub-only 组件的版本元数据现在**先走国内反向代理** `gh-proxy.com`（不转发你的 token），代理失败再回直连。另外设了 `GITHUB_TOKEN` 环境变量的机器额度会提到 5000 次/小时。
 
 - 命中缓存时日志会写"沿用 24 小时内抓到的版本清单（N 个组件）"，这次不打网络。
 - 想要最新版本号，点 **「⟳ 刷新版本」**——它绕过缓存强制重抓。
@@ -529,7 +530,7 @@ components.append(
 CONFIG_DIR = Path.home() / ".env-tools"
 ```
 
-「开发工具」那 38 个的**下载目录**是另一件事：第一次下载时记住你选的目录（存在 `config.json`），之后默认落在同一个位置；没记录过、或那个目录后来被删了，就回落到系统「下载」文件夹。这个目录不属于工作目录。
+「开发工具」那 40 个的**下载目录**是另一件事：第一次下载时记住你选的目录（存在 `config.json`），之后默认落在同一个位置；没记录过、或那个目录后来被删了，就回落到系统「下载」文件夹。这个目录不属于工作目录。
 
 ---
 
@@ -557,8 +558,8 @@ pyinstaller byte-tools.spec --noconfirm --clean
 推一个 tag 到 GitHub，`.github/workflows/release.yml` 会在 Windows / macOS / Linux 三个 runner 上分别打包，自动上传到对应的 GitHub Release，并在 Gitee Release 写好产物直链：
 
 ```bash
-git tag v1.2.2
-git push origin v1.2.2
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
 几分钟后 GitHub Release 是完整的正式版本（3 平台 4 个产物）；Gitee 有同名 Release，正文用表格列出三个平台产物的 GitHub 直链。全自动，无需手动点 Publish。
@@ -569,13 +570,13 @@ git push origin v1.2.2
 
 GitHub 侧全自动，**Gitee 侧要你在本机补一步上传**（境外 runner 传大二进制会挂死，国内链路只需几十秒）。前提：改动已合到 `master`，顺序不能反——workflow 取的是 tag 指向那个 commit 里的代码。
 
-1. **推 tag**：`git tag v1.2.2 && git push origin v1.2.2`
+1. **推 tag**：`git tag v1.2.3 && git push origin v1.2.3`
 2. **等 Actions 全绿**。此时 GitHub Release 有 4 个产物且已正式发布；Gitee 有同名 Release，正文是 GitHub 直链表格，但**附件区还是空的**。
 3. **本机把产物传上 Gitee**（令牌走交互输入，不落命令行历史）：
 
    ```bat
    cd /d E:\file\test\byte-tools
-   同步Gitee产物.bat v1.2.2
+   同步Gitee产物.bat v1.2.3
    ```
 
    就这一条。脚本会自己建 `release-assets/`、走 `gh-proxy.com` 把四个产物下进来、再逐个传上 Gitee，跑完 `[3/3]` 核对四个附件是否都在。产物已经在本地了就不重复下载（除非你手动清过目录）。双击 `同步Gitee产物.bat` 也一样：它只会问 tag 和令牌。
@@ -616,10 +617,10 @@ v1.0.2 这类"GitHub 成功、Gitee 没同步好"的情况不用重发包，两�
 ```bat
 REM Windows：先用 curl（走加速器）取产物，再跑上面第 3 步那条命令
 mkdir release-assets
-curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools.exe"
-curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools-windows-x64.zip"
-curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools-macos-arm64.zip"
-curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/ByteTools-linux-x64"
+curl -L -o release-assets\ByteTools.exe               "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.3/ByteTools.exe"
+curl -L -o release-assets\ByteTools-windows-x64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.3/ByteTools-windows-x64.zip"
+curl -L -o release-assets\ByteTools-macos-arm64.zip   "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.3/ByteTools-macos-arm64.zip"
+curl -L -o release-assets\ByteTools-linux-x64         "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.3/ByteTools-linux-x64"
 dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 ```
 
@@ -627,12 +628,12 @@ dir release-assets       REM 4 个大小要和 GitHub Release 上报的对得上
 # Linux / macOS / Git Bash
 mkdir -p ./release-assets
 for f in ByteTools.exe ByteTools-windows-x64.zip ByteTools-macos-arm64.zip ByteTools-linux-x64; do
-  curl -L -o "./release-assets/$f" "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.2/$f"
+  curl -L -o "./release-assets/$f" "https://gh-proxy.com/https://github.com/jilong2026/byte-tools/releases/download/v1.2.3/$f"
 done
 
 # 令牌用 read -s 现问现用，不落进命令行历史和日志
 read -rsp "Gitee Token: " GITEE_TOKEN; export GITEE_TOKEN; echo
-GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.2.2 \
+GITEE_OWNER=jack_liujilong GITEE_REPO=byte-tools TAG_NAME=v1.2.3 \
 GITHUB_REPO_SLUG=jilong2026/byte-tools ASSETS_DIR=./release-assets \
 "./同步Gitee产物.sh"
 unset GITEE_TOKEN
