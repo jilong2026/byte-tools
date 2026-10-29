@@ -1568,9 +1568,13 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 6. 密码（MySQL root / Redis requirepass）**只走 stdin 与配置文件**，绝不进 argv：
    - MySQL：临时选项文件（`--defaults-extra-file`，文件 ACL 收成当前用户 + SYSTEM +
      Administrators）+ stdin 喂 `ALTER USER`；旧密码错误就如实报错，不重试、不猜。
-   - Redis：写进版本专属 `redis.conf` 的 `requirepass`。
+   - Redis：写进版本专属 `redis.conf` 的 `requirepass`；值统一加双引号转义
+     （不加引号时按空白切分，带空格/`#` 的密码会被静默截断）。
+     设完必须**双向复核**：带密码 `PING` 要 `PONG`，**不带密码必须被 `NOAUTH` 拒绝**
+     （只验前者等于没验：requirepass 没生效时随便给个密码也会 PONG）。
+     密码走 `REDISCLI_AUTH` 环境变量，不用 `-a`（会进命令行历史）。
    - 工具侧用 DPAPI 加密后存 `~/.env-tools/service-secrets.json`，只用于维护。
-   - 护栏 `PasswordNeverInArgv` 双向断言（argv 没有、stdin 有）。
+   - 护栏 `PasswordNeverInArgv`（MySQL）、`RedisPasswordVerification` / `RedisConfQuoting`。
 7. **卸载顺序固定**：停服务 → `mysqld --remove` / `RedisService uninstall` →
    注册表键还在就 `sc delete` → **校验 SCM 已不认它（1060）且
    `HKLM\SYSTEM\CurrentControlSet\Services\<name>` 不存在** → 才允许删版本目录。
@@ -1614,13 +1618,26 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 （官方 CDN + 华为云），只有两边都明确 404 才剔除；探测失败一律保留。
 实测收敛后是 `8.4.0 / 8.0.37 / 5.7.44 / 5.7.43 / 5.7.42`。
 
+**Redis 侧同类问题（2026-10-29 一并修）**：
+
+- `RedisService.exe --help` 真机实测：子命令只有 `install / uninstall / run`，
+  选项是 `-c/--config`、`--port`、`--dir`、`--service-name`、`--display-name`、
+  `--start-mode`。原来 `sc create` 兜底里写的 `--service-run` **根本不存在**，
+  已改成 `run -c "<conf>" --port <port> --dir "<data>"`；install 也补了 `--display-name`。
+- `requirepass` 的密码加双引号转义，`dir` 也加引号（路径带空格时不再静默出错）。
+- `required_files` 扩到 `RedisService.exe / redis-server.exe / redis-cli.exe`
+  —— 少任何一个都不该让用户点下去才发现起不来（redis-cli 还要用于密码复核）。
+- `-with-Service` 资产 8.10.2 实测 HEAD 200，默认清单可用。
+
 **仍未跑过**：关掉工具后服务是否继续存活、在 services.msc 里手工启动、卸载闭环、
 1072、RedisService.exe 的实际 CLI 参数、`sc sdset` 的实际效果。
 已验到的是：
 
-- 全量护栏 1039 条通过（含 `bt_service_tests` 36 条，全部 FakeServiceBackend）；
+- 全量护栏 1046 条通过（含 `bt_service_tests` 43 条，全部 FakeServiceBackend）；
 - UAC 注册服务成功；启动后 SCM 报 RUNNING 且 3306 在监听；root 空密码能真连
   （`SELECT 1` 返回 1）；真实 mysql 客户端接受"`--defaults-extra-file` 在首位"的参数序；
+- `RedisService.exe --help` 的 CLI 契约（子命令/选项）与生成脚本逐项对齐，脚本语法通过
+  PowerShell Parser 校验；
 - 静态脚本内容：`--install` 在首位、`start= demand`、`--remove` + `sc delete` 兜底、
   注册表键复核、SDDL 追加与回滚；
 - MySQL 服务模式下的数据目录初始化仍走 `--initialize-insecure`（与 R5.7 同一套）。

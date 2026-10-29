@@ -421,6 +421,70 @@ class PasswordNeverInArgv(ServiceTestBase):
         self.assertIn("换行", why)
 
 
+class RedisPasswordVerification(ServiceTestBase):
+    """Redis 的 requirepass 必须"设完真验"，且密码不进 argv（走 REDISCLI_AUTH）。"""
+
+    def test_password_goes_in_env_not_argv_and_noauth_must_be_enforced(self):
+        comp = self.ready("redis", "8.10.2")
+        sentinel = "Sentinel!p@ss-2026"
+        outputs = [b"PONG", b"(error) NOAUTH Authentication required."]
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), dict(kwargs.get("env") or {})))
+            return mock.Mock(returncode=0, stdout=outputs[len(calls) - 1])
+
+        with mock.patch.object(main.subprocess, "run", side_effect=fake_run):
+            ok, why = main.redis_verify_auth(comp, "8.10.2", 6379, sentinel)
+        self.assertTrue(ok, why)
+        self.assertEqual(calls[0][1].get("REDISCLI_AUTH"), sentinel)
+        for argv, _env in calls:
+            self.assertNotIn(sentinel, " ".join(argv))
+        self.assertNotIn("REDISCLI_AUTH", calls[1][1], "匿名复核必须显式去掉环境变量")
+
+    def test_password_not_enforced_is_reported_as_failure(self):
+        comp = self.ready("redis", "8.10.2")
+        with mock.patch.object(main.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stdout=b"PONG")):
+            ok, why = main.redis_verify_auth(comp, "8.10.2", 6379, "pw")
+        self.assertFalse(ok)
+        self.assertIn("requirepass 没有生效", why)
+
+    def test_wrong_password_is_reported(self):
+        comp = self.ready("redis", "8.10.2")
+        with mock.patch.object(main.subprocess, "run",
+                               return_value=mock.Mock(
+                                   returncode=0,
+                                   stdout=b"WRONGPASS invalid username-password pair")):
+            ok, why = main.redis_verify_auth(comp, "8.10.2", 6379, "pw")
+        self.assertFalse(ok)
+        self.assertIn("WRONGPASS", why)
+
+    def test_unauthenticated_ping_needs_a_password(self):
+        comp = self.ready("redis", "8.10.2")
+        with mock.patch.object(main.subprocess, "run",
+                               return_value=mock.Mock(
+                                   returncode=0,
+                                   stdout=b"(error) NOAUTH Authentication required.")):
+            ok, why = main.redis_verify_auth(comp, "8.10.2", 6379, "")
+        self.assertFalse(ok)
+        self.assertIn("要求密码", why)
+
+
+class RedisConfQuoting(ServiceTestBase):
+    def test_password_with_spaces_and_quotes_is_quoted(self):
+        comp = self.ready("redis", "8.10.2")
+        path = main.write_redis_conf(comp, "8.10.2", 6379, 'a b"c\\d')
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('requirepass "a b\\"c\\\\d"', text)
+        self.assertIn('dir "', text, "路径要加引号，带空格时才不会读错")
+
+    def test_newline_in_password_is_refused(self):
+        comp = self.ready("redis", "8.10.2")
+        with self.assertRaises(ValueError):
+            main.write_redis_conf(comp, "8.10.2", 6379, "a\nb")
+
+
 class ServiceScriptShape(ServiceTestBase):
     def test_sddl_grant_is_idempotent_and_has_a_rollback(self):
         body = main._grant_user_control_ps("ByteTools-MySQL-8.0.37")
@@ -435,6 +499,16 @@ class ServiceScriptShape(ServiceTestBase):
         self.assertIn("--remove", body)
         self.assertIn("$sc delete", body)
         self.assertIn("marked_for_delete", body)
+
+    def test_redis_install_uses_the_documented_cli(self):
+        """RedisService.exe --help 实测：install / uninstall / run，没有 --service-run。"""
+        comp = self.ready("redis", "8.10.2")
+        body = main._install_service_body(comp, "8.10.2")
+        self.assertIn("install -c $conf", body)
+        self.assertIn("--start-mode manual", body)
+        self.assertIn("run -c", body)
+        self.assertNotIn("--service-run", body)
+        self.assertIn("--display-name", body)
 
 
 class CredentialsHintRendering(ServiceTestBase):
