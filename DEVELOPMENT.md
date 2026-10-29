@@ -1601,11 +1601,26 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 `StartServiceW`，并让 `control()` 对 0x10 直接抛错，护栏
 `bt_service_tests.ServiceStartUsesStartServiceApi` 钉住（真机教训，别改回去）。
 
-**仍未跑过**：服务真正启动后的端口监听、`services.msc` 手工启动、关工具后存活、
-卸载闭环、1072、RedisService.exe 的实际 CLI 参数、`sc sdset` 的实际效果。
+**同一天第二个真机坑：密码一条都没设上。** `mysql` 客户端只在参数扫描**最开头**
+识别 `--defaults-extra-file`，放到末尾会报 `unknown variable 'defaults-extra-file=...'`
+（退出码 7），root 仍是空密码，用户带密码连接就是 1045。已改为"它必须是第一个参数"，
+并且 `ALTER USER` 之后**用新密码真连一次**（`SELECT 1`）复核；复核不过就明确说
+"本次输入的密码没有生效"（`PasswordNeverInArgv` 钉住参数顺序与复核两步）。
+另：日志控件是富文本，`<端口>` 这类尖括号占位符会被当成 HTML 标签吞掉，
+凭证提示统一改成 `{port}` 由 `credentials_for()` 替换。
+
+**版本清单的幽灵条目**：MySQL 归档索引里列着 8.0.38 / 8.0.39，但官方 CDN 与华为云
+都是 404（用户点一次要白等三次失败）。`fetch_mysql_versions` 现在逐版本 HEAD
+（官方 CDN + 华为云），只有两边都明确 404 才剔除；探测失败一律保留。
+实测收敛后是 `8.4.0 / 8.0.37 / 5.7.44 / 5.7.43 / 5.7.42`。
+
+**仍未跑过**：关掉工具后服务是否继续存活、在 services.msc 里手工启动、卸载闭环、
+1072、RedisService.exe 的实际 CLI 参数、`sc sdset` 的实际效果。
 已验到的是：
 
-- 全量护栏 1035 条通过（含 `bt_service_tests` 32 条，全部 FakeServiceBackend）；
+- 全量护栏 1039 条通过（含 `bt_service_tests` 36 条，全部 FakeServiceBackend）；
+- UAC 注册服务成功；启动后 SCM 报 RUNNING 且 3306 在监听；root 空密码能真连
+  （`SELECT 1` 返回 1）；真实 mysql 客户端接受"`--defaults-extra-file` 在首位"的参数序；
 - 静态脚本内容：`--install` 在首位、`start= demand`、`--remove` + `sc delete` 兜底、
   注册表键复核、SDDL 追加与回滚；
 - MySQL 服务模式下的数据目录初始化仍走 `--initialize-insecure`（与 R5.7 同一套）。

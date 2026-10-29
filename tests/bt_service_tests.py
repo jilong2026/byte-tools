@@ -381,21 +381,36 @@ class PasswordNeverInArgv(ServiceTestBase):
         exe = comp.install_dir("8.0.37") / "bin" / "mysql.exe"
         exe.write_bytes(b"MZ")
         sentinel = "Sentinel!p@ss-2026"
-        seen = {}
+        calls = []
 
         def fake_run(argv, **kwargs):
-            seen["argv"] = list(argv)
-            seen["input"] = kwargs.get("input") or b""
-            return mock.Mock(returncode=0, stdout=b"")
+            calls.append((list(argv), kwargs.get("input") or b""))
+            return mock.Mock(returncode=0, stdout=b"1\n")
 
         with mock.patch.object(main.subprocess, "run", side_effect=fake_run), \
                 mock.patch.object(main, "_harden_file_acl", lambda _p: None):
             ok, why = main.mysql_set_root_password(comp, "8.0.37", 3306, sentinel)
         self.assertTrue(ok, why)
-        self.assertNotIn(sentinel, " ".join(seen["argv"]))
-        self.assertIn(sentinel.encode("utf-8"), seen["input"])
-        self.assertTrue(any(a.startswith("--defaults-extra-file=")
-                            for a in seen["argv"]))
+        self.assertEqual(len(calls), 2, "改密码 + 用新密码复核，缺一不可")
+        for argv, payload in calls:
+            self.assertNotIn(sentinel, " ".join(argv))
+            # MySQL 只在参数扫描最开头认 --defaults-extra-file，放到后面就是 87/7
+            self.assertTrue(argv[1].startswith("--defaults-extra-file="), argv)
+        self.assertIn(sentinel.encode("utf-8"), calls[0][1])
+        self.assertIn(b"SELECT 1", calls[1][1])
+
+    def test_failed_verification_is_not_reported_as_success(self):
+        comp = self.ready("mysql", "8.0.37")
+        (comp.install_dir("8.0.37") / "bin" / "mysql.exe").write_bytes(b"MZ")
+        results = [mock.Mock(returncode=0, stdout=b""),
+                   mock.Mock(returncode=1, stdout=b"ERROR 1045 (28000): Access denied")]
+
+        with mock.patch.object(main.subprocess, "run", side_effect=results), \
+                mock.patch.object(main, "_harden_file_acl", lambda _p: None):
+            ok, why = main.mysql_set_root_password(comp, "8.0.37", 3306, "pw")
+        self.assertFalse(ok)
+        self.assertIn("复核失败", why)
+        self.assertIn("1045", why)
 
     def test_newline_in_password_is_rejected_before_running_anything(self):
         comp = self.ready("mysql", "8.0.37")
@@ -420,6 +435,39 @@ class ServiceScriptShape(ServiceTestBase):
         self.assertIn("--remove", body)
         self.assertIn("$sc delete", body)
         self.assertIn("marked_for_delete", body)
+
+
+class CredentialsHintRendering(ServiceTestBase):
+    def test_mysql_hint_carries_the_real_port_and_no_html_tags(self):
+        """日志是富文本：`<端口>` 会被当标签吞掉，真机上就是这么少了一段。"""
+        comp = self.comps["mysql"]
+        text = "\n".join(main.credentials_for(comp, comp.launch, 3306))
+        self.assertIn("-P 3306", text)
+        self.assertNotIn("<端口>", text)
+        self.assertIn("-u root", text)
+
+    def test_redis_hint_carries_the_real_port(self):
+        comp = self.comps["redis"]
+        text = "\n".join(main.credentials_for(comp, comp.launch, 6379))
+        self.assertIn("-p 6379", text)
+        self.assertNotIn("<端口>", text)
+
+
+class MysqlVersionProbe(ServiceTestBase):
+    """版本列表里不许出现"三个源全 404"的幽灵版本（真机 8.0.38/8.0.39）。"""
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    def test_only_versions_with_a_real_windows_zip_are_reported(self):
+        with mock.patch.object(main, "http_session") as sess:
+            sess.return_value.head.return_value = self._Resp(404)
+            self.assertIs(main._mysql_zip_exists("8.0.38"), False)
+            sess.return_value.head.return_value = self._Resp(200)
+            self.assertIs(main._mysql_zip_exists("8.0.37"), True)
+            sess.return_value.head.side_effect = OSError("offline")
+            self.assertIsNone(main._mysql_zip_exists("8.0.36"))
 
 
 class RedisAssetShape(ServiceTestBase):
