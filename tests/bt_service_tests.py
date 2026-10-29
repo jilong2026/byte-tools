@@ -374,6 +374,30 @@ class PreinstallChecks(ServiceTestBase):
         self.assertFalse(main.service_image_is_ours(
             r"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqld.exe", comp))
 
+    def test_image_ownership_accepts_the_raw_root_when_resolve_differs(self):
+        """CI（GitHub Runner）的 TEMP 是 junction：ImagePath 是原始路径，
+        `resolve()` 却会换成另一端的前缀。两种形式都必须认，否则我们自己的服务
+        会被判成"别人的 MySQL"，安装/卸载直接被拒。"""
+        import subprocess
+
+        base = Path(self._tmp.name)
+        real = base / "real"
+        real.mkdir()
+        link = base / "link"
+        try:
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(real)],
+                           check=True, capture_output=True)
+        except Exception:  # noqa: BLE001
+            self.skipTest("当前环境不允许创建 junction，跳过")
+        old = main.CONFIG_DIR
+        main.CONFIG_DIR = link / ".env-tools"
+        self.addCleanup(setattr, main, "CONFIG_DIR", old)
+        ours = str(link / ".env-tools" / "mysql" / "mysql-8.0.37" / "bin" / "mysqld.exe")
+        self.assertNotEqual(str((main.CONFIG_DIR / "mysql").resolve()),
+                            str(main.CONFIG_DIR / "mysql"),
+                            "前提：resolve 必须真的跳到了另一端")
+        self.assertTrue(main.service_image_is_ours(ours, self.comps["mysql"]))
+
 
 class PasswordNeverInArgv(ServiceTestBase):
     def test_password_only_travels_on_stdin_and_the_option_file(self):
