@@ -1633,7 +1633,7 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 1072、RedisService.exe 的实际 CLI 参数、`sc sdset` 的实际效果。
 已验到的是：
 
-- 全量护栏 1046 条通过（含 `bt_service_tests` 43 条，全部 FakeServiceBackend）；
+- 全量护栏 1047 条通过（含 `bt_service_tests` 44 条，全部 FakeServiceBackend）；
 - UAC 注册服务成功；启动后 SCM 报 RUNNING 且 3306 在监听；root 空密码能真连
   （`SELECT 1` 返回 1）；真实 mysql 客户端接受"`--defaults-extra-file` 在首位"的参数序；
 - `RedisService.exe --help` 的 CLI 契约（子命令/选项）与生成脚本逐项对齐，脚本语法通过
