@@ -479,14 +479,34 @@ class AutoFetchContract(unittest.TestCase):
     def test_both_scripts_try_accelerator_first_and_github_last(self):
         """规则 R1 同样适用于这条下载：镜像优先、官网末位。"""
         bat = self._bat()
-        self.assertLess(bat.index('call :curl_fetch "%GH_ACCEL%%RAW%"'),
-                        bat.index('call :curl_fetch "%RAW%"'),
+        self.assertLess(bat.index("for %%A in (!ACCEL_ORDER!) do"),
+                        bat.index('call :curl_fetch "%RAW%" "%DST%"'),
                         "bat 把 github.com 直连排在了加速器前面")
         sh = self._sh()
         self.assertLess(sh.index('"${GH_ACCEL_PREFIX}${GH_DOWNLOAD_BASE}/${_name}"'),
                         sh.index('"${GH_DOWNLOAD_BASE}/${_name}"'),
                         "sh 把 github.com 直连排在了加速器前面")
         self.assertIn('GH_ACCEL_PREFIX="${GH_ACCEL_PREFIX:-https://gh-proxy.com/}"', sh)
+
+    def test_bat_probes_accelerators_on_every_run(self):
+        """加速器速度是按周变的（2026-10-29 gh-proxy 只有 43-76 KB/s），
+        所以每次执行先各拿 2 MB 量一遍，再按实测顺序下载。"""
+        bat = self._bat().replace("\r\n", "\n")
+        self.assertIn("\n:pick_accel\n", bat, "缺探测子过程")
+        self.assertIn("PROBE_CANDIDATES=", bat)
+        self.assertIn("%{speed_download}", bat)
+        self.assertIn("if defined GH_ACCEL (", bat, "GH_ACCEL 必须能钉死并跳过探测")
+        self.assertIn("BEST_S", bat, "没有按实测速度挑最快")
+        # 探测必须排在离线开关之后：AUTO_FETCH_ASSETS=0 时一个字节都不许发
+        self.assertLess(bat.index('if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof'),
+                        bat.index("call :pick_accel"),
+                        "离线模式下仍然探测了网络")
+
+    def test_bat_aborts_a_stalled_transfer_so_failover_can_happen(self):
+        """没有速度闸门时，一个 20 KB/s 的慢源会把 52 MB 拖到半小时，
+        后面更快的源根本没机会被尝试（2026-10-29 实测 30 分钟只下了 84/86 MB）。"""
+        bat = self._bat()
+        self.assertIn("--speed-limit 16384 --speed-time 45", bat)
 
     def test_downloaded_file_is_size_validated_in_both(self):
         """镜像会用 200 + 小 HTML 应付缺失文件，不校验体积就会把假产物传上 Gitee。"""

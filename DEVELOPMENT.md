@@ -249,7 +249,7 @@ kubectl 要走 DaoCloud 的 `files.m.daocloud.io/dl.k8s.io/…` 写法。
 | `kotlin` | Kotlin 编译器 | 无真镜像，走 `GH_ACCELERATORS`：`ghfast.top` → `gh-proxy.com` → `ghproxy.net` | `github.com/JetBrains/kotlin/releases/download/v<v>/kotlin-compiler-<v>.zip` | 三平台同一个 zip（89 MB，编译器是 JVM 产物）。Range 取样实测 206 + `PK`：**gh-proxy.com 18.4 Mbps、ghfast.top 7.2、gh-proxy.org 6.5**；裸 `github.com` 本机 SSLError。包顶层只有 `kotlinc/`（133 条），`bin/kotlinc.bat` 在里面 ⇒ `path_subdir="bin"` |
 | `graalvm` | GraalVM CE | 同上三个加速器 | `github.com/graalvm/graalvm-ce-builds/releases/download/graal-<tag>/graalvm-community-jdk-<stem>_<os>-<arch>_bin.<ext>` | 206 + `zip`：gh-proxy.com 14.7、ghfast.top 7.3、gh-proxy.org 7.3 Mbps；裸地址 SSLError。**版本号在资产名里**（tag 是 `graal-25.4.4.1.1`，版本是 `25.0.4.1.1`），fetcher 用 `-(\d+(?:\.\d+)+)_(?:windows\|macos\|linux)-` 从资产名读，**不许从 tag 切**。`env_var` 必须是 `GRAALVM_HOME`——写 `JAVA_HOME` 会和 `jdk`(Temurin) 抢同一个变量，两个组件互相覆盖对方的生效版本 |
 | `rust` | Rust | `rsproxy.cn/dist/<日期>/rust-<v>-x86_64-pc-windows-msvc.msi`（Rust 中文社区维护） | `static.rust-lang.org/dist/<日期>/…msi` | **1/1 家：16.9 MB/s（官方 15.5），206 + `\xd0\xcf`**（OLE）。**只有 1 个大陆源**，已登记 `SINGLE_SOURCE_EXCEPTION["rust"]=1`。踩过的坑：清华 `rustup/dist/<日期>/…msi` 404（它只镜像 tar.xz）、中科大整个 `rustup` 目录 404、腾讯云 `ChunkedEncodingError`。**日期目录不能省**（`/dist/<YYYY-MM-DD>/`）<br>**归档类型是 `msi`，走 `extract_archive` 里的 `msiexec /a` 管理性提取，不是 `msiexec /i` 真装机** —— 三条理由都是实测出来的：① 官方 `.exe`(NSIS) 已停发（带日期目录与不带的一律 404）；② 合并 `tar.xz` 内部是 `rustc/` + `cargo/` + `clippy-preview/` 等**组件目录，没有统一 `bin/`**，直接解压出来的 `rustc` 找不到标准库；③ `/a` 免提权、不写注册表，产出统一 prefix（`Rust/{bin,lib,share}`），且提取出来的 `rustc 1.99.0` / `cargo 1.99.0` / `rustfmt 1.10.0-stable` 真能跑 —— 而 `/i` 会留一个我们删不掉的注册表项、且大概率弹 UAC。清单里 **没有 `msi_url`**，只能把官方 `xz_url` 的后缀换成 `.msi`（1.99.0 / 1.98.0 / 1.97.1 三版换完都是 206 + OLE）<br>⚠ **装完仍需要一个链接器**：本机没装 VS Build Tools 时 `rustc` 能编译、**链接不过**，而且 Git for Windows 自带的 coreutils `link.exe` 会冒充 MSVC 链接器，报出莫名其妙的 `link: extra operand`。gnu 变体也不解决：实测合并包里**不含** `mingw-version/`（rust-mingw 是独立组件） |
-| `redis` | Redis | 无真镜像，走 `GH_ACCELERATORS` | `github.com/redis-windows/redis-windows/releases/download/<v>/Redis-<v>-Windows-x64-msys2.zip` | 206 + `zip`：gh-proxy.com 17.9、ghfast.top 8.0、gh-proxy.org 7.2 Mbps；裸地址 SSLError。**⚠ 非官方构建**（社区 `redis-windows`）——官方只发源码，`download.redis.io` 的 tar.gz 装不出 Windows 可执行文件，卡片 `data_note` 已写明。不选 `with-Service` 变体：那个 `RedisService.exe` 会把自己注册成 Windows 服务，进程就不归本工具管了 |
+| `redis` | Redis | 无真镜像，走 `GH_ACCELERATORS` | `github.com/redis-windows/redis-windows/releases/download/<v>/Redis-<v>-Windows-x64-msys2-with-Service.zip` | 206 + `zip`：gh-proxy.com 17.9、ghfast.top 8.0、gh-proxy.org 7.2 Mbps；裸地址 SSLError。**⚠ 非官方构建**（社区 `redis-windows`）——官方只发源码，`download.redis.io` 的 tar.gz 装不出 Windows 可执行文件，卡片 `data_note` 已写明。2026-10-29 起用 **with-Service** 变体（含 `RedisService.exe`，见 R5.8）；不带 Service 的旧包缺这个文件，判"不是服务版"要求重装 |
 
 #### 2026-10-12 B1：protoc / uv —— 「zip 形态的单二进制 / 无 XXX_HOME」的两个变体
 
@@ -1283,6 +1283,12 @@ HKLM 的，主进程拿到回报后只做了复验和登记，**一声没出**�
 - `同步Gitee产物.bat` / `同步Gitee产物.sh` 只借用本规则的第 1、4 条（纯 ASCII、外部调用加 `call`）
   与"别把手工步骤退回给用户"这条精神：产物目录不存在要自己建，缺产物要自己去下载
   （加速器优先、github.com 末位，见规则 R1），不再打印 `mkdir` + 四条 `curl` 让维护者手跑。
+  **加速器不是写死的**：`同步Gitee产物.bat` 每次执行先对 `gh-proxy.com / ghfast.top /
+  ghproxy.net` 各打一次 2 MB Range（10 秒上限）量速度，按实测从快到慢下载，github.com 末位；
+  2026-10-29 实测 gh-proxy 只剩 43–76 KB/s（220 MB 要 20+ 分钟），而同一天另两个可用。
+  设置 `GH_ACCEL` 可钉死某一个并跳过探测。单次传输另加
+  `--speed-limit 16384 --speed-time 45`：低于 16 KB/s 持续 45 秒就放弃该源换下一个，
+  不许一个慢源把后面更快的源全堵死。
   用户自举部分（找/装 Python）不适用——那是维护者本机脚本，普通用户不碰
 - 不适用于 macOS / Linux（那两个平台的脚本自举不在本规则内）
 

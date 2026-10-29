@@ -50,16 +50,15 @@ set "RELEASE_PAGE=https://gitee.com/%GITEE_OWNER%/%GITEE_REPO%/releases"
 REM GitHub side, used only to tell you how to fetch the artifacts
 set "GH_REPO_SLUG=jilong2026/byte-tools"
 REM Direct github.com times out from mainland China (measured 2026-09-29: curl rc=28
-REM after 20s). All three accelerators answer a small range request, but throughput
-REM differs ~65x, so this was picked by measured speed, not by reachability:
-REM   gh-proxy.com  ~9 MB/s (220MB in 24s)  <- used here
-REM   ghfast.top    ~54 KB/s
-REM   ghproxy.net   ~28 KB/s (timed out mid-range)
-REM Edit this one line if the accelerator ever dies.
+REM after 20s). Throughput between accelerators differs by up to 65x AND changes
+REM over time (gh-proxy 9 MB/s in Sept, only 43-76 KB/s on 2026-10-29), so the
+REM script **measures them on every run** (:pick_accel, 2 MB range each) and then
+REM downloads through fastest -> next -> github.com last.
+REM Set GH_ACCEL yourself to pin one accelerator and skip the probe.
 REM GH_ACCEL doubles as a test seam: the offline suite points it at a local mock
 REM so it can exercise "clear the staging dir, then re-download" without pulling
 REM 218 MB off the real network.
-if not defined GH_ACCEL set "GH_ACCEL=https://gh-proxy.com/"
+if not defined GH_ACCEL set "GH_ACCEL="
 
 set "TOKEN_ENV=%GITEE_TOKEN%"
 set "TAG_NAME=%~1"
@@ -288,6 +287,10 @@ REM untouched - except a 0-byte leftover from an interrupted run, which can only
 REM ever be garbage. AUTO_FETCH_ASSETS=0 is the test seam that keeps the
 REM regression suite offline; same name as the .sh one on purpose.
 if /i "%AUTO_FETCH_ASSETS%"=="0" goto :eof
+REM Probe must never abort the sync: a dead network just means every speed is 0
+REM and we fall back to gh-proxy.com -> github.com. (errorlevel here is whatever
+REM the last curl inside :probe_one left behind, so it must not be tested.)
+call :pick_accel
 call :clear_stale
 if errorlevel 1 goto :fail
 if not exist "%ASSETS_DIR%\" mkdir "%ASSETS_DIR%" >nul 2>nul
@@ -327,6 +330,55 @@ echo          release is unknown. Something still holds them open (Explorer
 echo          preview, antivirus, a previous run); close it and rerun, or delete
 echo          the folder by hand.
 exit /b 1
+:pick_accel
+REM Measured on every run: one 2 MB range request per candidate, ordered by speed.
+REM Currently gh-proxy / ghfast / ghproxy change rank by the week (2026-10-29:
+REM gh-proxy only 43-76 KB/s while the others were idle), so a hardcoded one is
+REM always a gamble. GH_ACCEL set by the caller pins it and skips the probe.
+if defined GH_ACCEL (
+  set "ACCEL_ORDER=%GH_ACCEL%"
+  echo   accelerator pinned by GH_ACCEL: %GH_ACCEL%
+  goto :eof
+)
+set "PROBE_RAW=https://github.com/%GH_REPO_SLUG%/releases/download/%TAG_NAME%/ByteTools.exe"
+if not defined PROBE_CANDIDATES set "PROBE_CANDIDATES=https://gh-proxy.com/ https://ghfast.top/ https://ghproxy.net/"
+set "PROBE_FILE=%TMPDIR%\probe.txt"
+if exist "%PROBE_FILE%" del /q "%PROBE_FILE%" >nul 2>nul
+echo   probing accelerators (2 MB range, 10s cap each) ...
+for %%A in (%PROBE_CANDIDATES%) do call :probe_one "%%A" "%PROBE_FILE%"
+set "ACCEL_ORDER="
+if exist "%PROBE_FILE%" (
+  set "BEST="
+  set "BEST_S=-1"
+  for /f "usebackq tokens=1,2" %%X in ("%PROBE_FILE%") do (
+    if %%Y GTR !BEST_S! (
+      set "BEST=%%X"
+      set "BEST_S=%%Y"
+    )
+  )
+  if defined BEST set "ACCEL_ORDER=!BEST! "
+  for /f "usebackq tokens=1,2" %%X in ("%PROBE_FILE%") do (
+    if /i not "%%X"=="!BEST!" set "ACCEL_ORDER=!ACCEL_ORDER!%%X "
+  )
+)
+if not defined ACCEL_ORDER (
+  echo   probe produced no result, falling back to gh-proxy.com
+  set "ACCEL_ORDER=https://gh-proxy.com/ "
+)
+for /f "tokens=1" %%F in ("!ACCEL_ORDER!") do set "GH_ACCEL=%%F"
+echo   download order: !ACCEL_ORDER!
+goto :eof
+
+:probe_one
+REM %~1 = accelerator prefix, %~2 = result file ("<url> <bytes/s>" per line)
+set "PSPD=0"
+for /f "delims=" %%S in ('curl.exe -sS -fL -r 0-2097151 --connect-timeout 5 --max-time 10 -o NUL -w "%%{speed_download}" "%~1%PROBE_RAW%" 2^>nul') do set "PSPD=%%S"
+for /f "tokens=1 delims=." %%N in ("!PSPD!") do set "PSPD=%%N"
+if not defined PSPD set "PSPD=0"
+echo %~1 !PSPD!>>"%~2"
+echo     %~1 -^> !PSPD! B/s
+goto :eof
+
 :fetch_asset
 REM %~1 = artifact name as published on the GitHub Release.
 set "DST=%ASSETS_DIR%\%~1"
@@ -339,9 +391,11 @@ del /q "%DST%" >nul 2>nul
 :fetch_start
 echo   downloading %~1 ...
 set "DL_OK="
-call :curl_fetch "%GH_ACCEL%%RAW%" "%DST%"
-if defined DL_OK goto :fetch_report
-call :curl_fetch "%RAW%" "%DST%"
+REM Fastest accelerator first, then the rest in measured order, github.com last (R1).
+for %%A in (!ACCEL_ORDER!) do (
+  if not defined DL_OK call :curl_fetch "%%A%RAW%" "%DST%"
+)
+if not defined DL_OK call :curl_fetch "%RAW%" "%DST%"
 :fetch_report
 if defined DL_OK goto :eof
 set "FETCH_FAILED=%FETCH_FAILED% %~1"
@@ -353,7 +407,7 @@ REM %~1 = URL, %~2 = destination. Accepted only when curl reports success AND
 REM the file is at least 1 MB: a mirror that answers 200 with a small HTML page
 REM would otherwise be shipped to Gitee as if it were the artifact.
 del /q "%~2" >nul 2>nul
-curl.exe -sS -fL %RETRY_OPT% --connect-timeout 20 --max-time 1800 -o "%~2" "%~1" -w "     http=%%{http_code} time=%%{time_total}s size=%%{size_download}B speed=%%{speed_download}B/s\n"
+curl.exe -sS -fL %RETRY_OPT% --connect-timeout 20 --max-time 1800 --speed-limit 16384 --speed-time 45 -o "%~2" "%~1" -w "     http=%%{http_code} time=%%{time_total}s size=%%{size_download}B speed=%%{speed_download}B/s\n"
 if errorlevel 1 goto :curl_fetch_bad
 if not exist "%~2" goto :curl_fetch_bad
 set "CSZ=0"
