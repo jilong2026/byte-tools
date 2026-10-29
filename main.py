@@ -14982,12 +14982,26 @@ def service_info(comp, version: str, backend=None) -> ServiceInfo:
 
 
 def service_image_is_ours(image_path: str, comp) -> bool:
-    """ImagePath 是否落在本工具的组件目录里（据此区分"我们的残留"与别人的 MySQL80）。"""
-    exe = _image_exe_path(image_path).lower()
+    """ImagePath 是否落在本工具的组件目录里（据此区分"我们的残留"与别人的 MySQL80）。
+
+    原始路径与 `resolve()` 后的路径**都要认**（2026-10-29 CI 踩出来的）：
+    GitHub Runner 的 TEMP 是 junction（`D:\\a\\_temp` → 别的盘），`resolve()` 会把
+    `CONFIG_DIR/mysql` 换成另一端的前缀，而 ImagePath 里还是 `D:\\...` 原件；
+    只比一种形式就会把"我们自己的服务"误判成外部服务，进而拒绝安装/卸载。
+    """
+    exe = os.path.normcase(os.path.abspath(_image_exe_path(image_path) or ""))
     if not exe:
         return False
-    root = str((CONFIG_DIR / comp.key).resolve()).lower()
-    return exe == root or exe.startswith(root + os.sep) or exe.startswith(root + "/")
+    roots = {CONFIG_DIR / comp.key}
+    try:
+        roots.add((CONFIG_DIR / comp.key).resolve())
+    except OSError:
+        pass
+    for root in roots:
+        root_n = os.path.normcase(os.path.abspath(str(root)))
+        if exe == root_n or exe.startswith(root_n + os.sep) or exe.startswith(root_n + "/"):
+            return True
+    return False
 
 
 def installed_service_versions(comp) -> List[Tuple[str, Path]]:
