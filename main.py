@@ -1681,6 +1681,21 @@ class Component:
             # 装了多个版本又定位不到具体是哪一个：整个停手。
             # 此时若继续按组件根清 PATH，会把用户没选中的那些版本的条目一起删掉。
             return note
+        # 服务模式（MySQL / Redis）：**先停服务、删服务，校验注册表键真的没了，才删目录**。
+        # "卸载没卸干净 → 新的装不上"就是从这里断链的，所以它必须排在删目录之前，
+        # 失败时直接返回、目录原样保留。
+        if service_spec_for(self) is not None and CURRENT_OS == "Windows":
+            svc_version = (install_path.name[len(self.key) + 1:]
+                           if install_path is not None and
+                           install_path.name.startswith(self.key + "-") else version)
+            res = uninstall_service(self, svc_version)
+            if res.cancelled:
+                return "已取消管理员权限请求：服务与版本目录都没有删除"
+            if not res.ok:
+                return f"卸载中止：{res.message}"
+            if res.message:
+                summary_parts.append(res.message)
+            drop_service_secret(f"{self.key}:{svc_version}")
         if note:
             summary_parts.append(note)
         component_root = CONFIG_DIR / self.key
@@ -5172,9 +5187,14 @@ def fetch_rust_versions() -> List[ComponentVersion]:
 
 
 def _redis_urls(v: str) -> Dict[str, List[str]]:
-    """Redis 社区构建（redis-windows）：Windows 专用 zip，走 GitHub 加速器。"""
+    """Redis 社区构建（redis-windows）：Windows 专用 zip，走 GitHub 加速器。
+
+    2026-10-29 起一律用 **-with-Service** 变体：它多一个 RedisService.exe，
+    是"注册成 Windows 服务"的唯一入口（8.10.2 实测 20,347,510 B）。
+    不带 Service 的包缺这个文件，卡片会判"不是服务版"并要求重装。
+    """
     official = ("https://github.com/redis-windows/redis-windows/releases/download/"
-                f"{v}/Redis-{v}-Windows-x64-msys2.zip")
+                f"{v}/Redis-{v}-Windows-x64-msys2-with-Service.zip")
     return {"Windows": _gh_accelerated(official)}
 
 
@@ -5190,7 +5210,7 @@ def fetch_redis_versions() -> List[ComponentVersion]:
         ver = tag.lstrip("vV")
         if _version_parts(ver) is None:
             continue
-        want = f"Redis-{ver}-Windows-x64-msys2.zip"
+        want = f"Redis-{ver}-Windows-x64-msys2-with-Service.zip"
         if want not in assets:
             continue
         found.setdefault(ver, []).append(_redis_cv(ver))
@@ -8299,6 +8319,23 @@ STOP_KINDS = ("pid", "shutdown_command", "port_lookup")
 
 
 @dataclass
+class ServiceSpec:
+    """Windows 服务模式描述符（2026-10-29 仅为 MySQL / Redis 增加）。
+
+    便携进程模式仍是其余 15 个可启停组件的默认；这里只描述"怎么注册成一个
+    按版本命名的 Windows 服务"。服务名/配置路径都由版本号派生，支持多版本并存。
+    """
+
+    kind: str                       # "mysql_native" | "redis_wrapper"
+    name_template: str              # "ByteTools-MySQL-{version}"
+    display_template: str           # "ByteTools MySQL {version}"
+    required_files: tuple = ()      # 相对版本安装目录；缺一个就判"不是服务版"
+    config_relpath: str = ""        # 相对 <key>-data；支持 {version}
+    password_kind: str = ""         # "mysql_root" | "redis_requirepass"
+    start_mode: str = "demand"      # 手动启动；不默认开机自启
+
+
+@dataclass
 class LaunchSpec:
     """一个组件"怎么被拉起来"的描述符。端口策略见 port_writeback 三种取值；
     厂商官方文件在任何策略下都不被修改（conf_copy 写的是 data 目录里的副本）。"""
@@ -8395,6 +8432,9 @@ class LaunchSpec:
     # 语义：argv 前缀 + {port} 占位符；退出码 0 = 服务真的可服务。
     # 演练层（bt_real_machine_drill.py）在 HTTP 判据不适用时改用它。
     service_probe: List[str] = field(default_factory=list)
+    # Windows 服务模式（2026-10-29）：None = 继续用便携脱离进程。
+    # 目前只给 MySQL / Redis 填；其余 15 个组件保持现状。
+    service: Optional["ServiceSpec"] = None
 
 
 @dataclass
@@ -9230,10 +9270,9 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         #   ② `--port` 实测能改口 ⇒ port_writeback="cli_flag"，不碰任何配置文件；
         #   ③ `--dir` + SAVE 实测把 dump.rdb 落到我们指定的目录 ⇒ 数据外移靠命令行，
         #      它没有可注入的 *_HOME / *_DATA 环境变量，所以 data_dir_env 留 None；
-        #   ④ **不选 with-Service 变体**：那个包里多一个 14.7MB 的 RedisService.exe，
-        #      它会把自己注册成 Windows 服务 —— 进程就不归本工具管，停止也停不干净。
-        # Linux/Darwin 那两条是防 KeyErrors 的对称写法（`spec.commands[CURRENT_OS]`
-        # 是直接下标）：官方在 unix 只发源码包，本工具在 unix 装不出 redis，走不到这里。
+        #   ④ Windows 从 2026-10-29 起走**服务模式**（spec.service，RedisService.exe），
+        #      下面的 commands 只是 Linux/Darwin 的对称写法：官方在 unix 只发源码包，
+        #      本工具在 unix 装不出 redis，走不到这里。
         commands={"Windows": ["{home}/redis-server.exe", "--port", "{port}",
                               "--dir", "{data_dir}"],
                   "Linux":   ["{home}/bin/redis-server", "--port", "{port}",
@@ -9249,16 +9288,24 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         console_path=None,
         health_path=None,
         startup_timeout=30,
-        risk_note=("命令行启动用的是官方默认：**只监听 127.0.0.1、无密码**。"
-                   "本工具不替你改 bind、也不替你设 requirepass。"),
-        data_note=("数据目录 = 本工具的 ~/.env-tools/redis-data（实测 --dir 生效，"
+        risk_note=("服务以 LocalSystem 运行、手动启动：配置写在版本专属 redis.conf（bind 127.0.0.1），"
+                   "密码可留空。服务模式下不再依赖命令行参数，关掉本工具后仍然存活。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/redis-data（redis.conf 的 dir 指过去，"
                    "SAVE 之后 dump.rdb 落在里面）。切换生效版本与卸载都不碰它。"),
         credentials_hint=(
             "**Redis 没有网页控制台** —— 6379 说的是 RESP 协议，浏览器打开只会看到"
             "协议错误，所以本工具不给它挂「访问页」按钮。"
             "验证是否可用：在本工具装好的版本目录里有一个 redis-cli.exe，"
-            "执行 `redis-cli.exe -p <端口> ping`，回 `PONG` 就是通了"
-            "（实测社区构建的命令行启动默认只监听 127.0.0.1、无密码）。"
+            "执行 `redis-cli.exe -p <端口> ping`，回 `PONG` 就是通了；"
+            "设了 requirepass 时要加 `-a`（或先 `AUTH`）。"
+        ),
+        service=ServiceSpec(
+            kind="redis_wrapper",
+            name_template="ByteTools-Redis-{version}",
+            display_template="ByteTools Redis {version}",
+            required_files=("RedisService.exe",),
+            config_relpath="{version}/redis.conf",
+            password_kind="redis_requirepass",
         ),
     ),
 
@@ -9273,13 +9320,16 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         commands={
             "Windows": ["{home}/bin/mysqld.exe", "--basedir={home}",
                         "--datadir={data_dir}", "--port={port}",
-                        "--bind-address=127.0.0.1", "--mysqlx=0", "--console"],
+                        "--bind-address=127.0.0.1", "--mysqlx=0",
+                        "--log-error={data_dir}/logs/mysql-error.err"],
             "Linux":   ["{home}/bin/mysqld", "--basedir={home}",
                         "--datadir={data_dir}", "--port={port}",
-                        "--bind-address=127.0.0.1", "--mysqlx=0"],
+                        "--bind-address=127.0.0.1", "--mysqlx=0",
+                        "--log-error={data_dir}/logs/mysql-error.err"],
             "Darwin":  ["{home}/bin/mysqld", "--basedir={home}",
                         "--datadir={data_dir}", "--port={port}",
-                        "--bind-address=127.0.0.1", "--mysqlx=0"],
+                        "--bind-address=127.0.0.1", "--mysqlx=0",
+                        "--log-error={data_dir}/logs/mysql-error.err"],
         },
         stop_kind="shutdown_command",
         shutdown_commands={
@@ -9298,20 +9348,28 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         health_path=None,
         startup_timeout=60,
         # 首次启动才初始化；`<data_dir>/mysql` 是 --initialize-insecure 建出来的系统库。
-        # `--console` 只在 Windows 有意义（Unix 默认把初始化日志写到 stderr，已由
-        # run_pre_start 捕获）；带上它在 Unix 是未知选项。
+        # **不要加 --console**：Windows 上它会让 mysqld 自己开一个黑框，
+        # 关掉黑框 = 给 MySQL 发关闭事件（2026-10-29 用户实测）。
         pre_start=["{home}/bin/mysqld" + (".exe" if CURRENT_OS == "Windows" else ""),
                    "--initialize-insecure", "--basedir={home}",
-                   "--datadir={data_dir}"]
-                  + (["--console"] if CURRENT_OS == "Windows" else []),
+                   "--datadir={data_dir}"],
         pre_start_if_missing="{data_dir}/mysql",
-        risk_note=("首次启动会用 `--initialize-insecure` 初始化数据目录：**root 无密码**、"
-                   "只监听 127.0.0.1。要用于生产请自己设 root 密码并改 bind-address。"),
-        data_note=("数据目录 = 本工具的 ~/.env-tools/mysql-data（--datadir 指过去）。"
+        risk_note=("Windows 上以**服务**方式运行（服务名 ByteTools-MySQL-<版本>，手动启动）。"
+                   "首次启动会用 `--initialize-insecure` 初始化数据目录（root 无密码），"
+                   "随后可在弹窗里设置 root 密码；服务只监听 127.0.0.1。"),
+        data_note=("数据目录 = 本工具的 ~/.env-tools/mysql-data（my.ini 的 datadir 指过去）。"
                    "切换生效版本与卸载都不碰它。"),
-        credentials_hint=("root 用户**无密码**（初始化参数是 --initialize-insecure）；"
-                          "只监听 127.0.0.1。验证连接："
-                          "`bin/mysql.exe -h 127.0.0.1 -P <端口> -u root`。"),
+        credentials_hint=("root 用户默认无密码（初始化参数是 --initialize-insecure）；"
+                          "若安装时设置了密码，用那次输入的密码。只监听 127.0.0.1。验证连接："
+                          "`bin/mysql.exe -h 127.0.0.1 -P <端口> -u root -p`。"),
+        service=ServiceSpec(
+            kind="mysql_native",
+            name_template="ByteTools-MySQL-{version}",
+            display_template="ByteTools MySQL {version}",
+            required_files=("bin/mysqld.exe",),
+            config_relpath="{version}/my.ini",
+            password_kind="mysql_root",
+        ),
     ),
 
     # ---------------- 2026-10-12 B4 补：MinIO（对象存储 + 自带 Web 控制台） ----------------
@@ -10945,12 +11003,15 @@ class LaunchWorker(QThread):
     notes = Signal(str, list)
 
     def __init__(self, action: str, comp: Component,
-                 comps: Dict[str, Component], mgr: "ServiceManager", parent=None):
+                 comps: Dict[str, Component], mgr: "ServiceManager", parent=None,
+                 version: str = "", password: str = ""):
         super().__init__(parent)
         self.action = action
         self.comp = comp
         self.comps = comps
         self.mgr = mgr
+        self.version = version
+        self.password = password
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -10965,7 +11026,14 @@ class LaunchWorker(QThread):
 
     def _dispatch(self) -> None:
         if self.action == "start":
-            res = self.mgr.start(self.comp, self.comps, sleeper=self._sleep)
+            # 服务模式才带 version/password；便携模式的老接缝（测试与第三方注入点）
+            # 只认 (comp, comps, sleeper)，无脑多传两个参数会把它们全部打断。
+            extra = {}
+            if self.version:
+                extra["version"] = self.version
+            if self.password:
+                extra["password"] = self.password
+            res = self.mgr.start(self.comp, self.comps, sleeper=self._sleep, **extra)
             if res.notes:
                 self.notes.emit(self.comp.key, list(res.notes))
             if res.ok:
@@ -10973,7 +11041,8 @@ class LaunchWorker(QThread):
             else:
                 self.failed.emit(self.comp.key, res.reason)
         elif self.action == "stop":
-            res = self.mgr.stop(self.comp, self.comps, sleeper=self._sleep)
+            extra = {"version": self.version} if self.version else {}
+            res = self.mgr.stop(self.comp, self.comps, sleeper=self._sleep, **extra)
             self._emit_stop(res)
         elif self.action == "force_stop":
             self._emit_stop(self.mgr.force_stop(self.comp.key, sleeper=self._sleep))
@@ -12242,6 +12311,8 @@ class RunRecord:
     # 默认 () 只表示"计划一写的旧文件里没这个字段"，加载侧会归一成 (port,)——
     # 默认值不是可选性，它决定旧记录会不会被整批静默丢弃。
     ports: tuple = ()
+    # Windows 服务名（2026-10-29）：pid_role="service" 时记录，服务模式靠它定位。
+    service_name: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return dict(self.__dict__)
@@ -12268,7 +12339,7 @@ def load_running_map() -> Dict[str, RunRecord]:
             rec = RunRecord(**item)
         except (TypeError, KeyError):
             continue
-        if rec.pid_role not in ("server", "launcher", "none"):
+        if rec.pid_role not in ("server", "launcher", "none", "service"):
             continue
         # Task 2 复盘裁决：手改的 running.json 常把端口存成 "80480" 这类字符串，
         # 不在这儿归一就会让字符串一路流进后续每一次端口探测。数字字段读侧归一成
@@ -13260,6 +13331,7 @@ _CONF_WRITERS = {
 VENDOR_LOG_CANDIDATES = {
     "activemq": ("data/activemq.log", "data/activemq.dump"),
     "nacos": ("logs/start.out",),
+    "mysql": ("logs/mysql-error.err",),
 }
 
 
@@ -13724,8 +13796,13 @@ def run_pre_start(comp: Component, spec: LaunchSpec, plan: LaunchPlan,
             return True, "", notes
     argv = [t.format(**mapping) for t in spec.pre_start]
     try:
-        proc = subprocess.run(argv, cwd=plan.cwd, env=plan.env,
-                              capture_output=True, timeout=timeout)
+        # 初始化/format 这类同步命令也必须隐藏控制台：Windows 上 mysql 的
+        # --initialize-insecure 是控制台程序，不传 CREATE_NO_WINDOW 会闪一个黑框。
+        kw = dict(cwd=plan.cwd, env=plan.env, capture_output=True, timeout=timeout,
+                  stdin=subprocess.DEVNULL)
+        if CURRENT_OS == "Windows":
+            kw["creationflags"] = CREATE_NO_WINDOW
+        proc = subprocess.run(argv, **kw)
     except subprocess.TimeoutExpired:
         return False, f"前置准备超过 {timeout} 秒没结束，已放弃启动。", notes
     except OSError as exc:
@@ -13900,6 +13977,8 @@ class ServiceManager:
                records: Optional[Dict[str, RunRecord]] = None) -> LaunchStatus:
         if getattr(comp, "launch", None) is None:
             return LaunchStatus("not_installed_or_stopped")
+        if service_spec_for(comp) is not None:
+            return self._service_status(comp, records)
         rec = (records if records is not None else load_running_map()).get(key)
         if rec is None:
             return LaunchStatus("not_installed_or_stopped")
@@ -13914,17 +13993,74 @@ class ServiceManager:
         return LaunchStatus("running", rec)
 
     def adopt(self, comps: Dict[str, Component]) -> List[LaunchStatus]:
-        """打开工具时对每个可启动组件做一次只读认定。绝不拉起进程。
-
-        返回**所有**可启动组件的状态，按 key 升序。2026-10-06 改的：
-        原来它返回 `[self.status(k, c) for k, c in comps.items() if launch]`
-        的全部元素，但调用方（与护栏）习惯取 `[0]` ——只有一个组件时看不出问题，
-        扩到 9 个之后 `[0]` 拿到的是字母序第一个（activemq）而不是被测组件，
-        护栏于是红在"断言 not_installed != running"这种看不懂的地方。
-        语义含糊的返回值是缺陷本身，不是测试的错。"""
+        """打开工具时对每个可启动组件做一次只读认定。绝不拉起进程。"""
         records = load_running_map()
+        self.backfill_service_records(comps, records)
         return [self.status(k, c, records) for k, c in sorted(comps.items())
                 if getattr(c, "launch", None) is not None]
+
+    def backfill_service_records(self, comps: Dict[str, Component],
+                                 records: Optional[Dict[str, RunRecord]] = None) -> None:
+        """把"服务在跑、但 running.json 里没有/已过期"的情况补登记。
+
+        用户完全可能在 services.msc 里启动服务，或者上次关工具时服务还在跑；
+        不补这一条，访问页与卡片就看不到它。全程只读 SCM，不启停任何东西。
+        """
+        recs = records if records is not None else load_running_map()
+        dirty = False
+        for key, comp in comps.items():
+            if service_spec_for(comp) is None:
+                continue
+            rec = recs.get(key)
+            if rec is not None and rec.pid_role != "service":
+                continue                       # 便携模式的旧登记，不归这里管
+            if rec is not None and rec.version:
+                info = service_info(comp, rec.version)
+                if info.state == SERVICE_RUNNING:
+                    fresh = service_run_record(comp, rec.version)
+                    if fresh.to_dict() != rec.to_dict():
+                        recs[key] = fresh
+                        dirty = True
+                    continue
+                recs.pop(key, None)
+                dirty = True
+                continue
+            for version, _path in installed_service_versions(comp):
+                if service_info(comp, version).state == SERVICE_RUNNING:
+                    recs[key] = service_run_record(comp, version)
+                    dirty = True
+                    break
+        if dirty:
+            save_running_map(recs)
+
+    def _service_status(self, comp: Component,
+                        records: Optional[Dict[str, RunRecord]] = None) -> LaunchStatus:
+        recs = records if records is not None else load_running_map()
+        rec = recs.get(comp.key)
+        version = (rec.version if rec is not None else "") or resolve_launch_version(comp)
+        if not version:
+            return LaunchStatus("not_installed_or_stopped")
+        info = service_info(comp, version)
+        if info.state == SERVICE_BROKEN:
+            return LaunchStatus("broken", rec,
+                                f"服务 {info.name} 指向的文件已不存在（服务损坏）")
+        if not info.exists and rec is not None and rec.pid_role != "service":
+            # 还没切成服务的旧便携进程：先按它自己的登记报告运行状态，
+            # 用户点「停止」时走 _portable_stop 收掉，之后就能正常装服务。
+            legacy_ports = tuple(rec.ports) or (rec.port,)
+            if any(self._is_listening(p) for p in legacy_ports):
+                return LaunchStatus("running", rec)
+        if info.state != SERVICE_RUNNING:
+            return LaunchStatus("not_installed_or_stopped")
+        if rec is None or rec.service_name != info.name or rec.version != version:
+            rec = service_run_record(comp, version)
+        ports = tuple(rec.ports) or (rec.port,)
+        silent = [p for p in ports if not self._is_listening(p)]
+        if silent:
+            return LaunchStatus("zombie", rec,
+                                f"服务 {info.name} 在运行，但端口 "
+                                f"{'/'.join(str(p) for p in silent)} 未监听")
+        return LaunchStatus("running", rec)
 
     def reconcile(self, comps: Dict[str, Component]) -> Dict[str, LaunchStatus]:
         """一次性认定 + 清僵尸：只处理 LAUNCH_KEYS 里的组件。
@@ -13932,6 +14068,7 @@ class ServiceManager:
         计划二会往登记表加组件，届时旧登记不该被本期代码删掉，
         所以这里按"认得的 key"过滤，而不是清全部文件。"""
         records = load_running_map()
+        self.backfill_service_records(comps, records)
         out: Dict[str, LaunchStatus] = {}
         dirty = False
         for key in LAUNCH_KEYS:
@@ -13953,10 +14090,13 @@ class ServiceManager:
         return out
 
     def start(self, comp: Component, comps: Dict[str, Component],
-              sleeper=time.sleep) -> StartResult:
+              sleeper=time.sleep, version: Optional[str] = None,
+              password: str = "", log: Optional[Callable[[str], None]] = None) -> StartResult:
         spec = getattr(comp, "launch", None)
         if spec is None:
             return StartResult(False, "gate", "本工具暂不支持启动该组件")
+        if service_spec_for(comp) is not None:
+            return self._service_start(comp, version, password, sleeper, log)
         existing = load_running_map().get(comp.key)
         if existing and self._is_listening(existing.port):
             return StartResult(False, "gate",
@@ -14099,7 +14239,15 @@ class ServiceManager:
         return " / ".join(data[-lines:]) if data else "（日志为空）"
 
     def stop(self, comp: Component, comps: Dict[str, Component],
-             deadline: float = 30.0, sleeper=time.sleep) -> StopResult:
+             deadline: float = 30.0, sleeper=time.sleep,
+             version: Optional[str] = None,
+             log: Optional[Callable[[str], None]] = None) -> StopResult:
+        if service_spec_for(comp) is not None:
+            return self._service_stop(comp, version, deadline, sleeper, log)
+        return self._portable_stop(comp, deadline, sleeper)
+
+    def _portable_stop(self, comp: Component, deadline: float,
+                       sleeper) -> StopResult:
         rec = load_running_map().get(comp.key)
         if rec is None:
             return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
@@ -14141,8 +14289,12 @@ class ServiceManager:
                 # 45 秒：子代理实测 rabbitmqctl stop 1~4s 就返回，
                 # 但它要先等 broker 把未落盘消息写完；给足余量，
                 # 否则会误判成「停不掉」并弹强杀确认框（能优雅停就别强杀）。
-                subprocess.run(argv, cwd=rec.home, env=env, timeout=45,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                kw = dict(cwd=rec.home, env=env, timeout=45,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          stdin=subprocess.DEVNULL)
+                if CURRENT_OS == "Windows":
+                    kw["creationflags"] = CREATE_NO_WINDOW
+                subprocess.run(argv, **kw)
             except (OSError, subprocess.TimeoutExpired):
                 pass
         elif spec.stop_kind == "port_lookup" or CURRENT_OS == "Windows":
@@ -14212,6 +14364,113 @@ class ServiceManager:
                                   f"{'/'.join(str(p) for p in ports)} 仍在听）。"
                                   f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
 
+    # --- 服务模式（MySQL / Redis）----------------------------------------
+    def _service_start(self, comp: Component, version: Optional[str], password: str,
+                       sleeper, log=None) -> StartResult:
+        """服务模式的启动：没注册就先注册（一次 UAC），然后交给 SCM 起。
+
+        多版本必须用**下拉框选中的那个版本**，不能走 resolve_launch_version()：
+        它挑的是"生效版本"，而服务要起的是用户眼睛正看着的那一个。
+        """
+        spec = service_spec_for(comp)
+        target = version or resolve_launch_version(comp)
+        if not target:
+            return StartResult(False, "gate",
+                               f"磁盘上还没有 {comp.display_name} 的已安装版本，先点「安装」。")
+        missing = service_required_missing(comp, target)
+        if missing:
+            return StartResult(
+                False, "gate",
+                f"{comp.display_name} {target} 缺少服务组件所需的文件：{'、'.join(missing)}。"
+                f"这个包不是带服务组件的完整版，请卸载后重新安装。")
+        peers = peer_running_services(comp, exclude_version=target)
+        if peers:
+            names = "、".join(p.name for p in peers)
+            return StartResult(
+                False, "gate",
+                f"另一个版本的服务 {names} 正在运行。同一端口同一时间只能跑一个版本："
+                f"先停止它，再启动 {target}。")
+        port = service_port(comp)
+        secret_key = f"{comp.key}:{target}"
+        stored = load_service_secret(secret_key)
+        notes: List[str] = []
+
+        info = service_info(comp, target)
+        if not info.exists:
+            if password and spec.password_kind == "redis_requirepass":
+                # Redis 的密码必须落在服务启动前读的那份 conf 里
+                save_service_secret(secret_key, password)
+            res = install_service(comp, target, log=log)
+            if not res.ok:
+                return StartResult(False, "gate" if res.cancelled else "service_install",
+                                   res.message)
+            notes.append(res.message)
+            info = res.info or SERVICE_BACKEND.query(service_name_for(spec, target))
+
+        if not info.running and port_is_listening(port):
+            owners = netstat_listener_pids((port,))
+            pid = owners.get(port)
+            return StartResult(
+                False, "port",
+                f"端口 {port} 已被别的进程占用" + (f"（PID {pid}）" if pid else "")
+                + "。服务模式不替你结束别人的进程：请先停掉占用它的程序再重试。")
+
+        # Redis 的密码必须落在**服务启动前**读到的那份 conf 里；已注册过的服务
+        # 也要在这里补写，否则本次输入的密码下一次重启前都不会生效。
+        if password and spec.password_kind == "redis_requirepass":
+            save_service_secret(secret_key, password)
+            write_redis_conf(comp, target, port, password)
+
+        res = start_service(comp, target, sleeper=sleeper, log=log)
+        if not res.ok:
+            return StartResult(False, "gate" if res.cancelled else "service_start",
+                               res.message, notes=notes)
+
+        if password:
+            if spec.password_kind == "mysql_root":
+                ok, why = mysql_set_root_password(comp, target, port, password, stored)
+                if ok:
+                    save_service_secret(secret_key, password)
+                    notes.append("root 密码已设置为本次输入的密码（只保存 DPAPI 加密副本）。")
+                else:
+                    notes.append(f"root 密码没设置成功：{why}")
+            elif spec.password_kind == "redis_requirepass":
+                notes.append("requirepass 已写入版本专属 redis.conf。")
+
+        rec = service_run_record(comp, target)
+        records = load_running_map()
+        records[comp.key] = rec
+        save_running_map(records)
+        return StartResult(True, "running", record=rec,
+                           console_url=rec.console_url, notes=notes)
+
+    def _service_stop(self, comp: Component, version: Optional[str], deadline: float,
+                      sleeper, log=None) -> StopResult:
+        rec = load_running_map().get(comp.key)
+        target = version or (rec.version if rec is not None else "") or \
+            resolve_launch_version(comp)
+        if not target:
+            return StopResult(False, reason="没有可识别的已安装版本，无法确定要停哪个服务。")
+        if not SERVICE_BACKEND.query(service_name_for(service_spec_for(comp), target)).exists \
+                and not SERVICE_BACKEND.registry_key_exists(
+                    service_name_for(service_spec_for(comp), target)):
+            # 迁移路径：服务还没注册过，但 running.json 里有一条**旧便携进程**登记。
+            # 不接这一条，用户升级后就会卡在"卡片说在运行、点停止说服务不存在"。
+            if rec is not None and rec.pid_role != "service":
+                return self._portable_stop(comp, deadline, sleeper)
+        res = stop_service(comp, target, sleeper=sleeper, deadline=deadline, log=log)
+        if res.ok:
+            records = load_running_map()
+            if records.pop(comp.key, None) is not None:
+                save_running_map(records)
+            return StopResult(True, reason=res.message)
+        if res.cancelled:
+            return StopResult(False, reason=res.message)
+        return StopResult(
+            False,
+            reason=(res.message + " 服务模式不会强杀进程：卡住时可以打开 services.msc，"
+                                   "或执行 `sc.exe stop <服务名>` 再停一次。"))
+
     def _leftover_note(self, spec: Optional[LaunchSpec]) -> str:
         """停止成功后附在 reason 里的残留辅助进程提示；没登记或没查到就是空串。"""
         names = tuple(getattr(spec, "leftover_processes", ()) or ())
@@ -14245,6 +14504,13 @@ class ServiceManager:
 
     def force_stop(self, key: str, sleeper=time.sleep, rounds: int = 5) -> StopResult:
         """用户明确同意后的强制结束。仍然只在"端口确实释放"时才清登记。"""
+        spec = LAUNCH_OF.get(key)
+        if spec is not None and getattr(spec, "service", None) is not None:
+            return StopResult(
+                False,
+                reason=("服务模式不会强杀进程：强制结束会把服务留在"
+                        "“停止中/崩溃”的半死状态，系统重启后仍可能残留。"
+                        "请用 services.msc，或管理员执行 `sc.exe stop <服务名>`。"))
         rec = load_running_map().get(key)
         if rec is None:
             return StopResult(False, reason="没有登记记录")
@@ -14327,6 +14593,973 @@ class ServiceManager:
 # 卡片按钮要的是同一个登记/探针视图：多张卡片各持一个 ServiceManager 会把
 # per-key 门与 running.json 的读写拆成两套口径。
 SERVICE_MANAGER = ServiceManager()
+
+
+# ---------------------------------------------------------------------------
+# Windows 服务后端（2026-10-29，只服务 MySQL / Redis）
+#
+# 服务模式的真相在 SCM 里，不在端口、也不在 running.json 里。所以读取一律走
+# ctypes（R5.3 第 4 条：识别状态绝不执行任何东西），只有装 / 卸 / 启 / 停这类
+# 写操作才走一次 UAC 的固定脚本。测试把 SERVICE_BACKEND 换成内存假实现即可离线跑。
+# ---------------------------------------------------------------------------
+
+SERVICE_NAME_RE = _re.compile(r"^ByteTools-(?:MySQL|Redis)-[0-9A-Za-z][0-9A-Za-z._-]*$")
+
+SERVICE_MISSING = "not_installed"
+SERVICE_STOPPED = "stopped"
+SERVICE_RUNNING = "running"
+SERVICE_PENDING = "pending"       # 起停过渡态；error=1060 时表示"标记为删除中"
+SERVICE_BROKEN = "broken"         # 服务还在，但它指的可执行文件已经不在了
+
+# SCM 的 dwCurrentState → 我们对外的四态。暂停按运行中算：它确实还在占着资源，
+# 再点一次「启动」只会被 SCM 拒绝（1056 服务已在运行）。
+_SCM_STATE_NAMES = {
+    1: SERVICE_STOPPED, 2: SERVICE_PENDING, 3: SERVICE_PENDING, 4: SERVICE_RUNNING,
+    5: SERVICE_PENDING, 6: SERVICE_PENDING, 7: SERVICE_RUNNING,
+}
+
+ERROR_SERVICE_DOES_NOT_EXIST = 1060
+ERROR_SERVICE_MARKED_FOR_DELETE = 1072
+ERROR_ACCESS_DENIED = 5
+ERROR_SERVICE_ALREADY_RUNNING = 1056
+
+SERVICE_CONTROL_STOP = 0x00000001
+SERVICE_CONTROL_CONTINUE = 0x00000003
+
+
+@dataclass
+class ServiceInfo:
+    """一次 SCM 查询的结论（只读，不含任何动作）。"""
+
+    name: str = ""
+    exists: bool = False
+    state: str = SERVICE_MISSING
+    image_path: str = ""
+    start_type: str = ""          # auto / demand / disabled
+    error: int = 0
+
+    @property
+    def running(self) -> bool:
+        return self.state == SERVICE_RUNNING
+
+
+def _image_exe_path(image: str) -> str:
+    """从服务的 ImagePath 里取出可执行文件路径。
+
+    写法有两种：`"C:\\a b\\x.exe" --flag` 与 `C:\\a\\x.exe --flag`。
+    取不出来就返回空串（调用方据此跳过"exe 还在不在"的检查，而不是误判损坏）。
+    """
+    text = (image or "").strip()
+    if not text:
+        return ""
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        return text[1:end] if end > 0 else text[1:]
+    low = text.lower()
+    for marker in (" --", " /"):
+        pos = low.find(marker)
+        if pos > 0:
+            return text[:pos]
+    return text
+
+
+def _scm_api():
+    """打开 advapi32 并配好 argtypes。
+
+    **argtypes 不能省**：HANDLE 在 64 位上是指针宽度，不声明时 ctypes 会按 C int
+    传，句柄被截断成 32 位，OpenService 于是随机失败。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _Status(ctypes.Structure):
+        _fields_ = [("dwServiceType", wintypes.DWORD),
+                    ("dwCurrentState", wintypes.DWORD),
+                    ("dwControlsAccepted", wintypes.DWORD),
+                    ("dwWin32ExitCode", wintypes.DWORD),
+                    ("dwServiceSpecificExitCode", wintypes.DWORD),
+                    ("dwCheckPoint", wintypes.DWORD),
+                    ("dwWaitHint", wintypes.DWORD),
+                    ("dwProcessId", wintypes.DWORD),
+                    ("dwServiceFlags", wintypes.DWORD)]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.OpenSCManagerW.restype = wintypes.HANDLE
+    advapi32.OpenSCManagerW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    advapi32.OpenServiceW.restype = wintypes.HANDLE
+    advapi32.OpenServiceW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD]
+    advapi32.CloseServiceHandle.argtypes = [wintypes.HANDLE]
+    advapi32.CloseServiceHandle.restype = wintypes.BOOL
+    advapi32.QueryServiceStatusEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                              ctypes.c_void_p, wintypes.DWORD,
+                                              ctypes.POINTER(wintypes.DWORD)]
+    advapi32.QueryServiceStatusEx.restype = wintypes.BOOL
+    advapi32.ControlService.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
+    advapi32.ControlService.restype = wintypes.BOOL
+    return advapi32, _Status, ctypes, wintypes
+
+
+class WindowsServiceBackend:
+    """SCM 只读查询 + 提权写操作。整个对象可被测试替换成内存实现。"""
+
+    def supported(self) -> bool:
+        return CURRENT_OS == "Windows"
+
+    @staticmethod
+    def _validate(name: str) -> None:
+        if not SERVICE_NAME_RE.match(name or ""):
+            raise ValueError(f"非法的服务名：{name!r}")
+
+    def query(self, name: str) -> ServiceInfo:
+        info = ServiceInfo(name=name)
+        if not self.supported():
+            return info
+        self._validate(name)
+        image, start_type = self._read_config(name)
+        if image is None and start_type is None:
+            return info
+        info.exists = True
+        info.image_path = image or ""
+        info.start_type = start_type or ""
+        exe = os.path.expandvars(_image_exe_path(image or ""))
+        if exe and not Path(exe).exists():
+            info.state = SERVICE_BROKEN
+            return info
+        state, err = self._scm_state(name)
+        info.error = err
+        # 1060：注册表键还在、SCM 已经不认它了 —— 正是"标记为删除"的样子。
+        info.state = (SERVICE_PENDING if err in (ERROR_SERVICE_DOES_NOT_EXIST,
+                                                 ERROR_SERVICE_MARKED_FOR_DELETE)
+                      else _SCM_STATE_NAMES.get(state, SERVICE_PENDING))
+        return info
+
+    def registry_key_exists(self, name: str) -> bool:
+        image, start_type = self._read_config(name)
+        return image is not None or start_type is not None
+
+    def control(self, name: str, code: int) -> int:
+        """发一次 SCM 控制码，返回 win32 错误码（0 = 成功）。只用于起停。"""
+        if not self.supported():
+            return ERROR_ACCESS_DENIED
+        self._validate(name)
+        advapi32, _Status, ctypes, wintypes = _scm_api()
+        scm = advapi32.OpenSCManagerW(None, None, 0x0001)      # SC_MANAGER_CONNECT
+        if not scm:
+            return ctypes.get_last_error()
+        try:
+            access = 0x0020 | 0x0004 | 0x0001                  # START | QUERY_STATUS | STOP
+            svc = advapi32.OpenServiceW(scm, name, access)
+            if not svc:
+                return ctypes.get_last_error()
+            try:
+                status = _Status()
+                if not advapi32.ControlService(svc, code, ctypes.byref(status)):
+                    return ctypes.get_last_error()
+                return 0
+            finally:
+                advapi32.CloseServiceHandle(svc)
+        finally:
+            advapi32.CloseServiceHandle(scm)
+
+    # --- 只读底层 -------------------------------------------------------
+    @staticmethod
+    def _read_config(name: str) -> Tuple[Optional[str], object]:
+        import winreg
+
+        path = rf"SYSTEM\CurrentControlSet\Services\{name}"
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0,
+                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                image = _reg_scalar(key, "ImagePath")
+                start = _reg_scalar(key, "Start")
+                start_type = {2: "auto", 3: "demand", 4: "disabled"}.get(start, "")
+                return image, start_type
+        except OSError:
+            return None, None
+
+    @staticmethod
+    def _scm_state(name: str) -> Tuple[int, int]:
+        if CURRENT_OS != "Windows":
+            return -1, ERROR_ACCESS_DENIED
+        advapi32, _Status, ctypes, wintypes = _scm_api()
+        scm = advapi32.OpenSCManagerW(None, None, 0x0001)
+        if not scm:
+            return -1, ctypes.get_last_error()
+        try:
+            svc = advapi32.OpenServiceW(scm, name, 0x0004)     # SERVICE_QUERY_STATUS
+            if not svc:
+                return -1, ctypes.get_last_error()
+            try:
+                buf = _Status()
+                needed = wintypes.DWORD(0)
+                if not advapi32.QueryServiceStatusEx(
+                        svc, 0, ctypes.byref(buf), ctypes.sizeof(buf), ctypes.byref(needed)):
+                    return -1, ctypes.get_last_error()
+                return int(buf.dwCurrentState), 0
+            finally:
+                advapi32.CloseServiceHandle(svc)
+        finally:
+            advapi32.CloseServiceHandle(scm)
+
+
+def _reg_scalar(key, name: str):
+    import winreg
+
+    try:
+        value, _kind = winreg.QueryValueEx(key, name)
+    except OSError:
+        return None
+    return value if isinstance(value, int) else str(value)
+
+
+# 唯一实例。测试替换它（fixture 里 `main.SERVICE_BACKEND = FakeServiceBackend()`）。
+SERVICE_BACKEND = WindowsServiceBackend()
+
+
+@dataclass
+class ServiceActionResult:
+    ok: bool
+    cancelled: bool = False
+    message: str = ""
+    info: Optional[ServiceInfo] = None
+
+
+def service_spec_for(comp) -> Optional[ServiceSpec]:
+    spec = getattr(comp, "launch", None)
+    return getattr(spec, "service", None) if spec is not None else None
+
+
+def service_name_for(spec: ServiceSpec, version: str) -> str:
+    return spec.name_template.format(version=version)
+
+
+def service_display_for(spec: ServiceSpec, version: str) -> str:
+    return spec.display_template.format(version=version)
+
+
+def service_data_dir(comp) -> Path:
+    return CONFIG_DIR / f"{comp.key}-data"
+
+
+def service_home(comp, version: str) -> Path:
+    """版本安装目录，并且**必须在 CONFIG_DIR/<key>/ 之下**。
+
+    服务名、ImagePath、配置路径最终都会拼进一条提权脚本里，所以这条边界
+    不是洁癖：路径来自外部（版本字符串可能被手改过），跑偏了就变成"以管理员
+    权限执行任意路径"。
+    """
+    home = comp.install_dir(version).resolve()
+    root = (CONFIG_DIR / comp.key).resolve()
+    if home != root and root not in home.parents:
+        raise ValueError(f"版本目录不在 {root} 之下：{home}")
+    return home
+
+
+def service_config_path(comp, version: str) -> Path:
+    spec = service_spec_for(comp)
+    rel = (getattr(spec, "config_relpath", "") or "").format(version=version)
+    return service_data_dir(comp) / rel
+
+
+def service_port(comp) -> int:
+    return int(getattr(comp.launch, "main_port", 0) or 0)
+
+
+def service_required_missing(comp, version: str) -> List[str]:
+    spec = service_spec_for(comp)
+    if spec is None:
+        return []
+    try:
+        home = service_home(comp, version)
+    except ValueError:
+        return list(spec.required_files)
+    return [rel for rel in spec.required_files if not (home / rel).is_file()]
+
+
+def service_info(comp, version: str, backend=None) -> ServiceInfo:
+    """SCM 状态 + "这个版本的目录是不是还完整"合成一条结论。"""
+    spec = service_spec_for(comp)
+    if spec is None:
+        return ServiceInfo()
+    be = backend or SERVICE_BACKEND
+    info = be.query(service_name_for(spec, version))
+    if info.exists and info.state != SERVICE_BROKEN:
+        exe = _image_exe_path(info.image_path)
+        if (exe and not Path(exe).exists()) or service_required_missing(comp, version):
+            info.state = SERVICE_BROKEN
+    return info
+
+
+def service_image_is_ours(image_path: str, comp) -> bool:
+    """ImagePath 是否落在本工具的组件目录里（据此区分"我们的残留"与别人的 MySQL80）。"""
+    exe = _image_exe_path(image_path).lower()
+    if not exe:
+        return False
+    root = str((CONFIG_DIR / comp.key).resolve()).lower()
+    return exe == root or exe.startswith(root + os.sep) or exe.startswith(root + "/")
+
+
+def installed_service_versions(comp) -> List[Tuple[str, Path]]:
+    """磁盘上装着的、带服务组件的版本（按版本号升序）。"""
+    out: List[Tuple[str, Path]] = []
+    prefix = f"{comp.key}-"
+    for path in comp.installed_dirs():
+        version = path.name[len(prefix):] if path.name.startswith(prefix) else path.name
+        if not service_required_missing(comp, version):
+            out.append((version, path))
+    out.sort(key=lambda item: _version_key(item[0]))
+    return out
+
+
+def peer_running_services(comp, exclude_version: str = "") -> List[ServiceInfo]:
+    """同组件其它版本里正在跑的服务。服务模式的"同端口只能跑一个"靠它把关。"""
+    out: List[ServiceInfo] = []
+    for version, _path in installed_service_versions(comp):
+        if version == exclude_version:
+            continue
+        info = service_info(comp, version)
+        if info.state in (SERVICE_RUNNING, SERVICE_PENDING):
+            out.append(info)
+    return out
+
+
+# --- 数据目录里的配置文件 ---------------------------------------------------
+def write_mysql_ini(comp, version: str, port: int) -> Path:
+    """写版本专属 my.ini。数据目录共享，配置按版本分开（多版本并存时互不覆盖）。"""
+    home = service_home(comp, version)
+    data_dir = service_data_dir(comp)
+    path = service_config_path(comp, version)
+    ensure_dir(path.parent)
+    ensure_dir(data_dir / "logs")
+    text = "\n".join([
+        "[mysqld]",
+        f"basedir={home.as_posix()}",
+        f"datadir={data_dir.as_posix()}",
+        f"port={port}",
+        "bind-address=127.0.0.1",
+        "mysqlx=0",
+        f"log-error={(data_dir / 'logs' / 'mysql-error.err').as_posix()}",
+        "",
+    ])
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def write_redis_conf(comp, version: str, port: int, password: str = "") -> Path:
+    """写版本专属 redis.conf。requirepass 只能明文写在配置里（Redis 本身的要求）。"""
+    data_dir = service_data_dir(comp)
+    path = service_config_path(comp, version)
+    ensure_dir(path.parent)
+    lines = [
+        "bind 127.0.0.1",
+        f"port {port}",
+        f"dir {data_dir.as_posix()}",
+        "save 900 1",
+        "save 300 10",
+        "save 60 10000",
+        "appendonly no",
+    ]
+    if password:
+        lines.append(f"requirepass {password}")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    _harden_file_acl(path)
+    return path
+
+
+def _harden_file_acl(path: Path) -> None:
+    """把含密码的配置文件收成"当前用户 + SYSTEM + 管理员"可读。
+
+    服务以 LocalSystem 跑，所以 SYSTEM 必须保留；玩家自己也要能改。
+    失败不抛：这只是加固，文件本来就落在用户 profile 里。
+    """
+    if CURRENT_OS != "Windows":
+        return
+    try:
+        sid = _current_user_sid()
+        argv = ["icacls", str(path), "/inheritance:r",
+                "/grant:r", f"*{sid}:(F)", "*S-1-5-18:(F)", "*S-1-5-32-544:(F)"]
+        kw = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                  stdin=subprocess.DEVNULL, timeout=20, check=False)
+        if CREATE_NO_WINDOW:
+            kw["creationflags"] = CREATE_NO_WINDOW
+        subprocess.run(argv, **kw)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _current_user_sid() -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                          ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                             ctypes.c_void_p, wintypes.DWORD,
+                                             ctypes.POINTER(wintypes.DWORD)]
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p,
+                                                ctypes.POINTER(wintypes.LPWSTR)]
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008,
+                                     ctypes.byref(token)):     # TOKEN_QUERY
+        return ""
+    try:
+        size = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # TokenUser
+        buf = ctypes.create_string_buffer(max(8, size.value))
+        if not advapi32.GetTokenInformation(token, 1, buf, size, ctypes.byref(size)):
+            return ""
+        sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+        out = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(out)):
+            return ""
+        try:
+            return out.value or ""
+        finally:
+            kernel32.LocalFree(out)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+# --- 密码：DPAPI 存本机、绝不进 argv -----------------------------------------
+SECRETS_FILE = CONFIG_DIR / "service-secrets.json"
+
+
+def _dpapi(data: bytes, unprotect: bool = False) -> Optional[bytes]:
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    buf_in = ctypes.create_string_buffer(data, len(data))
+    blob_in = DATA_BLOB(len(data), ctypes.cast(buf_in, ctypes.POINTER(ctypes.c_char)))
+    blob_out = DATA_BLOB()
+    fn = crypt32.CryptUnprotectData if unprotect else crypt32.CryptProtectData
+    if unprotect:
+        ok = fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+    else:
+        ok = fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+    if not ok:
+        return None
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _load_secrets() -> Dict[str, str]:
+    try:
+        data = json.loads(SECRETS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_service_secret(key: str, password: str) -> None:
+    """把密码用 DPAPI 加密后放在 ~/.env-tools/service-secrets.json（只用于回显与维护）。"""
+    if CURRENT_OS != "Windows" or not password:
+        return
+    enc = _dpapi(password.encode("utf-8"))
+    if enc is None:
+        return
+    data = _load_secrets()
+    data[key] = base64.b64encode(enc).decode("ascii")
+    try:
+        ensure_dir(SECRETS_FILE.parent)
+        SECRETS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_service_secret(key: str) -> str:
+    if CURRENT_OS != "Windows":
+        return ""
+    raw = _load_secrets().get(key)
+    if not raw:
+        return ""
+    try:
+        plain = _dpapi(base64.b64decode(raw), unprotect=True)
+    except Exception:  # noqa: BLE001
+        return ""
+    return plain.decode("utf-8", "replace") if plain else ""
+
+
+def drop_service_secret(key: str) -> None:
+    data = _load_secrets()
+    if key in data:
+        data.pop(key, None)
+        try:
+            SECRETS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+
+# --- 提权脚本（内容由本进程生成、值全部校验过）--------------------------------
+_SERVICE_PS_HEAD = r"""$ErrorActionPreference = 'Continue'
+$ProgressPreference = 'SilentlyContinue'
+$result = [ordered]@{ ok = $false; stage = 'run'; error = ''; steps = @(); marked_for_delete = $false }
+$resultPath = @@RESULT@@
+$sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+function AddStep([string]$stepName, [int]$code) {
+  $script:result.steps += [ordered]@{ name = $stepName; code = $code }
+}
+function SaveResult() {
+  try { $result | ConvertTo-Json -Compress -Depth 6 | Set-Content -LiteralPath $resultPath -Encoding UTF8 } catch { }
+}
+"""
+
+
+def _ps(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _grant_user_control_ps(name: str) -> str:
+    """给当前用户补 SERVICE_START/STOP/QUERY_STATUS，让日常启停不必每次都弹 UAC。
+
+    SDDL 拼接必须可解析、幂等、可回退：读回的 DACL 不以 D: 开头就整段跳过；
+    追加后复核，复核不过就按原文写回 —— 宁可回到"每次 UAC"，也不能锁死 DACL。
+    """
+    return f"""$acl = ((& $sc sdshow {_ps(name)}) -join '').Trim()
+if ($acl.StartsWith('D:')) {{
+  $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+  if ($sid -and ($acl -notlike "*$sid*")) {{
+    $sIdx = $acl.IndexOf('S:')
+    if ($sIdx -lt 0) {{ $sIdx = $acl.Length }}
+    $newAcl = $acl.Substring(0, $sIdx) + '(A;;CCLCRPWPDTLO;;;' + $sid + ')' + $acl.Substring($sIdx)
+    & $sc sdset {_ps(name)} $newAcl | Out-Null
+    AddStep 'acl' $LASTEXITCODE
+    $after = ((& $sc sdshow {_ps(name)}) -join '').Trim()
+    if ($after -notlike "*$sid*") {{
+      & $sc sdset {_ps(name)} $acl | Out-Null
+      AddStep 'acl_rollback' $LASTEXITCODE
+    }}
+  }}
+}}
+"""
+
+
+def _run_service_script(body: str, timeout: float = 300.0) -> Dict[str, object]:
+    """提权跑一段固定脚本，读回它写的 JSON。UAC 取消时 cancelled=True。"""
+    if CURRENT_OS != "Windows":
+        return {"ok": False, "cancelled": False, "error": "服务模式只支持 Windows",
+                "steps": [], "marked_for_delete": False}
+    import tempfile
+
+    stem = f"bt-svc-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    base = Path(tempfile.gettempdir()) / stem
+    script_path = base.with_name(stem + ".ps1")
+    result_path = base.with_name(stem + ".json")
+    script = (_SERVICE_PS_HEAD.replace("@@RESULT@@", _ps(result_path))
+              + "try {\n" + body + "\n} catch {\n  $result.error = \"$_\"; $result.ok = $false\n}\n"
+              + "SaveResult\n")
+    try:
+        script_path.write_text(script, encoding="utf-8-sig")
+    except OSError as exc:
+        return {"ok": False, "cancelled": False, "error": f"脚本写不出去：{exc}",
+                "steps": [], "marked_for_delete": False}
+    params = subprocess.list2cmdline(
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+         "-File", str(script_path)])
+    outcome = run_elevated_process("powershell.exe", params, timeout=timeout)
+    data: Dict[str, object] = {}
+    try:
+        if result_path.is_file():
+            data = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    except ValueError:
+        data = {}
+    _remove_quietly(script_path, result_path)
+    if outcome.get("cancelled"):
+        return {"ok": False, "cancelled": True,
+                "error": "已取消管理员权限请求，系统未做任何改动",
+                "steps": [], "marked_for_delete": False}
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "cancelled": False,
+                "error": str(outcome.get("error") or
+                             f"提权脚本没有回报结果（退出码 {outcome.get('exit_code')}）"),
+                "steps": [], "marked_for_delete": False}
+    data.setdefault("steps", [])
+    return data
+
+
+# --- 服务脚本的正文 ---------------------------------------------------------
+def _install_service_body(comp, version: str) -> str:
+    spec = service_spec_for(comp)
+    name = service_name_for(spec, version)
+    display = service_display_for(spec, version)
+    home = service_home(comp, version)
+    conf = service_config_path(comp, version)
+    port = service_port(comp)
+    lines: List[str] = []
+    if spec.kind == "mysql_native":
+        lines += [
+            f"$exe = {_ps(home / 'bin' / 'mysqld.exe')}",
+            f"$name = {_ps(name)}",
+            f"$conf = {_ps(str(conf))}",
+            "& $exe --install $name \"--defaults-file=$conf\" | Out-Null",
+            "AddStep 'install' $LASTEXITCODE",
+            "if ($LASTEXITCODE -ne 0) { throw \"mysqld --install 失败（退出码 $LASTEXITCODE）\" }",
+            "& $sc config $name 'start=' 'demand' | Out-Null",
+            "AddStep 'start_mode' $LASTEXITCODE",
+        ]
+    else:
+        lines += [
+            f"$exe = {_ps(home / 'RedisService.exe')}",
+            f"$name = {_ps(name)}",
+            f"$conf = {_ps(str(conf))}",
+            f"$data = {_ps(str(service_data_dir(comp)))}",
+            f"& $exe install -c $conf --dir $data --port {int(port)} "
+            f"--service-name $name --start-mode manual | Out-Null",
+            "AddStep 'install' $LASTEXITCODE",
+            "$key = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$name\"",
+            "if (-not (Test-Path $key)) {",
+            "  $bin = '\"' + $exe + '\" --service-run \"' + $conf + '\"'",
+            f"  & $sc create $name 'binPath=' $bin 'start=' 'demand' 'obj=' 'LocalSystem' "
+            f"'DisplayName=' {_ps(display)} | Out-Null",
+            "  AddStep 'sc_create' $LASTEXITCODE",
+            "}",
+        ]
+    lines += [
+        "if (-not (Test-Path \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$name\")) {",
+        "  throw '服务没有注册成功（注册表里找不到服务键）'",
+        "}",
+        _grant_user_control_ps(name),
+        "$result.ok = $true",
+    ]
+    return "\n".join(lines)
+
+
+def _uninstall_service_body(comp, version: str) -> str:
+    spec = service_spec_for(comp)
+    name = service_name_for(spec, version)
+    home = service_home(comp, version)
+    lines: List[str] = []
+    if spec.kind == "mysql_native":
+        lines += [f"$exe = {_ps(home / 'bin' / 'mysqld.exe')}", f"$name = {_ps(name)}",
+                  "if (Test-Path $exe) {",
+                  "  & $exe --remove $name | Out-Null",
+                  "  AddStep 'remove' $LASTEXITCODE",
+                  "}"]
+    else:
+        lines += [f"$exe = {_ps(home / 'RedisService.exe')}", f"$name = {_ps(name)}",
+                  "if (Test-Path $exe) {",
+                  "  & $exe uninstall --service-name $name | Out-Null",
+                  "  AddStep 'uninstall' $LASTEXITCODE",
+                  "}"]
+    lines += [
+        "$key = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$name\"",
+        "if (Test-Path $key) {",
+        "  & $sc delete $name | Out-Null",
+        "  AddStep 'sc_delete' $LASTEXITCODE",
+        "  Start-Sleep -Milliseconds 500",
+        "}",
+        "if (Test-Path $key) {",
+        "  $result.marked_for_delete = $true",
+        "  throw \"服务 $name 仍留在注册表里（多半是已标记为删除，需要重启 Windows 后再清理）\"",
+        "}",
+        "$result.ok = $true",
+    ]
+    return "\n".join(lines)
+
+
+def _control_service_body(name: str, action: str) -> str:
+    verb = "start" if action == "start" else "stop"
+    ok_codes = (0, ERROR_SERVICE_ALREADY_RUNNING) if verb == "start" else (0, 1062)
+    return "\n".join([
+        f"$name = {_ps(name)}",
+        f"& $sc {verb} $name | Out-Null",
+        f"AddStep '{verb}' $LASTEXITCODE",
+        f"if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne {ok_codes[1]}) {{ "
+        f"throw \"sc {verb} 失败（退出码 $LASTEXITCODE）\" }}",
+        "$result.ok = $true",
+    ])
+
+
+# --- 安装 / 启动 / 停止 / 卸载 ----------------------------------------------
+def _service_port_conflict(comp, version: str, port: int) -> str:
+    if not port or not port_is_listening(port):
+        return ""
+    owners = netstat_listener_pids((port,))
+    pid = owners.get(port)
+    return (f"端口 {port} 已被别的进程占用" + (f"（PID {pid}）" if pid else "")
+            + "。服务模式不替你结束别人的进程：请先停掉占用它的程序"
+              "（例如 MSI 装的 MySQL80 服务），再重试。")
+
+
+def _init_mysql_datadir(comp, version: str, log=None) -> Tuple[bool, str]:
+    data_dir = service_data_dir(comp)
+    if (data_dir / "mysql").is_dir():
+        return True, ""
+    home = service_home(comp, version)
+    ensure_dir(data_dir)
+    argv = [str(home / "bin" / "mysqld.exe"), "--initialize-insecure",
+            f"--basedir={home}", f"--datadir={data_dir}"]
+    if log:
+        log("数据目录还没有初始化，先用 mysqld --initialize-insecure 建一次（root 无密码，稍后可设置）……")
+    kw = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+              stdin=subprocess.DEVNULL, timeout=180)
+    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+        kw["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(argv, **kw)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"初始化数据目录失败：{exc}"
+    if proc.returncode != 0:
+        tail = (proc.stdout or b"").decode("utf-8", "replace").splitlines()[-5:]
+        return False, f"初始化数据目录失败（退出码 {proc.returncode}）：{' / '.join(tail)}"
+    return True, ""
+
+
+def install_service(comp, version: str, log=None) -> ServiceActionResult:
+    """把某个已装版本注册成服务（一次 UAC）。不启动、不设密码。"""
+    spec = service_spec_for(comp)
+    if spec is None:
+        return ServiceActionResult(False, message="这个组件没有登记服务模式")
+    if not SERVICE_BACKEND.supported():
+        return ServiceActionResult(False, message="服务模式只支持 Windows")
+    name = service_name_for(spec, version)
+    try:
+        service_home(comp, version)
+    except ValueError as exc:
+        return ServiceActionResult(False, message=str(exc))
+    missing = service_required_missing(comp, version)
+    if missing:
+        return ServiceActionResult(
+            False,
+            message=(f"{comp.display_name} {version} 缺少服务组件所需的文件："
+                     f"{'、'.join(missing)}。请先卸载这个版本、重新安装正确的完整包。"))
+    existing = SERVICE_BACKEND.query(name)
+    if existing.exists and existing.image_path and \
+            not service_image_is_ours(existing.image_path, comp):
+        return ServiceActionResult(
+            False,
+            message=(f"同名服务 {name} 已存在，但它指向 {_image_exe_path(existing.image_path)}，"
+                     f"不是本工具安装的。请先在 services.msc 里处理这个服务，本工具不会覆盖它。"))
+    if existing.exists and existing.state not in (SERVICE_BROKEN, SERVICE_MISSING):
+        return ServiceActionResult(True, message=f"服务 {name} 已经存在，无需重复安装。", info=existing)
+
+    port = service_port(comp)
+    conflict = _service_port_conflict(comp, version, port)
+    if conflict:
+        return ServiceActionResult(False, message=conflict)
+
+    if spec.kind == "mysql_native":
+        ok, why = _init_mysql_datadir(comp, version, log)
+        if not ok:
+            return ServiceActionResult(False, message=why)
+        write_mysql_ini(comp, version, port)
+    else:
+        write_redis_conf(comp, version, port, load_service_secret(f"{comp.key}:{version}"))
+
+    if log:
+        log(f"正在请求管理员权限，把 {comp.display_name} {version} 注册为服务 {name}（手动启动）……")
+    out = _run_service_script(_install_service_body(comp, version))
+    if out.get("cancelled"):
+        return ServiceActionResult(False, cancelled=True,
+                                   message=str(out.get("error") or "已取消管理员权限请求"))
+    info = SERVICE_BACKEND.query(name)
+    if not out.get("ok") or not info.exists:
+        detail = str(out.get("error") or "服务注册失败（提权脚本没有给出原因）")
+        return ServiceActionResult(False, message=detail, info=info)
+    if log:
+        log(f"服务 {name} 已注册（启动类型：手动）。可以在 services.msc 里看到它。")
+    return ServiceActionResult(True, message=f"服务 {name} 已注册", info=info)
+
+
+def start_service(comp, version: str, sleeper=time.sleep, log=None) -> ServiceActionResult:
+    spec = service_spec_for(comp)
+    name = service_name_for(spec, version)
+    info = service_info(comp, version)
+    if not info.exists:
+        return ServiceActionResult(False, message=f"服务 {name} 还没有安装。", info=info)
+    if info.state == SERVICE_BROKEN:
+        return ServiceActionResult(
+            False,
+            message=(f"服务 {name} 指向的可执行文件已经不在了（服务损坏）。"
+                     f"请先卸载这个版本（会顺带删掉这个服务），再重新安装。"), info=info)
+    if info.error in (ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE):
+        return ServiceActionResult(
+            False, message=f"服务 {name} 正在被删除（标记为删除），需要重启 Windows 后再试。", info=info)
+    port = service_port(comp)
+    if info.state == SERVICE_RUNNING and port_is_listening(port):
+        return ServiceActionResult(True, message=f"服务 {name} 已在运行。", info=info)
+
+    err = SERVICE_BACKEND.control(name, 0x0010)          # SERVICE_START
+    if err == ERROR_ACCESS_DENIED:
+        if log:
+            log("当前账户没有启动该服务的权限，改用一次管理员权限启动……")
+        out = _run_service_script(_control_service_body(name, "start"))
+        if out.get("cancelled"):
+            return ServiceActionResult(False, cancelled=True,
+                                       message=str(out.get("error") or "已取消管理员权限请求"))
+        if not out.get("ok"):
+            return ServiceActionResult(False, message=str(out.get("error") or "启动服务失败"), info=info)
+    elif err not in (0, ERROR_SERVICE_ALREADY_RUNNING):
+        return ServiceActionResult(False, message=f"启动服务 {name} 失败（win32 错误 {err}）", info=info)
+
+    rounds = max(1, int(getattr(comp.launch, "startup_timeout", 60) or 60))
+    for _ in range(rounds):
+        info = SERVICE_BACKEND.query(name)
+        if info.state == SERVICE_RUNNING and port_is_listening(port):
+            return ServiceActionResult(True, message=f"服务 {name} 已启动，端口 {port} 正在监听。", info=info)
+        if info.state == SERVICE_STOPPED:
+            return ServiceActionResult(
+                False,
+                message=(f"服务 {name} 启动后立刻又停了。常见原因：端口 {port} 被占、"
+                         f"数据目录初始化失败、配置写错。请查看 {service_data_dir(comp) / 'logs'} "
+                         f"与 Windows 事件查看器（eventvwr.msc）。"), info=info)
+        sleeper(1.0)
+    return ServiceActionResult(
+        False, message=f"服务 {name} 在 {rounds} 秒内没有进入运行状态，端口 {port} 未监听。", info=info)
+
+
+def stop_service(comp, version: str, sleeper=time.sleep, deadline: float = 30.0,
+                 log=None) -> ServiceActionResult:
+    spec = service_spec_for(comp)
+    name = service_name_for(spec, version)
+    info = SERVICE_BACKEND.query(name)
+    if not info.exists:
+        return ServiceActionResult(True, message=f"服务 {name} 不存在（已停止）。", info=info)
+    if info.state not in (SERVICE_RUNNING, SERVICE_PENDING):
+        return ServiceActionResult(True, message=f"服务 {name} 当前不是运行状态。", info=info)
+
+    err = SERVICE_BACKEND.control(name, SERVICE_CONTROL_STOP)
+    if err == ERROR_ACCESS_DENIED:
+        if log:
+            log("当前账户没有停止该服务的权限，改用一次管理员权限停止……")
+        out = _run_service_script(_control_service_body(name, "stop"))
+        if out.get("cancelled"):
+            return ServiceActionResult(False, cancelled=True,
+                                       message=str(out.get("error") or "已取消管理员权限请求"))
+        if not out.get("ok"):
+            return ServiceActionResult(False, message=str(out.get("error") or "停止服务失败"), info=info)
+    elif err not in (0, 1062):                            # 1062 = 服务本来就没在跑
+        return ServiceActionResult(False, message=f"停止服务 {name} 失败（win32 错误 {err}）", info=info)
+
+    port = service_port(comp)
+    for _ in range(max(1, int(deadline))):
+        info = SERVICE_BACKEND.query(name)
+        if info.state in (SERVICE_STOPPED, SERVICE_MISSING) and not port_is_listening(port):
+            return ServiceActionResult(True, message=f"服务 {name} 已停止，端口 {port} 已释放。", info=info)
+        sleeper(1.0)
+    return ServiceActionResult(
+        False, message=f"服务 {name} 在 {int(deadline)} 秒内没有停下来，端口 {port} 仍在监听。")
+
+
+def uninstall_service(comp, version: str, log=None) -> ServiceActionResult:
+    """停服务 → 官方卸载（mysqld --remove / RedisService uninstall）→ sc delete 兜底
+    → 校验注册表键真的没了。**校验不过就不许删目录**，这是"卸载不干净就装不上新的"
+    那条链子的最后一环。"""
+    spec = service_spec_for(comp)
+    if spec is None:
+        return ServiceActionResult(True, message="")
+    name = service_name_for(spec, version)
+    if not SERVICE_BACKEND.supported():
+        return ServiceActionResult(True, message="")
+    info = SERVICE_BACKEND.query(name)
+    key_exists = SERVICE_BACKEND.registry_key_exists(name)
+    if not info.exists and not key_exists:
+        return ServiceActionResult(True, message=f"服务 {name} 不存在，无需删除。", info=info)
+    if info.state in (SERVICE_RUNNING, SERVICE_PENDING):
+        stopped = stop_service(comp, version, log=log)
+        if not stopped.ok:
+            return ServiceActionResult(
+                False, message=(f"{stopped.message} 服务没有停掉，本次不删除服务、也不删版本目录。"))
+    if log:
+        log(f"正在请求管理员权限，删除服务 {name}……")
+    try:
+        service_home(comp, version)
+    except ValueError as exc:
+        return ServiceActionResult(False, message=str(exc))
+    out = _run_service_script(_uninstall_service_body(comp, version))
+    if out.get("cancelled"):
+        return ServiceActionResult(False, cancelled=True,
+                                   message=str(out.get("error") or "已取消管理员权限请求"))
+    still = SERVICE_BACKEND.registry_key_exists(name)
+    if still:
+        later = SERVICE_BACKEND.query(name)
+        if out.get("marked_for_delete") or later.error in (ERROR_SERVICE_DOES_NOT_EXIST,
+                                                           ERROR_SERVICE_MARKED_FOR_DELETE):
+            return ServiceActionResult(
+                False,
+                message=(f"服务 {name} 已被标记为删除，但注册表键还在（1072）。"
+                         f"**需要重启 Windows** 后再点一次卸载；版本目录已保留，没有删除。"))
+        return ServiceActionResult(
+            False,
+            message=(f"服务 {name} 没有删干净。请在管理员 PowerShell 里执行 "
+                     f"`sc.exe delete {name}`，或打开 services.msc 再试；"
+                     f"版本目录已保留。原因：{out.get('error') or '未知'}"))
+    if log:
+        log(f"服务 {name} 已从注册表移除。")
+    return ServiceActionResult(True, message=f"服务 {name} 已删除", info=info)
+
+
+def service_run_record(comp, version: str) -> RunRecord:
+    port = service_port(comp)
+    server = get_page_server()
+    url = server.url_for(comp.key) if server is not None else ""
+    return RunRecord(key=comp.key, version=version,
+                     home=str(service_home(comp, version)),
+                     data_dir=str(service_data_dir(comp)), port=port,
+                     console_url=url, pid=0, pid_role="service",
+                     started_at=time.time(), launcher_cmd=[], ports=(port,),
+                     service_name=service_name_for(service_spec_for(comp), version))
+
+
+# --- MySQL root 密码（只在首次安装后设一次） ---------------------------------
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def mysql_set_root_password(comp, version: str, port: int, new_password: str,
+                            old_password: str = "") -> Tuple[bool, str]:
+    """用 stdin 把 ALTER USER 喂给 mysql.exe；密码只出现在临时选项文件与 SQL 里。
+
+    argv 里只有路径与端口，哨兵用例会把它钉住。旧密码错误时 mysql 会以非零退出，
+    这时**不重试、不猜**，把它的原话交给用户。
+    """
+    if not new_password:
+        return True, ""
+    if any(ch in new_password for ch in "\r\n\x00"):
+        return False, "密码里不能有换行或 NUL 字符"
+    home = service_home(comp, version)
+    mysql_exe = home / "bin" / "mysql.exe"
+    if not mysql_exe.is_file():
+        return False, f"找不到 {mysql_exe}，无法设置 root 密码"
+    import tempfile
+
+    stem = f"bt-mysql-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    opt_file = Path(tempfile.gettempdir()) / (stem + ".cnf")
+    lines = ["[client]"]
+    if old_password:
+        lines.append('password="' + old_password.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    try:
+        opt_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _harden_file_acl(opt_file)
+    except OSError as exc:
+        return False, f"临时选项文件写不出去：{exc}"
+    sql = (f"ALTER USER 'root'@'localhost' IDENTIFIED BY {_sql_literal(new_password)};\n"
+           f"FLUSH PRIVILEGES;\n")
+    argv = [str(mysql_exe), "--protocol=tcp", "-h", "127.0.0.1", "-P", str(port),
+            "-u", "root", f"--defaults-extra-file={opt_file}"]
+    kw = dict(input=sql.encode("utf-8"), stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT, timeout=60)
+    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+        kw["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(argv, **kw)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"调用 mysql.exe 失败：{exc}"
+    finally:
+        _remove_quietly(opt_file)
+    if proc.returncode != 0:
+        tail = (proc.stdout or b"").decode("utf-8", "replace").splitlines()[-4:]
+        return False, f"设置 root 密码失败（退出码 {proc.returncode}）：{' / '.join(tail)}"
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -18224,14 +19457,22 @@ class ComponentCard(QFrame):
             # 服务是好的，只是没有页面可点。把这句话摆在这儿，用户就不会去找
             # 那个不存在的控制台入口、也不会以为服务坏了。
             tail = "" if self._has_console() else " · 无网页控制台"
-            self._set_launch(f"● 运行中 · 端口 {st.record.port}{tail}",
+            svc_tail = ""
+            if getattr(st.record, "service_name", ""):
+                svc_tail = f" · 服务 {st.record.service_name}"
+            self._set_launch(f"● 运行中{svc_tail} · 端口 {st.record.port}{tail}",
                              f"● 运行中 {st.record.port}")
             # 运行中禁止卸载：边跑边删目录会把正在写的日志和数据留在半删状态
             self.btn_uninstall.setEnabled(False)
             self.btn_uninstall.setToolTip("请先停止运行中的 %s 再卸载" % self.component.display_name)
             self._uninstall_locked_by_launch = True
         else:
-            if st.state == "zombie":
+            if st.state == "broken":
+                self._set_launch(
+                    "⚠ 服务损坏：服务还在，但它指向的文件已被删除。"
+                    "点「卸载」可先删掉这个服务，再重装这个版本。",
+                    "⚠ 服务损坏")
+            elif st.state == "zombie":
                 # 僵尸登记要看得见：否则"上次崩了、登记还留着"和"干净地停过"长得一模一样。
                 # 文案只承诺 start() 真会做的事：它不看旧 PID，直接起一个新进程并覆盖这条登记
                 # —— 万一是"卡住但还活着"的旧进程，那个进程归 adopt/手工处理，别说成"接管"。
@@ -18271,6 +19512,9 @@ class ComponentCard(QFrame):
     def _do_start(self) -> None:
         """真正开始启动（前置依赖已就位时走这里）。"""
         spec = self.component.launch
+        if service_spec_for(self.component) is not None:
+            self._do_service_start()
+            return
         # 端口提示必须与实际行为一致。2026-10-06 起策略是"不平移、被占就结束占用者"，
         # 这里原来还写着"被占用时会自动往后找空闲口"—— 确认框里说假话比不说更糟：
         # 用户以为端口会变，于是按自己的预期去连那个并不存在的端口。
@@ -18293,6 +19537,64 @@ class ComponentCard(QFrame):
         self.launch_worker = LaunchWorker("start", self.component,
                                           component_registry(), SERVICE_MANAGER,
                                           parent=self)
+        self.launch_worker.started_ok.connect(self._on_launch_ok)
+        self.launch_worker.failed.connect(self._on_launch_failed)
+        self.launch_worker.notes.connect(self._on_launch_notes)
+        self.launch_worker.finished.connect(self._on_launch_worker_done)
+        self.launch_worker.start()
+
+    def _do_service_start(self) -> None:
+        """服务模式的启动确认：先讲清"注册成服务、手动启动、要一次 UAC"，再收密码。"""
+        comp = self.component
+        spec = service_spec_for(comp)
+        version = self._current_version().version
+        name = service_name_for(spec, version)
+        missing = service_required_missing(comp, version)
+        if missing:
+            QMessageBox.warning(
+                self, "缺少服务组件",
+                f"{comp.display_name} {version} 缺少服务组件所需的文件：\n{'、'.join(missing)}\n\n"
+                f"这个包不是带服务组件的完整版。请先卸载这个版本，重新安装正确的包。")
+            return
+        info = service_info(comp, version)
+        if info.state == SERVICE_BROKEN:
+            QMessageBox.warning(
+                self, "服务损坏",
+                f"服务 {name} 还在，但它指向的可执行文件已经不存在了。\n\n"
+                f"请点「卸载」先删掉这个服务（版本目录也会一起清理），再重新安装 {version}。")
+            return
+        peers = peer_running_services(comp, exclude_version=version)
+        if peers and not info.running:
+            names = "、".join(p.name for p in peers)
+            QMessageBox.warning(
+                self, "另一个版本的服务在运行",
+                f"{names} 正在运行。同一端口同一时间只能跑一个版本：\n"
+                f"先在下拉框切到那个版本并点「停止」，再启动 {version}。")
+            return
+        mode = ("服务已注册，直接启动。" if info.exists else
+                "服务还没注册：会先请求一次管理员权限把它注册成 Windows 服务。")
+        reply = QMessageBox.question(
+            self, f"启动 {comp.display_name} {version}",
+            f"服务名：{name}\n启动类型：手动（不会开机自启）\n"
+            f"端口：{service_port(comp)}\n{mode}\n\n"
+            f"注册服务需要一次管理员权限（UAC）。启动后关掉本工具、关掉控制台，"
+            f"服务都会继续运行，也可以在 services.msc 里看到它。\n\n确认启动？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            return
+        password = ""
+        if spec.password_kind and not info.exists:
+            # 只在"第一次注册成服务"时问密码：之后每次启动再问一遍是骚扰，
+            # 而且 MySQL 的 root 密码已经生效、Redis 的 requirepass 已落在 conf 里。
+            dlg = ServicePasswordDialog(comp.display_name, spec.password_kind, self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            password = dlg.password()
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("启动中…")
+        self.launch_worker = LaunchWorker("start", comp, component_registry(),
+                                          SERVICE_MANAGER, parent=self,
+                                          version=version, password=password)
         self.launch_worker.started_ok.connect(self._on_launch_ok)
         self.launch_worker.failed.connect(self._on_launch_failed)
         self.launch_worker.notes.connect(self._on_launch_notes)
@@ -19930,6 +21232,66 @@ class ComponentCard(QFrame):
 # ---------------------------------------------------------------------------
 # 捐赠弹窗（不出现在文档中；仅代码内实现）
 # ---------------------------------------------------------------------------
+class ServicePasswordDialog(QDialog):
+    """服务模式首次安装时的密码输入（两次确认）。
+
+    密码只经 **stdin / 配置文件** 落地：MySQL 走临时选项文件 + `ALTER USER`，
+    Redis 写进版本专属 redis.conf。任何情况下都不进命令行 argv（R24）。
+    留空 = 不设密码（与服务端口只监听 127.0.0.1 的事实一起写进提示）。
+    """
+
+    def __init__(self, display_name: str, kind: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"{display_name} 服务密码")
+        self.setMinimumWidth(420)
+        self._kind = kind
+        root = QVBoxLayout(self)
+        what = "root 账号" if kind == "mysql_root" else "requirepass"
+        tip = QLabel(
+            f"为 {display_name} 设置 {what} 密码。\n"
+            f"密码会用 DPAPI 加密后保存在本机（仅用于维护），不会出现在命令行、"
+            f"日志或访问页里。\n留空表示不设密码（服务仍只监听 127.0.0.1）。")
+        tip.setWordWrap(True)
+        root.addWidget(tip)
+        self.pw = QLineEdit()
+        self.pw.setEchoMode(QLineEdit.Password)
+        self.pw.setPlaceholderText("密码（留空 = 不设置）")
+        self.pw2 = QLineEdit()
+        self.pw2.setEchoMode(QLineEdit.Password)
+        self.pw2.setPlaceholderText("再输一次")
+        root.addWidget(self.pw)
+        root.addWidget(self.pw2)
+        self.hint = QLabel("")
+        self.hint.setStyleSheet("color:#c62828;")
+        self.hint.setWordWrap(True)
+        root.addWidget(self.hint)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("确定")
+        ok.setObjectName("primaryBtn")
+        ok.setDefault(True)
+        ok.clicked.connect(self._on_ok)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        root.addLayout(row)
+
+    def _on_ok(self) -> None:
+        value = self.pw.text()
+        if value != self.pw2.text():
+            self.hint.setText("两次输入的密码不一致。")
+            return
+        if any(ch in value for ch in "\r\n\x00"):
+            self.hint.setText("密码里不能有换行或 NUL 字符。")
+            return
+        self.hint.setText("")
+        self.accept()
+
+    def password(self) -> str:
+        return self.pw.text()
+
+
 class ComponentDetailDialog(QDialog):
     """组件详情：一屏说清"它是干嘛的、装完怎么用、数据在哪、平台有什么坑"。
 
