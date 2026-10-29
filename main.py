@@ -14696,6 +14696,11 @@ def _scm_api():
     advapi32.QueryServiceStatusEx.restype = wintypes.BOOL
     advapi32.ControlService.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
     advapi32.ControlService.restype = wintypes.BOOL
+    # 启动**不能**走 ControlService：SERVICE_START(0x10) 不是控制码，
+    # 传进去 SCM 直接回 87(ERROR_INVALID_PARAMETER) —— 2026-10-29 真机踩到过。
+    advapi32.StartServiceW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                       ctypes.POINTER(wintypes.LPCWSTR)]
+    advapi32.StartServiceW.restype = wintypes.BOOL
     return advapi32, _Status, ctypes, wintypes
 
 
@@ -14737,11 +14742,38 @@ class WindowsServiceBackend:
         image, start_type = self._read_config(name)
         return image is not None or start_type is not None
 
-    def control(self, name: str, code: int) -> int:
-        """发一次 SCM 控制码，返回 win32 错误码（0 = 成功）。只用于起停。"""
+    def start(self, name: str) -> int:
+        """启动服务，返回 win32 错误码（0 = 成功）。"""
         if not self.supported():
             return ERROR_ACCESS_DENIED
         self._validate(name)
+        advapi32, _Status, ctypes, wintypes = _scm_api()
+        scm = advapi32.OpenSCManagerW(None, None, 0x0001)      # SC_MANAGER_CONNECT
+        if not scm:
+            return ctypes.get_last_error()
+        try:
+            svc = advapi32.OpenServiceW(scm, name, 0x0010 | 0x0004)   # START | QUERY_STATUS
+            if not svc:
+                return ctypes.get_last_error()
+            try:
+                if not advapi32.StartServiceW(svc, 0, None):
+                    return ctypes.get_last_error()
+                return 0
+            finally:
+                advapi32.CloseServiceHandle(svc)
+        finally:
+            advapi32.CloseServiceHandle(scm)
+
+    def control(self, name: str, code: int) -> int:
+        """向 SCM 发**控制码**（停/暂停/继续），返回 win32 错误码（0 = 成功）。
+
+        只接受控制码；`SERVICE_START` 这类启动请求必须走 start()（见上面注释）。
+        """
+        if not self.supported():
+            return ERROR_ACCESS_DENIED
+        self._validate(name)
+        if code == 0x0010:
+            raise ValueError("启动服务请调用 start()，ControlService 不接受 SERVICE_START")
         advapi32, _Status, ctypes, wintypes = _scm_api()
         scm = advapi32.OpenSCManagerW(None, None, 0x0001)      # SC_MANAGER_CONNECT
         if not scm:
@@ -15388,7 +15420,7 @@ def start_service(comp, version: str, sleeper=time.sleep, log=None) -> ServiceAc
     if info.state == SERVICE_RUNNING and port_is_listening(port):
         return ServiceActionResult(True, message=f"服务 {name} 已在运行。", info=info)
 
-    err = SERVICE_BACKEND.control(name, 0x0010)          # SERVICE_START
+    err = SERVICE_BACKEND.start(name)
     if err == ERROR_ACCESS_DENIED:
         if log:
             log("当前账户没有启动该服务的权限，改用一次管理员权限启动……")

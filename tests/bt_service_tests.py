@@ -46,10 +46,18 @@ class FakeServiceBackend:
         info = self.services.get(name)
         if info is None:
             return main.ERROR_SERVICE_DOES_NOT_EXIST
-        if code == 0x0010:
-            info.state = main.SERVICE_RUNNING
-        elif code == main.SERVICE_CONTROL_STOP:
+        if code == main.SERVICE_CONTROL_STOP:
             info.state = main.SERVICE_STOPPED
+        return 0
+
+    def start(self, name):
+        if self.control_should_raise:
+            raise AssertionError("状态认定路径不许碰 start()")
+        self.calls.append(("start", name))
+        info = self.services.get(name)
+        if info is None:
+            return main.ERROR_SERVICE_DOES_NOT_EXIST
+        info.state = main.SERVICE_RUNNING
         return 0
 
 
@@ -197,6 +205,32 @@ class ServiceStartRefusesPeerService(ServiceTestBase):
         self.assertFalse(res.ok)
         self.assertIn("8.0.36", res.reason)
         self.assertFalse([c for c in self.backend.calls if c[0] == "control"])
+
+
+class ServiceStartUsesStartServiceApi(ServiceTestBase):
+    def test_start_goes_through_start_service_api_not_control(self):
+        """真机 2026-10-29：启动误走 ControlService(SERVICE_START) 回 87。"""
+        comp = self.ready("mysql", "8.0.37")
+        self.add_service(comp, "8.0.37", main.SERVICE_STOPPED)
+        started = {"v": False}
+        orig_start = self.backend.start
+
+        def start_and_flag(name):
+            started["v"] = True
+            self.listening.add(3306)
+            return orig_start(name)
+
+        self.backend.start = start_and_flag
+        mgr = main.ServiceManager(is_listening=lambda p: p in self.listening)
+        res = mgr.start(comp, self.comps, version="8.0.37", sleeper=lambda s: None)
+        self.assertTrue(res.ok, res.reason)
+        self.assertIn(("start", "ByteTools-MySQL-8.0.37"), self.backend.calls)
+        self.assertFalse([c for c in self.backend.calls if c[0] == "control"])
+        self.assertEqual(main.load_running_map()["mysql"].pid_role, "service")
+
+    def test_backend_control_refuses_the_start_code(self):
+        with self.assertRaises(ValueError):
+            main.WindowsServiceBackend().control("ByteTools-MySQL-8.0.37", 0x0010)
 
 
 class ServicePortConflictPolicy(ServiceTestBase):
