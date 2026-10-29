@@ -1592,12 +1592,20 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 11. 旧便携进程的迁移：服务还没注册、但 running.json 里有便携登记且端口在听时，
     `status` 仍报运行中，`stop` 走原便携停止路径。停掉之后就能正常装服务。
 
-### R5.8.4 未真机验证的部分（如实记）
+### R5.8.4 真机记录与未验证部分（如实记）
 
-本机没有交互桌面/管理员权限，**UAC 弹窗、真实装/删服务、RedisService.exe 的
-CLI 参数、`sc sdset` 的实际效果都没有跑过**。已验到的是：
+2026-10-29 真机（非管理员启动的工具）：UAC 安装成功，`services.msc` 里出现
+`ByteTools-MySQL-8.0.37`（启动类型=手动，ImagePath 指向版本目录里的 `mysqld.exe`
++ 版本专属 `my.ini`）。首次点启动时报 **win32 87** —— 原因是启动走了
+`ControlService(SERVICE_START=0x10)`，而 0x10 不是控制码。已改为
+`StartServiceW`，并让 `control()` 对 0x10 直接抛错，护栏
+`bt_service_tests.ServiceStartUsesStartServiceApi` 钉住（真机教训，别改回去）。
 
-- 全量护栏 1031 条通过（含 `bt_service_tests` 28 条，全部 FakeServiceBackend）；
+**仍未跑过**：服务真正启动后的端口监听、`services.msc` 手工启动、关工具后存活、
+卸载闭环、1072、RedisService.exe 的实际 CLI 参数、`sc sdset` 的实际效果。
+已验到的是：
+
+- 全量护栏 1035 条通过（含 `bt_service_tests` 32 条，全部 FakeServiceBackend）；
 - 静态脚本内容：`--install` 在首位、`start= demand`、`--remove` + `sc delete` 兜底、
   注册表键复核、SDDL 追加与回滚；
 - MySQL 服务模式下的数据目录初始化仍走 `--initialize-insecure`（与 R5.7 同一套）。
