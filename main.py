@@ -9329,13 +9329,14 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "协议错误，所以本工具不给它挂「访问页」按钮。"
             "验证是否可用：在本工具装好的版本目录里有一个 redis-cli.exe，"
             "执行 `redis-cli.exe -p {port} ping`，回 `PONG` 就是通了；"
-            "设了 requirepass 时要加 `-a`（或先 `AUTH`）。"
+            "设了 requirepass 时先 `AUTH <密码>`，或给环境变量 `REDISCLI_AUTH` 再跑"
+            "（**别用 -a**：密码会留在命令行历史与进程列表里）。"
         ),
         service=ServiceSpec(
             kind="redis_wrapper",
             name_template="ByteTools-Redis-{version}",
             display_template="ByteTools Redis {version}",
-            required_files=("RedisService.exe",),
+            required_files=("RedisService.exe", "redis-server.exe", "redis-cli.exe"),
             config_relpath="{version}/redis.conf",
             password_kind="redis_requirepass",
         ),
@@ -14430,6 +14431,8 @@ class ServiceManager:
         secret_key = f"{comp.key}:{target}"
         stored = load_service_secret(secret_key)
         notes: List[str] = []
+        if password and any(ch in password for ch in "\r\n\x00"):
+            return StartResult(False, "gate", "密码里不能有换行或 NUL 字符")
 
         info = service_info(comp, target)
         if not info.exists:
@@ -14473,7 +14476,14 @@ class ServiceManager:
                     notes.append(f"root 密码没设置成功：{why}。"
                                  f"root 仍是空密码或原密码，本次输入的密码**没有生效**。")
             elif spec.password_kind == "redis_requirepass":
-                notes.append("requirepass 已写入版本专属 redis.conf。")
+                ok, why = redis_verify_auth(comp, target, port, password)
+                if ok:
+                    notes.append("requirepass 已生效：带密码 PING 返回 PONG，"
+                                 "无密码请求被 NOAUTH 拒绝。")
+                else:
+                    drop_service_secret(secret_key)
+                    notes.append(f"requirepass 没生效：{why}。"
+                                 f"本次输入的密码**没有生效**，Redis 仍是无密码状态。")
 
         rec = service_run_record(comp, target)
         records = load_running_map()
@@ -14485,6 +14495,11 @@ class ServiceManager:
             if ok_free:
                 notes.append("root 当前**没有密码**，可以直接用 `mysql -u root` 登录；"
                              "要设置密码请先卸载这个版本再重装（重装时会弹密码框）。")
+        if spec.password_kind == "redis_requirepass" and not password and not stored:
+            ok_free, _ = redis_verify_auth(comp, target, port, "")
+            if ok_free:
+                notes.append(f"Redis 当前**没有 requirepass**：`redis-cli -p {port} ping` 直接可用；"
+                             f"要设置密码请先卸载这个版本再重装（重装时会弹密码框）。")
         return StartResult(True, "running", record=rec,
                            console_url=rec.console_url, notes=notes)
 
@@ -15021,22 +15036,33 @@ def write_mysql_ini(comp, version: str, port: int) -> Path:
     return path
 
 
+def _redis_conf_quote(value: str) -> str:
+    """把值写成 redis.conf 里的双引号字符串。
+
+    不加引号时 Redis 的配置解析按空白切分：`requirepass a b` 只会取到 `a`，
+    密码里有空格/`#`/引号就会被静默截断或当注释 —— 用户以为设了，实际设的是半截。
+    """
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def write_redis_conf(comp, version: str, port: int, password: str = "") -> Path:
     """写版本专属 redis.conf。requirepass 只能明文写在配置里（Redis 本身的要求）。"""
+    if password and any(ch in password for ch in "\r\n\x00"):
+        raise ValueError("密码里不能有换行或 NUL 字符")
     data_dir = service_data_dir(comp)
     path = service_config_path(comp, version)
     ensure_dir(path.parent)
     lines = [
         "bind 127.0.0.1",
         f"port {port}",
-        f"dir {data_dir.as_posix()}",
+        f"dir {_redis_conf_quote(data_dir.as_posix())}",
         "save 900 1",
         "save 300 10",
         "save 60 10000",
         "appendonly no",
     ]
     if password:
-        lines.append(f"requirepass {password}")
+        lines.append("requirepass " + _redis_conf_quote(password))
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
     _harden_file_acl(path)
@@ -15289,11 +15315,13 @@ def _install_service_body(comp, version: str) -> str:
             f"$conf = {_ps(str(conf))}",
             f"$data = {_ps(str(service_data_dir(comp)))}",
             f"& $exe install -c $conf --dir $data --port {int(port)} "
-            f"--service-name $name --start-mode manual | Out-Null",
+            f"--service-name $name --display-name {_ps(display)} --start-mode manual | Out-Null",
             "AddStep 'install' $LASTEXITCODE",
             "$key = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$name\"",
             "if (-not (Test-Path $key)) {",
-            "  $bin = '\"' + $exe + '\" --service-run \"' + $conf + '\"'",
+            # 兜底：RedisService.exe 自己的 install 失败时按官方用法 `run -c <conf>` 注册
+            # （`--help` 实测：子命令只有 install / uninstall / run，没有 --service-run）。
+            f"  $bin = '\"' + $exe + '\" run -c \"' + $conf + '\" --port {int(port)} --dir \"' + $data + '\"'",
             f"  & $sc create $name 'binPath=' $bin 'start=' 'demand' 'obj=' 'LocalSystem' "
             f"'DisplayName=' {_ps(display)} | Out-Null",
             "  AddStep 'sc_create' $LASTEXITCODE",
@@ -15669,6 +15697,64 @@ def mysql_set_root_password(comp, version: str, port: int, new_password: str,
     if not ok:
         return False, f"密码写入后复核失败：{why}"
     return True, ""
+
+
+# --- Redis：requirepass 的复核 -------------------------------------------------
+def _redis_cli_path(comp, version: str) -> Optional[Path]:
+    home = service_home(comp, version)
+    for rel in ("redis-cli.exe", "bin/redis-cli.exe"):
+        path = home / rel
+        if path.is_file():
+            return path
+    return None
+
+
+def _redis_cli_ping(cli: Path, port: int, password: str) -> str:
+    """跑一次 PING。密码走 `REDISCLI_AUTH` 环境变量，**绝不进 argv**（R24）。"""
+    env = dict(os.environ)
+    env.pop("REDISCLI_AUTH", None)
+    if password:
+        env["REDISCLI_AUTH"] = password
+    argv = [str(cli), "-h", "127.0.0.1", "-p", str(port), "PING"]
+    kw = dict(env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+              stdin=subprocess.DEVNULL, timeout=15)
+    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+        kw["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(argv, **kw)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"__error__:{exc}"
+    return (proc.stdout or b"").decode("utf-8", "replace").strip()
+
+
+def redis_verify_auth(comp, version: str, port: int, password: str) -> Tuple[bool, str]:
+    """用 redis-cli 真连一次，确认 requirepass 到底生效没有。
+
+    **只验"带密码能 PONG"是不够的**：如果 requirepass 根本没写进去，随便给个
+    密码也会 PONG（Redis 不校验未知 AUTH）。所以设过密码时还要验反向：
+    不带密码的 PING 必须被 `NOAUTH` 拒绝。
+    """
+    cli = _redis_cli_path(comp, version)
+    if cli is None:
+        return False, f"找不到 redis-cli.exe（{service_home(comp, version)}）"
+    out = _redis_cli_ping(cli, port, password)
+    if out.startswith("__error__:"):
+        return False, out[len("__error__:"):]
+    if password:
+        if "PONG" not in out:
+            return False, f"带密码 PING 没有得到 PONG：{_tail_text(out)}"
+        anon = _redis_cli_ping(cli, port, "")
+        if anon.startswith("__error__:"):
+            return False, anon[len("__error__:"):]
+        if "NOAUTH" not in anon:
+            return False, (f"Redis 没有拒绝无密码请求（{_tail_text(anon)}），"
+                           f"requirepass 没有生效")
+        return True, ""
+    if "NOAUTH" in out:
+        return False, "Redis 要求密码，但本工具没有它的密码记录"
+    if "PONG" in out:
+        return True, ""
+    return False, f"PING 没有得到预期响应：{_tail_text(out)}"
 
 
 # ---------------------------------------------------------------------------
