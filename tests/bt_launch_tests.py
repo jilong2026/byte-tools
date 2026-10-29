@@ -21,6 +21,34 @@ from PySide6.QtCore import Qt  # noqa: E402  读下拉框的 DecorationRole（�
 from PySide6.QtWidgets import QApplication  # noqa: E402  要构造 QThread 子类得有 QApplication
 
 
+class _NoServicesBackend:
+    """本套件只测便携进程；真机装着 ByteTools 服务时不能让 SCM 影响结果。
+
+    `reconcile/adopt` 现在会回填"服务在跑但 running.json 没记录"的条目
+    （R5.8.3 第 3 条）。在开发机上 MySQL 服务真的在跑，ZombieMatrix 这类
+    "坏 JSON → 空表"的用例就会拿到机器相关的结果。服务模式的护栏在
+    bt_service_tests 里用自己的 FakeServiceBackend 覆盖，这里统一答"没有服务"。
+    """
+
+    def supported(self):
+        return True
+
+    def query(self, name):
+        return main.ServiceInfo(name=name)
+
+    def registry_key_exists(self, name):
+        return False
+
+    def start(self, name):
+        raise AssertionError("便携路径不该启动服务")
+
+    def control(self, name, code):
+        raise AssertionError("便携路径不该控制服务")
+
+
+main.SERVICE_BACKEND = _NoServicesBackend()
+
+
 class LaunchSpecTable(unittest.TestCase):
     def setUp(self):
         self.comps = {c.key: c for c in main.build_components()}

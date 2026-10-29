@@ -3893,6 +3893,33 @@ def fetch_node_versions() -> List[ComponentVersion]:
     return result
 
 
+def _mysql_zip_exists(v: str) -> Optional[bool]:
+    """这个版本的 winx64.zip 还有没有可下源（官方 CDN 优先，再问一次华为云）。
+
+    归档索引里会列出**没有 Windows 包**的版本（2026-10-29 真机：8.0.38 / 8.0.39
+    在 cdn 全是 404，用户点了白等三次失败）。只有**官方与镜像都明确 404** 才剔除；
+    任何一次探测失败（超时/断网/其它状态码）都返回 None，调用方据此保留 ——
+    网络差的时候宁可多列一个，也不能少列。
+    """
+    urls = (_mysql_urls(v).get("Windows") or [])
+    if not urls:
+        return None
+    cdn, mirror = urls[-1], urls[0]
+    answered = False
+    for url in (cdn, mirror):
+        try:
+            r = http_session().head(url, timeout=8, allow_redirects=True)
+        except Exception:  # noqa: BLE001
+            continue
+        if r.status_code in (200, 206):
+            return True
+        if r.status_code == 404:
+            answered = True
+            continue
+        return None
+    return False if answered else None
+
+
 def fetch_mysql_versions() -> List[ComponentVersion]:
     """MySQL 没有公开 API，抓 downloads.mysql.com 的归档索引。失败则用一个较新的固定清单。"""
     versions: List[str] = []
@@ -3908,13 +3935,18 @@ def fetch_mysql_versions() -> List[ComponentVersion]:
     except Exception:
         pass
     if not versions:
-        # 保底：一份手工维护的近期列表
+        # 保底：一份手工维护的近期列表（只放确认能在官方 CDN 下到 winx64.zip 的版本；
+        # 8.0.38 / 8.0.39 实测 404，不要加回来）
         versions = [
             "8.4.2", "8.4.1", "8.4.0",
-            "8.0.39", "8.0.38", "8.0.37", "8.0.36", "8.0.35", "8.0.34",
+            "8.0.37", "8.0.36", "8.0.35", "8.0.34",
             "5.7.44", "5.7.43", "5.7.42",
         ]
-    return [_cv(v, _mysql_urls(v)) for v in _sort_semver_desc(versions)]
+    ordered = _sort_semver_desc(set(versions))
+    kept = [v for v in ordered if _mysql_zip_exists(v) is not False]
+    # 探测把整张表都判成 404 时不可能是真的（多半是 CDN 换了布局）：
+    # 保留原列表，让下载器的多源故障转移去试镜像。
+    return [_cv(v, _mysql_urls(v)) for v in (kept or ordered)]
 
 
 def fetch_git_versions() -> List[ComponentVersion]:
@@ -9193,7 +9225,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         credentials_hint=(
             "**etcd 没有网页控制台** —— 2379 说 gRPC/HTTP，浏览器打开看不到页面。"
             "验证是否可用：同目录里的 etcdctl.exe 执行 "
-            "`etcdctl.exe --endpoints=http://127.0.0.1:<端口> put k v` 再 `get k`。"),
+            "`etcdctl.exe --endpoints=http://127.0.0.1:{port} put k v` 再 `get k`。"),
     ),
 
     "consul": LaunchSpec(
@@ -9260,7 +9292,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         credentials_hint=(
             "**ZooKeeper 没有网页控制台** —— 2181 说的是它自己的二进制协议，"
             "浏览器打开只会看到连接错误。验证方式：同目录的 zkCli.cmd 执行 "
-            "`zkCli.cmd -server 127.0.0.1:<端口>`，出现 `Welcome to ZooKeeper` 就是通了。"),
+            "`zkCli.cmd -server 127.0.0.1:{port}`，出现 `Welcome to ZooKeeper` 就是通了。"),
     ),
 
     "redis": LaunchSpec(
@@ -9296,7 +9328,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "**Redis 没有网页控制台** —— 6379 说的是 RESP 协议，浏览器打开只会看到"
             "协议错误，所以本工具不给它挂「访问页」按钮。"
             "验证是否可用：在本工具装好的版本目录里有一个 redis-cli.exe，"
-            "执行 `redis-cli.exe -p <端口> ping`，回 `PONG` 就是通了；"
+            "执行 `redis-cli.exe -p {port} ping`，回 `PONG` 就是通了；"
             "设了 requirepass 时要加 `-a`（或先 `AUTH`）。"
         ),
         service=ServiceSpec(
@@ -9359,9 +9391,10 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
                    "随后可在弹窗里设置 root 密码；服务只监听 127.0.0.1。"),
         data_note=("数据目录 = 本工具的 ~/.env-tools/mysql-data（my.ini 的 datadir 指过去）。"
                    "切换生效版本与卸载都不碰它。"),
-        credentials_hint=("root 用户默认无密码（初始化参数是 --initialize-insecure）；"
-                          "若安装时设置了密码，用那次输入的密码。只监听 127.0.0.1。验证连接："
-                          "`bin/mysql.exe -h 127.0.0.1 -P <端口> -u root -p`。"),
+        credentials_hint=("root 用户当前**无密码**（初始化参数是 --initialize-insecure）。"
+                          "只监听 127.0.0.1。验证连接："
+                          "`bin/mysql.exe -h 127.0.0.1 -P {port} -u root`（不要加 -p）；"
+                          "若安装时设置过密码，则加 `-p` 并用那次输入的密码。"),
         service=ServiceSpec(
             kind="mysql_native",
             name_template="ByteTools-MySQL-{version}",
@@ -9464,7 +9497,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
             "所以本工具不给它挂「访问页」按钮。"
             "官方这个 zip 里**只有 nats-server.exe**（实测条目就三个：LICENSE / README / "
             "nats-server.exe），没带 nats 命令行；要验活就自己下一个 nats CLI，"
-            "执行 `nats -s nats://127.0.0.1:<端口> server check`。"
+            "执行 `nats -s nats://127.0.0.1:{port} server check`。"
         ),
     ),
 }
@@ -12882,15 +12915,18 @@ def credentials_for(comp: Component, spec: LaunchSpec, port: int) -> List[str]:
     """
     if not spec.credentials_hint:
         return []
+    # `{port}` 是本工具自己的占位符（不是 HTML）。**不能用 `<端口>`**：
+    # 日志控件是富文本，`<端口>` 会被当成标签直接吞掉，用户看到的就是
+    # `mysql.exe ... -P -u root`（2026-10-29 真机）。
+    text = spec.credentials_hint.replace("{port}", str(port))
     # hint 里的端口是厂商默认值。当前策略是不平移（端口被占就结束占用者），
     # 所以实际端口恒等于默认值，hint 文本可以直接用；
     # 万一将来允许换端口，这里检测到不一致就该说清"实际是哪个"，不能让人照着
     # 默认端口去连一个不存在的地址。
     if port != spec.main_port:
-        lines = [spec.credentials_hint.replace(
-            f"127.0.0.1:{spec.main_port}", f"127.0.0.1:{port}")]
+        lines = [text.replace(f"127.0.0.1:{spec.main_port}", f"127.0.0.1:{port}")]
     else:
-        lines = [spec.credentials_hint]
+        lines = [text]
 
     if comp.key == "jenkins":
         # 随机密码只能从文件读。JENKINS_HOME 优先取登记里的 data_dir_env 值，
@@ -14431,9 +14467,11 @@ class ServiceManager:
                 ok, why = mysql_set_root_password(comp, target, port, password, stored)
                 if ok:
                     save_service_secret(secret_key, password)
-                    notes.append("root 密码已设置为本次输入的密码（只保存 DPAPI 加密副本）。")
+                    notes.append("root 密码已设置，并已用新密码连一次复核通过"
+                                 "（只保存 DPAPI 加密副本）。")
                 else:
-                    notes.append(f"root 密码没设置成功：{why}")
+                    notes.append(f"root 密码没设置成功：{why}。"
+                                 f"root 仍是空密码或原密码，本次输入的密码**没有生效**。")
             elif spec.password_kind == "redis_requirepass":
                 notes.append("requirepass 已写入版本专属 redis.conf。")
 
@@ -14441,6 +14479,12 @@ class ServiceManager:
         records = load_running_map()
         records[comp.key] = rec
         save_running_map(records)
+        if spec.password_kind == "mysql_root" and not password and not stored:
+            # 没设过密码就别让用户猜：真连一次，把"能不能免密登录"讲清楚。
+            ok_free, _ = mysql_verify_login(comp, target, port, "")
+            if ok_free:
+                notes.append("root 当前**没有密码**，可以直接用 `mysql -u root` 登录；"
+                             "要设置密码请先卸载这个版本再重装（重装时会弹密码框）。")
         return StartResult(True, "running", record=rec,
                            console_url=rec.console_url, notes=notes)
 
@@ -15547,12 +15591,66 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+def _mysql_client_run(mysql_exe: Path, port: int, password: str, sql: str,
+                      timeout: float = 60.0) -> Tuple[int, str]:
+    """用临时选项文件跑一次 mysql 客户端；密码只出现在文件与 stdin 里。
+
+    **`--defaults-extra-file` 必须是第一个参数**：MySQL 只在参数扫描最开头识别它，
+    放到后面会报 `unknown variable 'defaults-extra-file=...'` 并以 7 退出 ——
+    2026-10-29 真机就因此一条密码都没设上。
+    """
+    import tempfile
+
+    stem = f"bt-mysql-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    opt_file = Path(tempfile.gettempdir()) / (stem + ".cnf")
+    lines = ["[client]"]
+    if password:
+        lines.append('password="' + password.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    try:
+        opt_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _harden_file_acl(opt_file)
+    except OSError as exc:
+        return -1, f"临时选项文件写不出去：{exc}"
+    argv = [str(mysql_exe), f"--defaults-extra-file={opt_file}",
+            "--protocol=tcp", "-h", "127.0.0.1", "-P", str(port),
+            "-u", "root", "--connect-timeout=10"]
+    kw = dict(input=sql.encode("utf-8"), stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT, timeout=timeout)
+    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+        kw["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(argv, **kw)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return -1, f"调用 mysql.exe 失败：{exc}"
+    finally:
+        _remove_quietly(opt_file)
+    return proc.returncode, (proc.stdout or b"").decode("utf-8", "replace").strip()
+
+
+def _tail_text(text: str, lines: int = 4) -> str:
+    parts = [ln for ln in (text or "").splitlines() if ln.strip()]
+    return " / ".join(parts[-lines:]) if parts else "（没有输出）"
+
+
+def mysql_verify_login(comp, version: str, port: int, password: str) -> Tuple[bool, str]:
+    """用给定密码真连一次（`SELECT 1`）。设置完必须复核，不能只看退出码。"""
+    home = service_home(comp, version)
+    mysql_exe = home / "bin" / "mysql.exe"
+    if not mysql_exe.is_file():
+        return False, f"找不到 {mysql_exe}"
+    rc, out = _mysql_client_run(mysql_exe, port, password, "SELECT 1;\n")
+    if rc != 0:
+        return False, f"用新密码连接被拒（退出码 {rc}）：{_tail_text(out)}"
+    if "1" not in out:
+        return False, f"连接成功但返回内容异常：{_tail_text(out)}"
+    return True, ""
+
+
 def mysql_set_root_password(comp, version: str, port: int, new_password: str,
                             old_password: str = "") -> Tuple[bool, str]:
-    """用 stdin 把 ALTER USER 喂给 mysql.exe；密码只出现在临时选项文件与 SQL 里。
+    """改 root 密码，并用新密码复核一次；argv 里只有路径与端口。
 
-    argv 里只有路径与端口，哨兵用例会把它钉住。旧密码错误时 mysql 会以非零退出，
-    这时**不重试、不猜**，把它的原话交给用户。
+    旧密码错误时 mysql 会以非零退出，这时**不重试、不猜**，把它的原话交给用户。
     """
     if not new_password:
         return True, ""
@@ -15562,35 +15660,14 @@ def mysql_set_root_password(comp, version: str, port: int, new_password: str,
     mysql_exe = home / "bin" / "mysql.exe"
     if not mysql_exe.is_file():
         return False, f"找不到 {mysql_exe}，无法设置 root 密码"
-    import tempfile
-
-    stem = f"bt-mysql-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    opt_file = Path(tempfile.gettempdir()) / (stem + ".cnf")
-    lines = ["[client]"]
-    if old_password:
-        lines.append('password="' + old_password.replace("\\", "\\\\").replace('"', '\\"') + '"')
-    try:
-        opt_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        _harden_file_acl(opt_file)
-    except OSError as exc:
-        return False, f"临时选项文件写不出去：{exc}"
     sql = (f"ALTER USER 'root'@'localhost' IDENTIFIED BY {_sql_literal(new_password)};\n"
            f"FLUSH PRIVILEGES;\n")
-    argv = [str(mysql_exe), "--protocol=tcp", "-h", "127.0.0.1", "-P", str(port),
-            "-u", "root", f"--defaults-extra-file={opt_file}"]
-    kw = dict(input=sql.encode("utf-8"), stdout=subprocess.PIPE,
-              stderr=subprocess.STDOUT, timeout=60)
-    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
-        kw["creationflags"] = CREATE_NO_WINDOW
-    try:
-        proc = subprocess.run(argv, **kw)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"调用 mysql.exe 失败：{exc}"
-    finally:
-        _remove_quietly(opt_file)
-    if proc.returncode != 0:
-        tail = (proc.stdout or b"").decode("utf-8", "replace").splitlines()[-4:]
-        return False, f"设置 root 密码失败（退出码 {proc.returncode}）：{' / '.join(tail)}"
+    rc, out = _mysql_client_run(mysql_exe, port, old_password, sql)
+    if rc != 0:
+        return False, f"设置 root 密码失败（退出码 {rc}）：{_tail_text(out)}"
+    ok, why = mysql_verify_login(comp, version, port, new_password)
+    if not ok:
+        return False, f"密码写入后复核失败：{why}"
     return True, ""
 
 
