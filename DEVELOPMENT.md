@@ -1527,6 +1527,95 @@ A3 控制台路径 / A4 `--server.port` 生效 / A5 前台不弹窗，**全部 P
 
 ---
 
+## 规则 R5.8：MySQL / Redis 走 Windows 服务模式（2026-10-29）
+
+### R5.8.1 为什么改
+
+用户报两件事：① 以前自己装 MySQL 是 MSI，装完在 services.msc 里能看到服务和启动状态；
+工具装的便携 zip 看不到。② 工具里启动 MySQL 后会弹一个黑框，关掉黑框 MySQL 就断。
+
+根因：`mysqld.exe` 带了 `--console`（自己创建控制台窗口），关闭窗口 = 发送控制台关闭事件。
+`~/.env-tools/mysql-data/logs/byte-tools.out` 是 0 字节也印证输出走的是那个控制台。
+
+**因此只把 MySQL / Redis 改成服务模式**，其余 15 个可启停组件保持便携进程不变。
+分支判据只有一个：`LaunchSpec.service is not None`。
+
+### R5.8.2 形态
+
+- 服务名按版本派生：`ByteTools-MySQL-<version>` / `ByteTools-Redis-<version>`；
+  显示名 `ByteTools MySQL <version>` / `ByteTools Redis <version>`。
+- **手动启动**（`start= demand`），不默认开机自启。
+- 同一端口同一时间只允许一个版本的服务；起另一个版本前必须先停当前版本。
+- 配置文件按版本分开：`mysql-data/<version>/my.ini`、`redis-data/<version>/redis.conf`；
+  数据目录仍是共享的 `mysql-data` / `redis-data`。
+- Redis 资产从 2026-10-29 起必须是 **`-Windows-x64-msys2-with-Service.zip`**（含 `RedisService.exe`）。
+  旧包判"缺服务组件"，卡片要求卸载后重装。
+
+### R5.8.3 硬约束
+
+1. **状态认定只读 SCM**（ctypes `OpenSCManager/OpenService/QueryServiceStatusEx`），
+   **不执行 `sc.exe`**，也不调用任何启停动作 —— 这是 R5.3 第 4 条的延伸。
+   护栏 `bt_service_tests.ServiceStatusReadOnly` 把 `subprocess.run/Popen` 与
+   `SERVICE_BACKEND.control` 全部设成"一调就抛"。
+2. `running.json` 允许 `pid_role="service"`，记录里 `pid=0` + `service_name`。
+   `load_running_map` 的白名单必须包含 `"service"`，否则记录会被静默丢弃。
+3. 服务在跑但 running.json 没有记录（用户在 services.msc 里启动、或上次退出时没落盘）时，
+   `adopt/reconcile` 必须**回填**记录。护栏 `ServiceRecordBackfill`。
+4. `--console` 永不许回到 MySQL 的启动命令或 pre_start；控制台类辅助进程一律
+   `CREATE_NO_WINDOW + stdin=DEVNULL`（R5.7 已修）。
+5. **端口被外部进程占用就拒绝启动**，并在提示里点名端口/PID。服务模式**不替用户杀系统进程**，
+   也不 evict —— 与便携模式的策略不同，这里是故意收紧的。
+6. 密码（MySQL root / Redis requirepass）**只走 stdin 与配置文件**，绝不进 argv：
+   - MySQL：临时选项文件（`--defaults-extra-file`，文件 ACL 收成当前用户 + SYSTEM +
+     Administrators）+ stdin 喂 `ALTER USER`；旧密码错误就如实报错，不重试、不猜。
+   - Redis：写进版本专属 `redis.conf` 的 `requirepass`。
+   - 工具侧用 DPAPI 加密后存 `~/.env-tools/service-secrets.json`，只用于维护。
+   - 护栏 `PasswordNeverInArgv` 双向断言（argv 没有、stdin 有）。
+7. **卸载顺序固定**：停服务 → `mysqld --remove` / `RedisService uninstall` →
+   注册表键还在就 `sc delete` → **校验 SCM 已不认它（1060）且
+   `HKLM\SYSTEM\CurrentControlSet\Services\<name>` 不存在** → 才允许删版本目录。
+   - `1072 marked for deletion` **不许当成功**：不删目录、不谎报，
+     明确告诉用户"需要重启 Windows 后再点一次卸载"。
+   - 服务本来就不存在时幂等成功，重复卸载不报错。
+   - `mysql-data` / `redis-data` 默认保留，清理服务不动数据。
+   护栏：`ServiceUninstallSafety`（停止先于删除、失败不删目录、1072、幂等、不碰数据）。
+8. **预安装检查**：同名服务已存在时，
+   - ImagePath 落在 `CONFIG_DIR/<key>/` 下 → 视为我们自己的（幂等，已存在即成功）；
+   - 指向别处（例如 MSI 的 MySQL）→ **拒绝安装并点名**，绝不覆盖、绝不删除。
+   护栏 `PreinstallChecks`。
+9. 服务与目录"配对"的判据是 `required_files`（`bin/mysqld.exe` / `RedisService.exe`）
+   加上 ImagePath 指向的 exe 是否还在；缺一个就判 `broken`，卡片显示
+   「⚠ 服务损坏」，卸载时先删服务再删目录。
+10. 装服务时**尽力**用 `sc sdset` 给当前用户补 `CCLCRPWPDTLO`，让日常启停不必每次弹 UAC：
+    读回的 DACL 不以 `D:` 开头就整段跳过；追加后复核，复核不过按原文写回。
+    宁可回到"每次 UAC"，也不能锁死 DACL。
+11. 旧便携进程的迁移：服务还没注册、但 running.json 里有便携登记且端口在听时，
+    `status` 仍报运行中，`stop` 走原便携停止路径。停掉之后就能正常装服务。
+
+### R5.8.4 未真机验证的部分（如实记）
+
+本机没有交互桌面/管理员权限，**UAC 弹窗、真实装/删服务、RedisService.exe 的
+CLI 参数、`sc sdset` 的实际效果都没有跑过**。已验到的是：
+
+- 全量护栏 1031 条通过（含 `bt_service_tests` 28 条，全部 FakeServiceBackend）；
+- 静态脚本内容：`--install` 在首位、`start= demand`、`--remove` + `sc delete` 兜底、
+  注册表键复核、SDDL 追加与回滚；
+- MySQL 服务模式下的数据目录初始化仍走 `--initialize-insecure`（与 R5.7 同一套）。
+
+第一次真机装服务时按这个顺序看：
+`services.msc` 是否出现 `ByteTools-MySQL-<v>` → 启动类型=手动 →
+关掉工具后服务仍 RUNNING → 重开工具卡片回填为运行中 →
+卸载后 `sc query` 返回 1060 且
+`HKLM\SYSTEM\CurrentControlSet\Services\ByteTools-MySQL-<v>` 不存在 →
+立刻重装同一版本能成功。
+
+护栏清单：`ServiceSpecTable`、`ServiceStatusReadOnly`、`ServiceRecordBackfill`、
+`ServiceStartRefusesPeerService`、`ServicePortConflictPolicy`、`ServiceInstallFlow`、
+`ServiceUninstallSafety`、`PreinstallChecks`、`PasswordNeverInArgv`、
+`ServiceScriptShape`、`RedisAssetShape`、`ServiceBrokenDetection`。
+
+---
+
 ## 规则 R6：前置运行时自举契约（缺 JDK / Erlang 由本工具装好）
 
 ### R6.1 规则描述

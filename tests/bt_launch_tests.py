@@ -3515,6 +3515,25 @@ class PreStartAndPrereqWiring(unittest.TestCase):
         self.assertEqual(len(self.runs), before, "哨兵存在后不该再跑初始化")
         self.assertTrue(any("已初始化" in n for n in notes), notes)
 
+    def test_mysql_pre_start_has_no_console_and_hides_the_window(self):
+        """MySQL 初始化/启动不许带 `--console`，且同步命令必须隐藏黑框。
+
+        2026-10-29 用户实测：带 `--console` 时 mysqld 自己开黑框，关掉黑框 MySQL 就退出。
+        初始化（--initialize-insecure）也是控制台程序，必须 CREATE_NO_WINDOW + DEVNULL。
+        """
+        comp, plan, _guard = self._ready_mysql()
+        self.assertNotIn("--console", comp.launch.pre_start,
+                         "MySQL 初始化又带回了 --console")
+        self.assertNotIn("--console", comp.launch.commands["Windows"],
+                         "MySQL 启动命令又带回了 --console")
+        ok, why, _notes = main.run_pre_start(comp, comp.launch, plan)
+        self.assertTrue(ok, why)
+        _argv, kw = self.runs[-1]
+        self.assertIs(kw.get("stdin"), main.subprocess.DEVNULL)
+        if main.CURRENT_OS == "Windows":
+            self.assertTrue(int(kw.get("creationflags") or 0) & main.CREATE_NO_WINDOW,
+                            "Windows 上初始化没隐藏控制台，会闪黑框")
+
     def test_pre_start_failure_carries_the_output_tail_into_the_reason(self):
         """前置失败必须把输出末尾带进原因，否则用户只看到"失败"两个字。
 
