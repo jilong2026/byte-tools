@@ -1,0 +1,118 @@
+"""「支持作者」对话框（从 main.py 抽出，规则 R30）。
+
+资产目录由构造参数注入，默认取仓库根下的 assets/：打包成 onefile 后
+``__file__`` 位于解包目录内，``parents[1]`` 仍是产物根，因此两种形态都对。
+"""
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+)
+
+
+def default_assets_dir() -> Path:
+    """产物根下的 assets/（仓库内与 PyInstaller 解包目录均适用）。"""
+    return Path(__file__).resolve().parents[1] / "assets"
+
+
+class DonateDialog(QDialog):
+    """支持作者：微信 / 支付宝，各渠道展示对应二维码。"""
+
+    CHANNELS = [
+        ("微信", "#07C160", "wechat.png"),
+        ("支付宝", "#1677FF", "alipay.png"),
+        # ("QQ", "#EB1923", "qq.png"),
+    ]
+
+    def __init__(self, parent=None, assets_dir: Path = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("支持作者")
+        self.setMinimumSize(460, 460)
+        self.setObjectName("donateDialog")
+        self._assets_dir = Path(assets_dir) if assets_dir else default_assets_dir()
+        self._build_ui()
+        self._show_qr(*self.CHANNELS[0])
+
+    def _build_ui(self) -> None:
+        v = QVBoxLayout(self)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(14)
+
+        tip = QLabel("如果本工具对你有所帮助，欢迎请作者一杯咖啡 ☕")
+        tip.setAlignment(Qt.AlignCenter)
+        tip.setStyleSheet("font-size:14px;color:#444;")
+        v.addWidget(tip)
+
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        self._buttons = []  # type: list[QPushButton]
+        for name, color, filename in self.CHANNELS:
+            btn = QPushButton(name)
+            btn.setCursor(QCursor(Qt.PointingHandCursor))
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                f"QPushButton{{background:{color};color:white;border:none;border-radius:8px;padding:10px 20px;font-weight:600;}}"
+                f"QPushButton:checked{{background:{color};border:2px solid #333;}}"
+                f"QPushButton:hover{{background:{color};}}"
+            )
+            btn.clicked.connect(
+                lambda _=False, n=name, c=color, f=filename: self._show_qr(n, c, f))
+            row.addWidget(btn)
+            self._buttons.append(btn)
+        v.addLayout(row)
+
+        self._channel_label = QLabel("")
+        self._channel_label.setAlignment(Qt.AlignCenter)
+        self._channel_label.setStyleSheet("font-size:15px;font-weight:600;color:#333;")
+        v.addWidget(self._channel_label)
+
+        self.qr_view = QLabel("请选择下方渠道")
+        self.qr_view.setAlignment(Qt.AlignCenter)
+        self.qr_view.setMinimumHeight(260)
+        self.qr_view.setStyleSheet(
+            "background:#fafafa;border:1px solid #e0e0e0;border-radius:10px;color:#888;padding:10px;"
+        )
+        v.addWidget(self.qr_view, stretch=1)
+
+        note = QLabel("扫码打赏，感谢您的支持！")
+        note.setAlignment(Qt.AlignCenter)
+        note.setStyleSheet("font-size:12px;color:#999;")
+        v.addWidget(note)
+
+    def _show_qr(self, channel: str, color: str = "", filename: str = "") -> None:
+        for btn in self._buttons:
+            btn.setChecked(btn.text() == channel)
+        self._channel_label.setText(f"【{channel}】收款码")
+        if color:
+            self._channel_label.setStyleSheet(
+                f"font-size:15px;font-weight:600;color:{color};")
+
+        if not filename:
+            for n, c, f in self.CHANNELS:
+                if n == channel:
+                    filename = f
+                    break
+
+        qr_path = self._assets_dir / filename
+        if qr_path.exists():
+            pixmap = QPixmap(str(qr_path))
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self.qr_view.width() - 20,
+                    self.qr_view.height() - 20,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                self.qr_view.setPixmap(scaled)
+                return
+
+        self.qr_view.clear()
+        self.qr_view.setText(
+            f"未找到二维码文件：\n\n{qr_path}\n\n请将 {filename} 放入 assets 目录后重启。"
+        )
