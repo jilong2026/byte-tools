@@ -86,6 +86,7 @@ if not exist "%VENV_PY%" goto :venv_missing
 if "%VENV_USABLE%"=="1" goto :venv_ready
 call :say step2_rebuild "      Existing virtual environment is unusable, rebuilding it ..."
 if not defined BASE_PY goto :err_no_python
+call :stop_locked_in_venv
 call :create_venv --clear
 if exist "%VENV_PY%" goto :venv_ready
 goto :err_venv
@@ -131,6 +132,7 @@ call :say step3_ready "      PySide6 / requests already installed"
 goto :deps_runtime_done
 :deps_install
 call :say step3_installing "      Installing PySide6 / requests, Tsinghua mirror first ..."
+call :stop_locked_in_venv
 call :pip_install -r requirements.txt
 call "%RUN_PY%" -c "import PySide6, requests" >nul 2>&1
 if %errorlevel% neq 0 goto :err_deps
@@ -393,3 +395,13 @@ echo.
 call :say press_key "Press any key to close this window ..."
 pause >nul
 exit /b 1
+
+REM ==========================================================================
+:stop_locked_in_venv
+REM Windows cannot overwrite files a running process keeps open. Before we
+REM rebuild or reinstall .venv, stop any Python started from it (an earlier
+REM launch window from this script). Scoped strictly to the .venv directory.
+if not exist "%VENV_DIR%\" goto :eof
+for %%I in ("%VENV_DIR%") do set "VENV_ABS=%%~fI"
+call powershell -NoProfile -Command "$d=[IO.Path]::GetFullPath('%VENV_ABS%'); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($d,[StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host ('  stopping PID ' + $_.ProcessId + ' ' + $_.ExecutablePath); Stop-Process -Id $_.ProcessId -Force }" 2>nul
+goto :eof

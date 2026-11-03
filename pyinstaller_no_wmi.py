@@ -30,7 +30,6 @@ import sys
 
 
 APP_EXE = "ByteTools.exe"
-PAGE_SERVER_FLAG = "--bt-page-server"
 
 
 def _target_distpath(argv) -> str:
@@ -68,14 +67,46 @@ def _list_processes(exe_name: str) -> list:
         return []
 
 
-def page_server_pids(procs) -> list:
-    """只挑出「访问页服务」进程（命令行含 --bt-page-server）。
+def _first_arg(cmdline: str) -> str:
+    """取命令行里的可执行文件路径（支持引号包裹）。"""
+    text = (cmdline or "").strip()
+    if not text:
+        return ""
+    if text[0] == '"':
+        end = text.find('"', 1)
+        return text[1:end] if end > 0 else text[1:]
+    return text.split(" ", 1)[0]
 
-    它们是主程序按设计留下的独立进程（关窗后访问页仍可打开），重建产物时
-    必须先停；而**用户正在用的主窗口没有这个参数，绝不能顺手杀掉**。
+
+def _same_path(a: str, b: str) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+    except (OSError, ValueError):
+        return False
+
+
+def locking_pids(procs, target_exe: str) -> list:
+    """正在运行 target_exe 这个文件的进程 PID（路径精确匹配）。
+
+    锁住文件的只能是**同一个文件**的进程；按路径匹配可避免误杀装在别处的
+    另一份 ByteTools。命令行取不到（权限不足）时返回空表，由调用方兜底。
     """
-    return [pid for pid, cmd in procs
-            if pid and PAGE_SERVER_FLAG in (cmd or "")]
+    pids = []
+    for pid, cmd in procs:
+        if not pid:
+            continue
+        if _same_path(_first_arg(cmd), target_exe):
+            pids.append(pid)
+    return pids
+
+
+def _kill(pids) -> None:
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def _try_unlock(exe: str) -> bool:
@@ -88,48 +119,39 @@ def _try_unlock(exe: str) -> bool:
 
 
 def check_output_lock(argv) -> str:
-    """打包前预检：目标 exe 是否被正在运行的程序锁住。返回提示文本，空串 = 可继续。
+    """打包前预检：目标 exe 被占用时**自动结束占用进程**，返回空串继续。
 
-    处理顺序：
+    规则（2026-11-03 用户要求）：
       1. 产物不存在 / 可写 → 直接开工；
-      2. 被占用 → 先停掉**遗留的页服务**（命令行含 --bt-page-server，是我们自己
-         的独立进程），再复查；
-      3. 仍被占用 → 说明主窗口还开着，打印 PID 与 taskkill 命令，由人决定。
-
-    不自动结束主窗口：那可能是用户正在操作的程序（2026-11-03 实测 WinError 5
-    就是 dist/ByteTools.exe 被运行中的进程占用）。
+      2. 被占用 → 按路径精确找出正在运行该文件的进程并结束（含设计上会脱离
+         主程序存活的访问页服务）；
+      3. 路径匹配不到（命令行不可读）→ 退化为"同名进程全结束"；
+      4. 结束后仍不可写 → 打印剩余 PID 与 taskkill 命令（多半是杀软短暂占用）。
     """
     exe = os.path.join(_target_distpath(argv), APP_EXE)
     if not os.path.isfile(exe) or _try_unlock(exe):
         return ""
 
     procs = _list_processes(APP_EXE)
-    pids = page_server_pids(procs)
+    pids = locking_pids(procs, exe)
+    how = "正在运行该产物的进程"
+    if not pids:
+        pids = [pid for pid, _cmd in procs if pid]
+        how = "同名进程（命令行不可读，按名称兜底）"
     if pids:
-        print("[预检] 检测到上次运行留下的访问页服务，先停止它们："
+        print(f"[预检] 产物被占用，自动结束{how}："
               + ", ".join(f"PID {p}" for p in pids))
-        for pid in pids:
-            try:
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                               capture_output=True, timeout=15)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+        _kill(pids)
         if _try_unlock(exe):
             print("[预检] 已释放产物文件，继续打包。")
             return ""
 
-    lines = [f"[预检] 目标产物被占用：{exe}"]
-    main_pids = [p for p, _c in procs
-                 if p and p not in pids]
-    if main_pids:
-        lines.append("        正在运行的主程序："
-                     + ", ".join(f"PID {p}" for p in main_pids))
-        lines.append("        请先关闭字节工具箱窗口后重试；"
-                     "或在确认无误后执行：")
-        lines.append(f"        taskkill /PID {main_pids[0]} /T /F")
-    else:
-        lines.append("        未查到同名进程，可能是杀软/资源管理器短暂占用，"
-                     "稍等几秒或重启资源管理器后重试。")
+    lines = [f"[预检] 目标产物仍被占用：{exe}"]
+    if procs:
+        lines.append("        已尝试结束："
+                     + ", ".join(f"PID {p}" for p, _c in procs if p))
+    lines.append("        可能是杀软/资源管理器短暂占用：稍等几秒重试，"
+                 "或手动执行 taskkill 后重新打包。")
     return "\n".join(lines)
 
 

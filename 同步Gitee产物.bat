@@ -112,6 +112,7 @@ if not errorlevel 1 set "RETRY_OPT=%RETRY_OPT% --retry-all-errors"
 REM ---- assets dir: create it and pull whatever is missing ----
 REM One-click means one-click. Telling the maintainer to run four curl commands
 REM is the same defect the one-click launch scripts used to have.
+call :stop_locked_in_assets
 call :ensure_assets
 
 REM ---- assets dir check ----
@@ -169,7 +170,7 @@ curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 "%API_BASE%/release
 if errorlevel 1 goto :err_net
 
 set "RELEASE_ID="
-powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel.json' | ConvertFrom-Json; if ($j.id) { $j.id | Out-File -Encoding ascii '%TMPDIR%\id.txt' } } catch {}"
+call powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel.json' | ConvertFrom-Json; if ($j.id) { $j.id | Out-File -Encoding ascii '%TMPDIR%\id.txt' } } catch {}"
 if exist "%TMPDIR%\id.txt" set /p RELEASE_ID=<"%TMPDIR%\id.txt"
 if exist "%TMPDIR%\id.txt" del "%TMPDIR%\id.txt" >nul 2>nul
 
@@ -201,7 +202,7 @@ echo [2/3] upload artifacts ...
 curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 "%API_BASE%/releases/%RELEASE_ID%" -o "%TMPDIR%\rel2.json"
 if errorlevel 1 goto :err_net
 
-powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel2.json' | ConvertFrom-Json; if ($j.assets) { $j.assets | ForEach-Object { $_.name } | Out-File -Encoding ascii '%TMPDIR%\assets.txt' } } catch {}"
+call powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel2.json' | ConvertFrom-Json; if ($j.assets) { $j.assets | ForEach-Object { $_.name } | Out-File -Encoding ascii '%TMPDIR%\assets.txt' } } catch {}"
 if not exist "%TMPDIR%\assets.txt" type nul > "%TMPDIR%\assets.txt"
 
 set /a UPLOADED=0
@@ -256,7 +257,7 @@ echo [3/3] verify attachments ...
 curl.exe -sS %RETRY_OPT% --connect-timeout 20 --max-time 300 "%API_BASE%/releases/%RELEASE_ID%" -o "%TMPDIR%\rel3.json"
 if errorlevel 1 goto :err_net
 
-powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel3.json' | ConvertFrom-Json; $have = @(); if ($j.assets) { $have = @($j.assets | ForEach-Object { $_.name }) }; $want = @('ByteTools-windows-x64.zip','ByteTools.exe','ByteTools-macos-arm64.zip','ByteTools-linux-x64'); $miss = @($want | Where-Object { $have -notcontains $_ }); if ($miss.Count -eq 0) { 'OK' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } else { ($miss -join ', ') | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } } catch { 'UNKNOWN' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' }"
+call powershell -NoProfile -Command "try { $j = Get-Content -Raw -Encoding UTF8 '%TMPDIR%\rel3.json' | ConvertFrom-Json; $have = @(); if ($j.assets) { $have = @($j.assets | ForEach-Object { $_.name }) }; $want = @('ByteTools-windows-x64.zip','ByteTools.exe','ByteTools-macos-arm64.zip','ByteTools-linux-x64'); $miss = @($want | Where-Object { $have -notcontains $_ }); if ($miss.Count -eq 0) { 'OK' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } else { ($miss -join ', ') | Out-File -Encoding ascii '%TMPDIR%\chk.txt' } } catch { 'UNKNOWN' | Out-File -Encoding ascii '%TMPDIR%\chk.txt' }"
 
 set "CHK="
 if exist "%TMPDIR%\chk.txt" set /p CHK=<"%TMPDIR%\chk.txt"
@@ -317,6 +318,7 @@ if /i not "!TAIL_NAME!"=="release-assets" (
   goto :eof
 )
 if not exist "%ASSETS_DIR%\" goto :eof
+call :stop_locked_in_assets
 echo   clearing stale staging dir "%ASSETS_DIR%" before re-fetching ...
 REM No redirect on this line on purpose: "/dev/null" is not a cmd device, and when
 REM the redirect target cannot be created cmd drops the WHOLE command without
@@ -454,3 +456,14 @@ exit /b 1
 :fail_nopause
 if not defined NO_PAUSE pause
 exit /b 1
+
+REM ==========================================================================
+:stop_locked_in_assets
+REM Windows cannot overwrite/delete a file a running process keeps open.
+REM Before clearing or re-downloading the staging dir, stop processes whose
+REM executable lives inside it (e.g. a launched ByteTools.exe from an older
+REM release). Scoped strictly to ASSETS_DIR; unrelated copies are untouched.
+if not exist "%ASSETS_DIR%\" goto :eof
+for %%I in ("%ASSETS_DIR%") do set "ASSETS_ABS=%%~fI"
+call powershell -NoProfile -Command "$d=[IO.Path]::GetFullPath('%ASSETS_ABS%'); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($d,[StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Write-Host ('  stopping PID ' + $_.ProcessId + ' ' + $_.ExecutablePath); Stop-Process -Id $_.ProcessId -Force }" 2>nul
+goto :eof

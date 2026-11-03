@@ -68,12 +68,17 @@ offscreen 冒烟：MainWindow()/show/close、DonateDialog() → SMOKE OK
 - `一键启动项目.bat` / `一键打包exe.bat` 无需改动：均用 `%~dp0` 定位仓库根，
   只校验 `main.py` / `byte-tools.spec` / `requirements.txt`；新包由 PyInstaller
   静态分析与显式 hiddenimports 收齐。
-- `pyinstaller_no_wmi.py` 增加**打包前预检**（2026-11-03 用户实测报
+- `pyinstaller_no_wmi.py` 增加**打包前预检并自动结束占用进程**（2026-11-03 用户实测报
   `PermissionError: [WinError 5] dist\ByteTools.exe`）：
-  · 目标 exe 不可写时，先自动停止遗留的「访问页服务」进程（命令行含 `--bt-page-server`，
-    它们是设计上脱离主程序存活的独立进程）；
-  · 主窗口仍在运行时**不擅自结束**，打印 PID 与 `taskkill` 命令；
-  · 用 `--distpath` 独立目录完整构建并以 offscreen 启动 12 秒验证。
+  · 按「正在运行该文件」路径精确匹配结束进程（含设计上脱离主程序存活的访问页服务）；
+    路径读不到时退化为同名进程；不会误杀装在别处的另一份 ByteTools；
+  · 结束后仍不可写才打印 PID 与建议；用 `--distpath` 独立目录完整构建并冒烟验证。
+- 同类保护下沉到其余脚本：
+  · `一键启动项目.bat` / `一键打包exe.bat`：重建 `.venv`（`--clear`）或安装依赖前，
+    只停掉可执行文件位于 `.venv` 内的进程；
+  · `同步Gitee产物.bat`：清空/重新下载 `release-assets` 前，停掉可执行文件位于该目录的进程；
+  · `同步Gitee产物.sh`：有 `lsof` 时停掉占用产物目录的进程（POSIX 允许删运行中文件，
+    但 `curl -o` 覆盖运行中的可执行文件会 ETXTBSY），没有 `lsof` 则由 curl 报错兜底。
 
 ---
 

@@ -459,10 +459,21 @@ class BuildPreflightTests(unittest.TestCase):
     def test_only_page_servers_are_selected_for_auto_stop(self):
         import pyinstaller_no_wmi as no_wmi
 
-        procs = [(111, r"dist\ByteTools.exe --bt-page-server C:\x"),
-                 (222, r"dist\ByteTools.exe"),
-                 (333, "")]
-        self.assertEqual(no_wmi.page_server_pids(procs), [111])
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = str(Path(tmp) / "ByteTools.exe")
+            other = str(Path(tmp) / "other" / "ByteTools.exe")
+            procs = [(111, f'"{exe}" --bt-page-server C:\\x'),
+                     (222, exe),
+                     (333, other),
+                     (444, "")]
+            self.assertEqual(no_wmi.locking_pids(procs, exe), [111, 222])
+
+    def test_first_arg_handles_quotes(self):
+        import pyinstaller_no_wmi as no_wmi
+
+        self.assertEqual(no_wmi._first_arg('"C:\\a b\\x.exe" --flag'), "C:\\a b\\x.exe")
+        self.assertEqual(no_wmi._first_arg("C:\\x.exe --flag"), "C:\\x.exe")
+        self.assertEqual(no_wmi._first_arg(""), "")
 
 
 class DiagnosticsIntegrationTests(unittest.TestCase):
