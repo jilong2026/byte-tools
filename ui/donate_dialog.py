@@ -1,8 +1,9 @@
 """「支持作者」对话框（从 main.py 抽出，规则 R30）。
 
-资产目录由构造参数注入，默认取仓库根下的 assets/：打包成 onefile 后
-``__file__`` 位于解包目录内，``parents[1]`` 仍是产物根，因此两种形态都对。
+资产目录由构造参数注入；默认优先取 ``sys._MEIPASS``（onefile 数据根），
+源码运行回落到仓库根下的 assets/。
 """
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -18,7 +19,14 @@ from PySide6.QtWidgets import (
 
 
 def default_assets_dir() -> Path:
-    """产物根下的 assets/（仓库内与 PyInstaller 解包目录均适用）。"""
+    """数据资源根下的 assets/。
+
+    onefile 打包后模块在 PYZ 里，``__file__`` 的父目录不一定是数据根；
+    ``sys._MEIPASS`` 才是 PyInstaller 声明的解包目录，优先用它。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "assets"
     return Path(__file__).resolve().parents[1] / "assets"
 
 

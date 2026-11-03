@@ -67,6 +67,15 @@ hidden_imports = [
     "charset_normalizer",
     "certifi",
     "idna",
+    # 本地包（2026-11-03 模块化后显式点名）。main.py 里有 mid-file import，
+    # 静态分析能跟上；显式列出是防"以后改成动态导入 / _main 晚绑定后漏收"，
+    # 漏了的表现同样是**打包后 import 失败**，而源码运行完全正常。
+    "core",
+    "data",
+    "services",
+    "ui",
+    # ui/main_window.py 在方法内 `from theme import QSS`（局部 import）
+    "theme",
 ]
 
 # 2026-10-13 二次攻坚：**保留 tkinter**（不进 excludes），让 PyInstaller 官方

@@ -3304,6 +3304,12 @@ Windows 官方直链"对 macOS 独占组件是假话。
    真实对话框弹出来把用例挂死（2026-11-03 抽 ComponentCard 时实测踩到）。
 7. main.py 内的删除一律走 `_safe_rmtree()`；`services` / `ui` 里调用 main 的能力
    统一写成 `_main.<name>`（晚绑定），不要 `from main import xxx`。
+8. **数据资源路径必须认 `sys._MEIPASS`**：`assets/` 与 `.qm` 的定位优先取
+   `sys._MEIPASS`，源码运行再回落到仓库根。只按 `__file__` 推算在 onefile 下
+   依赖解包目录布局，属于"今天对、改打包方式就错"的写法。
+9. 新增本地包（`core` / `data` / `services` / `ui` / `theme`）必须同步进
+   `byte-tools.spec` 的 `hiddenimports`。`_main.` 晚绑定不会产生静态 import，
+   漏收的表现是**打包后 ImportError、源码运行却完全正常**。
 
 ### R30.3 验收
 

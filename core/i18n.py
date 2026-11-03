@@ -13,6 +13,8 @@ Qt .qm 翻译文件若存在（assets/i18n/byte-tools_<lang>.qm），
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Dict, Optional
 
 _STRINGS: Dict[str, Dict[str, str]] = {
@@ -58,13 +60,20 @@ def tr(text: str, **kwargs) -> str:
     return template
 
 
+def assets_root() -> Path:
+    """数据资源根：onefile 下取 sys._MEIPASS，源码运行取仓库根。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    return Path(__file__).resolve().parents[1]
+
+
 def install_translator(app) -> bool:
     """若存在 .qm 文件则加载（可选）。返回是否加载成功。"""
     try:
-        from pathlib import Path
         from PySide6.QtCore import QTranslator
 
-        qm = Path(__file__).resolve().parents[1] / "assets" / "i18n" / f"byte-tools_{current_language()}.qm"
+        qm = assets_root() / "assets" / "i18n" / f"byte-tools_{current_language()}.qm"
         if not qm.is_file():
             return False
         translator = QTranslator(app)

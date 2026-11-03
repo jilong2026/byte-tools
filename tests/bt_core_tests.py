@@ -382,6 +382,15 @@ class I18nTests(unittest.TestCase):
         self.i18n.set_language("en")
         self.assertEqual(self.i18n.tr("没有翻译的句子"), "没有翻译的句子")
 
+    def test_assets_root_prefers_meipass_when_frozen(self):
+        import sys as _sys
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(_sys, "_MEIPASS", tmp, create=True):
+                self.assertEqual(self.i18n.assets_root(), Path(tmp))
+        self.assertNotEqual(self.i18n.assets_root(), Path("/nonexistent"))
+
 
 class ComponentDetailDialogUiTests(unittest.TestCase):
     @classmethod
@@ -412,6 +421,15 @@ class ComponentDetailDialogUiTests(unittest.TestCase):
     def test_url_netloc_reexport_and_behavior(self):
         self.assertEqual(main._url_netloc("https://www.navicat.com.cn/x"), "www.navicat.com.cn")
         self.assertEqual(main._url_netloc("not a url"), "")
+
+    def test_default_assets_dir_prefers_meipass_when_frozen(self):
+        import sys as _sys
+        from unittest import mock
+        from ui.donate_dialog import default_assets_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(_sys, "_MEIPASS", tmp, create=True):
+                self.assertEqual(default_assets_dir(), Path(tmp) / "assets")
 
 
 class DiagnosticsIntegrationTests(unittest.TestCase):
