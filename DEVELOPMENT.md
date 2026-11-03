@@ -3269,6 +3269,14 @@ Windows 官方直链"对 macOS 独占组件是假话。
 | `core/versioning.py` | `Version` 与三套版本口径 | 三套口径的分歧是承重的，不许"统一" |
 | `core/windows_service.py` | SCM 只读查询 + 启停写入口 | 状态识别只读；启动只走 `StartServiceW` |
 | `core/download.py` | 多源故障转移下载线程 | 必须经 `configure()` 注入依赖；session 用 lambda 解引用，保证 `main.http_session` 桩点有效 |
+| `core/platform.py` | 平台判定（is_windows / is_macos / is_linux） | 值由 provider 晚绑定，测试改写 `main.CURRENT_OS` 后必须立刻生效 |
+| `core/perf.py` | 计时与可选 tracemalloc 快照 | 默认不采样；`BYTE_TOOLS_PROFILE=1` 才开内存 |
+| `core/i18n.py` | 以中文原文为键的最小翻译表 | 未命中回落中文；`.qm` 存在时由 `install_translator` 加载 |
+| `data/components.py` | 版本 / 产物数据模型 | 通过 `configure()` 注入 os / human_size provider，禁止 import main |
+| `services/service_manager.py` | 服务生命周期管理 | 依赖以 `_main.<name>` 晚绑定；测试 `patch main.*` 必须生效 |
+| `ui/component_card.py` | 组件卡片 | 只本地导入基类 `QFrame` 与 `Signal`，其余 Qt/业务名走 `_main.` |
+| `ui/main_window.py` | 主窗口 | 只本地导入基类 `QMainWindow` 与 `Signal`，其余走 `_main.` |
+| `ui/component_detail_dialog.py` | 组件详情对话框 | 自包含；`url_netloc/escape_html/event_global_pos` 同文件 |
 | `core/exceptions.py` | 自定义异常 + `safe_rmtree` | 删除用户路径必须经 `safe_rmtree` |
 | `ui/donate_dialog.py` | 「支持作者」对话框 | 资产目录由参数注入，不写死 `__file__/assets` |
 
@@ -3287,13 +3295,20 @@ Windows 官方直链"对 macOS 独占组件是假话。
    页面渲染循环、凭据解密）允许 `except Exception`，且必须写明"为什么不能外抛"。
 4. 新增版本比较只许用 `Version`（`core/versioning.py`）。
    `_version_parts` / `_semver_key` / `_version_key` 是兼容薄壳，不许再有第二份实现。
-5. `core/` 模块不许 import `main`（避免循环依赖）；需要运行环境信息时用参数注入
-   （例：`WindowsServiceBackend(CURRENT_OS)`、`core.download.configure(...)`）。
+5. `core/`、`data/`、`services/`、`ui/` 模块不许 import `main`（避免循环依赖）；
+   需要运行环境信息时用参数注入（例：`WindowsServiceBackend(CURRENT_OS)`、
+   `core.download.configure(...)`）。
+6. **从 main.py 抽 UI 类时，只允许本地导入基类与 `Signal`**，`QMessageBox` /
+   `QFileDialog` 等其余 Qt 名一律写成 `_main.<name>`。理由是测试大量使用
+   `main.QMessageBox = <桩>` 这种"替换名字"的写法；模块自带 import 会让桩失效，
+   真实对话框弹出来把用例挂死（2026-11-03 抽 ComponentCard 时实测踩到）。
+7. main.py 内的删除一律走 `_safe_rmtree()`；`services` / `ui` 里调用 main 的能力
+   统一写成 `_main.<name>`（晚绑定），不要 `from main import xxx`。
 
 ### R30.3 验收
 
-- 全量离线回归：`python tests/run_all_tests.py`（2026-11-03 终态：24 套件 / 1076 条全绿）。
-- 新护栏：`tests/bt_core_tests.py`（27 条）覆盖越界删除、前缀伪装目录、日志不递归、
-  版本口径一致、SCM 模块在非 Windows 上保持惰性、下载故障转移与 `main.http_session` 桩点、
-  支持作者对话框的资产注入。
+- 全量离线回归：`python tests/run_all_tests.py`（2026-11-03 终态：24 套件 / 1087 条全绿）。
+- 新护栏：`tests/bt_core_tests.py`（38 条）覆盖越界删除、前缀伪装目录、日志不递归、
+  版本口径一致、SCM 模块惰性、下载故障转移与 `main.http_session` 桩点、性能计时、
+  翻译回落、详情/支持作者对话框的资产注入与过滤器摘除。
 - 关窗冒烟：offscreen 下 `MainWindow()` → `show()` → `close()` 退出码 0。

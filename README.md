@@ -704,15 +704,20 @@ Windows：默认写的就是**用户级**变量，通常不需要管理员权限
 
 ```
 byte-tools/
-├── main.py                     # 主程序（UI + 业务编排）
+├── main.py                     # 主程序（业务编排 + 入口）
 ├── core/                       # 承重模块（规则 R30）
 │   ├── constants.py            # 超时 / 缓存 / 镜像基址 / 安全阈值
 │   ├── logger.py               # 结构化日志（四级颜色 + JSON 导出）
 │   ├── exceptions.py           # 自定义异常 + safe_rmtree（路径校验）
 │   ├── versioning.py           # Version 与三套版本口径
 │   ├── download.py             # 多源故障转移下载线程
+│   ├── platform.py             # 平台判定收拢
+│   ├── perf.py                 # 计时 / 可选内存快照
+│   ├── i18n.py                 # 最小翻译表（中文原文为键）
 │   └── windows_service.py      # SCM 只读查询 + 启停写入口
-├── ui/                         # 已抽出的自包含对话框（DonateDialog）
+├── data/components.py          # 版本 / 产物数据模型
+├── services/service_manager.py # 服务生命周期管理
+├── ui/                         # 组件卡片、主窗口、详情 / 支持作者对话框
 ├── 一键启动项目.bat            # Windows：自动装环境后启动 GUI
 ├── 一键打包exe.bat             # Windows：自动装环境后产出 dist/ByteTools.exe
 ├── pyinstaller_no_wmi.py       # 打包入口：绕开 PyInstaller 对 WMI 的依赖

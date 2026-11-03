@@ -72,6 +72,11 @@ try:
         UPDATE_CHECK_INTERVAL_SEC,
         UPDATE_HTTP_TIMEOUT,
         HTTP_UA,
+        FETCH_TIMEOUT_QUICK,
+        FETCH_TIMEOUT_WEB,
+        FETCH_TIMEOUT_HEAD,
+        FETCH_TIMEOUT_API,
+        EXEC_PROBE_TIMEOUT,
     )
     _HAS_CORE_MODULES = True
     logger = get_logger("main")
@@ -90,6 +95,11 @@ except ImportError:  # pragma: no cover - 仅当 core/ 目录缺失时走到
     UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
     UPDATE_HTTP_TIMEOUT = 8.0
     HTTP_UA = {"User-Agent": "byte-tools"}
+    FETCH_TIMEOUT_QUICK = 4
+    FETCH_TIMEOUT_WEB = 6
+    FETCH_TIMEOUT_HEAD = 8
+    FETCH_TIMEOUT_API = 20
+    EXEC_PROBE_TIMEOUT = 4
 
     def safe_rmtree(path, verify_deleted=True, allowed_root=None):
         """Fallback: 无 core 模块时退化为普通删除。"""
@@ -209,9 +219,9 @@ def _open_in_file_manager(path: str) -> bool:
     try:
         if not target or not Path(target).is_dir():
             return False
-        if CURRENT_OS == "Windows":
+        if is_windows():
             os.startfile(target)          # noqa: S606 - 系统自带命令，路径来自我们自己
-        elif CURRENT_OS == "Darwin":
+        elif is_macos():
             subprocess.Popen(["open", target])
         else:
             subprocess.Popen(["xdg-open", target])
@@ -591,6 +601,15 @@ def build_diagnostics() -> str:
     except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001 - 少一节也不能让整份报告生成失败
         log_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("结构化日志（最近 50 条）", log_lines)
+
+    # ---- 性能快照（计时 + 可选内存采样）----
+    perf_lines = []
+    try:
+        from core import perf as _perf
+        perf_lines = _perf.format_section()
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001 - 少一节也不能让整份报告生成失败
+        perf_lines = [f"读取失败: {type(exc).__name__}: {exc}"]
+    out += _diag_section("性能快照", perf_lines)
 
     return "\n".join(out)
 
@@ -1043,6 +1062,21 @@ CURRENT_OS = _os_name()
 MACHINE = _machine_name()
 IS_ARM = ("arm" in MACHINE) or ("aarch64" in MACHINE)
 
+# 平台判定收拢到 core/platform.py（规则 R30）。
+# provider 用 lambda 解引用，测试改写 main.CURRENT_OS 后判定立刻跟着变。
+from core.platform import (  # noqa: E402
+    configure as _configure_platform,
+    is_linux,
+    is_macos,
+    is_windows,
+)
+
+_configure_platform(
+    os_provider=lambda: CURRENT_OS,
+    machine_provider=lambda: MACHINE,
+    is_arm_provider=lambda: IS_ARM,
+)
+
 
 def human_size(num: float) -> str:
     """把字节数转换为可读字符串。"""
@@ -1063,89 +1097,19 @@ def ensure_dir(path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 产物格式 → 界面对它的称呼。用户要在"安装器"和"便携包"之间做选择，
 # 这两个词的区别（要不要走安装向导、能不能自己挑目录）比扩展名本身更有用。
-ARTIFACT_LABELS: Dict[str, str] = {
-    "exe": "exe 安装器（走安装向导）",
-    "zip": "zip 便携包（解压即用）",
-    # 2026-10-15：只下载类里有组件同时发"同一件事的两种形态"，光靠 exe/zip 区分不开 ——
-    # Goose / Qwen Code 都同时发**桌面端**与**终端版**，两个若都标成「zip 便携包」，
-    # 「下载 ▾」菜单里会出现两条一模一样的文案。给它俩一组说得清的标签。
-    "cli": "命令行版（解压后把可执行文件放进 PATH）",
-    "portable": "免安装便携版（exe，双击即用）",
-    # 2026-10-15 第五批：GitHub Copilot CLI 官方只发 .msi（外加一个 zip）。
-    "msi": "msi 安装包（走 Windows 安装向导）",
-}
+# 版本 / 产物数据模型已抽出到 data/components.py（规则 R30）。
+# configure 用 lambda 解引用 main.CURRENT_OS，测试改写它后派生结果仍跟着变。
+from data.components import (  # noqa: E402
+    ARTIFACT_LABELS,
+    ComponentVersion,
+    DownloadArtifact,
+    configure as _configure_component_data,
+)
 
-
-@dataclass
-class DownloadArtifact:
-    """一个版本的**一种**产物。
-
-    同一个版本官方常常发两样东西：走安装向导的 `.exe` 与解压即用的 `.zip` 便携包。
-    它们不是"同一个文件的不同镜像"（那是 `url_list_map` 管的事），而是**两个不同的文件**，
-    所以单独建模，由「下载 ▾」菜单让用户挑，菜单文字带体积。
-    """
-
-    fmt: str                        # "exe" / "zip" —— 同时决定落盘后缀与魔数
-    label: str                      # 界面上怎么称呼它
-    urls: List[str]                 # 已按 R1 排好序的源列表（当前平台）
-    size: int = 0                   # 官方声明的字节数，0 = 未知
-
-    def menu_text(self) -> str:
-        return f"{self.label} · {human_size(self.size)}" if self.size else self.label
-
-
-@dataclass
-class ComponentVersion:
-    """描述一个组件版本对应的下载 URL 及归档格式。"""
-
-    version: str
-    url_map: Dict[str, str]  # 单 URL 模式：{"Windows": url, "Darwin": url, "Linux": url}
-    archive_map: Dict[str, str] = field(default_factory=dict)  # 归档类型：zip / tar.gz
-    # 多源故障转移模式（R1）：按操作系统键映射的 URL 列表（镜像优先 + 末位官网）。
-    # 与 url_map 二选一：若当前系统的 url_list_map 非空，则 urls_for_current() 返回该列表；
-    # 否则回退到 url_map 的单 URL 模式（仅少数无国内镜像的组件，如 kubectl）。
-    url_list_map: Dict[str, List[str]] = field(default_factory=dict)
-    # 「开发工具」专用：这个版本可下的多种产物（R13.4）。空表 = 只有一种产物，
-    # 此时 `download_artifacts()` 直接拿主 URL 造一项，所以单产物组件不必重复登记。
-    artifacts: List[DownloadArtifact] = field(default_factory=list)
-
-    def download_artifacts(self) -> List[DownloadArtifact]:
-        """「下载 ▾」要列的产物清单。"""
-        if self.artifacts:
-            return list(self.artifacts)
-        ext = self.archive_for_current() or "bin"
-        return [DownloadArtifact(fmt=ext,
-                                 label=ARTIFACT_LABELS.get(ext, ext),
-                                 urls=self.urls_for_current())]
-
-    def url_for_current(self) -> Optional[str]:
-        """当前系统的首选下载地址：多源模式取列表首个（优先级最高的镜像），单源模式取该源。"""
-        urls = self.urls_for_current()
-        return urls[0] if urls else None
-
-    def urls_for_current(self) -> List[str]:
-        """
-        多源故障转移模式：返回当前系统的下载 URL 列表，按 R1 优先级排序。
-
-        若 url_list_map 配置了当前系统的非空列表，则返回该列表（镜像在前 + 末位官网）；
-        否则回退到单 URL 模式，返回 [url_map[CURRENT_OS]] 或空列表。
-        """
-        if CURRENT_OS in self.url_list_map and self.url_list_map[CURRENT_OS]:
-            return list(self.url_list_map[CURRENT_OS])
-        url = self.url_map.get(CURRENT_OS)
-        return [url] if url else []
-
-    def archive_for_current(self) -> str:
-        if CURRENT_OS in self.archive_map:
-            return self.archive_map[CURRENT_OS]
-        # 兼容多源模式：从 urls_for_current() 的第一个 URL 推断归档类型
-        urls = self.urls_for_current()
-        url = urls[0] if urls else ""
-        if url.endswith(".zip"):
-            return "zip"
-        if url.endswith(".tar.gz") or url.endswith(".tgz"):
-            return "tar.gz"
-        return "zip"
+_configure_component_data(
+    os_provider=lambda: CURRENT_OS,
+    human_size_fn=human_size,
+)
 
 
 
@@ -1440,7 +1404,7 @@ class Component:
             return None
         # Windows 上很多组件只带脚本包装器（catalina.bat / mvn.cmd 等），
         # 只找 .exe 会漏检，故按常见 PATHEXT 扩展名依次尝试。
-        suffixes = [".exe", ".bat", ".cmd", ".com", ""] if CURRENT_OS == "Windows" else [""]
+        suffixes = [".exe", ".bat", ".cmd", ".com", ""] if is_windows() else [""]
         # 依次尝试 path_subdir、bin、Scripts、根目录
         candidates_dir = [self.path_subdir, "bin", "Scripts", "condabin", ""]
         for sub in candidates_dir:
@@ -1496,7 +1460,7 @@ class Component:
 
         # 2) 通过 PATH 中的可执行文件
         # exec_name 自带扩展名时（Nacos 的 startup.cmd / startup.sh）不再补 .exe
-        need_exe = CURRENT_OS == "Windows" and not os.path.splitext(self.exec_name)[1]
+        need_exe = is_windows() and not os.path.splitext(self.exec_name)[1]
         exe_name_final = self.exec_name + (".exe" if need_exe else "")
         which = _which_fast(exe_name_final) or _which_fast(self.exec_name)
         if which:
@@ -1599,7 +1563,7 @@ class Component:
         # 服务模式（MySQL / Redis）：**先停服务、删服务，校验注册表键真的没了，才删目录**。
         # "卸载没卸干净 → 新的装不上"就是从这里断链的，所以它必须排在删目录之前，
         # 失败时直接返回、目录原样保留。
-        if service_spec_for(self) is not None and CURRENT_OS == "Windows":
+        if service_spec_for(self) is not None and is_windows():
             svc_version = (install_path.name[len(self.key) + 1:]
                            if install_path is not None and
                            install_path.name.startswith(self.key + "-") else version)
@@ -1884,13 +1848,13 @@ def _probe_version(exe: str, args: List[str]) -> str:
         return ""
     try:
         kwargs: Dict[str, int] = {}
-        if CURRENT_OS == "Windows":
+        if is_windows():
             kwargs["creationflags"] = CREATE_NO_WINDOW
         proc = subprocess.run(
             [exe, *args],
             capture_output=True,
             text=True,
-            timeout=4,
+            timeout=EXEC_PROBE_TIMEOUT,
             check=False,
             stdin=STDIN_DEVNULL,
             **kwargs,
@@ -2540,7 +2504,7 @@ def _erlang_urls(v: str) -> Dict[str, List[str]]:
       - 所以只能 _gh_accelerated（加速器在前、末位裸 GitHub）。
       - Windows 之外（官方包是 .tar.gz 源码）本工具不由它承担，返回空。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return {}
     return {"Windows": _gh_accelerated(
         f"https://github.com/erlang/otp/releases/download/OTP-{v}/otp_win64_{v}.zip")}
@@ -2563,7 +2527,7 @@ def fetch_erlang_versions() -> List[ComponentVersion]:
           只认**有 Windows 便携包**的 tag —— 没有资产的 tag 列出来就是让用户白点一次。
     """
     data = _github_api_json(
-        "https://api.github.com/repos/erlang/otp/releases?per_page=30", timeout=20)
+        "https://api.github.com/repos/erlang/otp/releases?per_page=30", timeout=FETCH_TIMEOUT_API)
     if not isinstance(data, list):
         raise RuntimeError("Erlang 版本列表抓取失败：GitHub Releases 返回异常")
     rx = _re.compile(r"^otp_win64_(\d+(?:\.\d+)*)\.zip$")
@@ -3834,7 +3798,7 @@ def _mysql_zip_exists(v: str) -> Optional[bool]:
     answered = False
     for url in (cdn, mirror):
         try:
-            r = http_session().head(url, timeout=8, allow_redirects=True)
+            r = http_session().head(url, timeout=FETCH_TIMEOUT_HEAD, allow_redirects=True)
         except (requests.RequestException, OSError):
             continue
         if r.status_code in (200, 206):
@@ -3854,7 +3818,7 @@ def fetch_mysql_versions() -> List[ComponentVersion]:
         for prefix in ("mysql-8.4", "mysql-8.0", "mysql-5.7"):
             try:
                 html = _get(f"https://downloads.mysql.com/archives/community/?tpl=version&os=src&version={prefix}",
-                            timeout=6).text
+                            timeout=FETCH_TIMEOUT_WEB).text
                 versions.extend(_re.findall(rf'({prefix}\.\d+)', html))
             except BEST_EFFORT_ERRORS:
                 continue
@@ -9309,7 +9273,7 @@ LAUNCH_OF: Dict[str, LaunchSpec] = {
         # 首次启动才初始化；`<data_dir>/mysql` 是 --initialize-insecure 建出来的系统库。
         # **不要加 --console**：Windows 上它会让 mysqld 自己开一个黑框，
         # 关掉黑框 = 给 MySQL 发关闭事件（2026-10-29 用户实测）。
-        pre_start=["{home}/bin/mysqld" + (".exe" if CURRENT_OS == "Windows" else ""),
+        pre_start=["{home}/bin/mysqld" + (".exe" if is_windows() else ""),
                    "--initialize-insecure", "--basedir={home}",
                    "--datadir={data_dir}"],
         pre_start_if_missing="{data_dir}/mysql",
@@ -9658,8 +9622,8 @@ def build_components() -> List[Component]:
             # 解释器"的布局已经不适用；path_subdir 指错，PATH 里就找不到 python，
             # 界面会一直显示"未安装"或"切了但没生效"。
             # Unix 的官方包解释器在 bin/，保持原样。
-            path_subdir="tools" if CURRENT_OS == "Windows" else "bin",
-            exec_name="python3" if CURRENT_OS != "Windows" else "python",
+            path_subdir="tools" if is_windows() else "bin",
+            exec_name="python3" if (not is_windows()) else "python",
             version_args=["--version"],
             versions=[_cv(v, _python_urls(v)) for v in ("3.12.4", "3.11.9", "3.10.11", "3.9.13")],
         )
@@ -9677,7 +9641,7 @@ def build_components() -> List[Component]:
             # 写 "bin" 会让 PATH 指到一个不存在的目录 —— 与 Python 那次（"Scripts"）
             # 是同一类错：界面上只表现为"切了但没生效"，命令行永远命中机器上原有的 node。
             # Unix 官方 tar.gz 里解释器确实在 bin/，保持原样。
-            path_subdir="" if CURRENT_OS == "Windows" else "bin",
+            path_subdir="" if is_windows() else "bin",
             exec_name="node",
             version_args=["--version"],
             versions=[_cv(v, _node_urls(v)) for v in ("20.15.0", "18.20.3", "16.20.2")],
@@ -9695,7 +9659,7 @@ def build_components() -> List[Component]:
             key="git",
             display_name="Git",
             env_var=None,
-            path_subdir="cmd" if CURRENT_OS == "Windows" else "bin",
+            path_subdir="cmd" if is_windows() else "bin",
             exec_name="git",
             version_args=["--version"],
             unsupported_platform_hint=(
@@ -9737,7 +9701,7 @@ def build_components() -> List[Component]:
             key="conda",
             display_name="Miniconda",
             env_var="CONDA_HOME",
-            path_subdir="Scripts" if CURRENT_OS == "Windows" else "bin",
+            path_subdir="Scripts" if is_windows() else "bin",
             exec_name="conda",
             version_args=["--version"],
             versions=conda_versions,
@@ -9946,7 +9910,7 @@ def build_components() -> List[Component]:
             key="kafka",
             display_name="Apache Kafka",
             env_var="KAFKA_HOME",
-            path_subdir="bin/windows" if CURRENT_OS == "Windows" else "bin",
+            path_subdir="bin/windows" if is_windows() else "bin",
             exec_name="kafka-server-start",  # Kafka 启动脚本（Linux/Mac 带 .sh 后缀）
             version_args=[],
             # 启动脚本：执行即拉起 broker，探测阶段只判定存在
@@ -10049,7 +10013,7 @@ def build_components() -> List[Component]:
             display_name="Nacos",
             env_var="NACOS_HOME",
             path_subdir="bin",
-            exec_name="startup.cmd" if CURRENT_OS == "Windows" else "startup.sh",
+            exec_name="startup.cmd" if is_windows() else "startup.sh",
             version_args=["--version"],
             # startup 脚本一执行就会拉起 Nacos 服务，探测阶段绝不执行
             version_probe=False,
@@ -10735,7 +10699,7 @@ def install_downloaded(comp: Component, version: str, archive: Path,
                 target_name = (comp.exec_name if comp.exec_name.endswith(".war")
                                else comp.exec_name + ".war")
                 renamed_by_fallback = True
-            elif archive_ext == "exe" or CURRENT_OS == "Windows":
+            elif archive_ext == "exe" or is_windows():
                 target_name = comp.exec_name + ".exe"
                 renamed_by_fallback = True
             else:
@@ -10783,7 +10747,7 @@ def _run_installer_for(comp: Component, installer_path: Path, target_dir: Path,
     args = list(comp.installer_args.get(CURRENT_OS, []))
     ensure_dir(target_dir.parent)
 
-    if CURRENT_OS == "Windows":
+    if is_windows():
         # Windows Miniconda: 参数末尾 /D=path 不允许带引号
         cmd = [str(installer_path)] + args + [f"/D={target_dir}"]
         emit("info", f"运行：{' '.join(cmd)}")
@@ -10929,7 +10893,7 @@ def notify_shell_environment(user32=None, timeout_ms: int = 3000) -> bool:
     参数: user32 传 None 时用真实 user32；测试里传一个假对象即可断言"发给谁、
     带什么标志、lParam 指向哪个字符串"。返回是否至少有一个外壳窗口确认收到。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return False
     import ctypes
     from ctypes import wintypes
@@ -10970,7 +10934,7 @@ def _notify_other_top_level_windows(timeout_ms: int = 1000) -> None:
     放在后台线程里做：这条走的是 HWND_BROADCAST，窗口数量不可控，
     虽然带 SMTO_ABORTIFHUNG 仍可能耗上一阵，不该拖住点按钮的人。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return
     try:
         import ctypes
@@ -11005,7 +10969,7 @@ class EnvManager:
             return False
         p = Path(path)
         bin_dir = p / "bin"
-        exe = bin_dir / (exec_name + (".exe" if CURRENT_OS == "Windows" else ""))
+        exe = bin_dir / (exec_name + (".exe" if is_windows() else ""))
         return exe.exists()
 
     @staticmethod
@@ -11018,7 +10982,7 @@ class EnvManager:
         外壳那一路必须**同步**发（见 notify_shell_environment 的真机数据）；
         给其它顶层窗口那一路放后台线程，发不出去也不影响已经写好的注册表。
         """
-        if CURRENT_OS != "Windows":
+        if (not is_windows()):
             return
         try:
             notify_shell_environment()
@@ -11066,7 +11030,7 @@ class EnvManager:
         if not expanded:
             return ""
         normed = os.path.normpath(expanded).rstrip("\\/")
-        return normed.lower() if CURRENT_OS == "Windows" else normed
+        return normed.lower() if is_windows() else normed
 
     @staticmethod
     def _same_path(a: str, b: str) -> bool:
@@ -11151,7 +11115,7 @@ class EnvManager:
             return home / ".zshrc"
         if shell.endswith("bash"):
             # macOS 上 bash 更常读 ~/.bash_profile
-            return home / (".bash_profile" if CURRENT_OS == "Darwin" else ".bashrc")
+            return home / (".bash_profile" if is_macos() else ".bashrc")
         return home / ".profile"
 
     @staticmethod
@@ -11322,14 +11286,14 @@ class EnvManager:
 
     @staticmethod
     def write_user_env(name: str, value: str) -> None:
-        if CURRENT_OS == "Windows":
+        if is_windows():
             EnvManager.set_windows_user_env(name, value)
         else:
             EnvManager.set_unix_env(name, value)
 
     @staticmethod
     def drop_user_env(name: str) -> None:
-        if CURRENT_OS == "Windows":
+        if is_windows():
             EnvManager.remove_windows_user_env(name)
         else:
             EnvManager.remove_unix_env(name)
@@ -11351,7 +11315,7 @@ class EnvManager:
     @staticmethod
     def read_user_env(name: str) -> Optional[str]:
         """读持久层里某环境变量的值，不存在返回 None。"""
-        if CURRENT_OS == "Windows":
+        if is_windows():
             return EnvManager._read_windows_user_env(name)
         rc = EnvManager._shell_rc_file()
         if not rc.exists():
@@ -11370,14 +11334,14 @@ class EnvManager:
 
     @staticmethod
     def add_path_entry(entry: str) -> None:
-        if CURRENT_OS == "Windows":
+        if is_windows():
             EnvManager.append_windows_path(entry)
         else:
             EnvManager.append_unix_path(entry)
 
     @staticmethod
     def drop_path_entry(entry: str) -> None:
-        if CURRENT_OS == "Windows":
+        if is_windows():
             EnvManager.remove_windows_path_entry(entry)
         else:
             EnvManager.remove_unix_path_entry(entry)
@@ -11385,7 +11349,7 @@ class EnvManager:
     @staticmethod
     def remove_path_entries_under(root: str) -> List[str]:
         """删除 root 目录内（含目录已不存在的残留）的 PATH 条目，返回被删条目列表。"""
-        if CURRENT_OS == "Windows":
+        if is_windows():
             return EnvManager.remove_windows_path_entries_under(root)
         return EnvManager.remove_unix_path_entries_under(root)
 
@@ -11401,7 +11365,7 @@ class EnvManager:
         """
         if not entries:
             return
-        if CURRENT_OS == "Windows":
+        if is_windows():
             current = EnvManager._read_windows_user_path()
             missing = [e for e in entries
                        if not any(EnvManager._same_path(c, e) for c in current)]
@@ -11429,7 +11393,7 @@ class EnvManager:
         想拿它做"全量备份→整表恢复"或"与进程 PATH 逐条对比"的调用方，
         必须先想清楚这个差异，否则 Unix 侧会漏掉不属于本工具的那一大截。
         """
-        if CURRENT_OS == "Windows":
+        if is_windows():
             return EnvManager._read_windows_user_path()
         rc = EnvManager._shell_rc_file()
         if not rc.exists():
@@ -11453,7 +11417,7 @@ class EnvManager:
         返回: Dict[str, str]  键统一大写；拿不到时返回**空 dict**（非 Windows、令牌被拒、
         API 失败都算），调用方必须按"未能复验"处理，不许把空结果当成"复验通过"。
         """
-        if CURRENT_OS != "Windows":
+        if (not is_windows()):
             return {}
         try:
             import ctypes
@@ -11895,7 +11859,7 @@ def _spawn_page_daemon() -> int:
         with open(log_path, "ab", buffering=0) as log_fh:
             kw = dict(stdin=subprocess.DEVNULL, stdout=log_fh,
                       stderr=subprocess.STDOUT, cwd=str(CONFIG_DIR), env=env)
-            if CURRENT_OS == "Windows":
+            if is_windows():
                 kw["creationflags"] = DETACH_FLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
                 if CREATE_NO_WINDOW:
                     kw["creationflags"] |= CREATE_NO_WINDOW
@@ -12309,7 +12273,7 @@ def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
     try:
         kw = dict(capture_output=True, timeout=10,
                   text=True, encoding="utf-8", errors="replace")
-        if CURRENT_OS == "Windows":
+        if is_windows():
             # 静默外部命令（与 main.py 里其它外部命令同一惯例）：
             # 从 GUI 点"强制结束"时，不带这个标志会闪一个黑框。
             kw["creationflags"] = CREATE_NO_WINDOW
@@ -12343,7 +12307,7 @@ def running_process_images(image_names: Sequence[str]) -> List[str]:
         try:
             kw = dict(capture_output=True, timeout=10,
                       text=True, encoding="utf-8", errors="replace")
-            if CURRENT_OS == "Windows":
+            if is_windows():
                 kw["creationflags"] = CREATE_NO_WINDOW
             done = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}",
                                    "/FO", "CSV", "/NH"], **kw)
@@ -12681,7 +12645,7 @@ def _netstat_text() -> str:
     try:
         kw = dict(capture_output=True, timeout=10,
                   text=True, encoding="utf-8", errors="replace")
-        if CURRENT_OS == "Windows":
+        if is_windows():
             kw["creationflags"] = CREATE_NO_WINDOW
         return subprocess.run(["netstat", "-ano"], **kw).stdout or ""
     except (OSError, subprocess.TimeoutExpired):
@@ -12695,7 +12659,7 @@ def _process_name(pid: int) -> str:
     except (TypeError, ValueError):
         return ""
     try:
-        if CURRENT_OS == "Windows":
+        if is_windows():
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True, timeout=10, text=True,
@@ -12776,7 +12740,7 @@ def evict_port_occupant(port: int, label: str,
     ① 绝不结束我们自己（pid == os.getpid()）—— 否则本工具会把自己刚起的进程杀掉；
     ② 归属不唯一（同口多个 PID）时不结束任何一个 —— 宁可启动失败也不赌。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return f"端口 {port}（{label}）被占用；当前只支持在 Windows 上自动结束占用者"
     pid, name = occupant_of(port)
     if pid is None:
@@ -12829,7 +12793,7 @@ def _tasklist_pid_exists(pid: int) -> bool:
 def process_alive(pid: int) -> bool:
     """PID 是否还活着。查不到就当活着（宁可多等，不可误杀）。"""
     try:
-        if CURRENT_OS == "Windows":
+        if is_windows():
             return _tasklist_pid_exists(pid)
         os.kill(pid, 0)
         return True
@@ -13245,7 +13209,7 @@ def process_is_alive(pid: int) -> bool:
     """PID 是否还在。**注意这是提示不是真相**：spec §4 定的是端口在听才算运行中。"""
     if not pid or pid <= 0:
         return False
-    if CURRENT_OS == "Windows":
+    if is_windows():
         import ctypes
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         still_alive = 259
@@ -13524,11 +13488,11 @@ def java_major_of(home: Optional[str]) -> Optional[int]:
     """
     if not home:
         return None
-    exe = Path(home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")
+    exe = Path(home) / "bin" / ("java.exe" if is_windows() else "java")
     if not exe.is_file():
         return None
     kwargs: Dict[str, object] = {"stdin": STDIN_DEVNULL}
-    if CURRENT_OS == "Windows":
+    if is_windows():
         kwargs["creationflags"] = CREATE_NO_WINDOW
     try:
         proc = subprocess.run([str(exe), "-version"], capture_output=True, text=True,
@@ -13648,7 +13612,7 @@ def run_pre_start(comp: Component, spec: LaunchSpec, plan: LaunchPlan,
         # --initialize-insecure 是控制台程序，不传 CREATE_NO_WINDOW 会闪一个黑框。
         kw = dict(cwd=plan.cwd, env=plan.env, capture_output=True, timeout=timeout,
                   stdin=subprocess.DEVNULL)
-        if CURRENT_OS == "Windows":
+        if is_windows():
             kw["creationflags"] = CREATE_NO_WINDOW
         proc = subprocess.run(argv, **kw)
     except subprocess.TimeoutExpired:
@@ -13694,7 +13658,7 @@ def _launch_mapping(comp: Component, java_home: str, port: int,
     cluster_id = (read_or_create_cluster_id(data_dir)
                   if any("{cluster_id}" in t for t in texts) else "")
     return {
-        "java": str(Path(java_home) / "bin" / ("java.exe" if CURRENT_OS == "Windows" else "java")),
+        "java": str(Path(java_home) / "bin" / ("java.exe" if is_windows() else "java")),
         "war": str(home / "jenkins.war"),
         "home": str(home),
         "data_dir": str(data_dir),
@@ -13789,692 +13753,9 @@ class StopResult:
     reason: str = ""
 
 
-class ServiceManager:
-    """本机进程生命周期的唯一入口。探针全部可注入，测试因此不碰网络也不碰进程。"""
-
-    def __init__(self, is_listening=port_is_listening, http_ok=http_ok,
-                 process_alive=process_is_alive, terminate=None, lookup_pids=None,
-                 process_images=None):
-        self._is_listening = is_listening
-        self._http_ok = http_ok
-        self._process_alive = process_alive
-        self._terminate = terminate or self._terminate_by_pid
-        # 端口反查的注入点。用 lambda 包一层而不是把函数当默认值绑死：
-        # 默认参数在 def 时求值，测试 patch main.netstat_listener_pids 就会失效
-        # （这个坑计划一的 start() 已经踩过并写进注释）。
-        self._lookup_pids = lookup_pids or (lambda ports: netstat_listener_pids(ports))
-        # 同上：残留辅助进程的查询也是子进程调用，只给停止路径收尾用（见 LaunchSpec.leftover_processes）。
-        self._process_images = process_images or (
-            lambda names: running_process_images(names))
-
-    @staticmethod
-    def _terminate_by_pid(rec: RunRecord) -> None:
-        """只结束我们自己登记过的 PID。
-
-        spec §2 说明 Nacos / ActiveMQ 的 PID 不可信，所以计划二必须走正规
-        shutdown 脚本；本期 Jenkins 我们就是服务进程，terminate 才成立。
-        非 server 角色一律不动手 —— 这条守卫是"绝不误杀别人进程"的最后防线。"""
-        if rec.pid_role != "server" or rec.pid is None or rec.pid <= 0:
-            return
-        try:
-            os.kill(rec.pid, 15)
-        except OSError:
-            pass
-
-    def status(self, key: str, comp: Component,
-               records: Optional[Dict[str, RunRecord]] = None) -> LaunchStatus:
-        if getattr(comp, "launch", None) is None:
-            return LaunchStatus("not_installed_or_stopped")
-        if service_spec_for(comp) is not None:
-            return self._service_status(comp, records)
-        rec = (records if records is not None else load_running_map()).get(key)
-        if rec is None:
-            return LaunchStatus("not_installed_or_stopped")
-        # 按整簇判，不按单口：Nacos 主口在听、gRPC 9848 掉了是"半死"，
-        # 显示成运行中会让用户以为客户端连得上（spec 计划二 §7）。
-        # 老记录没有 ports 字段（加载侧才做归一），进程内现构造的也得能判，故按 port 兜底。
-        silent = [p for p in (tuple(rec.ports) or (rec.port,))
-                  if not self._is_listening(p)]
-        if silent:
-            return LaunchStatus("zombie", rec,
-                                f"登记的进程已不在监听 {'/'.join(str(p) for p in silent)}")
-        return LaunchStatus("running", rec)
-
-    def adopt(self, comps: Dict[str, Component]) -> List[LaunchStatus]:
-        """打开工具时对每个可启动组件做一次只读认定。绝不拉起进程。"""
-        records = load_running_map()
-        self.backfill_service_records(comps, records)
-        return [self.status(k, c, records) for k, c in sorted(comps.items())
-                if getattr(c, "launch", None) is not None]
-
-    def backfill_service_records(self, comps: Dict[str, Component],
-                                 records: Optional[Dict[str, RunRecord]] = None) -> None:
-        """把"服务在跑、但 running.json 里没有/已过期"的情况补登记。
-
-        用户完全可能在 services.msc 里启动服务，或者上次关工具时服务还在跑；
-        不补这一条，访问页与卡片就看不到它。全程只读 SCM，不启停任何东西。
-        """
-        recs = records if records is not None else load_running_map()
-        dirty = False
-        for key, comp in comps.items():
-            if service_spec_for(comp) is None:
-                continue
-            rec = recs.get(key)
-            if rec is not None and rec.pid_role != "service":
-                continue                       # 便携模式的旧登记，不归这里管
-            if rec is not None and rec.version:
-                info = service_info(comp, rec.version)
-                if info.state == SERVICE_RUNNING:
-                    fresh = service_run_record(comp, rec.version)
-                    if fresh.to_dict() != rec.to_dict():
-                        recs[key] = fresh
-                        dirty = True
-                    continue
-                recs.pop(key, None)
-                dirty = True
-                continue
-            for version, _path in installed_service_versions(comp):
-                if service_info(comp, version).state == SERVICE_RUNNING:
-                    recs[key] = service_run_record(comp, version)
-                    dirty = True
-                    break
-        if dirty:
-            save_running_map(recs)
-
-    def _service_status(self, comp: Component,
-                        records: Optional[Dict[str, RunRecord]] = None) -> LaunchStatus:
-        recs = records if records is not None else load_running_map()
-        rec = recs.get(comp.key)
-        version = (rec.version if rec is not None else "") or resolve_launch_version(comp)
-        if not version:
-            return LaunchStatus("not_installed_or_stopped")
-        info = service_info(comp, version)
-        if info.state == SERVICE_BROKEN:
-            return LaunchStatus("broken", rec,
-                                f"服务 {info.name} 指向的文件已不存在（服务损坏）")
-        if not info.exists and rec is not None and rec.pid_role != "service":
-            # 还没切成服务的旧便携进程：先按它自己的登记报告运行状态，
-            # 用户点「停止」时走 _portable_stop 收掉，之后就能正常装服务。
-            legacy_ports = tuple(rec.ports) or (rec.port,)
-            if any(self._is_listening(p) for p in legacy_ports):
-                return LaunchStatus("running", rec)
-        if info.state != SERVICE_RUNNING:
-            return LaunchStatus("not_installed_or_stopped")
-        if rec is None or rec.service_name != info.name or rec.version != version:
-            rec = service_run_record(comp, version)
-        ports = tuple(rec.ports) or (rec.port,)
-        silent = [p for p in ports if not self._is_listening(p)]
-        if silent:
-            return LaunchStatus("zombie", rec,
-                                f"服务 {info.name} 在运行，但端口 "
-                                f"{'/'.join(str(p) for p in silent)} 未监听")
-        return LaunchStatus("running", rec)
-
-    def reconcile(self, comps: Dict[str, Component]) -> Dict[str, LaunchStatus]:
-        """一次性认定 + 清僵尸：只处理 LAUNCH_KEYS 里的组件。
-
-        计划二会往登记表加组件，届时旧登记不该被本期代码删掉，
-        所以这里按"认得的 key"过滤，而不是清全部文件。"""
-        records = load_running_map()
-        self.backfill_service_records(comps, records)
-        out: Dict[str, LaunchStatus] = {}
-        dirty = False
-        for key in LAUNCH_KEYS:
-            comp = comps.get(key)
-            if comp is None or getattr(comp, "launch", None) is None:
-                continue
-            if key not in records:
-                continue          # 没有登记的 key 不是"待认定"的东西：卡片自己的
-                                  # status() 会答"未运行"，reconcile 只负责把有过登记的
-                                  # 一条条判完，返回集因此可以为空（用例钉的就是这个）
-            st = self.status(key, comp, records)
-            if st.state == "zombie":
-                records.pop(key, None)
-                dirty = True
-                st = LaunchStatus("not_installed_or_stopped")
-            out[key] = st
-        if dirty:
-            save_running_map(records)
-        return out
-
-    def start(self, comp: Component, comps: Dict[str, Component],
-              sleeper=time.sleep, version: Optional[str] = None,
-              password: str = "", log: Optional[Callable[[str], None]] = None) -> StartResult:
-        spec = getattr(comp, "launch", None)
-        if spec is None:
-            return StartResult(False, "gate", "本工具暂不支持启动该组件")
-        if service_spec_for(comp) is not None:
-            return self._service_start(comp, version, password, sleeper, log)
-        existing = load_running_map().get(comp.key)
-        if existing and self._is_listening(existing.port):
-            return StartResult(False, "gate",
-                               f"{comp.display_name} 已在运行（端口 {existing.port}）",
-                               record=existing, console_url=existing.console_url)
-
-        java_home = resolve_java_home(comps)
-        ok, reason = launch_gate(comp, spec, java_home)
-        if not ok:
-            return StartResult(False, "gate", reason)
-
-        base = spec.main_port
-        # is_free 显式按名字传，不靠默认值绑定：默认参数在 def 时就把函数绑死了，
-        # 测试 patch main.port_is_free 会失效。
-        # 端口策略（2026-10-06 起）：只用官方默认端口，不平移；被占就结束占用者。
-        # 结束掉了谁要告诉用户 —— "我杀了某个进程"这种事不说出来是不道德的。
-        evicted: List[str] = []
-        port_plan, why = choose_ports(spec, is_free=port_is_free, evicted=evicted)
-        if not port_plan.main:
-            return StartResult(False, "port", why)
-        port_notes = [f"端口被占用，已结束占用者：{x}" for x in evicted]
-
-        data_dir = CONFIG_DIR / f"{comp.key}-data"
-        log_file = data_dir / "logs" / "byte-tools.out"
-        # 只建数据目录本身，**不在 pre_start 之前建 logs/**：MySQL 的
-        # --initialize-insecure 要求数据目录为空，多一个 logs/ 就报 "directory is unusable"。
-        # 日志目录等前置准备跑完、真正 open 日志之前再建（见下面 with open 之前）。
-        ensure_dir(data_dir)
-        # 端口回写必须在 spawn 之前做完：改了配置却没起进程、或起进程时配置没生效，
-        # 两边状态对不上时比"没启动"更难归因。
-        ok, why, notes = prepare_ports(comp, spec, port_plan, data_dir)
-        # "我结束了哪个进程"必须跟着结果回到卡片：静默杀进程却不说是谁，
-        # 用户事后发现某程序被杀会完全不知道是哪一步干的。
-        notes = list(port_notes) + list(notes)
-        if not ok:
-            return StartResult(False, "writeback", why, notes=notes)
-        plan = build_launch_plan(comp, spec, java_home, port_plan.main, log_file)
-        # 前置准备（kafka 的 KRaft format 等）。必须在 spawn 之前：
-        # 配了 --ignore-formatted 所以重复跑幂等（实测 rc=0），
-        # 而漏了它 kafka 会直接 `No readable meta.properties files found.`。
-        ok_pre, why_pre, pre_notes = run_pre_start(comp, spec, plan)
-        notes = notes + list(pre_notes)
-        if not ok_pre:
-            return StartResult(False, "prestart", why_pre, notes=notes)
-
-        # 重定向句柄在 Popen 把它交给子进程后立刻由父进程关掉（with 退出）：
-        # Windows 上父进程留着一个打开的日志句柄，既漏句柄又会让临时目录删不掉；
-        # 子进程拿到的是 CreateProcess 复制过去的一份，关自己这份不影响它。
-        ensure_dir(log_file.parent)
-        with open(plan.log_file, "ab", buffering=0) as log_fh:
-            popen_kw = dict(cwd=str(plan.cwd), env=plan.env,
-                            stdout=log_fh,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-            if CURRENT_OS == "Windows":
-                popen_kw["creationflags"] = DETACH_FLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
-                if CREATE_NO_WINDOW:
-                    popen_kw["creationflags"] |= CREATE_NO_WINDOW
-            else:
-                popen_kw["start_new_session"] = True
-
-            try:
-                proc = subprocess.Popen(plan.argv, **popen_kw)
-            except OSError as exc:
-                return StartResult(False, "spawn", f"拉起失败：{exc}")
-
-            # 第二个进程（rocketmq 的 broker）。顺序在主进程之后 ——
-            # broker 要向 namesrv 注册，namesrv 没起来它会反复重试。
-            #
-            # 拉起失败要**连主进程一起收掉**：留下一个"namesrv 在跑、broker 没起来"
-            # 的半死状态，比直接失败更难归因（用户看到 9876 在听就以为服务可用）。
-            for extra in (spec.extra_processes or []):
-                try:
-                    argv_extra = [t.format(**_plan_mapping(comp, spec, plan))
-                                  for t in extra[CURRENT_OS]]
-                except (KeyError, IndexError):
-                    return StartResult(False, "spawn", f"启动命令里的占位符无法替换：{extra}")
-                try:
-                    subprocess.Popen(argv_extra, **popen_kw)
-                except OSError as exc:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-                    return StartResult(False, "spawn",
-                                       f"第二个进程拉起失败：{exc}"
-                                       f"（命令：{argv_extra[0]}）")
-
-        # 有界探活：按"每轮 sleeper(1.0) 至多 startup_timeout 轮"计数而不是纯墙钟
-        # deadline —— deadline 写法在 sleeper 被替换成 no-op 时会退化成烧 CPU 的
-        # 忙等（提交信息钉的就是"有界探活后才登记"）。真实运行里每轮睡 1 秒，
-        # 语义等价于 startup_timeout 秒内未监听即放弃。
-        for _ in range(max(1, int(spec.startup_timeout))):
-            # 整簇都要在听才算起来：Nacos 的 gRPC 9848/9849 与 ActiveMQ 的 broker 口
-            # 没起来时控制台能开、客户端连不上，只探主口会登记成一个"半死"的运行中。
-            if all(self._is_listening(p) for p in port_plan.all_ports):
-                rec = RunRecord(key=comp.key,
-                                version=resolve_launch_version(comp)
-                                or comp.versions[0].version,
-                                home=str(plan.cwd), data_dir=plan.env.get(spec.data_dir_env, ""),
-                                port=port_plan.main, console_url=plan.console_url,
-                                pid=proc.pid,
-                                pid_role="server" if spec.stop_kind == "pid" else "launcher",
-                                started_at=time.time(), launcher_cmd=list(plan.argv),
-                                ports=port_plan.all_ports)
-                records = load_running_map()
-                records[comp.key] = rec
-                save_running_map(records)
-                # 端口全在听 ≠ 控制台能用。这里再探一次控制台（**不改判定**：
-                # 服务进程已在监听、登记已落盘，就仍然是"启动成功"），
-                # 把"控制台还没就绪"作为一条提示行交给界面，好让用户看到
-                # "再等一会儿"而不是点开一个 503 页面以为坏了（Jenkins 实测就是这样）。
-                note = self._console_readiness_note(spec, port_plan.main)
-                if note:
-                    notes = list(notes) + [note]
-                return StartResult(True, "running", record=rec,
-                                   console_url=plan.console_url, notes=notes)
-            sleeper(1.0)
-
-        # 超时：把刚拉起的进程收掉，不留一个"没人登记的监听者"
-        reason = (f"{spec.startup_timeout} 秒内端口 "
-                  f"{'/'.join(str(p) for p in port_plan.all_ports)} 未监听"
-                  f"（需要全部端口都在听）。启动输出见 {plan.log_file}，"
-                  f"末尾内容：{self._tail(plan.log_file)}"
-                  f"；{comp.display_name} 自身日志："
-                  f"{vendor_log_tails(data_dir, plan.cwd, comp.key)}")
-        try:
-            proc.terminate()
-        except OSError as exc:
-            # 收尸失败必须出声：这个进程恰恰不在 running.json 里（spec §5）
-            reason += f"；进程可能仍在监听（PID {proc.pid}，收尸失败：{exc}）"
-        return StartResult(False, "timeout", reason, notes=notes)
-
-    @staticmethod
-    def _tail(path: Path, lines: int = 8) -> str:
-        """失败归因要能直接看见（spec §5）：读日志末尾几行，读不到就说读不到。"""
-        try:
-            data = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return "（日志还读不到）"
-        return " / ".join(data[-lines:]) if data else "（日志为空）"
-
-    def stop(self, comp: Component, comps: Dict[str, Component],
-             deadline: float = 30.0, sleeper=time.sleep,
-             version: Optional[str] = None,
-             log: Optional[Callable[[str], None]] = None) -> StopResult:
-        if service_spec_for(comp) is not None:
-            return self._service_stop(comp, version, deadline, sleeper, log)
-        return self._portable_stop(comp, deadline, sleeper)
-
-    def _portable_stop(self, comp: Component, deadline: float,
-                       sleeper) -> StopResult:
-        rec = load_running_map().get(comp.key)
-        if rec is None:
-            return StopResult(False, reason=f"{comp.display_name} 没有本工具的启动登记，无法确定该停哪个进程。")
-        spec = comp.launch
-        if spec.stop_kind == "shutdown_command" and spec.shutdown_commands.get(CURRENT_OS):
-            # 占位符契约：这里喂得出 RunRecord 上的键（port/home/data_dir）。
-            #
-            # **env 必须与启动时一致**（2026-10-06 真机实测踩出来的）：
-            # 之前这里 `subprocess.run(argv, cwd=rec.home)` 不传 env，
-            # 于是 rabbitmqctl.bat 找不到 erl.exe（免安装 Erlang 不设系统变量）、
-            # 拿不到 RABBITMQ_NODENAME —— 它**静默失败**（输出被 DEVNULL 吞掉），
-            # 表现是「点了停止，30 秒后弹窗问要不要强杀」。
-            # 能优雅停的组件必须真的优雅停下，否则这条路径等于没接。
-            data_dir = rec.data_dir or str(CONFIG_DIR / f"{comp.key}-data")
-            #占位符要凑齐：stop 侧除了 port/home/data_dir，nginx 还要 {conf}
-            #（它靠 -c 定位配置、不靠 cwd）—— 少一个就 KeyError 崩在停止流程里。
-            argv = [t.format(port=rec.port, home=rec.home, data_dir=data_dir,
-                             conf_dir=str(Path(data_dir) / "conf"),
-                             conf=config_file_for(comp, Path(data_dir)),
-                             java="", war="",
-                             log_file=str(Path(data_dir) / "logs" / "byte-tools.out"))
-                    for t in spec.shutdown_commands[CURRENT_OS]]
-            env = dict(os.environ)
-            if spec.extra_env:
-                for name, template in spec.extra_env.items():
-                    try:
-                        env[name] = template.format(
-                            port=rec.port, home=rec.home, data_dir=data_dir,
-                            conf_dir=str(Path(data_dir) / "conf"), war="",
-                            log_file=str(Path(data_dir) / "logs" / "byte-tools.out"))
-                    except (KeyError, IndexError):
-                        pass
-            if spec.prereq is not None:
-                erl = find_erlang_home_erl()
-                if erl:
-                    env["PATH"] = str(Path(erl).parent) + os.pathsep + env.get("PATH", "")
-                    env["ERLANG_HOME"] = str(Path(erl).parent.parent)
-            try:
-                # 45 秒：子代理实测 rabbitmqctl stop 1~4s 就返回，
-                # 但它要先等 broker 把未落盘消息写完；给足余量，
-                # 否则会误判成「停不掉」并弹强杀确认框（能优雅停就别强杀）。
-                kw = dict(cwd=rec.home, env=env, timeout=45,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          stdin=subprocess.DEVNULL)
-                if CURRENT_OS == "Windows":
-                    kw["creationflags"] = CREATE_NO_WINDOW
-                subprocess.run(argv, **kw)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        elif spec.stop_kind == "port_lookup" or CURRENT_OS == "Windows":
-            # 端口是真相：整簇都空了就当已停（下面的等待循环会清登记），别吓用户。
-            ports = tuple(rec.ports) or (rec.port,)
-            if not any(self._is_listening(p) for p in ports):
-                records = load_running_map()
-                records.pop(comp.key, None)
-                save_running_map(records)
-                return StopResult(True,
-                                  reason=f"{comp.display_name} 已经不在监听 "
-                                         f"{'/'.join(str(p) for p in ports)}，登记已清。"
-                                         f"{self._leftover_note(spec)}")
-            if spec.stop_kind != "port_lookup":
-                # **登记的 PID 已经死了、端口却还在听**（2026-10-08 真机实测定位）：
-                # java -jar 在 Windows 上由 java.exe 先起一个子 JVM（或启动器先退），
-                # 于是 running.json 里那一行 pid 可能已经不存在，真正监听的是它的子进程。
-                # 旧代码在这里直接回 need_force，而 force_stop 又只认"活着的登记 PID"
-                # （`if self._process_alive(rec.pid)`）→ 两边都推给对方的死角：
-                # 用户点停止 → 弹"要强制结束吗" → 点确定 → 回"我什么都没杀"，
-                # 最后只能自己去任务管理器里杀 java.exe。
-                # 现在在这里按端口反查唯一归属，把"该杀谁"查清楚再交给 force_stop。
-                live = [p for p in (tuple(rec.ports) or (rec.port,)) if self._is_listening(p)]
-                owner = ""
-                owners = self._lookup_pids(tuple(live)) if live else {}
-                mine = {p: pid for p, pid in owners.items() if pid != os.getpid()}
-                # **判据用"登记 PID 是不是持有端口的那个"，而不是"登记 PID 还活着吗"**
-                # （2026-10-08 实测教训）：PID 存活查询会误判 —— 一个早已退出的 PID
-                # 在 Windows 上可能被 OpenProcess 判成"还在"（PID 被系统回收或
-                # 句柄语义差异），于是"死者"被当成"凶手"，真正的监听进程毫发无伤。
-                # 端口归属是我们**刚查出来的事实**，没有这种不确定性。
-                if mine and len(set(mine.values())) == 1 and rec.pid not in set(mine.values()):
-                    real_pid = next(iter(set(mine.values())))
-                    owner = (f"登记的 PID {rec.pid} 已经不持有该端口，"
-                             f"实际监听的是 PID {real_pid}（java 启动器先退出、子 JVM 在听）。")
-                return StopResult(False, need_force=True,
-                                  reason=(f"{comp.display_name}（端口 {rec.port}）"
-                                          f"{owner + ' ' if owner else ''}"
-                                          f"在 Windows 上只能直接终止进程，"
-                                          f"这会打断正在进行的任务、可能丢未落盘的配置。要强制结束吗？"))
-            # port_lookup 没有优雅手段：厂商的关闭脚本按进程名强杀会误伤本机同名实例，
-            # 而登记的 PID 是包装脚本不是服务进程。所以第一步只请示，一个进程都不碰。
-            return StopResult(False, need_force=True,
-                              reason=(f"{comp.display_name}（端口 "
-                                      f"{'/'.join(str(p) for p in ports)}）没有可用的优雅停止手段："
-                                      f"它的启动脚本是包装器，登记的 PID 不是服务进程，"
-                                      f"而厂商自带的关闭脚本按进程名强杀、会误伤本机其它同名实例。"
-                                      f"要按端口找到那个进程并强制结束吗？"))
-        else:
-            self._terminate(rec)
-
-        # 与 start() 同一套"有界轮次"约定（main.py 里 start 的注释钉过）：按轮计数、
-        # 每轮 sleeper(1.0)、至少探一次。用 deadline 递减做墙钟会在 sleeper 被注入成
-        # 短睡时把宽限期静默缩短，no-op 时退化成忙等。
-        ports = tuple(rec.ports) or (rec.port,)
-        for _ in range(max(1, int(deadline))):
-            if not any(self._is_listening(p) for p in ports):
-                records = load_running_map()
-                records.pop(comp.key, None)
-                save_running_map(records)
-                return StopResult(True, reason=f"{comp.display_name} 已停止，端口 "
-                                               f"{'/'.join(str(p) for p in ports)} 已释放。"
-                                               f"{self._leftover_note(spec)}")
-            sleeper(1.0)
-        return StopResult(False, need_force=True,
-                          reason=(f"{comp.display_name} 在 {int(deadline)} 秒内没停下来（端口 "
-                                  f"{'/'.join(str(p) for p in ports)} 仍在听）。"
-                                  f"要强制结束这个进程吗？强制结束可能丢未落盘的数据。"))
-
-    # --- 服务模式（MySQL / Redis）----------------------------------------
-    def _service_start(self, comp: Component, version: Optional[str], password: str,
-                       sleeper, log=None) -> StartResult:
-        """服务模式的启动：没注册就先注册（一次 UAC），然后交给 SCM 起。
-
-        多版本必须用**下拉框选中的那个版本**，不能走 resolve_launch_version()：
-        它挑的是"生效版本"，而服务要起的是用户眼睛正看着的那一个。
-        """
-        spec = service_spec_for(comp)
-        target = version or resolve_launch_version(comp)
-        if not target:
-            return StartResult(False, "gate",
-                               f"磁盘上还没有 {comp.display_name} 的已安装版本，先点「安装」。")
-        missing = service_required_missing(comp, target)
-        if missing:
-            return StartResult(
-                False, "gate",
-                f"{comp.display_name} {target} 缺少服务组件所需的文件：{'、'.join(missing)}。"
-                f"这个包不是带服务组件的完整版，请卸载后重新安装。")
-        peers = peer_running_services(comp, exclude_version=target)
-        if peers:
-            names = "、".join(p.name for p in peers)
-            return StartResult(
-                False, "gate",
-                f"另一个版本的服务 {names} 正在运行。同一端口同一时间只能跑一个版本："
-                f"先停止它，再启动 {target}。")
-        port = service_port(comp)
-        secret_key = f"{comp.key}:{target}"
-        stored = load_service_secret(secret_key)
-        notes: List[str] = []
-        if password and any(ch in password for ch in "\r\n\x00"):
-            return StartResult(False, "gate", "密码里不能有换行或 NUL 字符")
-
-        info = service_info(comp, target)
-        if not info.exists:
-            if password and spec.password_kind == "redis_requirepass":
-                # Redis 的密码必须落在服务启动前读的那份 conf 里
-                save_service_secret(secret_key, password)
-            res = install_service(comp, target, log=log)
-            if not res.ok:
-                return StartResult(False, "gate" if res.cancelled else "service_install",
-                                   res.message)
-            notes.append(res.message)
-            info = res.info or SERVICE_BACKEND.query(service_name_for(spec, target))
-
-        if not info.running and port_is_listening(port):
-            owners = netstat_listener_pids((port,))
-            pid = owners.get(port)
-            return StartResult(
-                False, "port",
-                f"端口 {port} 已被别的进程占用" + (f"（PID {pid}）" if pid else "")
-                + "。服务模式不替你结束别人的进程：请先停掉占用它的程序再重试。")
-
-        # Redis 的密码必须落在**服务启动前**读到的那份 conf 里；已注册过的服务
-        # 也要在这里补写，否则本次输入的密码下一次重启前都不会生效。
-        if password and spec.password_kind == "redis_requirepass":
-            save_service_secret(secret_key, password)
-            write_redis_conf(comp, target, port, password)
-
-        res = start_service(comp, target, sleeper=sleeper, log=log)
-        if not res.ok:
-            return StartResult(False, "gate" if res.cancelled else "service_start",
-                               res.message, notes=notes)
-
-        if password:
-            if spec.password_kind == "mysql_root":
-                ok, why = mysql_set_root_password(comp, target, port, password, stored)
-                if ok:
-                    save_service_secret(secret_key, password)
-                    notes.append("root 密码已设置，并已用新密码连一次复核通过"
-                                 "（只保存 DPAPI 加密副本）。")
-                else:
-                    notes.append(f"root 密码没设置成功：{why}。"
-                                 f"root 仍是空密码或原密码，本次输入的密码**没有生效**。")
-            elif spec.password_kind == "redis_requirepass":
-                ok, why = redis_verify_auth(comp, target, port, password)
-                if ok:
-                    notes.append("requirepass 已生效：带密码 PING 返回 PONG，"
-                                 "无密码请求被 NOAUTH 拒绝。")
-                else:
-                    drop_service_secret(secret_key)
-                    notes.append(f"requirepass 没生效：{why}。"
-                                 f"本次输入的密码**没有生效**，Redis 仍是无密码状态。")
-
-        rec = service_run_record(comp, target)
-        records = load_running_map()
-        records[comp.key] = rec
-        save_running_map(records)
-        if spec.password_kind == "mysql_root" and not password and not stored:
-            # 没设过密码就别让用户猜：真连一次，把"能不能免密登录"讲清楚。
-            ok_free, _ = mysql_verify_login(comp, target, port, "")
-            if ok_free:
-                notes.append("root 当前**没有密码**，可以直接用 `mysql -u root` 登录；"
-                             "要设置密码请先卸载这个版本再重装（重装时会弹密码框）。")
-        if spec.password_kind == "redis_requirepass" and not password and not stored:
-            ok_free, _ = redis_verify_auth(comp, target, port, "")
-            if ok_free:
-                notes.append(f"Redis 当前**没有 requirepass**：`redis-cli -p {port} ping` 直接可用；"
-                             f"要设置密码请先卸载这个版本再重装（重装时会弹密码框）。")
-        return StartResult(True, "running", record=rec,
-                           console_url=rec.console_url, notes=notes)
-
-    def _service_stop(self, comp: Component, version: Optional[str], deadline: float,
-                      sleeper, log=None) -> StopResult:
-        rec = load_running_map().get(comp.key)
-        target = version or (rec.version if rec is not None else "") or \
-            resolve_launch_version(comp)
-        if not target:
-            return StopResult(False, reason="没有可识别的已安装版本，无法确定要停哪个服务。")
-        if not SERVICE_BACKEND.query(service_name_for(service_spec_for(comp), target)).exists \
-                and not SERVICE_BACKEND.registry_key_exists(
-                    service_name_for(service_spec_for(comp), target)):
-            # 迁移路径：服务还没注册过，但 running.json 里有一条**旧便携进程**登记。
-            # 不接这一条，用户升级后就会卡在"卡片说在运行、点停止说服务不存在"。
-            if rec is not None and rec.pid_role != "service":
-                return self._portable_stop(comp, deadline, sleeper)
-        res = stop_service(comp, target, sleeper=sleeper, deadline=deadline, log=log)
-        if res.ok:
-            records = load_running_map()
-            if records.pop(comp.key, None) is not None:
-                save_running_map(records)
-            return StopResult(True, reason=res.message)
-        if res.cancelled:
-            return StopResult(False, reason=res.message)
-        return StopResult(
-            False,
-            reason=(res.message + " 服务模式不会强杀进程：卡住时可以打开 services.msc，"
-                                   "或执行 `sc.exe stop <服务名>` 再停一次。"))
-
-    def _leftover_note(self, spec: Optional[LaunchSpec]) -> str:
-        """停止成功后附在 reason 里的残留辅助进程提示；没登记或没查到就是空串。"""
-        names = tuple(getattr(spec, "leftover_processes", ()) or ())
-        if not names:
-            return ""
-        return _leftover_process_note(self._process_images(names))
-
-    def _console_readiness_note(self, spec: LaunchSpec, port: int) -> str:
-        """启动成功后探一次控制台，返回给用户的提示行（没问题时返回空串）。
-
-        为什么值得多花一次 HTTP（2026-10-08 真机实测定位）：
-        Jenkins 的 8080 一开始监听就回 `503 Please wait while Jenkins is getting
-        ready to work` —— "已启动"是真的，但用户点控制台会看到一个等待页。
-        与其让他怀疑没启动成功，不如在日志里点明"控制台还在初始化"。
-
-        判据只用于**提示**，不参与"启动成功/失败"：服务进程确实在监听、
-        登记也确实落盘了，那就是启动成功（把 5xx 当失败会让 Jenkins 启动永远判失败）。
-        """
-        if not spec.console_path:
-            return ""
-        url = f"http://127.0.0.1:{port}{spec.console_path}"
-        try:
-            r = http_session().get(url, timeout=8, allow_redirects=True)
-            code = r.status_code
-        except Exception:
-            return ""
-        if code >= 500:
-            return (f"已启动，但控制台 {url} 现在返回 {code}（服务还在初始化），"
-                    f"稍等一会儿再点控制台；端口已经在正常服务。")
-        return ""
-
-    def force_stop(self, key: str, sleeper=time.sleep, rounds: int = 5) -> StopResult:
-        """用户明确同意后的强制结束。仍然只在"端口确实释放"时才清登记。"""
-        spec = LAUNCH_OF.get(key)
-        if spec is not None and getattr(spec, "service", None) is not None:
-            return StopResult(
-                False,
-                reason=("服务模式不会强杀进程：强制结束会把服务留在"
-                        "“停止中/崩溃”的半死状态，系统重启后仍可能残留。"
-                        "请用 services.msc，或管理员执行 `sc.exe stop <服务名>`。"))
-        rec = load_running_map().get(key)
-        if rec is None:
-            return StopResult(False, reason="没有登记记录")
-        ports = tuple(rec.ports) or (rec.port,)
-        # 记录"动手前就在听的口"。判失败时要说清是"我们杀完它还在听"还是
-        # "本来就在听且我们没动手"——两者的归因完全不同，不能混成一句
-        # "可能是别的进程占着"（真机2026-10-06实测就踩过这个坑，见下）。
-        live_before = [p for p in ports if self._is_listening(p)]
-        killed: List[int] = []
-        if live_before:
-            owners = self._lookup_pids(tuple(live_before))
-            mine = {p: pid for p, pid in owners.items() if pid != os.getpid()}
-            if rec.pid_role == "server":
-                if self._process_alive(rec.pid):
-                    try:
-                        os.kill(rec.pid, 9)
-                        killed.append(rec.pid)
-                    except OSError:
-                        pass
-                if mine and not killed:
-                    # 登记 PID 说"还活着"、但它**并不是**持有端口的那一个
-                    # （java 启动器先退、子 JVM 在听；或 PID 被系统回收后判活有误）：
-                    # 只杀登记 PID 的话端口永远不会释放，用户点停止永远停不掉。
-                    # 归属唯一才动手（mine 的构造保证），且只杀端口真正的主人。
-                    for pid in sorted(set(mine.values())):
-                        try:
-                            os.kill(pid, 9)
-                            killed.append(pid)
-                        except OSError:
-                            pass
-            elif mine:
-                # 三重闸：① 有我们自己的登记（上面 rec is not None 已保证）
-                #      ② 不是我们自己（pid != os.getpid()）
-                #      ③ 用户已确认 —— 走到 force_stop 本身就是确认
-                # 归属有歧义（同口多 PID）时 _pick_unique_pids 不给结果，宁可不杀。
-                for pid in sorted(set(mine.values())):
-                    try:
-                        os.kill(pid, 9)
-                        killed.append(pid)
-                    except OSError:
-                        pass
-            else:
-                # 端口反查没给出"唯一、且不是我们自己"的对象 → 一个都不许杀。
-                # 这里必须当场把"为什么没动手"说清并返回：只往下走复查循环，
-                # 用户拿到的就是"端口还在听，可能是别人占着"——把我们的不作为说成别人的错。
-                return StopResult(False, need_force=True,
-                                  reason=(f"没有找到可以安全强制结束的进程：端口 "
-                                          f"{'/'.join(str(p) for p in live_before)} 仍在听，"
-                                          f"但端口反查没有给出唯一归属（或给出的就是我们自己）。"
-                                          f"已放弃强制结束，登记保留，不动任何进程。"))
-        # 终止调用返回 ≠ 监听 socket 已关闭。**必须先给进程一个退出窗口再开始复查**——
-        # 真机 2026-10-06 实测：JVM 收到 TerminateProcess 后要几百毫秒到几秒才真正松开
-        # 监听 socket。原来"杀完立刻进复查循环"，rounds=1 时循环体只跑一次就判"还在听"，
-        # 于是一次成功的强杀被报成"可能是别的进程占着端口"——而端口其实随后就释放了，
-        # 登记却被留了下来（用户看到的就是"停止按钮点了没用"）。
-        # 与 start() 同一套"有界轮次"约定：每轮 sleeper(1.0) 后复查，最少探一次。
-        for _ in range(max(1, int(rounds))):
-            if not any(self._is_listening(p) for p in ports):
-                records = load_running_map()
-                records.pop(key, None)
-                save_running_map(records)
-                return StopResult(True, reason="已强制结束并释放端口。"
-                                               f"{self._leftover_note(LAUNCH_OF.get(key))}")
-            sleeper(1.0)
-        left = [p for p in ports if self._is_listening(p)]
-        # 归因要分清两种"还在听"：我们杀过 → 大概率是进程还没退出完；
-        # 没杀过（kill 抛了 OSError 或 pid 本就不活）→ 才可能是别人占着。
-        if killed and set(left) & set(live_before):
-            return StopResult(False, need_force=True,
-                              reason=(f"已向进程 {'/'.join(str(p) for p in killed)} 发出强制结束，"
-                                      f"但端口 {'/'.join(str(p) for p in left)} 在 "
-                                      f"{max(1, int(rounds))} 秒内仍未释放。"
-                                      f"该进程可能在做长耗时收尾；再点一次强制结束，"
-                                      f"或先确认它是否还占着资源。"))
-        return StopResult(False, need_force=True,
-                          reason=f"端口 {'/'.join(str(p) for p in left)} 仍在监听，"
-                                 f"本次没有成功结束任何进程，可能是别的程序占着这个端口。")
-
-
-# 卡片按钮要的是同一个登记/探针视图：多张卡片各持一个 ServiceManager 会把
-# per-key 门与 running.json 的读写拆成两套口径。
-SERVICE_MANAGER = ServiceManager()
-
-
-# ---------------------------------------------------------------------------
-# Windows 服务后端（2026-10-29，只服务 MySQL / Redis）
-#
-# 服务模式的真相在 SCM 里，不在端口、也不在 running.json 里。所以读取一律走
-# ctypes（R5.3 第 4 条：识别状态绝不执行任何东西），只有装 / 卸 / 启 / 停这类
-# 写操作才走一次 UAC 的固定脚本。测试把 SERVICE_BACKEND 换成内存假实现即可离线跑。
-# ---------------------------------------------------------------------------
-
-# Windows 服务（SCM）后端已抽出到 core/windows_service.py。
-# 这里只做 re-export：测试与老调用点仍通过 main.ServiceInfo / main.SERVICE_BACKEND 访问。
+# 服务生命周期已抽出到 services/service_manager.py（规则 R30）。
+# 依赖通过模块级 __getattr__ 晚绑定到 main，测试 patch main.* 仍然生效。
+from services import service_manager as _service_manager  # noqa: E402
 from core.windows_service import (  # noqa: E402
     ERROR_ACCESS_DENIED,
     ERROR_SERVICE_ALREADY_RUNNING,
@@ -14495,9 +13776,12 @@ from core.windows_service import (  # noqa: E402
     _scm_api,
 )
 
+_service_manager.configure(sys.modules[__name__])
+from services.service_manager import ServiceManager  # noqa: E402
 
 # 唯一实例。测试替换它（fixture 里 `main.SERVICE_BACKEND = FakeServiceBackend()`）。
 SERVICE_BACKEND = WindowsServiceBackend(CURRENT_OS)
+SERVICE_MANAGER = ServiceManager()
 
 
 @dataclass
@@ -14682,7 +13966,7 @@ def _harden_file_acl(path: Path) -> None:
     服务以 LocalSystem 跑，所以 SYSTEM 必须保留；玩家自己也要能改。
     失败不抛：这只是加固，文件本来就落在用户 profile 里。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return
     try:
         sid = _current_user_sid()
@@ -14771,7 +14055,7 @@ def _load_secrets() -> Dict[str, str]:
 
 def save_service_secret(key: str, password: str) -> None:
     """把密码用 DPAPI 加密后放在 ~/.env-tools/service-secrets.json（只用于回显与维护）。"""
-    if CURRENT_OS != "Windows" or not password:
+    if (not is_windows()) or not password:
         return
     enc = _dpapi(password.encode("utf-8"))
     if enc is None:
@@ -14786,7 +14070,7 @@ def save_service_secret(key: str, password: str) -> None:
 
 
 def load_service_secret(key: str) -> str:
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return ""
     raw = _load_secrets().get(key)
     if not raw:
@@ -14856,7 +14140,7 @@ if ($acl.StartsWith('D:')) {{
 
 def _run_service_script(body: str, timeout: float = 300.0) -> Dict[str, object]:
     """提权跑一段固定脚本，读回它写的 JSON。UAC 取消时 cancelled=True。"""
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return {"ok": False, "cancelled": False, "error": "服务模式只支持 Windows",
                 "steps": [], "marked_for_delete": False}
     import tempfile
@@ -15015,7 +14299,7 @@ def _init_mysql_datadir(comp, version: str, log=None) -> Tuple[bool, str]:
         log("数据目录还没有初始化，先用 mysqld --initialize-insecure 建一次（root 无密码，稍后可设置）……")
     kw = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
               stdin=subprocess.DEVNULL, timeout=180)
-    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+    if is_windows() and CREATE_NO_WINDOW:
         kw["creationflags"] = CREATE_NO_WINDOW
     try:
         proc = subprocess.run(argv, **kw)
@@ -15253,7 +14537,7 @@ def _mysql_client_run(mysql_exe: Path, port: int, password: str, sql: str,
             "-u", "root", "--connect-timeout=10"]
     kw = dict(input=sql.encode("utf-8"), stdout=subprocess.PIPE,
               stderr=subprocess.STDOUT, timeout=timeout)
-    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+    if is_windows() and CREATE_NO_WINDOW:
         kw["creationflags"] = CREATE_NO_WINDOW
     try:
         proc = subprocess.run(argv, **kw)
@@ -15327,7 +14611,7 @@ def _redis_cli_ping(cli: Path, port: int, password: str) -> str:
     argv = [str(cli), "-h", "127.0.0.1", "-p", str(port), "PING"]
     kw = dict(env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
               stdin=subprocess.DEVNULL, timeout=15)
-    if CURRENT_OS == "Windows" and CREATE_NO_WINDOW:
+    if is_windows() and CREATE_NO_WINDOW:
         kw["creationflags"] = CREATE_NO_WINDOW
     try:
         proc = subprocess.run(argv, **kw)
@@ -15690,7 +14974,7 @@ def _windows_registry_env_values() -> List[Tuple[str, str, str]]:
     Path 被排除是因为它由 _windows_registry_path_entries 单独按条目处理 ——
     当作"一个值"去看会得到一长串，命中与否毫无意义。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return []
     import winreg  # type: ignore
 
@@ -15711,7 +14995,7 @@ def _windows_registry_env_values() -> List[Tuple[str, str, str]]:
 
 def _windows_registry_path_entries() -> List[Tuple[str, str]]:
     """两 hive 的 Path 条目：(hive 名, 条目原文)。未展开的 %VAR% 原样返回。"""
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return []
     import winreg  # type: ignore
 
@@ -15739,7 +15023,7 @@ def _python_homes_from_py_launcher() -> List[str]:
          -V:Astral/CPython3.12.12 C:\\...\\cpython-3.12.12-windows-x86_64-none\\python.exe
     第二行那种"不在 PATH、也没有 PYTHON_HOME"的解释器，只有这条源看得见。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return []
     try:
         proc = subprocess.run(["py", "-0p"], capture_output=True, text=True,
@@ -15760,7 +15044,7 @@ def _python_homes_from_registry() -> List[str]:
 
     公司键不限于 PythonCore —— Astral（uv 装的那份）也在这里。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return []
     import winreg  # type: ignore
 
@@ -15833,7 +15117,7 @@ def discover_version_candidates(comp: Component) -> List[DiscoveredVersion]:
     for ver, path in installed_versions(comp):
         _add(str(path), "workspace", ver)
 
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         # 非 Windows 暂不做外部发现：接管路径（§5.4）本身就是 Windows 专有
         # （HKLM/HKCU + UAC），而设计文档里的实测数据也全部来自 Windows。
         # 宁可不列，也不给一个点了没用的按钮。
@@ -15913,7 +15197,7 @@ def _exec_name_variants(comp: Component) -> List[str]:
         return []
     if os.path.splitext(name)[1]:
         return [name]
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         # POSIX 要带上 `.sh`：2026-10-10 读 apache-tomcat-10.1.60.tar.gz 实测，
         # `bin/` 里**没有**不带扩展名的 `catalina`，只有 `catalina.sh` / `catalina.bat`。
         # 只认裸名的话，Linux/macOS 上装完 tomcat 会连入口都找不到（状态与版本探测全落空）。
@@ -16092,7 +15376,7 @@ def read_machine_env_raw(name: str) -> Tuple[Optional[str], str]:
           原来的 REG_EXPAND_SZ —— 写成 REG_SZ 会让 %VAR% 变成字面量，等于改坏了
           别人的变量。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return None, ""
     import winreg  # type: ignore
 
@@ -16128,7 +15412,7 @@ def read_user_env_raw(name: str) -> Tuple[Optional[str], str, str]:
 
     返回: (原文, 类型名, "HKCU")；不存在时 (None, "", "HKCU")
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return None, "", "HKCU"
     import winreg  # type: ignore
 
@@ -16595,7 +15879,7 @@ def _run_elevated_helper(request: Dict[str, object],
     这是**可替换的进程边界**（与既有 _read_windows_user_env 同构），不是功能开关：
     测试把本模块的 _run_elevated_helper 换成假助手，即可离线覆盖全部分支（§8）。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return {"ok": False, "stage": "launch", "error": "提权接管仅支持 Windows"}
 
     import ctypes
@@ -17383,7 +16667,7 @@ def _dead_tool_path_predicate():
 def find_dead_tool_path_entries() -> List[str]:
     """列出 PATH 里指向本工具安装目录、但目录已不存在的残留条目（不改动任何东西）。"""
     is_dead = _dead_tool_path_predicate()
-    if CURRENT_OS == "Windows":
+    if is_windows():
         return [p for p in EnvManager._read_windows_user_path() if is_dead(p)]
     rc = EnvManager._shell_rc_file()
     if not rc.exists():
@@ -17407,7 +16691,7 @@ def cleanup_dead_tool_path_entries() -> List[str]:
     返回: List[str] 被移除的 PATH 条目
     """
     is_dead = _dead_tool_path_predicate()
-    if CURRENT_OS == "Windows":
+    if is_windows():
         return EnvManager._filter_path_entries(is_dead)
 
     removed: List[str] = []
@@ -17849,7 +17133,7 @@ def list_shell_processes() -> List[Tuple[int, str, float, bool]]:
     error 5。这类窗口既拿不到我们的 WM_SETTINGCHANGE 广播（UIPI 挡在中间），
     环境块又是登录时那一份，只有整窗关掉重开才会更新。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return []
     try:
         import ctypes
@@ -18074,7 +17358,7 @@ def wsl_rootfs_urls() -> List[str]:
 
 def wsl_exe() -> Optional[str]:
     """找 wsl.exe。装在 System32；打包成 GUI 进程后 PATH 里也未必有它，所以写死系统目录。"""
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return None
     for cand in (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wsl.exe",
                  Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Sysnative" / "wsl.exe"):
@@ -18103,7 +17387,7 @@ def wsl_run(args: List[str], timeout: float = 120.0) -> Tuple[int, str]:
     exe = wsl_exe()
     if not exe:
         return 127, ""
-    flags = 0x08000000 if CURRENT_OS == "Windows" else 0     # CREATE_NO_WINDOW
+    flags = 0x08000000 if is_windows() else 0     # CREATE_NO_WINDOW
     try:
         proc = subprocess.run([exe] + list(args), capture_output=True,
                               timeout=timeout, creationflags=flags)
@@ -18136,7 +17420,7 @@ def wsl_distro_base_path(name: str) -> Optional[str]:
     路径在注册表里是 `\\\\?\\C:\\...` 形式，这里只剥前缀、不 resolve —— resolve 会把
     WSL 的虚拟盘路径改成别名，和 `wsl -l -v` 之外的任何地方都对不上。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return None
     import winreg  # type: ignore
 
@@ -18192,7 +17476,7 @@ def wsl_state() -> Dict[str, object]:
 
 def windows_reboot_pending() -> bool:
     """系统是否在等重启（只读注册表，不需要管理员）。"""
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return False
     import winreg  # type: ignore
 
@@ -18259,7 +17543,7 @@ def run_elevated_process(exe: str, params: str, timeout: float = 1800.0) -> Dict
     任意命令）；这里跑的是**我们生成的、内容固定的**安装脚本，脚本路径由本进程写盘，
     调用方无法注入参数。仍然只有一次 UAC。
     """
-    if CURRENT_OS != "Windows":
+    if (not is_windows()):
         return {"ok": False, "cancelled": False, "exit_code": -1,
                 "error": "WSL 安装仅支持 Windows"}
 
@@ -18422,2617 +17706,13 @@ class CardColumnLayout(QVBoxLayout):
         return -1
 
 
-class ComponentCard(QFrame):
-    """展示一个组件的卡片。"""
+# 组件卡片已抽出到 ui/component_card.py（规则 R30）。
+# 未在本模块定义的业务名以 _main.<name> 晚绑定，测试 patch main.* 仍然生效。
+from ui import component_card as _component_card  # noqa: E402
 
-    request_log = Signal(str, str)
-    # 向导型卡片（ui_action="wsl"）请求打开安装向导：由 MainWindow 建卡时接线。
-    wsl_requested = Signal()
+_component_card.configure(sys.modules[__name__])
+from ui.component_card import ComponentCard  # noqa: E402
 
-    def __init__(self, component: Component, log_cb: Callable[[str, str], None], parent=None) -> None:
-        super().__init__(parent)
-        self.component = component
-        self.log_cb = log_cb
-        self.worker: Optional[DownloadWorker] = None
-        self._extracted_path: Optional[Path] = None
-        # 前置运行时（JDK / Erlang）的自动安装队列与下载线程。
-        # 队列非空时「启动」按钮显示"准备依赖…"，装完自动继续启动。
-        self._prereq_queue: List[Tuple[Component, str]] = []
-        self.prereq_worker: Optional[DownloadWorker] = None
-        # 「已配置」标签的异步版本号回填状态
-        self._status_where = ""
-        self._status_version = ""
-        self._status_shows_configured = False
-        # 多版本胶囊的基础文案：异步版本号回填时要在它后面续（" · <版本>"），
-        # 不能落到非多版本那条 "✓ 已配置（…）" 旧文案。
-        # **存的是全量原文**（tooltip 源 + 缓存）：短串单独存在 _mv_capsule_short，
-        # 两者由 _detect_status_impl 的同一个分支产出。把缓存改成短串会让 tooltip
-        # 丢掉版本列表；只改显示不改缓存，异步回填时全量原文又会弹回主文本。
-        self._mv_capsule: str = ""
-        self._mv_capsule_short: str = ""
-        # 多版本胶囊是否用橙色告警态（未对齐 / 被 PATH 更靠前的条目遮蔽）
-        self._mv_orange: bool = False
-        # 多版本按钮状态：切换/卸载两个按钮要按"当前选中的版本"重算，
-        # 而重算有两个触发点（探测之后、下拉框换选中），故把输入缓存在这里。
-        self._mv_active: Optional[str] = None
-        self._mv_warned: bool = False
-        self._mv_installed_set: set = set()
-        self._mv_buttons_ready: bool = False
-        self._version_worker: Optional["VersionProbeWorker"] = None
-        # 本卡片起过的、还没跑完的探测线程（含被顶替掉的那些）。closeEvent 只认得
-        # _version_worker 那一条，被顶替的旧线程没人等就是进程级 abort。
-        self._probe_workers: List["VersionProbeWorker"] = []
-        # 卸载按钮是否被"运行中"锁过：只有锁过才允许在停止后解冻。
-        # 未运行时把 btn_uninstall 一律设成可用会顶掉 _detect_status 按"选中版本
-        # 装没装"算出的状态，给出一张未安装也能点卸载的卡片（做不到的承诺）。
-        self._uninstall_locked_by_launch: bool = False
-        # 最近一次启动生成的「启动成功访问页」URL（没有自带控制台的组件用它，
-        # 供「打开访问页」按钮与状态栏使用；进程内缓存，登记表里也写了一份）。
-        self._launch_page_url: Optional[str] = None
-
-        self.setObjectName("card")
-        self.setFrameShape(QFrame.NoFrame)
-
-        # 阴影
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(18)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(0, 0, 0, 40))
-        self.setGraphicsEffect(shadow)
-
-        # 外部版本接管那组属性**必须**在任何可能提前 return 的渲染代码之前就位。
-        # 2026-10-13 的崩溃就是这么来的：这段初始化原先被塞在 _load_icon() 末尾的
-        # fallback 分支里，而该分支上方有一条「图标加载成功就 return」的早退；
-        # 于是 jdk（外部接管白名单成员，且 assets/component-icons/jdk.png 存在）
-        # 一进卡片就跳过初始化，紧接着 __init__ 里的 _detect_status() 调
-        # _refresh_external_section() 读 self._external_frame → AttributeError，
-        # 主窗口起不来（traceback 停在"正在加载组件 1/87"）。
-        # 规矩：**属性初始化不许挂在任何带早退分支的函数里**。
-        self._init_external_state()
-
-        self._build_ui()
-        self._detect_status()
-
-    # ------------------------------------------------------------------
-    def _build_ui(self) -> None:
-        # 四行结构：顶部（标题+角标）/ 状态行 / 版本行 / 按钮行 / 进度条。
-        # 原先版本下拉与按钮混在同一行（mid），塞进 271px 宽的格子必然换行，
-        # 卡片高度从 121 涨到 230；拆开 + 缩短文案与 padding 后按钮一行放得下。
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(6)
-
-        # 顶部：图标 + 名称 & 角标
-        top = QHBoxLayout()
-        top.setSpacing(8)
-        
-        # 左侧图标（ICON_BOX_PX 见组件图标一节；渲染尺度 ICON_RENDER_SCALE）
-        self.icon_label = QLabel()
-        self.icon_label.setFixedSize(ICON_BOX_PX, ICON_BOX_PX)
-        self.icon_label.setStyleSheet("""
-            background: linear-gradient(135deg, #f5f7fa 0%, #e3e8ef 100%);
-            border-radius: 6px;
-            border: 1px solid #d8dde6;
-        """)
-        self.icon_label.setAlignment(Qt.AlignCenter)
-        self.icon_label.setPixmap(QPixmap(":/icons/default-icon.svg").scaled(
-            28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        top.addWidget(self.icon_label)
-        
-        # 标题 & 角标
-        title = QLabel(self.component.display_name)
-        title.setObjectName("cardTitle")
-        title.setFont(QFont("", 13, QFont.Bold))
-        # 标题不许把卡片撑爆：QLabel 的 minimumSizeHint 是**整串文本**的宽度，
-        # "Apache RocketMQ" 一渲染就要 255px，加上「可多版本」角标 71px 早就超过
-        # 309px 的格子 → 网格里出现横向滚动条（真机 2026-10-08 实测踩中）。
-        # 显式把最小宽压到 1，布局才允许压缩它；超宽的部分被裁掉，全名进 tooltip。
-        title.setMinimumWidth(1)
-        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        title.setToolTip(self.component.display_name)
-        top.addWidget(title)
-        # 「它是干嘛的」入口（2026-10-12 用户要求）。做成名称后一枚 20px 图标按钮，
-        # 不是「详情」文字按钮：格子内部只有 271–309px，按钮行已有 2–5 颗，
-        # 再加一颗必然换行、卡片高度会从实测 153px 涨回 ~230px（见卡片瘦身一节）。
-        # 也不用悬停 tooltip：详情里有下载地址要能选中复制，tooltip 撑不住。
-        self.btn_detail = QPushButton("ℹ")
-        self.btn_detail.setObjectName("detailBtn")
-        self.btn_detail.setFixedSize(20, 20)
-        self.btn_detail.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_detail.setToolTip("看它是干嘛的、装完怎么用")
-        self.btn_detail.clicked.connect(self.on_detail_clicked)
-        top.addWidget(self.btn_detail)
-
-        # 多版本能力角标：一个版本都没装时，这张卡片跟其它组件长得一样，
-        # 用户看不出"它支持同时装几个版本"。做成独立 QLabel 而不是拼进标题文本——
-        # display_name 同时是搜索匹配（component_matches）与日志前缀（_log）的真源。
-        # 非多版本组件不创建这个节点（不是创建后隐藏），那 19 张卡片保持原样。
-        if self.component.multi_version:
-            badge = QLabel("可多版本")
-            badge.setObjectName("multiVersionBadge")
-            # 竖直方向必须 Fixed：同一行里标题的 sizeHint 比它高一点（13pt 粗体），
-            # 默认 Preferred 会让角标被拉到与标题等高 —— 带背景的标签一被拉高，
-            # 就从紧凑胶囊变成一个大盒子（真机 2026-10-10 用户截图：JDK / Python 卡）。
-            badge.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-            badge.setStyleSheet(
-                "color:#5c6f82;background:#eef2f6;border-radius:9px;"
-                "padding:2px 8px;font-size:11px;font-weight:600;"
-            )
-            badge.setToolTip(
-                "这个组件可以同时安装多个版本。在下拉框里选中某个版本后点"
-                "「切换」，就把它设为生效版本（改写 XXX_HOME 与 PATH）；"
-                "带绿色对勾的版本表示磁盘上已安装。"
-            )
-            top.addWidget(badge)
-        top.addStretch(1)
-        root.addLayout(top)
-
-        # 图标在 _build_ui 末尾统一渲染（_render_icon），这里不再画一次 ——
-        # 原先这里和末尾各调了一次，等于每张卡白渲染两遍。
-
-        self.status_label = QLabel("检测中…")
-        self.status_label.setObjectName("statusLabel")
-        # 同标题的道理：QLabel 的 minimumSizeHint 是整串文本的宽度，状态一长
-        # （"✓ 已配置 · 系统安装 · 版本检测中…"）就会把格子撑开，哪怕主文本已经
-        # 精简过 —— 不同机器字体/缩放不同，撑到什么程度不一样。显式压掉最小宽，
-        # 让布局允许压缩它；超宽的部分裁掉，全量原文本来就在 tooltip 里。
-        self.status_label.setMinimumWidth(1)
-        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        # 角标与胶囊都靠左挤在一起会互相裁字，胶囊单独一行（格子内部只有 271px）
-        status_row = QHBoxLayout()
-        status_row.setSpacing(8)
-        status_row.addWidget(self.status_label)
-        if self.component.launch is not None:
-            # 运行状态自己一个小 label：status_label 已有 5 处写点，挤进去会把
-            # 多版本胶囊 / 系统安装 那套判定搅浑（R3.9 要求非目标组件零影响）。
-            # 原先挂在按钮行尾巴上，按钮行在 271px 里已经排满，故提到状态行。
-            self.launch_label = QLabel("")
-            self.launch_label.setObjectName("launchLabel")
-            # 同上：僵尸登记的原文很长，别让它把格子撑开
-            self.launch_label.setMinimumWidth(1)
-            self.launch_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            status_row.addWidget(self.launch_label)
-        status_row.addStretch(1)
-        root.addLayout(status_row)
-
-        # 版本行：版本标签 + 下拉框
-        ver = QHBoxLayout()
-        ver.setSpacing(8)
-        version_label = QLabel("版本")
-        version_label.setObjectName("fieldLabel")
-        version_label.setFixedWidth(36)
-        ver.addWidget(version_label)
-
-        self.version_combo = SearchableComboBox()
-        self.version_combo.setObjectName("versionCombo")
-        self.version_combo.setCursor(QCursor(Qt.PointingHandCursor))
-        self._reload_combo_items()
-        # 固定宽度，避免抢占按钮空间。150 是"版本串还能看全"与"按钮行放得下"的折中：
-        # 原来的 220 会把按钮行顶出格子。
-        self.version_combo.setFixedWidth(150)
-        self.version_combo.setFixedHeight(30)
-        self.version_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        # 向导型卡片（ui_action）没有"可选版本"：留一个不可点的占位，
-        # 免得用户看到一个空下拉框以为是加载失败。
-        if self.component.ui_action:
-            self.version_combo.blockSignals(True)
-            self.version_combo.clear()
-            self.version_combo.addItem("内置安装器")
-            self.version_combo.setEnabled(False)
-            self.version_combo.blockSignals(False)
-        # 换选中就要重算切换/卸载按钮：不连这条，切一次生效版本后按钮会一直灰着
-        # （2026-09-30 真机反馈）。只做按钮同步，不重跑探测、不起版本探测子进程。
-        self.version_combo.currentIndexChanged.connect(
-            lambda *_: self._sync_action_buttons())
-        ver.addWidget(self.version_combo)
-        ver.addStretch(1)
-        root.addLayout(ver)
-
-        # 按钮行：一行放完，不换行
-        actions = QHBoxLayout()
-        actions.setSpacing(6)
-
-        self.btn_install = QPushButton("安装")
-        self.btn_install.setObjectName("primaryBtn")
-        self.btn_install.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_install.setFixedHeight(30)
-        # 只下载型组件：同一颗主按钮、同一个属性名，但文案是「下载」、槽位是
-        # on_download_clicked。不改属性名是因为 _sync_action_buttons、布局与一批用例
-        # 都按 btn_install 找它 —— 改名零收益、风险面却是整个卡片。
-        if self.component.ui_action == "wsl":
-            # 向导型卡片：主按钮既不是下载也不是安装包，而是打开 WslDialog。
-            self.btn_install.setText("安装向导")
-            self.btn_install.setToolTip(
-                "打开 WSL 安装向导：启用 WSL 与虚拟机平台、安装官方运行时、"
-                "导入 Ubuntu 24.04。系统功能装完会提示你手动重启 —— 本工具不会替你重启。")
-            self.btn_install.clicked.connect(self._open_wsl_wizard)
-        elif self.component.download_only:
-            if self.component.official_page_only:
-                # 更弱的一档：没有可直链的安装包 → 给「官网下载」，点开浏览器自己去下。
-                # 文案要说清"本工具不代下不代装"，否则用户会以为点了就开始下。
-                self.btn_install.setText("官网下载")
-                tip = ("这个组件官方没有可直接下载的安装包链接（只给网页入口 / 需要用包管理器装）——"
-                       "点一下会在浏览器里打开它的官网，请在那里自行下载安装。"
-                       "本工具不代下、不代装、不代跑安装程序")
-                if self.component.data_note:
-                    tip += "\n" + self.component.data_note
-                self.btn_install.setToolTip(tip)
-                self.btn_install.clicked.connect(self.on_open_official_page_clicked)
-            else:
-                # 有两种产物可选时按钮写成「下载 ▾」：不点就不知道有得挑，而选错一次
-                # 是重下 1.5 GB。▾ 只是提示"这里会弹菜单"，真正的挑选在 on_download_clicked 里。
-                multi = any(len(cv.artifacts) > 1 for cv in self.component.versions)
-                self.btn_install.setText("下载 ▾" if multi else "下载")
-                tip = "下载官方安装包到你选的目录。本工具不解压、不安装、不配置环境变量"
-                if multi:
-                    tip += "\n这个版本官方同时提供 exe 安装器与 zip 便携包，点了会让你选（带体积）"
-                if self.component.data_note:
-                    # data_note 平时是靠**卸载确认框**露出来的，而这批组件根本没有卸载按钮 ——
-                    # 不另找地方挂上去，"不含授权"那句就只存在于源码注释里了。
-                    tip += "\n" + self.component.data_note
-                self.btn_install.setToolTip(tip)
-                self.btn_install.clicked.connect(self.on_download_clicked)
-        else:
-            self.btn_install.clicked.connect(self.on_install_clicked)
-        actions.addWidget(self.btn_install)
-
-        # 「配置环境变量 / 切换为生效版本」→「切换」：格子只有 271px，
-        # 两种旧叫法都太长；多版本语义由 tooltip 承载（下面 _sync_action_buttons 里）。
-        # 只下载型组件**不创建**这个节点（不是创建后隐藏，同「可多版本」角标的纪律）：
-        # 它没有"生效版本"可切，留着按钮等于给用户一个点了会写注册表的入口。
-        if not self.component.download_only:
-            self.btn_configure = QPushButton("切换")
-            self.btn_configure.setObjectName("secondaryBtn")
-            self.btn_configure.setCursor(QCursor(Qt.PointingHandCursor))
-            self.btn_configure.setFixedHeight(30)
-            self.btn_configure.clicked.connect(self.on_configure_clicked)
-            actions.addWidget(self.btn_configure)
-
-        self.btn_cancel = QPushButton("取消")
-        self.btn_cancel.setObjectName("dangerBtn")
-        self.btn_cancel.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_cancel.setFixedHeight(30)
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.setVisible(False)  # 默认隐藏；开始下载时才显示
-        self.btn_cancel.clicked.connect(self.on_cancel_clicked)
-        actions.addWidget(self.btn_cancel)
-
-        # 只下载型组件**不创建**卸载节点（不是创建后置 None/隐藏）：
-        # 属性压根不存在，任何误用它的代码都会当场 AttributeError 而不是静默跳过。
-        if not self.component.download_only:
-            self.btn_uninstall = QPushButton("卸载")
-            self.btn_uninstall.setObjectName("dangerBtn")
-            self.btn_uninstall.setCursor(QCursor(Qt.PointingHandCursor))
-            self.btn_uninstall.setFixedHeight(30)
-            # 默认禁用，待 _detect_status 检测到已安装或有本地下载时才启用
-            self.btn_uninstall.setEnabled(False)
-            self.btn_uninstall.setToolTip("删除已安装的版本、清理 XXX_HOME 与 PATH")
-            self.btn_uninstall.clicked.connect(self.on_uninstall_clicked)
-            actions.addWidget(self.btn_uninstall)
-
-        # 启动相关按钮：只有登记了启动描述符的组件才有（LAUNCH_KEYS，本期只有 Jenkins）
-        self.launch_worker: Optional[LaunchWorker] = None
-        if self.component.launch is not None:
-            # 启动/停止合并成**一个**按钮（2026-10-06 用户要求）：
-            # 未运行时显示「启动」，运行中变成「停止」，点了就做对应的事。
-            #
-            # 为什么不用两个按钮切换显隐：按钮的位置会变，用户的眼睛要重新找一遍。
-            # 2026-10-06 用户连续三次反馈"没有停止按钮"—— 按钮其实一直好着
-            # （可见可用、文本"停止"），问题在于它与「启动」并排、
-            # 运行状态时那一格才亮起来，看起来就像"多出来的按钮没出现"。
-            # 合成一个之后：按钮永远在那儿，状态直接写在按钮文字上，
-            # 不用找、不用猜。
-            #
-            # 文案**不许瘦身**：_running_per_ui() 读它判断是否在运行。
-            self.btn_start = QPushButton("启动")
-            self.btn_start.setObjectName("primaryBtn")
-            self.btn_start.setCursor(QCursor(Qt.PointingHandCursor))
-            self.btn_start.setFixedHeight(30)
-            self.btn_start.clicked.connect(self.on_start_stop_clicked)
-            actions.addWidget(self.btn_start)
-            # 刻意**不保留** `self.btn_stop`：合并按钮后没有第二个 widget，
-            # 留一个同名别名会让读代码的人以为界面上有两个按钮。
-            # 旧代码里 `btn_stop.isEnabled()` 那个"是否在运行"的判据，
-            # 改为读按钮文字——见 _running_per_ui()。
-            self.btn_console = QPushButton("控制台")
-            # 原先没有 objectName → 三条 QSS 全部匹配不到它，拿系统默认样式，
-            # 实测比旁边几颗按钮宽一圈（sizeHint 恒 80，同长度的「安装」只占 42）。
-            self.btn_console.setObjectName("secondaryBtn")
-            self.btn_console.setFixedHeight(30)
-            self.btn_console.clicked.connect(self.on_console_clicked)
-            self.btn_console.setEnabled(False)
-            actions.addWidget(self.btn_console)
-
-        actions.addStretch(1)  # 右侧留空，避免按钮被拉伸
-        root.addLayout(actions)
-
-        # 底部：进度条
-        # 高度保持 14：setTextVisible(True) 的百分比在 8px 下必然被裁切，
-        # 且圆角 6px 会大于半高 4px。
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setTextVisible(True)
-        self.progress.setValue(0)
-        root.addWidget(self.progress)
-
-        # 卡片左上角的官方图标（2026-10-13 新增）。纯渲染，无副作用、无早退。
-        self._render_icon()
-
-        # ---- 「系统里检测到的版本」折叠区＋还原按钮（设计 §6）----
-        # 只给白名单里的 7 个组件建（不是建了再隐藏）：其余卡片保持原样，
-        # R3.9 那句"非目标组件文案与按钮零变化"才守得住。
-        # 必须排在 _build_ui 末尾：_build_external_section 会往布局尾部塞一个
-        # 撑高的 stretch，放在进度条之前会被后面的控件顶到折叠区上面去。
-        if supports_external_takeover(self.component):
-            self._build_external_section(root)
-
-        # 末尾必须有一个 stretch：网格会把同一行的卡片拉成等高，内容少的卡片就
-        # 多出一段高度。没有这个占位的话，那段高度会被**能长大的控件**吃掉 ——
-        # statusLabel 的纵向策略是 Preferred，首当其冲被拉成一个空白大色块
-        # （真机截图：Ant / bat 卡的「未安装」「已装 …」被撑成大方块，
-        #  而同一行内容更多的 Maven 卡是紧凑一行）。
-        #
-        # ⚠ 2026-10-15 修：这一行原先写在 `_build_external_section()` 里，也就是
-        # **只有那 7 个外部接管组件**（jdk / python / node / go / maven / gradle / bun）
-        # 才有，其余 125 张卡一张都没有。旧顺序下恰好没排出"高矮混排"的一行，
-        # 所以一直没露出来；当天给 Tab 加了 a→z 排序（R22）后，高卡（Maven 238px）
-        # 与矮卡（Ant / bat 178px）排进同一行，立刻变成肉眼可见的大色块。
-        # **排序只是触发器，缺陷本身一直都在。**
-        #
-        # 无条件加在 `_build_ui` 末尾，位置与那 7 张卡原来完全一致（它们也是
-        # external 区之后才加），所以对既有卡片零行为变化。
-        root.addStretch(1)
-
-    def _init_external_state(self) -> None:
-        """初始化外部版本接管那组实例属性（状态，不碰任何控件）。
-
-        由 __init__ 在 _build_ui() **之前**调用。控件本身在 _build_ui 末尾
-        通过 _build_external_section() 创建；这里只把"还没建"这件事记成
-        None，好让 _refresh_external_section() 在折叠区尚未存在的组件上
-        也能安全空转。
-
-        单独拆出来是为了守住一条规矩：**属性初始化不许写在带早退分支的
-        函数里**。2026-10-13 的启动崩溃就是这么来的（详见 __init__ 里那段注释）。
-        """
-        self._external_candidates: List["DiscoveredVersion"] = []
-        self._external_scanned = False
-        self._external_expanded = False
-        self._external_worker: Optional["ExternalDiscoveryWorker"] = None
-        self._external_rows: List[QWidget] = []
-        self._restore_btn: Optional[QPushButton] = None
-        self._external_frame: Optional[QFrame] = None
-        self._external_toggle: Optional[QPushButton] = None
-        self._external_body: Optional[QWidget] = None
-
-    def _render_icon(self) -> None:
-        """在卡片左上角渲染该组件的官网图标，取不到就退回分类色块。
-
-        纯渲染：这个方法不建任何后续逻辑依赖的属性，也不提前 return 后还要
-        有人接着干活 —— 渲染成功与否对卡片的其余部分没有任何影响。
-        职责拆分：
-          · `load_component_icon_pixmap()` 负责"找到并栅格化"，全部防错都在那边
-          · 本方法只负责"贴上去，贴不上就画色块"
-        """
-        key = self.component.key
-        pixmap = load_component_icon_pixmap(key, ICON_BOX_PX * ICON_RENDER_SCALE)
-        if pixmap is not None:
-            # 不要再 scaled()：load_component_icon_pixmap 返回的已经是
-            # ICON_BOX_PX 逻辑尺寸、ICON_RENDER_SCALE 倍密度的成品。
-            # 二次缩放会把它压成 64 逻辑像素 = 逻辑尺寸的 2 倍，
-            # QLabel 32x32 的槽位放不下就被裁掉一角 —— 界面看到的是
-            # "图标缺了一块"（2026-10-14 用户截图就是这个现象）。
-            self.icon_label.setPixmap(pixmap)
-            return
-
-        # fallback: 使用默认色块（按分类显示不同颜色）
-        # ⚠ 这个字典的**键是分类名字符串**，2026-10-14 分类改名时它必须跟着改 ——
-        # 键对不上不会报错，只会安静地落到下面的兜底灰色 (#757575)，那个 Tab 的
-        # 所有无图标组件会一起变成灰块。所以这里用 CAT_* 常量而不是裸字符串。
-        category_map = {
-            CAT_ENV: ("#4CAF50", "#43A047"),       # 绿色系（编程语言、SDK 等）
-            CAT_SERVER: ("#2196F3", "#1976D2"),     # 蓝色系（数据库、服务器等）
-            CAT_LAUNCH: ("#FF9800", "#F57C00"),     # 橙色系（服务组件）
-            CAT_TOOL: ("#9C27B0", "#7B1FA2"),       # 紫色系（IDE、客户端等）
-        }
-        cat = COMPONENT_CATEGORY_OF.get(key, CAT_TOOL)
-        grad_from, grad_to = category_map.get(cat, ("#757575", "#424242"))
-
-        self.icon_label.setStyleSheet(f"""
-            background: linear-gradient(135deg, {grad_from} 0%, {grad_to} 100%);
-            border-radius: 6px;
-            border: 1px solid #d8dde6;
-        """)
-        self.icon_label.setText(key[:3].upper())
-        self.icon_label.setAlignment(Qt.AlignCenter)
-        self.icon_label.setFont(QFont("", 10, QFont.Bold))
-        self.icon_label.setForegroundRole(QPalette.Text)
-        
-    # ------------------------------------------------------------------
-    # 「系统里检测到的版本」折叠区（§6）
-    # ------------------------------------------------------------------
-    def _build_external_section(self, root: QVBoxLayout) -> None:
-        """卡片底部的折叠区 + 常驻的「还原到我之前的设置」。
-
-        默认收起且整块隐藏：格子内部只有 271px，展开就是好几行；绝大多数机器上
-        这里本来就是空的，不该白占地方。首次展开时才去扫（要真跑版本命令）。
-        """
-        self._external_frame = QFrame()
-        self._external_frame.setObjectName("externalBox")
-        box = QVBoxLayout(self._external_frame)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(4)
-
-        self._external_toggle = QPushButton("▸ 系统里检测到的版本")
-        self._external_toggle.setObjectName("externalToggle")
-        self._external_toggle.setCursor(QCursor(Qt.PointingHandCursor))
-        self._external_toggle.setFixedHeight(24)
-        # 同卡片里所有 QLabel/QPushButton 的道理：不压掉最小宽，长路径会把格子撑开
-        self._external_toggle.setMinimumWidth(1)
-        self._external_toggle.setSizePolicy(QSizePolicy.Expanding,
-                                            QSizePolicy.Fixed)
-        self._external_toggle.setToolTip(
-            "扫描本机已安装的这个组件的其它版本（环境变量、PATH、注册表里的登记）。\n"
-            "扫描只读，不会改动任何设置；点开后才开始扫描。")
-        self._external_toggle.clicked.connect(self._toggle_external_section)
-        box.addWidget(self._external_toggle)
-
-        self._external_body = QWidget()
-        self._external_body_layout = QVBoxLayout(self._external_body)
-        self._external_body_layout.setContentsMargins(2, 0, 2, 0)
-        self._external_body_layout.setSpacing(3)
-        self._external_body.setVisible(False)
-        box.addWidget(self._external_body)
-
-        self._restore_btn = QPushButton("↩ 还原到我之前的设置")
-        self._restore_btn.setObjectName("restoreBtn")
-        self._restore_btn.setCursor(QCursor(Qt.PointingHandCursor))
-        self._restore_btn.setFixedHeight(26)
-        self._restore_btn.setMinimumWidth(1)
-        self._restore_btn.setVisible(False)
-        self._restore_btn.clicked.connect(self.on_restore_external_clicked)
-        box.addWidget(self._restore_btn)
-
-        self._external_frame.setVisible(False)
-        root.addWidget(self._external_frame)
-
-    def _toggle_external_section(self) -> None:
-        self._external_expanded = not self._external_expanded
-        self._external_body.setVisible(self._external_expanded)
-        self._external_toggle.setText(
-            ("▾ " if self._external_expanded else "▸ ") + self._external_toggle_text())
-        if self._external_expanded and not self._external_scanned:
-            self._start_external_discovery()
-
-    def _external_toggle_text(self) -> str:
-        n = len(self._external_candidates)
-        return f"系统里检测到的版本（{n}）" if self._external_scanned \
-            else "系统里检测到的版本"
-
-    def _start_external_discovery(self) -> None:
-        self._external_toggle.setText("▾ 正在扫描…")
-        self._external_toggle.setEnabled(False)
-        self._external_worker = ExternalDiscoveryWorker(self.component, self)
-        self._external_worker.done.connect(self._on_external_discovered)
-        self._external_worker.start()
-
-    def _on_external_discovered(self, cands) -> None:
-        self._external_worker = None
-        self._external_scanned = True
-        self._external_candidates = [c for c in cands if c.source != "workspace"]
-        self._external_toggle.setEnabled(True)
-        self._external_toggle.setText(
-            ("▾ " if self._external_expanded else "▸ ") + self._external_toggle_text())
-        self._refresh_external_section()
-
-    def _refresh_external_section(self) -> None:
-        """按当前状态重画折叠区与还原按钮。"""
-        if self._external_frame is None:
-            return
-        takeover = (load_takeover_map().get(self.component.key)
-                    if supports_external_takeover(self.component) else None)
-        # R3.19：为工作区版本提权改过系统变量时，还原按钮同样要常驻 —— 用户点「切换」
-        # 被系统级条目压住、同意了那次提权，之后就必须有个一键回到原样的出口。
-        machine_fix = (load_machine_fix_map().get(self.component.key)
-                       if supports_external_takeover(self.component) else None)
-
-        # 还原按钮：只在"确实动过"时常驻（§6）。重启后仍然出现 —— 依据是
-        # config.json 里的登记，不是本次运行的内存状态。
-        if self._restore_btn is not None:
-            self._restore_btn.setVisible(bool(takeover or machine_fix))
-            if takeover:
-                snap = takeover.get("snapshot") or {}
-                hives = []
-                if snap.get("HKCU"):
-                    hives.append("HKCU\\Environment")
-                if snap.get("HKLM"):
-                    hives.append("HKLM\\SYSTEM\\...\\Environment")
-                keys = sorted({k for h in snap.values() if isinstance(h, dict)
-                               for k in h})
-                self._restore_btn.setToolTip(
-                    f"当前生效的是系统里那个 {takeover.get('version')}"
-                    f"（{takeover.get('home')}）。\n"
-                    f"点这里按接管前的原文写回：{'、'.join(hives) or '（无）'}"
-                    f"，键：{'、'.join(keys) or '（无）'}。\n"
-                    "需要管理员权限时会再弹一次授权。")
-            elif machine_fix:
-                snap = machine_fix.get("snapshot") or {}
-                keys = sorted(k for k in (snap.get("HKLM") or {}))
-                self._restore_btn.setToolTip(
-                    f"为了让工作区里的 {machine_fix.get('version')} 生效，"
-                    "本工具在系统 PATH 最前插了一条。\n"
-                    f"点这里按改动前的原文写回：HKLM\\SYSTEM\\...\\Environment，"
-                    f"键：{'、'.join(keys) or '（无）'}。\n"
-                    "还原后命令行会回到改动前的那一份（也就是你自己装的那个），"
-                    "本工具装的版本仍在，可用下拉框再切回来。\n"
-                    "需要管理员权限时会再弹一次授权。")
-
-        # 折叠区整块：有外部候选 or 有接管/提权登记的残留时才出现
-        show = bool(self._external_candidates) or bool(takeover or machine_fix)
-        self._external_frame.setVisible(show)
-        if not show:
-            return
-
-        # 清空上一轮：takeAt 之后布局就不管它了，但 widget 的 parent 与几何都还在，
-        # 延迟删除执行前它会一直渲染在原地（项目记忆里踩过的"幽灵"）→ 先 hide、
-        # 再摘 parent、最后 deleteLater。
-        while self._external_body_layout.count():
-            item = self._external_body_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.setParent(None)
-                widget.deleteLater()
-        self._external_rows = []
-
-        if not self._external_candidates:
-            hint = QLabel("没有扫描到外部安装的版本")
-            hint.setObjectName("externalHint")
-            hint.setMinimumWidth(1)
-            self._external_body_layout.addWidget(hint)
-            self._external_rows.append(hint)
-            return
-
-        for dv in self._external_candidates:
-            row = self._make_external_row(dv, takeover)
-            self._external_body_layout.addWidget(row)
-            self._external_rows.append(row)
-
-    def _make_external_row(self, dv: "DiscoveredVersion",
-                           takeover: Optional[dict]) -> QWidget:
-        """一行外部版本：版本号 / 完整路径 / 「当前在用」标记 + 「切过去」。
-
-        路径**换行显示**而不是省略号：格子只有 271px，而用户就是靠这段路径
-        认出"这是我装在 D 盘那个"。裁掉一半等于把这一行的全部信息量丢掉一半，
-        所以宁可让卡片高一点（折叠区本来就是用户主动展开的）。
-        """
-        row = QFrame()
-        row.setObjectName("externalRow")
-        outer = QVBoxLayout(row)
-        outer.setContentsMargins(0, 2, 0, 2)
-        outer.setSpacing(0)
-
-        in_use = bool(takeover) and EnvManager._same_path(
-            str(dv.home), str(takeover.get("home") or ""))
-        head = QHBoxLayout()
-        head.setSpacing(6)
-        title = QLabel(f"{dv.version}" + ("　← 当前在用" if in_use else ""))
-        title.setObjectName("externalVersion")
-        title.setMinimumWidth(1)
-        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        head.addWidget(title)
-
-        btn = QPushButton("已生效" if in_use else "切过去")
-        btn.setObjectName("secondaryBtn")
-        btn.setCursor(QCursor(Qt.PointingHandCursor))
-        btn.setFixedHeight(24)
-        btn.setEnabled(not in_use)
-        btn.setToolTip("已生效" if in_use else
-                       f"把这个版本设为生效版本（会改写 "
-                       f"{self.component.env_var or 'PATH'}，必要时需要管理员权限）")
-        btn.clicked.connect(lambda _=False, d=dv: self.on_switch_external(d))
-        head.addWidget(btn)
-        outer.addLayout(head)
-
-        # 路径单独一行、占满整行宽：271px 的格子里它本来就放不下，
-        # 挤在按钮旁边只会两败俱伤（实测按钮会压在路径文字上）。
-        path_label = QLabel(str(dv.home))
-        path_label.setObjectName("externalPath")
-        path_label.setMinimumWidth(1)
-        path_label.setWordWrap(True)
-        path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        path_label.setToolTip(f"{dv.version}\n{dv.home}\n发现来源：{dv.source}")
-        outer.addWidget(path_label)
-        return row
-
-    def on_switch_external(self, dv: "DiscoveredVersion") -> None:
-        """把生效版本切到这个外部安装（§5.3 → 需要时 §5.4 提权）。"""
-        def _sink(text: str) -> None:
-            low = str(text)
-            level = ("error" if ("失败" in low or "未通过" in low or "未完成" in low)
-                     else "warn" if ("取消" in low or "未能" in low or "仍" in low)
-                     else "info")
-            self._log(level, low)
-
-        self._log("info", f"准备切换到系统里那个 {dv.version}（{dv.home}）…")
-        res = switch_to_external_version(
-            self.component, dv,
-            confirm_machine=self._confirm_machine_takeover, log=_sink)
-        # 步骤已由 _sink 逐条实时打出，不再回放 res["steps"]（否则每条日志两遍）。
-        if res.get("ok"):
-            self._log("ok", f"已切换到系统里的 {dv.version}；"
-                            "新开的终端/IDE 才会读到新值")
-            self._log_verification_hint(time.time())
-        elif res.get("verdict") == "cancelled":
-            self._log("warn", "已取消，未做任何改动")
-        else:
-            self._log("error", str(res.get("error") or "切换未成功"))
-        self._refresh_external_section()
-        self._detect_status()
-        self._sync_action_buttons()
-
-    def _confirm_machine_takeover(self, plan: dict) -> bool:
-        """提权前的确认框：逐条列出要改什么、改成什么、原来是什么（§5.4 明文要求）。
-
-        这里必须是"用户点了确定才动系统变量"—— 它改的是整机所有程序看到的环境。
-        """
-        env_var = str(plan.get("env_var") or "")
-        add_entry = str(plan.get("add_entry") or "")
-        before_path, before_type = read_machine_env_raw("Path")
-        before_var, _vt = read_machine_env_raw(env_var) if env_var else (None, "")
-        lines = [
-            f"要让命令行真正用上这个版本，需要修改「系统变量」（需要管理员权限）：",
-            "",
-            f"· 系统 PATH 最前面插入：",
-            f"    {add_entry}",
-        ]
-        if env_var:
-            lines += ["", f"· 系统变量 {env_var}：",
-                      f"    现在：{before_var or '（未设置）'}",
-                      f"    改为：{plan.get('home')}"]
-        lines += [
-            "",
-            f"· 其余原有条目（含 {before_type or 'REG_EXPAND_SZ'} 里的 %VAR% 占位符）"
-            f"逐字保留，不删不改；",
-            "· 改动前的原文会先存一份快照，卡片上随时可以「还原到我之前的设置」。",
-            "",
-            "继续吗？（会弹出 Windows 的权限确认窗口）",
-        ]
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("需要管理员权限")
-        box.setText("\n".join(lines))
-        yes = box.addButton("继续（修改系统变量）", QMessageBox.AcceptRole)
-        box.addButton("取消", QMessageBox.RejectRole)
-        box.exec()
-        return box.clickedButton() is yes
-
-    def on_restore_external_clicked(self) -> None:
-        """「还原到我之前的设置」：按快照把动过的变量写回原文。
-
-        R3.19 之后这里要能收两笔账，顺序固定：先还「为工作区版本提权改的系统变量」，
-        再还「接管的外部版本」。两者在稳态里不会并存（切工作区版本前已先还原），
-        真碰到并存时全还掉才是"回到我之前的样子"。
-        """
-        def _sink(text: str) -> None:
-            level = ("error" if ("失败" in str(text) or "未完成" in str(text))
-                     else "info")
-            self._log(level, str(text))
-
-        did = False
-        if has_machine_fix(self.component):
-            fix = revert_machine_fix(self.component, log=_sink)
-            if fix.get("ok"):
-                did = True
-            else:
-                self._log("error", "系统变量还原未完成："
-                          + str(fix.get("error") or ""))
-
-        if has_external_takeover(self.component):
-            res = revert_external_version(self.component, log=_sink)
-            if res.get("ok"):
-                did = True
-            elif res.get("cancelled"):
-                self._log("warn", "已取消还原，设置未改动")
-            else:
-                self._log("error", str(res.get("error") or "还原未完成"))
-
-        if did:
-            self._log("ok", "已还原到我之前的设置，新开的终端才会读到")
-        self._refresh_external_section()
-        self._detect_status()
-
-    # ------------------------------------------------------------------
-    # 状态文案：主文本给短串，全量详情进 tooltip
-    # ------------------------------------------------------------------
-    def _set_status(self, full: str, short: str) -> None:
-        """状态行的唯一写入口：主文本用短串，全量原文进 tooltip。
-
-        格子内部只有 271px，而 PySide6 的 QLabel 没有 setElideMode（超宽是直接
-        clip，不是省略号），所以长文案只能"主文本写结论、tooltip 写全文"。
-        两者**每次都要一起设置**：状态切换时只 setText 会把上一轮的详情留在
-        悬停提示里，变成一句已经没有依据的旧话。
-        """
-        self.status_label.setText(short)
-        self.status_label.setToolTip(full)
-
-    def _set_launch(self, full: str, short: str) -> None:
-        """运行状态 label 的唯一写入口，同 _set_status()。"""
-        self.launch_label.setText(short)
-        self.launch_label.setToolTip(full)
-
-    # ------------------------------------------------------------------
-    def _log(self, level: str, msg: str) -> None:
-        self.log_cb(level, f"[{self.component.display_name}] {msg}")
-
-    # ------------------------------------------------------------------
-    # 一键启动：卡片只负责"读状态 → 摆按钮 → 把动作丢进线程"，判定全在 ServiceManager。
-    def _launch_status(self):
-        return SERVICE_MANAGER.status(self.component.key, self.component)
-
-    def _refresh_launch_state(self) -> None:
-        """按端口实况刷新按钮与运行状态 label（不碰 status_label 那枚状态胶囊）。
-        本方法只读，一次都不许拉起进程。"""
-        if self.component.launch is None:
-            return
-        try:
-            self._refresh_launch_state_impl()
-        finally:
-            # 状态一变就通知主窗重算 Tab 上的运行标记 `●`。放在 finally 里：
-            # 刷新过程中抛异常时标记也不该留在旧值上。
-            self._notify_tabs_running_changed()
-
-    def _notify_tabs_running_changed(self) -> None:
-        """告诉主窗"本卡片是否在运行"变了，好去刷新 Tab 标题上的 `●`。
-
-        用 getattr 逐层探：卡片可能在窗口还没建完时就被刷新（构造期测试），
-        那时主窗上还没有 _mark_running_tabs，直接跳过而不是炸掉整个刷新。
-        """
-        try:
-            win = self.window()
-        except Exception:       # 顶层 C++ 对象已销毁（关窗途中）
-            return
-        mark = getattr(win, "_mark_running_tabs", None)
-        if mark is None:
-            return
-        try:
-            mark()
-        except Exception:       # 主窗可能正处在关窗流程里，标记刷不上不影响功能
-            pass
-
-    def _running_per_ui(self) -> bool:
-        """**界面上**认定的"在运行"：按钮文字是不是「停止」。
-
-        为什么读文字而不读 enabled：合并按钮后按钮在运行中也要可点（它就是停止按钮），
-        enabled 已经不能区分状态了。而按钮文字就是用户看到的状态本身 ——
-        读它等于"用户以为的"与"程序认为的"永远一致。
-        Tab 上的运行标记、跳页逻辑都用它。
-        """
-        return self.btn_start.text().rstrip("… ") == "停止"
-
-    def _refresh_launch_state_impl(self) -> None:
-        st = self._launch_status()
-        running = st.state == "running"
-        # 磁盘上没有任何已安装版本时，「启动」就**该是灰的**（2026-10-10 用户给的
-        # 两个方案里选这个）：与"选中版本已装则置灰「安装」"是同一条设计语言 ——
-        # 做不到的事不给点。另一个方案（点了再弹"没装"提示）被否掉的实测理由：
-        # 以前点下去会先弹一个**端口与风险确认框**，用户确认完才在日志里看到"没装"，
-        # 等于先骗他做一次决定。
-        launchable = resolve_launch_version(self.component) is not None
-        self.btn_start.setEnabled(self.launch_worker is None and (running or launchable))
-        # **每个可启停组件都有一个能打开的地址**（2026-10-08 用户要求）：
-        #   自带 Web 界面 → 按钮文字「控制台」，指向它自己的页面；
-        #   协议端口型（kafka/rocketmq/rabbitmq）→ 文字「访问页」，
-        #   指向工具自带的「启动成功」页（卡片销毁前若还留着上次的 URL 就用它，
-        #   否则由 _has_console() 从登记表里读）。
-        spec = getattr(self.component, "launch", None)
-        own_page = spec is not None and bool(spec.console_path)
-        self.btn_console.setText("控制台" if own_page else "访问页")
-        # 按钮**常驻**（2026-10-10 用户报「有些怎么没有控制台按钮」）：以前停止状态下
-        # `console_path` 为 None 的组件（kafka / rocketmq / rabbitmq）会被整个藏掉 ——
-        # 它们只有运行期间由本工具生成的那一页"启动成功 / 该怎么访问"，于是没在跑的时候
-        # 按钮消失，用户读成"这个组件少了一个功能"。现在只要可启停就留着，
-        # 点不动的原因写进 tooltip（禁用态不解释，就是让用户猜）。
-        self.btn_console.setVisible(spec is not None)
-        self.btn_console.setEnabled(running)
-        self.btn_console.setToolTip(
-            "" if running else
-            f"启动 {self.component.display_name} 之后才能打开"
-            + ("它自己的页面" if own_page else "本工具为它生成的访问说明页"))
-        # 按钮文字就是状态本身：运行中显示「停止」，否则显示「启动」。
-        # 正在起/停的过渡态（"启动中…"/"停止中…"）不能被这一行盖掉——
-        # 那是用户点下去之后的即时反馈，被立刻改回「启动」会让人以为没点上。
-        if self.launch_worker is None:
-            if running:
-                self.btn_start.setText("停止")
-                self.btn_start.setObjectName("dangerBtn")
-                self.btn_start.setToolTip(
-                    f"停止 {self.component.display_name}（端口 {st.record.port}）")
-            else:
-                self.btn_start.setText("启动")
-                self.btn_start.setObjectName("primaryBtn")
-                self.btn_start.setToolTip(
-                    f"启动 {self.component.display_name}（端口 {self.component.launch.main_port}）"
-                    if launchable else
-                    f"磁盘上还没有 {self.component.display_name} 的已安装版本，"
-                    "先点「安装」装一个，或把版本切到已装的那个，才能启动")
-            # 换objectName 后要重刷 QSS，否则配色停留在上一个状态。
-            self.btn_start.style().unpolish(self.btn_start)
-            self.btn_start.style().polish(self.btn_start)
-        if running:
-            # 「无网页控制台」写在标签里（2026-10-06 用户报「显示启动成功实际无法访问」）：
-            # 服务是好的，只是没有页面可点。把这句话摆在这儿，用户就不会去找
-            # 那个不存在的控制台入口、也不会以为服务坏了。
-            tail = "" if self._has_console() else " · 无网页控制台"
-            svc_tail = ""
-            if getattr(st.record, "service_name", ""):
-                svc_tail = f" · 服务 {st.record.service_name}"
-            self._set_launch(f"● 运行中{svc_tail} · 端口 {st.record.port}{tail}",
-                             f"● 运行中 {st.record.port}")
-            # 运行中禁止卸载：边跑边删目录会把正在写的日志和数据留在半删状态
-            self.btn_uninstall.setEnabled(False)
-            self.btn_uninstall.setToolTip("请先停止运行中的 %s 再卸载" % self.component.display_name)
-            self._uninstall_locked_by_launch = True
-        else:
-            if st.state == "broken":
-                self._set_launch(
-                    "⚠ 服务损坏：服务还在，但它指向的文件已被删除。"
-                    "点「卸载」可先删掉这个服务，再重装这个版本。",
-                    "⚠ 服务损坏")
-            elif st.state == "zombie":
-                # 僵尸登记要看得见：否则"上次崩了、登记还留着"和"干净地停过"长得一模一样。
-                # 文案只承诺 start() 真会做的事：它不看旧 PID，直接起一个新进程并覆盖这条登记
-                # —— 万一是"卡住但还活着"的旧进程，那个进程归 adopt/手工处理，别说成"接管"。
-                self._set_launch(
-                    f"⚠ 上次运行的残留登记（端口 {st.record.port} 没在听），"
-                    f"再点启动会重新起一个并覆盖这条登记",
-                    f"⚠ 残留登记 · 端口 {st.record.port}")
-            else:
-                self._set_launch("", "")
-            # 只解冻自己被锁过的那次：卸载按钮的可用性本来由 _detect_status /
-            # _sync_action_buttons 按"选中版本装没装"判定，无条件点亮会给出
-            # 一张未安装也能点卸载的卡片。
-            if self._uninstall_locked_by_launch:
-                self._uninstall_locked_by_launch = False
-                self.btn_uninstall.setEnabled(True)
-                self.btn_uninstall.setToolTip("删除已安装的版本、清理 XXX_HOME 与 PATH")
-
-    def on_start_clicked(self) -> None:
-        spec = self.component.launch
-        # 按钮平时就是灰的（见 _refresh_launch_state_impl 的 launchable 判据），
-        # 这一道是兜底：状态是异步刷的，磁盘可能在两次刷新之间被外部删掉。
-        # **必须排在自动装前置依赖之前** —— 否则一个没装的组件会先被拉去装一个 JDK，
-        # 装完再告诉他"没装"，白折腾一遍网络。
-        if resolve_launch_version(self.component) is None:
-            self._log("warn",
-                      f"磁盘上还没有 {self.component.display_name} 的已安装版本，"
-                      "先点「安装」装一个，或把版本切到已装的那个，再点启动。")
-            return
-        # 「开机就能用」：缺前置运行时（JDK / Erlang）时**先自动装好再启动**，
-        # 而不是弹一句"请先装一个 JDK"把活儿交回给用户。
-        missing = prereq_components(self.component, component_registry())
-        if missing:
-            self._install_missing_prereqs(missing)
-            return
-        self._do_start()
-
-    def _do_start(self) -> None:
-        """真正开始启动（前置依赖已就位时走这里）。"""
-        spec = self.component.launch
-        if service_spec_for(self.component) is not None:
-            self._do_service_start()
-            return
-        # 端口提示必须与实际行为一致。2026-10-06 起策略是"不平移、被占就结束占用者"，
-        # 这里原来还写着"被占用时会自动往后找空闲口"—— 确认框里说假话比不说更糟：
-        # 用户以为端口会变，于是按自己的预期去连那个并不存在的端口。
-        port_line = f"端口：{spec.main_port}"
-        if spec.port_offsets:
-            port_line += f"（派生口 {', '.join(str(spec.main_port + int(o)) for o in spec.port_offsets)}）"
-        if spec.extra_ports:
-            port_line += f"；独立口 {', '.join(str(p) for p in spec.extra_ports)}"
-        port_line += "\n（端口被占用时会结束占用它的进程，不会自动换端口）"
-        reply = QMessageBox.question(
-            self, "确认启动 %s" % self.component.display_name,
-            "%s\n%s\n\n确认启动？" % (port_line, spec.risk_note),
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if reply != QMessageBox.Yes:
-            return
-        self.btn_start.setEnabled(False)
-        self.btn_start.setText("启动中…")
-        # parent=self：worker 归卡片的 Qt 对象树持有，run() 还没回来时不依赖
-        # launch_worker 这一个引用吊命；结束后由 _on_launch_worker_done deleteLater 收回。
-        self.launch_worker = LaunchWorker("start", self.component,
-                                          component_registry(), SERVICE_MANAGER,
-                                          parent=self)
-        self.launch_worker.started_ok.connect(self._on_launch_ok)
-        self.launch_worker.failed.connect(self._on_launch_failed)
-        self.launch_worker.notes.connect(self._on_launch_notes)
-        self.launch_worker.finished.connect(self._on_launch_worker_done)
-        self.launch_worker.start()
-
-    def _do_service_start(self) -> None:
-        """服务模式的启动确认：先讲清"注册成服务、手动启动、要一次 UAC"，再收密码。"""
-        comp = self.component
-        spec = service_spec_for(comp)
-        version = self._current_version().version
-        name = service_name_for(spec, version)
-        missing = service_required_missing(comp, version)
-        if missing:
-            QMessageBox.warning(
-                self, "缺少服务组件",
-                f"{comp.display_name} {version} 缺少服务组件所需的文件：\n{'、'.join(missing)}\n\n"
-                f"这个包不是带服务组件的完整版。请先卸载这个版本，重新安装正确的包。")
-            return
-        info = service_info(comp, version)
-        if info.state == SERVICE_BROKEN:
-            QMessageBox.warning(
-                self, "服务损坏",
-                f"服务 {name} 还在，但它指向的可执行文件已经不存在了。\n\n"
-                f"请点「卸载」先删掉这个服务（版本目录也会一起清理），再重新安装 {version}。")
-            return
-        peers = peer_running_services(comp, exclude_version=version)
-        if peers and not info.running:
-            names = "、".join(p.name for p in peers)
-            QMessageBox.warning(
-                self, "另一个版本的服务在运行",
-                f"{names} 正在运行。同一端口同一时间只能跑一个版本：\n"
-                f"先在下拉框切到那个版本并点「停止」，再启动 {version}。")
-            return
-        mode = ("服务已注册，直接启动。" if info.exists else
-                "服务还没注册：会先请求一次管理员权限把它注册成 Windows 服务。")
-        reply = QMessageBox.question(
-            self, f"启动 {comp.display_name} {version}",
-            f"服务名：{name}\n启动类型：手动（不会开机自启）\n"
-            f"端口：{service_port(comp)}\n{mode}\n\n"
-            f"注册服务需要一次管理员权限（UAC）。启动后关掉本工具、关掉控制台，"
-            f"服务都会继续运行，也可以在 services.msc 里看到它。\n\n确认启动？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if reply != QMessageBox.Yes:
-            return
-        password = ""
-        if spec.password_kind and not info.exists:
-            # 只在"第一次注册成服务"时问密码：之后每次启动再问一遍是骚扰，
-            # 而且 MySQL 的 root 密码已经生效、Redis 的 requirepass 已落在 conf 里。
-            dlg = ServicePasswordDialog(comp.display_name, spec.password_kind, self)
-            if dlg.exec() != QDialog.Accepted:
-                return
-            password = dlg.password()
-        self.btn_start.setEnabled(False)
-        self.btn_start.setText("启动中…")
-        self.launch_worker = LaunchWorker("start", comp, component_registry(),
-                                          SERVICE_MANAGER, parent=self,
-                                          version=version, password=password)
-        self.launch_worker.started_ok.connect(self._on_launch_ok)
-        self.launch_worker.failed.connect(self._on_launch_failed)
-        self.launch_worker.notes.connect(self._on_launch_notes)
-        self.launch_worker.finished.connect(self._on_launch_worker_done)
-        self.launch_worker.start()
-
-    # ------------------------------------------------------------------
-    # 前置运行时的自动安装（JDK / Erlang）
-    # ------------------------------------------------------------------
-    def _install_missing_prereqs(self, keys: List[str]) -> None:
-        """把缺失的前置运行时排队装好，装完自动重跑启动。
-
-        为什么不弹"要不要装"的问询：用户点了「启动」就是"我要它跑起来"，
-        再问一次等于把决定权丢回去；而这里要装的都是**明确的、可复现的**东西
-        （JDK / Erlang 的官方包），装错了也只是多一个版本目录。
-        """
-        comps = component_registry()
-        queue: List[Tuple[Component, str]] = []
-        for key in keys:
-            pre = comps.get(key)
-            if pre is None:
-                continue
-            version = pick_prereq_version(pre, prereq_install_versions(self.component))
-            if version is None:
-                QMessageBox.warning(
-                    self, "缺少前置运行时",
-                    f"{self.component.display_name} 需要 {pre.display_name}，"
-                    f"但当前平台没有它的可下载版本。")
-                return
-            if prereq_already_installed(pre, version):
-                continue
-            queue.append((pre, version))
-        if not queue:
-            # 需求已经满足（比如别的卡片刚装上）→ 直接继续
-            self._do_start()
-            return
-        names = "、".join(f"{c.display_name} {v}" for c, v in queue)
-        self._log("info", f"{self.component.display_name} 启动前需要 {names}，"
-                          f"正在自动下载安装（装一次，以后不再重复）…")
-        self.btn_start.setEnabled(False)
-        self.btn_start.setText("准备依赖…")
-        self._prereq_queue = queue
-        self._install_next_prereq()
-
-    def _install_next_prereq(self) -> None:
-        """装队列里的下一个前置组件；装完继续下一个，全装完则重跑启动。"""
-        if not self._prereq_queue:
-            self.btn_start.setEnabled(True)
-            self.btn_start.setText("启动")
-            self._log("ok", "前置运行时已就位，继续启动。")
-            self._do_start()
-            return
-        pre, version = self._prereq_queue.pop(0)
-        cv = next((c for c in pre.versions if c.version == version), None)
-        urls = cv.urls_for_current() if cv else []
-        if cv is None or not urls:
-            self._on_prereq_failed(f"{pre.display_name} {version} 没有可用下载地址")
-            return
-        suffix = self._download_suffix(pre, cv, urls)
-        dest = CONFIG_DIR / pre.key / "downloads" / f"{pre.key}-{version}{suffix}"
-        ensure_dir(dest.parent)
-        self._log("info", f"下载 {pre.display_name} {version}（源：{urls[0]}）")
-        self.prereq_worker = DownloadWorker(urls, dest, parent=self)
-        self.prereq_worker.progress.connect(self._on_prereq_progress)
-        self.prereq_worker.log.connect(self._log)
-        self.prereq_worker.finished_ok.connect(
-            lambda p, c=pre, v=version: self._on_prereq_downloaded(c, v, Path(p)))
-        self.prereq_worker.finished_fail.connect(self._on_prereq_failed)
-        self.prereq_worker.start()
-
-    @staticmethod
-    def _download_suffix(comp: "Component", cv: "ComponentVersion", urls: List[str]) -> str:
-        """下载文件名的后缀必须与包体真实形态一致（extract_archive 按后缀选分支）。"""
-        if comp.installer_mode:
-            ext = cv.archive_map.get(CURRENT_OS, "")
-            if not ext:
-                first = urls[0] if urls else ""
-                ext = "exe" if first.endswith(".exe") else ("sh" if first.endswith(".sh") else "bin")
-            return f".{ext}"
-        ext = cv.archive_for_current()
-        return {"zip": ".zip", "tar.gz": ".tar.gz", "tgz": ".tar.gz", "exe": ".exe",
-                "war": ".war", "": "", "bin": "", "cli": ".zip"}.get(ext, f".{ext}")
-
-    def _on_prereq_progress(self, done: int, total: int) -> None:
-        if total > 0:
-            self._log("info", f"依赖下载中：{human_size(done)} / {human_size(total)}"
-                              f"（{int(done * 100 / total)}%）")
-
-    def _on_prereq_downloaded(self, pre: "Component", version: str, path: Path) -> None:
-        try:
-            final = install_downloaded(pre, version, path, _LoggerAdapter(self._log))
-        except Exception as exc:
-            self._on_prereq_failed(f"{pre.display_name} 安装失败：{exc}")
-            return
-        if not prereq_already_installed(pre, version):
-            self._on_prereq_failed(f"{pre.display_name} 装完了但在 {final} 里找不到可执行文件")
-            return
-        self._log("ok", f"{pre.display_name} {version} 已装好：{final}")
-        ok_env = self._configure_prereq_env(pre, final)
-        if not ok_env:
-            # java 系组件没有 JAVA_HOME 就是起不来，这里不许再写成"不影响启动"
-            self._on_prereq_failed(
-                f"{pre.display_name} 装好了，但写 {pre.env_var or 'PATH'} 失败，"
-                f"{self.component.display_name} 依然启动不了")
-            return
-        self._install_next_prereq()
-
-    def _configure_prereq_env(self, pre: "Component", final: Path) -> bool:
-        """让刚装好的前置运行时**真的能用**：HOME 变量 + PATH 都要写，且跨平台。
-
-        以前这里只调 Windows 专用的 `set_windows_user_env` 写一个 HOME，**不写 PATH**，
-        Linux/macOS 上更是连 HOME 都不写；失败时日志还写着"不影响启动" —— 对 java 系
-        组件来说恰恰相反：JAVA_HOME 没配上，nacos 的 startup.cmd / jenkins 的 `java -jar`
-        根本起不来，用户看到的就是"依赖明明装好了，启动还是失败"。
-        所以改成与正常安装同一套写入（HOME + PATH + 装完核对），失败如实上报。
-        """
-        bin_dir = final / pre.path_subdir if pre.path_subdir else final
-        try:
-            if pre.env_var:
-                if CURRENT_OS == "Windows":
-                    EnvManager.set_windows_user_env(pre.env_var, str(final))
-                    EnvManager.append_windows_path(str(bin_dir))
-                else:
-                    rc = EnvManager.set_unix_env(pre.env_var, str(final))
-                    EnvManager.append_unix_path(str(bin_dir))
-                    self._log("info", f"已写入 {rc}")
-                self._log("ok", f"设置 {pre.env_var}={final}")
-            else:
-                if CURRENT_OS == "Windows":
-                    EnvManager.append_windows_path(str(bin_dir))
-                else:
-                    EnvManager.append_unix_path(str(bin_dir))
-            self._log("ok", f"追加 PATH：{bin_dir}")
-            ok_dir, _where = verify_bin_dir(pre, final)
-            if not ok_dir:
-                self._log("warn", f"{pre.display_name} 装完了，但 {bin_dir} 里没有它的可执行文件")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            self._log("error", f"写 {pre.env_var or 'PATH'} 失败：{exc}")
-            return False
-
-    def _on_prereq_failed(self, reason: str) -> None:
-        self._prereq_queue = []
-        self.btn_start.setEnabled(True)
-        self.btn_start.setText("启动")
-        self._log("error", f"前置运行时准备失败：{reason}")
-        QMessageBox.warning(self, "前置运行时准备失败",
-                            f"{reason}\n\n装好之后可以再点一次「启动」。")
-
-    def _on_launch_ok(self, key: str, console_url: str) -> None:
-        """启动成功后的统一收尾：**给用户一个能打开的地址** + 说清停止按钮在哪。
-
-        2026-10-08 用户要求：不管组件有没有自带控制台，启动后都要有个能访问的页面，
-        让用户确认"确实起来了"。所以这里分两路：
-          - 自带 Web 界面（含 ES 的 JSON 根路径）：地址就是它自己的；
-          - 协议端口型（kafka / rocketmq / rabbitmq）：用工具自带的
-            「启动成功」页（见 ComponentPageServer），并把 URL 写回登记，
-            这样卡片上的「打开访问页」按钮也能直接打开它。
-        """
-        st = self._launch_status()
-        rec = st.record
-        spec = self.component.launch
-        page_url: Optional[str] = None
-        if rec is not None and spec is not None:
-            try:
-                page_url = show_launch_page(self.component, spec, rec)
-            except Exception as exc:      # 页面服务不该影响"启动成功"这件事
-                self._log("warn", f"生成访问页失败（不影响服务运行）：{exc}")
-            if page_url and page_url != rec.console_url:
-                # 把访问页写回登记：刷新界面/重开工具后「打开访问页」按钮仍可用
-                try:
-                    records = load_running_map()
-                    if self.component.key in records:
-                        records[self.component.key].console_url = page_url
-                        save_running_map(records)
-                except Exception:
-                    pass
-                self._launch_page_url = page_url
-        if spec is not None and rec is not None:
-            for line in launch_success_lines(self.component, spec, rec, page_url):
-                self._log("ok", line)
-        self._refresh_launch_state()
-        # 明说停止按钮在哪：2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。
-        # 查下来按钮一直好着（可见可用、文本"停止"、旁边 label 显示"● 运行中 · 端口 8848"），
-        # 但启动成功后只写一句"已启动，控制台：…"，用户不确定"停止"这个按钮出现了没有
-        # ——尤其卡片上同时有"卸载"按钮，两者挨在一起，容易看成没变。
-        # 所以直接点名：停止按钮就在这张卡片上、按钮文字是什么。
-        self._log("info", f"「停止」按钮已出现在这张卡片上（现在可用），"
-                          f"再点一次可结束运行中的 {self.component.display_name}。")
-        self._log_credentials()
-
-    def _log_credentials(self) -> None:
-        """把登录凭据打进组件日志（2026-10-06 用户要求）。
-
-        凭据不算秘密了：这些是**厂商出厂默认**（nacos/nacos、admin/admin），
-        任何装了同一个版本的人都是同一份。而 Jenkins 那种随机密码本来就在
-        本机文件里、只有本机用户能读。它解决的是"服务起来了却登不进去，
-        还要自己去翻文件/翻官方文档"——那才是真折腾。
-
-        用 info 级而不是 warn 级：这不是风险提示，是用户现在就需要的信息。
-        """
-        spec = self.component.launch
-        if spec is None:
-            return
-        try:
-            port = self._launch_status().record.port \
-                if self._launch_status().state == "running" else spec.main_port
-        except Exception:
-            port = spec.main_port
-        try:
-            for line in credentials_for(self.component, spec, port):
-                self._log("info", line)
-        except Exception as exc:            # 凭据读不出来不该影响启动结果
-            self._log("warn", f"读取登录凭据失败（不影响使用）：{exc}")
-
-    def _on_launch_notes(self, key: str, notes: list) -> None:
-        """端口准备的告警逐条进组件日志。吞掉的话，用户之后想找"端口改在哪份文件里"
-        只能自己猜 —— R4 第 6 条禁止的写法。"""
-        for line in notes:
-            self._log("warn", line)
-
-    def _on_launch_failed(self, key: str, reason: str) -> None:
-        # 关窗链路里 cancel 触发的 failed 可能在退出途中投递进来；模态框自己转事件循环，
-        # 会把关窗卡住。只看顶层窗口（closeEvent 已立的 _closing 旗）是不是正在关。
-        # try 包的是 self.window() 这次 Qt 调用本身：顶层 C++ 对象先没了它会抛 RuntimeError，
-        # 而那时候连"记一条日志"的机会都没有 —— 那正是本方法要避免的静默失败。
-        try:
-            closing = is_closing()
-        except Exception:
-            closing = True
-        if closing:
-            self._log("warn", f"操作未完成（窗口正在关闭）：{reason}")
-            return
-        self._log("error", f"操作失败：{reason}")
-        QMessageBox.warning(self, "操作失败", reason)
-        self._refresh_launch_state()
-
-    def _on_need_force(self, key: str, reason: str) -> None:
-        """停止超时/无法优雅结束：问一次，不自己决定强杀（spec §5）。"""
-        if QMessageBox.question(self, "需要强制结束", reason,
-                                QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) != QMessageBox.Yes:
-            self._log("warn", "未强制结束，进程仍在运行。")
-            return
-        # need_force 是从 worker 线程里发的：这个槽跑的时候老 worker 的 run()
-        # 可能还没返回，丢掉它最后一个引用会被 PySide 就地销毁还在跑的 QThread。
-        # parent=self 把引用交给对象树持有，这条窗口才关得掉。
-        self.launch_worker = LaunchWorker("force_stop", self.component,
-                                          component_registry(), SERVICE_MANAGER,
-                                          parent=self)
-        self.launch_worker.stopped.connect(self._on_launch_stopped)
-        self.launch_worker.failed.connect(self._on_launch_failed)
-        self.launch_worker.need_force.connect(self._on_need_force)
-        self.launch_worker.finished.connect(self._on_launch_worker_done)
-        self.launch_worker.start()
-
-    def _on_launch_stopped(self, key: str) -> None:
-        self._log("info", "已停止。")
-        # 停止后也报一次凭据：用户常常是"启动→看一眼配置→再停止"这个顺序，
-        # 停止这一刻他正要打开控制台，此刻给凭据最省事（日志滚动到底就能看到）。
-        if self.component.launch is not None:
-            self._log_credentials()
-        self._refresh_launch_state()
-
-    def _on_launch_worker_done(self) -> None:
-        # 按身份收尾：老 worker 的 finished 可能晚于新 worker 起跑
-        # （need_force 那条路上两条线程会短暂共存），无条件置 None 会把刚启动的
-        # force_stop worker 的引用抹掉，强杀正在跑时反而没人持有它。
-        worker = self.sender()
-        if worker is self.launch_worker:
-            self.launch_worker = None
-        if worker is not None:
-            worker.deleteLater()   # finished 之后删除是安全的：run() 已经返回
-        self._refresh_launch_state()
-
-    def on_start_stop_clicked(self) -> None:
-        """启动/停止合并按钮的唯一入口：按当前实况决定做哪件事。
-
-        判据用 `_launch_status()`（直接读端口实况），不用按钮上次的文字或启用态——
-        那两个都可能被异步结果改过，用它们当依据就会出现"按钮写着启动、其实在跑"
-        或者反过来，点一下做了错的事。
-        """
-        st = self._launch_status()
-        if st.state == "running":
-            self.on_stop_clicked()
-        elif st.state == "zombie":
-            # 僵尸登记（登记还在、端口没在听）：点按钮的意图是"清掉它重新起一个"，
-            # 而不是"再停一次已经没在跑的东西"——那会让用户以为按钮坏了。
-            self.on_start_clicked()
-        else:
-            self.on_start_clicked()
-
-    def on_stop_clicked(self) -> None:
-        self.btn_start.setEnabled(False)
-        self.btn_start.setText("停止中…")
-        self.launch_worker = LaunchWorker("stop", self.component,
-                                          component_registry(), SERVICE_MANAGER,
-                                          parent=self)
-        self.launch_worker.stopped.connect(self._on_launch_stopped)
-        self.launch_worker.failed.connect(self._on_launch_failed)
-        # 这条线不能省：停不下来时 need_force 就是"问一次"的唯一入口，
-        # 漏接了按钮会直接停在"停止中"结束、用户既没被问也没结果。
-        self.launch_worker.need_force.connect(self._on_need_force)
-        self.launch_worker.finished.connect(self._on_launch_worker_done)
-        self.launch_worker.start()
-
-    def on_console_clicked(self) -> None:
-        """打开访问页。
-
-        **每个可启停组件都有一个能打开的地址**（2026-10-08 用户要求）：
-          - 自带 Web 界面：它自己的控制台/首页（nginx 是 8888、tomcat 是 8081，
-            都由登记表里的实际端口给出，不再写死 8080）；
-          - 协议端口型（kafka / rocketmq / rabbitmq / ES）：工具自带的
-            「启动成功」页，上面写着运行状态、端口、日志路径与访问方式。
-
-        历史坑（2026-10-06）：nginx/tomcat 的 console_path 曾是 None，
-        console_url 被拼成 `http://127.0.0.1:8080` → 点开必然 404，
-        用户以为"启动成功是假的"。现在这两件都有真实首页，且对没有界面的组件
-        改指自带页，不会再指到一扇不存在的门。
-        """
-        st = self._launch_status()
-        if st.record is None:
-            return
-        target = st.record.console_url
-        spec = getattr(self.component, "launch", None)
-        if spec is not None and not spec.console_path:
-            # 协议端口型：页服务可能因重启换了端口（或刚从旧版本升级上来），
-            # 登记里那条 URL 不一定还能用。点开的这一刻取一次当前端口。
-            server = get_page_server()
-            fresh = server.url_for(self.component.key) if server is not None else None
-            if fresh:
-                target = fresh
-        if not self._has_console():
-            QMessageBox.information(
-                self,
-                f"{self.component.display_name} 没有网页控制台",
-                f"{self.component.display_name} 不提供网页界面，"
-                f"它的服务在端口 {st.record.port} 上（对局域网开放）。\n\n"
-                f"要访问它请用对应的客户端工具，例如：\n"
-                f"{self._no_console_hint()}")
-            return
-        QDesktopServices.openUrl(QUrl(target))
-
-    def _has_console(self) -> bool:
-        """该组件是否有可点的访问页。
-
-        判据有两条（任一成立即可点）：
-          ① 登记表里有 `console_path` —— 组件自带的 Web 界面/首页；
-          ② 登记里的 `console_url` 指向本工具自带的「启动成功」页
-             （协议端口型组件走这条，见 show_launch_page）。
-        2026-10-08 之前只认①，于是 kafka/rocketmq/rabbitmq 的卡片上
-        根本没有这个按钮 —— 而用户现在**要求**每件都有能打开的页面。
-        """
-        spec = getattr(self.component, "launch", None)
-        if spec is None:
-            return False
-        if spec.console_path:
-            return True
-        try:
-            st = self._launch_status()
-        except Exception:
-            return False
-        return bool(st.record is not None and st.record.console_url)
-
-    def _no_console_hint(self) -> str:
-        """没有控制台时，给一句"这个组件该怎么用"的实话。
-
-        **端口不能写死**（2026-10-08 改正）：原来这里写着 8080，而 tomcat 实际是
-        8081、nginx 是 8888 —— 一句写错端口的指引比不给指引更坏，用户会照它去连
-        一个根本没人听的端口。现在按登记表里的 main_port 现算。
-        """
-        spec = getattr(self.component, "launch", None)
-        port = getattr(spec, "main_port", None) or "?"
-        return {
-            "tomcat": f"把 WAR 放进 ~/.env-tools/tomcat-data/webapps/ 后访问 "
-                      f"http://127.0.0.1:{port}/应用名/（放安装目录那份不生效）",
-            "nginx": f"默认站点在 ~/.env-tools/nginx-data/html/ 下，"
-                     f"访问 http://127.0.0.1:{port}/",
-            "elasticsearch": f"用 curl 访问 http://127.0.0.1:{port}/（图形界面 Kibana 不在本工具里）",
-            "kafka": "用 kafka-topics.bat（安装目录 bin/windows/ 下）之类的命令行工具操作",
-            "rocketmq": "用 mqadmin（安装目录 bin/ 下）命令行工具操作",
-            "rabbitmq": "管理界面需要额外开 rabbitmq_management 插件，本工具暂未启用",
-        }.get(self.component.key, "请用对应的客户端工具访问")
-
-    # ------------------------------------------------------------------
-    def _render_status_label(self) -> None:
-        if self.component.multi_version and self._mv_capsule:
-            # 多版本胶囊正文取 _detect_status 已算好的基础文案（逐字不变），异步版本号
-            # 只在其后追加；绿=有生效版本（_status_shows_configured），橙=均未生效/未对齐。
-            # _mv_capsule 为空串表示这次走的是"本工具没装过、探测到系统安装"的通用分支，
-            # 那时必须落到下面的 ✓ 已配置 文案，不能渲染一个空胶囊。
-            # 短串与全量原文同步续上版本号：主文本只放得下结论，版本列表在 tooltip 里。
-            text = self._mv_capsule
-            # 外部只塞了胶囊全文（没算过短串）时退回全量，主文本不许是空的
-            short = self._mv_capsule_short or self._mv_capsule
-            if self._status_version:
-                text += f" · {self._status_version}"
-                short += f" · {self._status_version}"
-            self._set_status(text, short)
-            self.status_label.setStyleSheet(
-                "color:#ef6c00;font-weight:600;padding:2px 8px;"
-                "background:#fff3e0;border-radius:10px;"
-                if self._mv_orange or not self._status_shows_configured else
-                "color:#2e7d32;font-weight:600;padding:2px 8px;"
-                "background:#e8f5e9;border-radius:10px;")
-            return
-
-        text = f"✓ 已配置（{self._status_where}）"
-        short = f"✓ 已配置 · {self._short_where()}"
-        if self._status_version:
-            text += f" · {self._status_version}"
-            short += f" · {self._status_version}"
-        elif self.component.version_probe:
-            text += " · 版本检测中…"
-            short += " · 检测中…"
-        self._set_status(text, short)
-        self.status_label.setStyleSheet(
-            "color:#2e7d32;font-weight:600;padding:2px 8px;"
-            "background:#e8f5e9;border-radius:10px;"
-        )
-
-    def _short_where(self) -> str:
-        """主文本里那截"来源"要短（格子只有 271px），完整出处留给 tooltip。
-
-        多版本组件走到通用分支 = 本工具一个版本都没装、探测到的是用户自己装的，
-        主文本只说「系统安装」；"不由本工具管理"这个结论在 tooltip 的全量原文里。
-        """
-        if self.component.multi_version:
-            return "系统安装"
-        return self._status_where or "系统"
-
-    def _schedule_version_probe(self, exe_path: str) -> None:
-        """把「执行组件命令取版本号」推迟到事件循环空闲时，且放到后台线程。
-
-        version_probe=False 的启动脚本型组件（Nacos/Kafka/RocketMQ/Seata/RabbitMQ）
-        在这里直接跳过——一执行就会把中间件服务拉起来。
-        """
-        if not (exe_path and self.component.version_probe and self.component.version_args):
-            return
-        QTimer.singleShot(0, lambda: self._start_version_probe(exe_path))
-
-    def _start_version_probe(self, exe_path: str) -> None:
-        # 关窗途中事件循环还会转（closeEvent 里那些 wait 就是机会），残留的 singleShot
-        # 这时再起一条线程 = 窗口析构时它还在跑 = 进程 abort。_launch_fetch_worker 早有这道闸。
-        if is_closing():
-            return
-        worker = VersionProbeWorker(exe_path, list(self.component.version_args), self)
-        worker.done.connect(lambda text, w=worker: self._on_version_probed(text, w))
-        worker.finished.connect(worker.deleteLater)
-        # 顶替掉的旧线程不能没人等：`_version_worker` 只代表最新那一条，
-        # 而三处 `_version_worker = None` 和这里的重赋值都会把在跑的旧线程变成孤儿。
-        self._probe_workers = [w for w in self._probe_workers
-                               if _qthread_state(w) == "running"]
-        self._probe_workers.append(worker)
-        self._version_worker = worker
-        worker.start()
-
-    def _on_version_probed(self, text: str, worker: Optional["VersionProbeWorker"] = None) -> None:
-        # 回包可能晚到：状态已不「已配置」或已被更新一轮探测取代时丢弃
-        if not self._status_shows_configured:
-            return
-        if worker is not None and worker is not self._version_worker:
-            return
-        self._status_version = text or "未知版本"
-        self._render_status_label()
-
-    # ------------------------------------------------------------------
-    def _installed_here(self, version: str) -> Optional[Path]:
-        """该版本是否真的装好了：装好返回安装目录，否则 None。
-
-        只看目录存在不够 —— 解压一半失败也会留下目录，那时按钮灰掉、
-        卸载又删不出东西，用户就被卡死了。所以还要在里面找得到该组件的可执行文件；
-        没有 exec_name 的组件（Jenkins 只有一个 war 包）退化成"目录非空"。
-        """
-        home = self.component.install_dir(version)
-        if not home.is_dir():
-            return None
-        if self.component.exec_name:
-            return home if self.component.exec_path_in_home(str(home)) else None
-        return home if any(home.iterdir()) else None
-
-    # ------------------------------------------------------------------
-    def _sync_action_buttons(self) -> None:
-        """按「当前选中的版本」重算三个按钮：下载并安装 / 切换生效 / 卸载。
-
-        三个触发点：① _detect_status 之后；② 下拉框换选中之后；
-        ③ 下载结束或失败之后。只挂 ① 会出真机 bug —— 切一次生效版本后按钮置灰，
-        用户换选另一个版本没人重算，按钮一直灰着点不动（2026-09-30 反馈）。
-        """
-        # 只下载型组件没有「切换 / 卸载」节点，下面每一行都会踩空；
-        # 而且它按"选中版本装没装"算启用条件，那要去扫盘 —— 一开始就该短路掉。
-        if self.component.download_only:
-            return
-        # 下载途中按钮归下载流程管：否则换个选中就能并发触发第二次下载
-        if not (self.worker and self.worker.isRunning()):
-            selected = self._current_version().version
-            home = self._installed_here(selected)
-            self.btn_install.setEnabled(home is None)
-            self.btn_install.setToolTip(
-                f"该版本已安装在 {home}；要重新安装请先点「卸载」" if home else
-                "下载该版本并解压安装到本工具工作目录")
-        if not self._mv_buttons_ready:
-            return
-        # 未对齐/被遮蔽时切换按钮必须可用：哪怕 selected 恰好等于 active，
-        # 也得让用户能再点一次去收敛 PATH 与登记表
-        selected = self._current_version().version
-        can_switch = selected != self._mv_active or self._mv_warned
-        self.btn_configure.setEnabled(can_switch)
-        self.btn_configure.setToolTip(
-            "把下拉框选中的版本设为生效版本：改 XXX_HOME，并把本组件在 PATH 里的"
-            "条目收敛成这一条；已开着的终端需重开才生效"
-            "（Windows Terminal 的新标签页、IDE 里的新终端都还是旧环境，要整个关掉重开）"
-            if can_switch else
-            f"选中的 {selected} 已是生效版本；要换版本先在下拉框里选中")
-        # 卸载按钮只对"已装的选中版本"启用：tooltip 承诺卸载选中的那个，
-        # 而 selected 完全可能没装——放行会走 resolve 兜底删掉用户没选中的版本。
-        if selected in self._mv_installed_set:
-            # 运行中（被启动锁过）不许重新点亮卸载：切换版本下拉框也会走到这里，
-            # 无条件启用会让按钮和"● 运行中"的文案在同一张卡上自相矛盾。
-            self.btn_uninstall.setEnabled(not self._uninstall_locked_by_launch)
-            self.btn_uninstall.setToolTip(
-                f"卸载下拉框选中的 {selected}：只删该版本目录与它的 PATH 条目，"
-                "其他已装版本不动")
-        else:
-            self.btn_uninstall.setEnabled(False)
-            self.btn_uninstall.setToolTip(
-                f"选中的 {selected} 未安装；要卸载其他版本先在下拉框里选中"
-                "（下拉框里有绿勾的就是已装）")
-
-    # ------------------------------------------------------------------
-    def _show_external_capsule(self, takeover: dict, ordered, residue) -> bool:
-        """接管外部版本时的状态胶囊（设计 §6 第三档）。返回 True = 已接管显示。
-
-        为什么必须单独一档：接管生效期间 active 登记按 §4.3 已被删除，走原来那条
-        "本工具装了哪个版本生效"的分支只会报成"均未生效"，与实际情况正好相反。
-        """
-        home = Path(str(takeover.get("home") or ""))
-        ver = str(takeover.get("version") or "?")
-        names = "、".join(v for v, _p in ordered)
-        green = ("color:#2e7d32;font-weight:600;padding:2px 8px;"
-                 "background:#e8f5e9;border-radius:10px;")
-        orange = ("color:#ef6c00;font-weight:600;padding:2px 8px;"
-                  "background:#fff3e0;border-radius:10px;")
-
-        if not home.is_dir():
-            # §7：快照指向的目录被用户删了 —— 如实说，**不自动改环境**，
-            # 只提示可以点还原或另选一个。
-            capsule = (f"● 之前接管的外部版本已不存在（{home}）· 请点「还原到我之前的设置」"
-                       "或改选别的版本")
-            short = "● 接管的外部版本已不存在"
-            warned = True
-        else:
-            tail = (f" · 工作区 {len(ordered)} 个版本（{names}）" if ordered
-                    else " · 工作区没有装版本")
-            level = "系统" if str(takeover.get("level")) == "machine" else "用户"
-            capsule = f"● 生效 {ver}（{level} {home}）{tail}"
-            short = f"● 生效 {ver}（{level}级）"
-            warned = False
-        if residue:
-            capsule += f" · 另有 {len(residue)} 个残留空目录待清理"
-            short += f" · {len(residue)} 个残留待清理"
-            warned = True
-
-        self._mv_capsule = capsule
-        self._mv_capsule_short = short
-        self._mv_orange = warned
-        self._set_status(capsule, short)
-        self.status_label.setStyleSheet(orange if warned else green)
-        # active 置空：切换按钮据此恒为可用（用户要能切回工作区版本，
-        # _apply_active 会先走 release_external_before_workspace_switch 还原）。
-        self._mv_active = None
-        self._mv_warned = warned
-        self._mv_installed_set = ({v for v, _p in ordered}
-                                  | {v for v, _p in residue})
-        self._mv_buttons_ready = True
-        self._sync_action_buttons()
-        self._status_shows_configured = False
-        self._status_version = ""
-        self._version_worker = None
-        self._refresh_installed_marks()
-        return True
-
-    def _detect_status(self) -> None:
-        """检测组件状态，并在每条出口后刷新一遍运行态。
-
-        _detect_status_impl 有四条出口（多版本胶囊 / 已配置 / 已下载 / 未安装），把
-        `_refresh_launch_state()` 写在物理末尾只会覆盖最后那条；包一层才能保证
-        "每次重探状态都顺带把启动/停止/卸载按钮对齐端口实况"。
-        """
-        self._detect_status_impl()
-        self._refresh_launch_state()
-
-    def _detect_status_impl(self) -> None:
-        """检测该组件当前是否已安装、已配置。
-
-        - 若系统 PATH 或 XXX_HOME 已能找到可执行文件，则视为「已配置」，禁用
-          「仅配置环境变量」按钮，避免重复写入。
-        - 若本地已解压但未配置，则允许点击「仅配置环境变量」。
-        - 若未安装，两个按钮均可用。
-
-        本方法在窗口构建卡片时就会被调用，因此绝不同步执行组件命令：detect 只判定
-        存在（probe_version=False），版本号交给 VersionProbeWorker 异步回填。
-        """
-        # 向导型卡片（WSL）：只报"装没装"，不启动任何提权/探测子进程。
-        # 判据用目录存在性而不是 `wsl --version`：建卡发生在启动期，186 张卡里
-        # 这一张不该额外拉两个子进程。
-        if self.component.ui_action == "wsl":
-            imported = (wsl_work_dir() / WSL_DISTRO).is_dir()
-            if imported:
-                full = (f"WSL2 已就绪：Ubuntu {WSL_UBUNTU_SERIES} 已导入到 "
-                        f"{wsl_work_dir() / WSL_DISTRO}。点「安装向导」可查看详情或重新导入。")
-                short = "● WSL 已就绪"
-                style = ("color:#2e7d32;font-weight:600;padding:2px 8px;"
-                         "background:#e8f5e9;border-radius:10px;")
-            else:
-                full = ("点「安装向导」：启用 WSL 与虚拟机平台 → 安装官方运行时 → "
-                        "导入 Ubuntu 24.04。系统功能装完必须重启才生效，"
-                        "本工具只提示、不会替你重启。")
-                short = "● 未安装 · 点「安装向导」"
-                style = ("color:#5b6b7a;font-weight:600;padding:2px 8px;"
-                         "background:#eef2f6;border-radius:10px;")
-            self._set_status(full, short)
-            self.status_label.setStyleSheet(style)
-            return
-        # 只下载型组件（「开发工具」）磁盘上根本不会有它，任何"已配置 / 未安装"的结论
-        # 都是假的，而且算这些结论要扫盘。胶囊只说清它能干什么，中性灰 —— 不用绿色
-        # （绿色在本界面里等于"已配置"）也不用橙色（等于"出问题了"）。
-        if self.component.download_only:
-            note = "仅提供官方安装包下载 · 不解压、不配置环境变量"
-            self._set_status(note, "仅提供官方安装包下载")
-            self.status_label.setStyleSheet(
-                "color:#5b6b7a;font-weight:600;padding:2px 8px;"
-                "background:#eef2f6;border-radius:10px;")
-            return
-        # 「下载并安装」的启用状态只取决于选中的版本装没装好，与后面走哪条探测分支无关，
-        # 所以在分支之前先同步一次；多版本那两个按钮要等本方法算出 active 之后再同步。
-        self._sync_action_buttons()
-        # 多版本组件：状态胶囊要表达的是"装了哪几个 + 哪个生效"，
-        # 而不是单一的"已配置/未配置"；生效以 active 登记表为准，探测只用于回填版本号。
-        if self.component.multi_version:
-            ordered = installed_versions(self.component)
-            residue = residue_install_dirs(self.component)
-            # 磁盘上的已装集合刚变过（装完/卸完），"已装但清单里没有"的合成项要跟着增减。
-            # 必须放在 `if ordered` 之前：最后一个额外版本被卸掉时 ordered 为空，
-            # 会直接落到下面的通用探测分支，放里面就永远摘不掉那一行。
-            if self.version_combo.count() != len(self._combo_version_list()):
-                self._reload_combo_items(preferred=self.version_combo.currentText())
-            # 接管了外部版本的一档（§6）：这个时候 active 登记已被删除，不能按
-            # "本工具装了哪个版本生效"去显示，否则会报成"均未生效"。
-            if supports_external_takeover(self.component):
-                self._refresh_external_section()
-                takeover = load_takeover_map().get(self.component.key)
-                if takeover:
-                    if self._show_external_capsule(takeover, ordered, residue):
-                        return
-            # 只有"本工具目录下确实装着版本"时才走多版本胶囊。一个都没有时不许就此断言
-            # "未安装"——用户很可能自己装了 JDK/Maven（JAVA_HOME 或 PATH 里就有），
-            # 那要交给下面的通用探测识别成"已配置（系统安装）"。
-            if ordered:
-                home_ver = (load_active_map().get(self.component.key)
-                            or infer_active_from_env(self.component))
-                path_ver = self._path_hit_version()
-                active = home_ver or path_ver
-                # HOME 与 PATH 指向不同版本时，命令行实际用的是 PATH 那个；只报 HOME 里的
-                # 就是骗人（2026-09-30 真机：bun 1.4.2 与 1.4.1 同时留在 PATH 里）。
-                mismatch = bool(home_ver and path_ver and home_ver != path_ver)
-                # 复验"新终端实际会命中谁"：被 PATH 里更靠前的条目（系统级变量、用户自装的
-                # 版本）压住时，不许只写"生效 X"——那正是本机 jdk 的处境。
-                verdict, shadow = self._path_effective_check(active)
-                warned = mismatch or verdict == "shadowed"
-                names = "、".join(v for v, _p in ordered)
-                short = ""
-                if mismatch:
-                    capsule = (f"● 已装 {len(ordered)} 个版本 · 未对齐：PATH 用的是 {path_ver}，"
-                               f"{self.component.env_var or '环境变量'} 指 {home_ver}（{names}）")
-                    short = "● 未对齐（PATH≠HOME）"
-                elif verdict == "shadowed":
-                    capsule = (f"● 已装 {len(ordered)} 个版本 · 生效 {active}（{names}）"
-                               f" · 但 PATH 先命中 {shadow}")
-                    short = (f"● 已装 {len(ordered)} 个 · 生效 {active}"
-                             f" · 被 PATH 抢先")
-                else:
-                    tail = f" · 生效 {active}" if active else " · 均未生效"
-                    capsule = f"● 已装 {len(ordered)} 个版本{tail}（{names}）"
-                    short = f"● 已装 {len(ordered)} 个{tail}"
-                if residue:
-                    # 磁盘上还有内容被删空的目录：必须报出来，否则它既不算已装、
-                    # 又没人知道要清理，就成了永久死角（胶囊是用户唯一的入口线索）。
-                    warned = True
-                    capsule += f" · 另有 {len(residue)} 个残留空目录待清理"
-                    short += f" · {len(residue)} 个残留待清理"
-                self._mv_capsule = capsule
-                self._mv_capsule_short = short
-                self._mv_orange = warned
-                self._set_status(capsule, short)
-                self.status_label.setStyleSheet(
-                    "color:#ef6c00;font-weight:600;padding:2px 8px;"
-                    "background:#fff3e0;border-radius:10px;" if warned or not active else
-                    "color:#2e7d32;font-weight:600;padding:2px 8px;"
-                    "background:#e8f5e9;border-radius:10px;")
-                selected = self._current_version().version
-                # 按钮启用状态交给 _sync_action_buttons()：它还有第二个触发时机 ——
-                # 下拉框换选中。只挂在这里会出真机 bug（2026-09-30）：切一次之后按钮置灰，
-                # 用户换选另一个版本，没人重算，按钮一直灰着点不动。
-                self._mv_active = active
-                self._mv_warned = warned
-                self._mv_installed_set = ({v for v, _p in ordered}
-                                          | {v for v, _p in residue})
-                self._mv_buttons_ready = True
-                self._sync_action_buttons()
-                # 探测回填只在确有生效版本、且没有未对齐时开放闸门，并把上一轮
-                # 生效版本回填过的旧版本号清掉——否则切完版本胶囊还挂着 21.0.4。
-                self._status_shows_configured = bool(active) and not mismatch
-                self._status_version = ""
-                # 作废上一轮探测线程的迟到回调：_on_version_probed 靠 worker 身份挡旧回包，
-                # 不清旧 _version_worker 的话，旧 worker 回来会把上一轮生效版本的旧版本号
-                # 贴进这一轮的新胶囊里，永久错标。
-                self._version_worker = None
-                if not mismatch:
-                    for ver, path in ordered:
-                        if ver == active:
-                            # 复用既有寻径（会试 bin/、根目录、.bat/.cmd 等），别自己拼路径
-                            exe = self.component.exec_path_in_home(str(path))
-                            if exe:
-                                self._schedule_version_probe(str(exe))
-                            break
-                self._refresh_installed_marks()
-                return
-            elif residue:
-                # 只剩空壳目录（真机 2026-10-07 rabbitmq 的收尾状态）：说"未安装"是假话
-                # ——磁盘上确实有个删不掉的目录；说"已装"也是假话 —— 里面一个文件都没有。
-                # 所以这一支单独说清"残留待清理"，并且**不能**落到下面的通用探测分支：
-                # 那一支会按 PATH/HOME 判定，而空壳的 HOME 刚被这次卸载清掉，
-                # 结果是卡片显示"未安装"、卸载按钮置灰，那个目录就永远清不掉了。
-                vers = "、".join(v for v, _p in residue)
-                capsule = (f"● {len(residue)} 个残留空目录待清理（{vers}）"
-                           f" · 内容已删除、不算已装")
-                self._mv_capsule = capsule
-                self._mv_capsule_short = f"● {len(residue)} 个残留待清理"
-                self._mv_orange = True
-                self._set_status(capsule, self._mv_capsule_short)
-                self.status_label.setStyleSheet(
-                    "color:#ef6c00;font-weight:600;padding:2px 8px;"
-                    "background:#fff3e0;border-radius:10px;")
-                self._mv_active = None
-                self._mv_warned = True
-                self._mv_installed_set = {v for v, _p in residue}
-                self._mv_buttons_ready = True
-                self._sync_action_buttons()
-                self._status_shows_configured = False
-                self._status_version = ""
-                self._version_worker = None
-                self._refresh_installed_marks()
-                return
-
-        result = self.component.detect(probe_version=False)
-        # 通用分支（非多版本组件、或多版本组件但本工具没装过）自己管按钮状态，
-        # 必须关掉多版本按钮同步，否则下拉框一换选中就把这里设好的状态改回去。
-        self._mv_buttons_ready = False
-        self._status_shows_configured = bool(result.installed)
-        if result.installed:
-            where = result.source or "系统"
-            if self.component.multi_version:
-                # 多版本组件走到这里 = 本工具没装过任何版本，探测到的是用户自己装的。
-                # 不写清楚的话，用户会以为这枚"已配置"是本工具装的，找不到切换入口。
-                where = f"{where} · 系统安装，不由本工具管理"
-            self._status_where = where
-            self._status_version = ""
-            # 走通用分支 = 本工具没装过这个组件，多版本胶囊不适用；清空它，
-            # 否则 _render_status_label 会渲染上一轮留下的旧胶囊。
-            self._mv_capsule = ""
-            self._mv_capsule_short = ""
-            self._render_status_label()
-            # 已可用 —— 禁用「仅配置环境变量」按钮
-            self.btn_configure.setEnabled(False)
-            self.btn_configure.setToolTip(
-                f"系统已能检测到 {self.component.display_name}"
-                f"（{result.exe_path or where}），无需再次配置。"
-            )
-            # 已配置状态下允许卸载（仅能清理由本工具写入的 XXX_HOME/PATH marker）
-            if self.component.multi_version:
-                # 走到这里 = 本工具一个版本都没装，探测到的是用户自己装的。
-                # 放开卸载按钮只会给出一个做不到的承诺（真点下去也只会回"未找到安装目录"）。
-                self.btn_uninstall.setEnabled(False)
-                self.btn_uninstall.setToolTip(
-                    "系统里这个是你自己装的，本工具不代为卸载。想交给本工具管理并在多个"
-                    "版本间切换，先在下拉框选一个版本点「安装」。")
-            else:
-                self.btn_uninstall.setEnabled(True)
-                self.btn_uninstall.setToolTip(
-                    "卸载将删除本地安装目录，并清理由本工具写入的环境变量"
-            )
-            self._schedule_version_probe(result.exe_path)
-            return
-
-        # 尝试查找本地已解压目录
-        install_root = CONFIG_DIR / self.component.key
-        if install_root.exists() and any(
-            p for p in install_root.iterdir()
-            if p.is_dir() and not p.name.startswith(".") and p.name != "downloads"
-        ):
-            # 主文本已经够短，不需要 tooltip 复述；显式清空，免得留下上一轮胶囊的详情
-            self._set_status("", "● 已下载，未配置")
-            self.status_label.setStyleSheet(
-                "color:#ef6c00;font-weight:600;padding:2px 8px;"
-                "background:#fff3e0;border-radius:10px;"
-            )
-            self.btn_configure.setEnabled(True)
-            self.btn_configure.setToolTip("将已下载的版本写入 XXX_HOME 与 PATH")
-            # 已下载但未配置：允许卸载（删除本地解压目录）
-            self.btn_uninstall.setEnabled(True)
-            self.btn_uninstall.setToolTip("删除已下载但尚未配置的安装目录")
-            return
-
-        self._set_status("", "○ 未安装")
-        self.status_label.setStyleSheet(
-            "color:#c62828;font-weight:600;padding:2px 8px;"
-            "background:#ffebee;border-radius:10px;"
-        )
-        self.btn_configure.setEnabled(True)
-        self.btn_configure.setToolTip("将已下载的版本写入 XXX_HOME 与 PATH")
-        # 未安装：禁用卸载
-        self.btn_uninstall.setEnabled(False)
-        self.btn_uninstall.setToolTip("当前组件未安装，无需卸载")
-
-    # ------------------------------------------------------------------
-    def _display_label(self, cv: ComponentVersion) -> str:
-        return getattr(cv, "display_label", None) or cv.version
-
-    def _combo_version_list(self) -> List[ComponentVersion]:
-        """下拉框真正要显示的清单：内置/在线清单 + 磁盘已装但清单里没有的版本。
-
-        必须合成是因为在线清单只保留近期版本（2026-09-30 真机：bun 清单里已无 1.4.1，
-        磁盘上却装着），否则会出现"胶囊说已装 2 个版本、下拉框里只有 1 个能选"——
-        那个版本切不了也卸不掉。合成项没有下载 URL，但"已装即置灰安装按钮"正好兜住。
-
-        **所有组件都合成，不再只对多版本组件**（2026-10-06 改）。原先非多版本组件
-        直接 return 候选清单，但它们的清单同样会落后于实际安装版本：jenkins 候选是
-        2.568.3/2.555.3/2.541.3，磁盘上装的是 2.580.1—— 不合成的话那个已装版本
-        在下拉框里根本不存在，用户看到的是"装了东西但下拉框里没有它、也没有绿勾"，
-        而启动走 `resolve_launch_version()` 会去找已装的那个，两边对不上。
-        R3.9 那句"非多版本组件清单逐字不变"约束的是**不能凭空造版本**，
-        不是"不许把真装了的版本显示出来"—— 后者正是本条要修的。
-        """
-        # 只下载型组件：磁盘上不会有它，合成本来就没有对象；直接返回官方清单，
-        # 顺带保证"下拉框里出现的每一版都能下载"这条判据不被合成项污染。
-        if self.component.download_only:
-            return list(self.component.versions)
-        result = list(self.component.versions)
-        known = {cv.version for cv in result}
-        # 已装的 + 只剩空壳的都合成进来：空壳必须还能被选中并卸载，
-        # 否则它既不算已装、又不在下拉框里，就没人能清掉它（residue_install_dirs 的用途）。
-        on_disk = [v for v, _p in installed_versions(self.component)]
-        on_disk += [v for v, _p in residue_install_dirs(self.component)]
-        extras = [v for v in dict.fromkeys(on_disk) if v not in known]
-        for ver in extras:
-            cv = ComponentVersion(version=ver, url_map={}, archive_map={})
-            key = _semver_key(ver)
-            pos = len(result)
-            for i, existing in enumerate(result):
-                if _semver_key(existing.version) < key:
-                    pos = i
-                    break
-            result.insert(pos, cv)
-        return result
-
-    def _refresh_installed_marks(self) -> None:
-        """给磁盘上已装的版本挂绿勾；只动 DecorationRole，不碰条目文本。
-
-        为什么不写成文本前缀：下拉框条目文本是版本反查的唯一键（_current_version /
-        repopulate(preferred=…) 都按 currentText 匹配），加「✓」会让选版、安装、
-        卸载与配置保存全部错位。图标是纯装饰数据，不参与任何反查。
-
-        **所有组件都挂，不分multi_version**（2026-10-06 改）。原先这里对
-        `multi_version=False` 的组件直接 return，理由是"它们没有版本并存的概念"——
-        但下拉框里照样列了具体版本（如 tomcat 9 / nginx 1.26），用户装完一个版本后
-        那个版本就该被标出来，否则"我装的是哪个"只能靠记忆。实测：python 有勾而
-        jenkins / nacos / activemq / powershell 全都没有，正是这个 return 造成的。
-        `multi_version` 只管"能不能多版本并存"（R3 语义），不该管"要不要显示已装"。
-        """
-        # 只下载型组件永远没"已装"这回事：勾的判据是磁盘目录，它一个字节都不往
-        # ~/.env-tools 下写。这里短路，免得以后有人给它加了落盘就把勾带出来。
-        if self.component.download_only:
-            return
-        versions = self._combo_version_list()
-        # F4 护栏：下面的循环按 enumerate(versions) 的行号往 combo 写数据，前提是
-        # 行数与下拉框清单 1:1。哪天有调用点在改清单的同时没重灌 combo（搜索过滤、
-        # repopulate 时机变化），按位写会写歪或直接 IndexError——宁可这一轮不刷勾，
-        # 也不写歪：行数不齐就整轮跳过。
-        if self.version_combo.count() != len(versions):
-            return
-        installed = {v for v, _p in installed_versions(self.component)}
-        icon = _installed_icon()
-        empty = QIcon()
-        for i, cv in enumerate(versions):
-            self.version_combo.setItemData(i, icon if cv.version in installed else empty,
-                                           Qt.DecorationRole)
-
-    # ------------------------------------------------------------------
-    def _reload_combo_items(self, preferred: Optional[str] = None) -> None:
-        """把下拉框清单（含"已装但清单里没有"的合成项）灌进 combo，并重挂"已装"图标。"""
-        versions = self._combo_version_list()
-        labels = [self._display_label(v) for v in versions]
-        # 若首次调用（combo 里还没内容），走普通 addItems 路径
-        if self.version_combo.count() == 0:
-            self.version_combo.blockSignals(True)
-            self.version_combo.addItems(labels)
-            # 默认选中**已安装的那个**，不是清单第一项（真机 2026-10-06 查出来的）。
-            # 离线候选清单会落后于实际安装版本：jenkins 候选首位 2.568.3、实装 2.580.1，
-            # 无条件选第一项会让下拉框停在一个没装的版本上——绿勾全是空的、
-            # 点"配置环境变量"或"卸载"会对着不存在的目录动手。
-            # 找不到任何已装版本时才退回第一项（首装场景就该选清单首位）。
-            idx = 0
-            # 只下载型组件磁盘上永远不会有它，这次扫描纯属白跑 —— 而且"建卡时不碰磁盘"
-            # 是这类组件的契约之一，留着它以后就没法证明"它真的不落盘"。
-            if not self.component.download_only:
-                installed = {v for v, _p in installed_versions(self.component)}
-                for i, cv in enumerate(self._combo_version_list()):
-                    if cv.version in installed:
-                        idx = i
-                        break
-            self.version_combo.setCurrentIndex(idx)
-            self.version_combo.blockSignals(False)
-            self.version_combo._committed_text = self.version_combo.currentText()
-            self._refresh_installed_marks()
-            return
-        self.version_combo.repopulate(labels, preferred=preferred)
-        # repopulate 内部 clear() 会连带销毁旧条目的 DecorationRole 数据，
-        # 所以装载出口的两条路径都得重挂一次，否则抓取线程回填版本后标记全丢。
-        self._refresh_installed_marks()
-
-    def set_versions(self, versions: List[ComponentVersion]) -> None:
-        """外部（抓取线程）用新版本列表替换现有列表。"""
-        if not versions:
-            return
-        prev_ver = self._current_version().version if self.component.versions else None
-        self.component.versions = versions
-        preferred_label = None
-        if prev_ver:
-            for cv in versions:
-                if cv.version == prev_ver:
-                    preferred_label = self._display_label(cv)
-                    break
-        self._reload_combo_items(preferred=preferred_label)
-        self._log("ok", f"已获取 {len(versions)} 个版本")
-
-    # ------------------------------------------------------------------
-    def _current_version(self) -> ComponentVersion:
-        """按显示 label 反查真实版本，兼容 SearchableComboBox 的可编辑文本。
-
-        必须与 `_reload_combo_items` 用同一份清单（含"已装但清单里没有"的合成项）：
-        两处不一致时，下拉框里明明显示着某个版本，反查却落回第一项，
-        用户以为在切 1.4.1、实际配出去的是 1.4.2。
-        """
-        text = self.version_combo.currentText().strip()
-        versions = self._combo_version_list()
-        for cv in versions:
-            if self._display_label(cv) == text or cv.version == text:
-                return cv
-        idx = max(0, self.version_combo.currentIndex())
-        return versions[min(idx, len(versions) - 1)]
-
-    # ------------------------------------------------------------------
-    def on_install_clicked(self) -> None:
-        cv = self._current_version()
-        # 多源故障转移：urls_for_current() 返回按 R1 优先级排序的 URL 列表
-        urls = cv.urls_for_current()
-        if not urls:
-            # 优先使用组件配置的 unsupported_platform_hint（如 Docker 引导去 Docker Desktop 官网）
-            # 未配置时回退到通用提示
-            hint = self.component.unsupported_platform_hint
-            if hint:
-                self._log("error", hint)
-            else:
-                self._log("error", f"当前系统 {CURRENT_OS} 无可用下载地址。")
-            return
-
-        # 决定下载文件后缀
-        if self.component.installer_mode:
-            # 从 archive_map 取扩展名（exe / sh），其次从 URL 推断
-            ext = cv.archive_map.get(CURRENT_OS, "")
-            if not ext:
-                first_url = urls[0] if urls else ""
-                if first_url.endswith(".exe"):
-                    ext = "exe"
-                elif first_url.endswith(".sh"):
-                    ext = "sh"
-                else:
-                    ext = "bin"
-            suffix = f".{ext}"
-        else:
-            archive_ext = cv.archive_for_current()
-            # 按 archive_ext 计算下载文件后缀：
-            #   zip      → .zip
-            #   tar.gz   → .tar.gz
-            #   exe      → .exe        (单二进制 Windows，如 kubectl.exe)
-            #   war      → .war        (单文件，如 jenkins.war)
-            #   "" / bin → 空后缀       (单二进制 Linux/Mac，如 kubectl)
-            #   其它     → .<archive_ext>
-            if archive_ext == "zip":
-                suffix = ".zip"
-            elif archive_ext in ("tar.gz", "tgz"):
-                suffix = ".tar.gz"
-            elif archive_ext == "exe":
-                suffix = ".exe"
-            elif archive_ext == "war":
-                suffix = ".war"
-            elif archive_ext in ("", "bin"):
-                suffix = ""
-            else:
-                suffix = "." + archive_ext
-
-        download_dir = CONFIG_DIR / self.component.key / "downloads"
-        ensure_dir(download_dir)
-        dest = download_dir / f"{self.component.key}-{cv.version}{suffix}"
-
-        self.progress.setValue(0)
-        self.btn_install.setEnabled(False)
-        self.btn_configure.setEnabled(False)
-        self.btn_cancel.setVisible(True)
-        self.btn_cancel.setEnabled(True)
-
-        self.worker = DownloadWorker(urls, dest)
-        self.worker.progress.connect(self._on_progress)
-        self.worker.log.connect(self._log)
-        self.worker.finished_ok.connect(lambda p: self._on_download_ok(Path(p), cv))
-        self.worker.finished_fail.connect(self._on_download_fail)
-        self.worker.start()
-
-    # ------------------------------------------------------------------
-    def on_open_official_page_clicked(self) -> None:
-        """「官网下载」那颗按钮：打开组件官网，由用户自己在那里下载。
-
-        适用于 `official_page_only` 的组件 —— 官方没有可直接下载的安装包地址
-        （只给网页入口 / 要真机抓包 / 只能用 npm・pip・插件装）。用户 2026-10-15 的要求：
-        与其因为"拿不到直链"就不放这张卡，不如给一颗「官网下载」，点开浏览器自己去下。
-
-        URL 取 `official_url`（R19 那张**人工登记**的表），不从下载地址推导 ——
-        与 R19 同一条纪律。没登记就报错而不是打开空页面（护栏已保证这类组件必有登记）。
-        """
-        url = self.component.official_url
-        if not url:
-            self._log("error", f"{self.component.display_name} 没有登记官网地址，打不开。")
-            return
-        QDesktopServices.openUrl(QUrl(url))
-        self._log("info", f"已在浏览器打开 {self.component.display_name} 的官网：{url}"
-                          "（本工具不代下、不代装，去官网自己下）")
-
-    def on_download_clicked(self) -> None:
-        """「开发工具」那颗「下载」：把官方安装包下到用户挑的目录，到此为止。
-
-        为什么不复用 on_install_clicked：那条链的收尾是
-        `install_downloaded` → `_configure_after_extract` → `apply_active_version`
-        → `_configure_env`，**每一步都在写注册表 / shell rc**（且 `_configure_env`
-        连 env_var 为空都会往 PATH 里塞一条）。共用一个槽位，等于给以后
-        "顺手在这里加一行配置"留门 —— 分开写才是把"这类组件不碰环境"钉死。
-        """
-        cv = self._current_version()
-        arts = cv.download_artifacts()
-        if not any(a.urls for a in arts):
-            self._log("error", self.component.unsupported_platform_hint
-                      or f"当前系统 {CURRENT_OS} 无可用下载地址。")
-            return
-        # 先问要哪一种产物，再问下到哪儿：反过来会让用户"选了半天目录又弹一次"。
-        art = pick_download_artifact(arts, self,
-                                     self.btn_install.mapToGlobal(
-                                         QPoint(0, self.btn_install.height())))
-        if art is None:
-            return          # 菜单上按了 Esc：什么都不该发生
-        start = load_download_dir()
-        chosen = QFileDialog.getExistingDirectory(self, "选择安装包保存位置", str(start))
-        if not chosen:
-            return          # 用户点了取消：什么都不该发生
-        dest_dir = Path(chosen)
-        suffix = (".zip" if art.fmt == "cli"
-                  else f".{art.fmt}" if art.fmt and art.fmt != "bin" else "")
-        dest = _unique_download_path(dest_dir / f"{self.component.key}-{cv.version}{suffix}")
-        save_download_dir(dest_dir)
-
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.btn_install.setEnabled(False)
-        self.btn_cancel.setVisible(True)
-        self.btn_cancel.setEnabled(True)
-
-        self.worker = DownloadWorker(art.urls, dest, None,
-                                     _MAGIC_BY_EXT.get(art.fmt, b""))
-        self.worker.progress.connect(self._on_progress)
-        self.worker.log.connect(self._log)
-        self.worker.finished_ok.connect(lambda p: self._on_download_only_ok(Path(p), art))
-        self.worker.finished_fail.connect(self._on_download_only_fail)
-        self.worker.start()
-
-    def _on_download_only_ok(self, path: Path, art: DownloadArtifact) -> None:
-        self.progress.setValue(100)
-        self.btn_cancel.setVisible(False)
-        self.btn_cancel.setEnabled(False)
-        hint = ("双击这个文件自己装，安装目录由你在安装向导里选。" if art.fmt == "exe"
-                else "解压到任意目录即可使用，不需要安装。")
-        try:
-            size_txt = human_size(path.stat().st_size)
-        except OSError as exc:
-            # 下载线程说成功了却读不到文件（被杀软秒删、目录被移动）：
-            # 记一条错误就返回，别在 Qt 槽里抛出去，也别弹一个指向空气的对话框。
-            self._log("error", f"下载报告成功，但读不到文件 {path}：{exc}")
-            self._sync_action_buttons()
-            return
-        self._log("ok", f"已下载到 {path}（{size_txt}，"
-                        f"{art.label}）。本工具**不解压、不安装、不配置环境变量** —— {hint}")
-        answer = QMessageBox.question(
-            self, "下载完成",
-            f"{path.name}\n已保存到：\n{path.parent}\n\n要打开所在文件夹吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if answer == QMessageBox.Yes and not _open_in_file_manager(path.parent):
-            self._log("warn", f"打不开文件夹，请自己到 {path.parent} 找它")
-        self.btn_install.setEnabled(True)
-
-    def _on_download_only_fail(self, message: str) -> None:
-        # 取消走的是同一个 finished_fail（沿用 DownloadWorker 的既有约定），
-        # 那种情况不该报"失败"，只记一句就好。
-        level = "warn" if "取消" in message else "error"
-        self._log(level, f"下载未完成：{message}")
-        self.btn_cancel.setVisible(False)
-        self.btn_cancel.setEnabled(False)
-        self.btn_install.setEnabled(True)
-
-    # ------------------------------------------------------------------
-    def _on_progress(self, downloaded: int, total: int) -> None:
-        if total > 0:
-            self.progress.setValue(int(downloaded * 100 / total))
-            self.progress.setFormat(f"{human_size(downloaded)} / {human_size(total)}")
-        else:
-            # 未知总长度
-            self.progress.setRange(0, 0)
-            self.progress.setFormat(f"{human_size(downloaded)}")
-
-    # ------------------------------------------------------------------
-    def _on_download_ok(self, path: Path, cv: ComponentVersion) -> None:
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100)
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.setVisible(False)
-
-        try:
-            # 落位实现只有一处（模块级 install_downloaded）：界面与真机演练走同一条路径，
-            # 演练绿灯才等价于"用户点下去会成功"。
-            final = install_downloaded(self.component, cv.version, path,
-                                       _LoggerAdapter(self._log))
-            self._extracted_path = final
-            # 自动尝试配置环境变量
-            self._configure_after_extract(final)
-        except Exception as exc:
-            self._log("error", f"安装/配置失败：{exc}\n{traceback.format_exc()}")
-        finally:
-            # 按钮状态统一交给 _sync_action_buttons（已装的版本不许被重新点亮）
-            self.btn_configure.setEnabled(True)
-            self._sync_action_buttons()
-            # 装成功与否都会在磁盘上留下（或不留）目录，勾的有无正由磁盘决定，
-            # 这里统一刷新一次，省得在两个分支各写一遍。
-            self._refresh_installed_marks()
-            # _detect_status 会根据探测结果再决定 btn_configure 是否禁用
-            self._detect_status()
-
-    # ------------------------------------------------------------------
-    def _run_installer(self, installer_path: Path, target_dir: Path) -> None:
-        """静默运行安装器（用于 Miniconda 之类）。实现见模块级 _run_installer_for。"""
-        _run_installer_for(self.component, installer_path, target_dir, self._log)
-
-    # ------------------------------------------------------------------
-    def _on_download_fail(self, msg: str) -> None:
-        self.btn_configure.setEnabled(True)
-        self._sync_action_buttons()
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.setVisible(False)
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        if msg and msg != "用户取消":
-            QMessageBox.warning(self, "下载失败", f"{self.component.display_name} 下载失败：\n{msg}")
-
-    # ------------------------------------------------------------------
-    def on_cancel_clicked(self) -> None:
-        if self.worker and self.worker.isRunning():
-            self.worker.cancel()
-
-    # ------------------------------------------------------------------
-    def on_uninstall_clicked(self) -> None:
-        """
-        点击卸载按钮：弹二次确认 → 调 component.uninstall(version) → 输出日志 → 刷新状态。
-
-        卸载是不可逆操作，所以先弹 QMessageBox.question 确认；用户点 Yes 才执行。
-        """
-        # spec §5 运行中禁止卸载。按钮置灰是第一道，这里是第二道：置灰状态可能被
-        # 其它同步路径顶掉，而"边跑边删目录"删掉的正是服务进程正在写的日志与数据。
-        if self.component.launch is not None and \
-                SERVICE_MANAGER.status(self.component.key, self.component).state == "running":
-            reason = "请先停止运行中的 %s 再卸载" % self.component.display_name
-            self._log("warn", reason)
-            QMessageBox.warning(self, "无法卸载", reason)
-            self._refresh_launch_state()
-            return
-        cv = self._current_version()
-        # 二次确认：卸载会删除本地目录、清理环境变量与 PATH，不可逆。
-        # 正文（"删哪些" + "数据去哪儿"）由纯函数 uninstall_confirm_text 统一拼，
-        # 后者按组件区分数据去处 —— 计划一那句对 Nacos 是半句真话。
-        # 确认框尾巴按组件是否多版本分叉：多版本现在只动选中的那个版本，
-        # 旧的"以实际装着的目录为准"在多选并存场景下会变成假话；
-        # 非多版本组件的原文逐字保持不变。
-        tail = ("（只删除选中的这一个版本，其他已装版本不动；"
-                "若删掉的正是当前生效版本，会自动切到剩余里版本号最高的那个）"
-                if self.component.multi_version else
-                "（若所选版本与实际安装版本不一致，会以实际装着的目录为准）")
-        reply = QMessageBox.question(
-            self,
-            "确认卸载",
-            f"确定要卸载 {self.component.display_name} {cv.version} 吗？\n\n"
-            f"将执行以下操作：\n"
-            f"{uninstall_confirm_text(self.component)}\n\n"
-            f"{tail}",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            self._log("info", f"已取消卸载 {self.component.display_name} {cv.version}")
-            return
-        try:
-            # R3.19：若之前为了让**这个版本**生效而提权改过系统变量，先按原文还原再删目录。
-            # 不还原的话，系统 PATH 最前会留下一条指向即将消失的目录的死条目 ——
-            # 那比"没生效"更糟：全机所有程序的 PATH 里都多一条失效路径。
-            fix_entry = load_machine_fix_map().get(self.component.key)
-            if fix_entry and EnvManager._same_path(
-                    str(fix_entry.get("home") or ""),
-                    str(self.component.install_dir(cv.version))):
-                back = revert_machine_fix(
-                    self.component,
-                    log=lambda m: self._log("error" if ("失败" in m or "未完成" in m)
-                                            else "info", m))
-                if not back.get("ok"):
-                    self._log("error", "系统变量还原未完成，已中止卸载以免留下失效条目："
-                              + str(back.get("error") or ""))
-                    return
-                self._refresh_external_section()
-            self._log("info", f"开始卸载 {self.component.display_name} {cv.version}")
-            # 调用 Component.uninstall 执行实际卸载，返回中文摘要
-            summary = self.component.uninstall(cv.version)
-            self._log("ok", f"卸载完成：{summary}")
-            # 磁盘上少了一个版本目录，下拉框里它的勾必须同时消失
-            self._refresh_installed_marks()
-            # 卸载后重新检测状态，刷新状态胶囊与按钮启用状态
-            self._detect_status()
-        except Exception as exc:
-            self._log("error", f"卸载失败：{exc}")
-
-    # ------------------------------------------------------------------
-    def _path_hit_version(self) -> Optional[str]:
-        """按 PATH 顺序找出命令行**实际**会命中的"本工具装的那个版本"。
-
-        读的是持久层 PATH（新开终端真正会用到的那份），不是 os.environ —— 后者只是本进程
-        启动时的快照，可能被之前的安装/切换改脏。找不到属于本组件的条目时返回 None。
-        """
-        comp = self.component
-        if not comp.exec_name:
-            return None
-        root = str(CONFIG_DIR / comp.key)
-        names = [comp.exec_name]
-        if CURRENT_OS == "Windows" and not os.path.splitext(comp.exec_name)[1]:
-            names = [comp.exec_name + s for s in (".exe", ".cmd", ".bat", "")]
-        for entry in EnvManager.read_user_path_entries():
-            if not EnvManager._under_root(entry, root):
-                continue
-            for ver, path in installed_versions(comp):
-                bin_dir = (path / comp.path_subdir) if comp.path_subdir else path
-                if not EnvManager._same_path(str(bin_dir), entry):
-                    continue
-                for name in names:
-                    if (bin_dir / name).exists():
-                        return ver
-        return None
-
-    def _expected_bin_dir(self, version: str) -> Path:
-        """生效版本"应当"出现在 PATH 里的那个目录（写变量与复验共用一套算法）。"""
-        home = self.component.install_dir(version)
-        return home / self.component.path_subdir if self.component.path_subdir else home
-
-    def _path_effective_check(self, active: Optional[str]) -> Tuple[str, Optional[str]]:
-        """复验：按系统合成的 PATH 顺序，命令行第一个命中的目录是不是生效版本该在的那个。
-
-        返回 ("ok", None) | ("shadowed", 抢走命令的目录) | ("unknown", None)。
-        unknown 含"拿不到合成环境"和"PATH 里根本没有这个命令"两种，都不许当成通过：
-        前者是没测，后者说明命令压根不在 PATH 上。
-
-        为什么必须有这一步（2026-09-30 真机实测）：用户 PATH 整体排在系统 PATH 之后，
-        且系统 PATH 里的 %JAVA_HOME%\\bin 是按**系统**表展开定死的 —— 我们把
-        JAVA_HOME 与自己的 PATH 条目都写对了，命令行仍可能命中用户自装的那个版本。
-        只报"已切到 X"就是假话。
-        """
-        if not active or not self.component.exec_name:
-            return "unknown", None
-        composed = EnvManager.composed_env()
-        path_value = composed.get("PATH")
-        if not path_value:
-            return "unknown", None
-        exec_name = self.component.exec_name
-        names = ([exec_name] if CURRENT_OS != "Windows"
-                 else ([exec_name + s for s in (".exe", ".cmd", ".bat", "")]
-                       if not os.path.splitext(exec_name)[1] else [exec_name]))
-        expected = str(self._expected_bin_dir(active))
-        # 走目录清单缓存，而不是逐条 os.path.exists：合成 PATH 上有几十个条目，
-        # 每个条目 × 4 个后缀，而这张表在 88 张卡建卡时会被重复问同一批目录
-        # 两万次上下（详见 _path_dir_listing 的说明）。
-        upper = (lambda s: s.upper()) if sys.platform == "win32" else (lambda s: s)
-        for entry in path_value.split(";"):
-            entry = entry.strip()
-            if not entry:
-                continue
-            try:
-                listing = _path_dir_listing(entry)
-            except (OSError, ValueError):
-                continue
-            if any(upper(n) in listing for n in names):
-                return ("ok", None) if EnvManager._same_path(entry, expected) else ("shadowed", entry)
-        return "unknown", None
-
-    def detail_lines(self) -> list:
-        """组装详情正文，返回 [(小标题, 段落), ...] —— 固定四段式。
-
-        「它是什么」与「怎么用」来自两张登记表；「本工具会替你做什么」由能力位
-        现场派生（不新写文案，避免第二份真相）；「平台说明」登记了才显示。
-        data_note（数据去处）与版本清单**不进详情**：前者归卸载确认框，
-        后者下拉框里就在 —— 详情只回答"这是什么、怎么用"两个问题。
-        """
-        comp = self.component
-        out: list = []
-        if getattr(comp, "summary", ""):
-            out.append(("它是什么", comp.summary))
-        usage = COMPONENT_USAGE.get(comp.key, "")
-        if usage:
-            out.append(("怎么用", usage))
-
-        # 本工具替你做的事：全部从既有登记派生，措辞统一用分号分隔的短句。
-        if comp.download_only:
-            todo = ["官方安装包下到你在弹窗里选的目录（记住上次位置）",
-                    "不解压、不写环境变量、不代跑安装程序：安装由你自己确认"]
-        else:
-            todo = ["镜像优先下载，失败自动换源",
-                    "解压到本工具目录并写好环境变量与 PATH",
-                    "装完后台自检版本号回填到卡片"]
-            spec = comp.launch
-            if spec is not None:
-                # 派生口是「主口 + 偏移」，不是绝对端口（真机 2026-10-12 我自己把
-                # etcd 显示成「端口 2379、1」过一次）。算法与 choose_ports() 一致。
-                ports = [spec.main_port] + [spec.main_port + int(o)
-                                            for o in spec.port_offsets]
-                ports += [int(p) for p in spec.extra_ports]
-                stop = "一键启停"
-                if spec.console_path:
-                    stop += f"，控制台在 {spec.main_port}{spec.console_path}"
-                todo.append(f"{stop}（端口 {'、'.join(str(p) for p in ports)}，"
-                            f"整簇都在听才算运行中）")
-            if supports_external_takeover(comp):
-                todo.append("可接管你本机已装的那一份，并可一键还原")
-        out.append(("本工具会替你做什么", "；".join(todo) + "。"))
-
-        if comp.unsupported_platform_hint:
-            out.append(("平台说明", comp.unsupported_platform_hint))
-        return out
-
-    def _open_wsl_wizard(self) -> None:
-        """打开主窗的 WSL 向导（卡片与标题栏共用同一个对话框实例）。"""
-        self.wsl_requested.emit()
-
-    def on_detail_clicked(self) -> None:
-        """打开详情对话框。无副作用：只读地展示登记表里已有的事实。"""
-        dlg = ComponentDetailDialog(self.component, self.detail_lines(), self)
-        # 2026-10-13 修：用 show() 而不是 exec()，modal=False 让 eventFilter 能捕获
-        # "点击外部"的动作（exec() 会变成真正模态，把鼠标事件全吞掉）。show() 后
-        # 对话框虽然还带"知道了"按钮，但用户习惯外点即关，体验更好。
-        dlg.setModal(False)
-        dlg.show()
-
-    def active_version(self) -> Optional[str]:
-        """当前生效版本：active 登记表 → 持久层 XXX_HOME 反推 → PATH 实际命中。
-
-        第三级兜底是必要的：老配置既没登记表、HOME 又被手工清过时，PATH 里那条
-        本工具写入的条目就是唯一的事实来源。
-        """
-        if not self.component.multi_version:
-            return None
-        return (load_active_map().get(self.component.key)
-                or infer_active_from_env(self.component)
-                or self._path_hit_version())
-
-    def _log_verification_hint(self, since_epoch: Optional[float] = None) -> None:
-        """切换后给出可直接复制的校验命令，并点名"比这次切换更早、还开着的终端"。
-
-        写这么细是因为真实踩过的坑：Windows 是把环境块**复制**给新进程的，
-        Windows Terminal 的新标签页、IDE 里新开的终端都还继承着宿主进程那份旧环境。
-        用户按"重开终端"的字面意思操作，看到的仍然是切换前的版本，
-        于是以为切换没生效（2026-09-30 真机反馈）。
-        只讲道理没用——同一天实测：注册表与新进程都是 1.4.1，用户屏幕上那个
-        PowerShell 进程创建于切换前 12 分钟。所以这里直接把 pid 和起始时间摆出来。
-        """
-        exe = self.component.exec_name or ""
-        args = " ".join(self.component.version_args or ["--version"])
-        lines = ["校验是否真生效（必须在切换之后新启动的终端里跑）："]
-        if exe:
-            lines.append(f"    where {exe}      ← 应当指向上面那个目录")
-            lines.append(f"    {exe} {args}")
-        if self.component.env_var:
-            lines.append(f"    echo %{self.component.env_var}%      ← cmd 里看变量值")
-        lines.append("不想重开，可以在当前 PowerShell 里先刷新再验：")
-        lines.append("    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine')"
-                     " + ';' + [Environment]::GetEnvironmentVariable('Path','User')")
-        lines.append("注意：Windows Terminal 的新标签页、IDE 里新开的终端都还是旧环境，"
-                     "要把整个 Windows Terminal / IDE 关掉重开。")
-        if since_epoch:
-            try:
-                procs = list_shell_processes()
-            except Exception:
-                procs = []
-            lines.extend(stale_shell_lines(procs, since_epoch, os.getpid()))
-        self._log("info", "\n".join(lines))
-
-    # ------------------------------------------------------------------
-    def _apply_active(self, version: str) -> bool:
-        """把指定版本设为生效版本；成功后写登记表并刷新界面。
-
-        返回: bool  成功与否。失败原因已在日志里，界面不再处理异常。
-
-        刷新已装勾是必要的：apply_active_version 中途失败会回滚磁盘/环境状态，
-        生效版本变了也可能连带影响状态探测读到的目录，图标得跟磁盘重新对齐。
-        """
-        t_switch = time.time()
-        # §4.3 两条键互斥 + R3.19：接管过外部版本、或为系统变量做过提权改动时，
-        # 都要先原样还原再切工作区版本，否则系统 PATH 最前还插着旧那条，
-        # 切完命令行仍是旧版本。
-        def _release_sink(text: str) -> None:
-            low = str(text)
-            level = ("error" if ("失败" in low or "未完成" in low or "未通过" in low)
-                     else "warn" if ("取消" in low or "未能" in low or "仍" in low)
-                     else "info")
-            self._log(level, low)
-
-        release = release_machine_state(
-            self.component, log=_release_sink,
-            reason="切回工作区版本")
-        # 不再回放 release["steps"]：底层各函数已把每一步打进 log（2026-10-21 修
-        # "同一步打印两遍"）。这里只处理终态。
-        if not release.get("ok"):
-            self._log("error", "接管/系统变量还原未完成，已中止本次切换以免留下半截状态："
-                      + str(release.get("error") or ""))
-            return False
-        try:
-            steps = apply_active_version(self.component, version)
-        except SwitchError as exc:
-            self._log("error", str(exc))
-            return False
-        for step in steps:
-            self._log("error" if ("失败" in step) else "ok", step)
-        save_active_version(self.component.key, version)
-        # 写完必须复验"新终端实际会命中谁"：PATH 是系统段 + 用户段拼出来的，
-        # 我们写的是用户段，完全可能被前面那条（用户自装的版本）压住。
-        verdict, shadow = self._path_effective_check(version)
-        if verdict == "ok":
-            self._log("ok", f"复验通过：新开的终端会用到 {self._expected_bin_dir(version)}")
-            self._log_verification_hint(t_switch)
-        elif verdict == "shadowed":
-            self._handle_shadowed_after_switch(version, shadow, t_switch)
-        else:
-            self._log("warn", "未能复验新终端会用到哪个目录（拿不到系统合成后的环境），"
-                              "请重开一个终端手动确认一次。")
-            self._log_verification_hint(t_switch)
-        self._refresh_installed_marks()
-        self._detect_status()
-        return True
-
-    def _handle_shadowed_after_switch(self, version: str, shadow: Optional[str],
-                                      since_epoch: float) -> None:
-        """切换后仍被更靠前的目录压住时，**能自己解决的就自己解决**（R3.19）。
-
-        判据是"抢命令的那条写在哪一段"（shadow_location），不是猜：
-          · 写在用户段 → 把我们那条让到用户段最前即可，**零提权**；
-          · 写在系统段 → 用户级永远压不住，问一次是否用管理员权限插到系统段最前；
-          · 两段都找不到 → 只如实报告，不提权（改系统变量也未必对症）。
-        前两步只在白名单组件上做：那是"要不要动用户机器 PATH"的显式白名单，
-        非白名单组件维持"只报告"的老行为（R3.17 的同一道闸）。
-        """
-        exec_name = self.component.exec_name or ""
-        expected = str(self._expected_bin_dir(version))
-        head = (f"环境变量已切到 {version}，但复验发现新终端里 {exec_name} 仍会先命中 "
-                f"{shadow} —— 它排在 PATH 更前面（多半是系统级变量或你自己装的版本）。")
-        where = shadow_location(str(shadow or "")) if shadow else "outside"
-        whitelisted = supports_external_takeover(self.component)
-
-        # ① 用户段内部还有救：把我们那条让到用户段最前，再复验一次（零提权）
-        if whitelisted and where == "user":
-            try:
-                if prepend_user_path_entry(expected):
-                    self._log("info", f"已把本工具那条提到用户 PATH 最前：{expected}")
-            except Exception as exc:  # noqa: BLE001
-                self._log("warn", f"调整用户 PATH 顺序失败：{exc}")
-            verdict2, shadow2 = self._path_effective_check(version)
-            if verdict2 == "ok":
-                self._log("ok", f"复验通过：新开的终端会用到 {expected}")
-                self._log_verification_hint(since_epoch)
-                return
-            if shadow2:
-                shadow = shadow2
-                where = shadow_location(str(shadow))
-
-        # ② 系统段压着：只有改系统 Path 才有用，问一次（确认框 + UAC）
-        if whitelisted and where == "machine":
-            self._log("warn", head + "它在**系统变量**里，用户级写入压不住；"
-                                    "本工具可以帮你把这个版本插到系统 PATH 最前"
-                                    "（原有条目一条不删，随时可还原）。")
-            res = apply_workspace_machine(
-                self.component, version,
-                confirm_machine=self._confirm_machine_takeover,
-                log=lambda m: self._log(
-                    "error" if ("失败" in str(m) or "未通过" in str(m)
-                                or "未完成" in str(m))
-                    else "warn" if ("取消" in str(m) or "未能" in str(m))
-                    else "info", m))
-            if res.get("ok"):
-                self._log("ok", "已在系统级生效；新开的终端/IDE 才会读到新值")
-                self._log_verification_hint(since_epoch)
-                self._refresh_external_section()
-            elif res.get("verdict") == "cancelled":
-                self._log("warn", "已取消，系统变量未改动；命令行仍会用上面那个版本")
-            else:
-                self._log("error", str(res.get("error") or "改系统变量未成功"))
-            return
-
-        # ③ 两段都不是 / 不在白名单：如实报告，并说清为什么本工具不接手
-        self._log("warn", head + "它不在本工具的工作目录里，也不在本工具能改的"
-                                "「用户变量」里；需要你自己在「系统变量」的 PATH 里"
-                                "删掉/后移那条，再重开终端。")
-
-    # ------------------------------------------------------------------
-    def on_configure_clicked(self) -> None:
-        """仅配置环境变量。
-
-        多版本组件：把下拉框选中的版本设为"当前生效版本"（PATH 只留它一条）。
-        其他组件：沿用原有"取已装目录里语义版本最高的一个"的行为，不写 active 表。
-
-        为什么必须按下拉框选中的版本生效，而不是照旧取"目录名字典序最后一个"：
-        jdk 的下拉清单是内置大版本串 21/17/11/8，装了 21、17、8 时，
-        字符串排序会把 jdk-8 排到最后，
-        于是用户明明选的是 21，配出来的却是 8 —— 生效版本与所选版本必须一致。
-        """
-        install_root = CONFIG_DIR / self.component.key
-        if not install_root.exists():
-            self._log("warn", "尚未下载，请先执行“安装”。")
-            return
-        ordered = installed_versions(self.component)
-        if self.component.multi_version:
-            if not ordered:
-                self._log("warn", (f"未找到符合 {self.component.key}-<版本号> 命名的安装目录；"
-                                   f"可用『清理残留 PATH』自愈后重试"))
-                return
-            chosen = self._current_version().version
-            if chosen not in [v for v, _p in ordered]:
-                self._log("warn", (f"下拉框选的是 {chosen}，磁盘上没有对应目录；"
-                                   f"已装：{'、'.join(v for v, _p in ordered)}"))
-                return
-            self._apply_active(chosen)
-            return
-        if not ordered:
-            self._log("warn", "未找到已解压的安装目录。")
-            return
-        self._configure_env(ordered[0][1])
-        self._detect_status()
-
-    # ------------------------------------------------------------------
-    def _configure_after_extract(self, install_path: Path) -> None:
-        """安装/解压收尾时配置环境变量。
-
-        多版本组件走**原子切换**（写 XXX_HOME + 把本组件在 PATH 里的条目收敛成这一条
-        + 记 active 表），不能再走 _configure_env 的"追加一条"：装两个版本就会在 PATH 里
-        留下两条，命令行按顺序只认第一条，界面上说的"生效版本"就成了假话
-        （2026-09-30 用户真机反馈：bun 1.4.2 与 1.4.1 同时在 PATH）。
-        非多版本组件保持原有行为逐字不变。
-        """
-        comp = self.component
-        # 装完先核对"要放进 PATH 的目录里有没有可执行文件"（R3.22 的教训）：
-        # 指错目录只会表现为"切了但没生效"，用户无从自查，必须当场点名。
-        ok_dir, where = verify_bin_dir(comp, install_path)
-        if not ok_dir:
-            self._log("warn",
-                      f"装完核对：本工具准备放进 PATH 的目录里没有 {comp.exec_name}"
-                      + (f"，实际它在 {where}" if where else "（整个安装目录里都没找到）")
-                      + "。这会让「切换生效版本」失效 —— 命令行仍会命中机器上原有的那个。"
-                        "请把这段日志发给开发者，需要修正该组件的 path_subdir。")
-        if not comp.multi_version:
-            self._configure_env(install_path)
-            return
-        version = version_from_install_dir(comp, install_path)
-        if not version:
-            # 目录名不符合 <key>-<version> 约定（历史安装），无法登记生效版本，
-            # 退回老路径配置，至少让组件可用
-            self._configure_env(install_path)
-            return
-        self._log("info", f"多版本组件：把新装的 {version} 设为生效版本并收敛 PATH")
-        self._apply_active(version)
-
-    # ------------------------------------------------------------------
-    def _configure_env(self, install_path: Path) -> None:
-        """根据组件类型写入 XXX_HOME 与 PATH。"""
-        try:
-            comp = self.component
-            bin_dir = install_path / comp.path_subdir
-            if comp.env_var:
-                if CURRENT_OS == "Windows":
-                    EnvManager.set_windows_user_env(comp.env_var, str(install_path))
-                    EnvManager.append_windows_path(str(bin_dir))
-                else:
-                    rc = EnvManager.set_unix_env(comp.env_var, str(install_path))
-                    EnvManager.append_unix_path(str(bin_dir))
-                    self._log("info", f"已写入 {rc}")
-                self._log("ok", f"设置 {comp.env_var}={install_path}")
-                self._log("ok", f"追加 PATH：{bin_dir}")
-            else:
-                if CURRENT_OS == "Windows":
-                    EnvManager.append_windows_path(str(bin_dir))
-                else:
-                    rc = EnvManager.append_unix_path(str(bin_dir))
-                    self._log("info", f"已写入 {rc}")
-                self._log("ok", f"追加 PATH：{bin_dir}")
-
-            if CURRENT_OS != "Windows":
-                self._log("warn", "请打开新的终端或执行 `source ~/.zshrc` 让环境变量生效。")
-        except Exception as exc:
-            self._log("error", f"环境变量配置失败：{exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -21098,175 +17778,14 @@ class ServicePasswordDialog(QDialog):
         return self.pw.text()
 
 
-class ComponentDetailDialog(QDialog):
-    """组件详情：一屏说清"它是干嘛的、装完怎么用、数据在哪、平台有什么坑"。
-
-    **点击对话框之外的任何地方自动关闭**（2026-10-12 用户要求）：做法是给
-    QApplication 挂全局事件过滤器，鼠标按下位置落在对话框 frameGeometry 之外
-    就 accept()。这是详情弹窗该有的交互 —— 用户点开看一眼就继续点卡片，
-    不该被模态框"锁"住；保留「知道了」按钮给习惯用按钮的人。
-    正文用 QTextEdit 而不是 QLabel —— 用户要能**选中复制**里面的命令与变量名。
-    """
-
-    def __init__(self, comp, sections, parent=None):
-        super().__init__(parent)
-        self.comp = comp
-        self.setObjectName("componentDetailDialog")
-        self.setWindowTitle(f"{comp.display_name} · 详情")
-        self.resize(560, 520)
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 16, 16, 12)
-        v.setSpacing(10)
-
-        head = QLabel(comp.display_name)
-        head.setObjectName("detailTitle")
-        head.setFont(QFont("", 14, QFont.Bold))
-        v.addWidget(head)
-
-        # 官网一行（2026-10-14 用户要求"所有组件的详情页都加可点击官网链接，
-        # 有中国大陆官网的用大陆的，没有的用原本官网"）。
-        # 取值全部来自 COMPONENT_OFFICIAL_URLS（人工逐条核实），**不再从下载 URL
-        # 推导域名** —— 推导出来的是 api.adoptium.net / artifacts.elastic.co 这类
-        # 下载服务器，写成"官网"是误导。
-        #
-        # 链接文字与 href **必须同源**：早先的写法是文字显示下载域名、跳转却是官网，
-        # 于是出现"写着 archive.apache.org、点进去是 apache.org"。文字里的域名
-        # 直接从 URL 切出来，不另写一份字符串，两者就不可能对不上。
-        official = comp.official_url
-        if official:
-            domain = _url_netloc(official)
-            addr = QLabel(
-                f'官网：<a href="{official}">{_escape_html(comp.display_name)} · '
-                f'{_escape_html(domain)}</a>')
-            addr.setOpenExternalLinks(True)      # 点击直接走系统浏览器，不在软件内开
-            addr.setObjectName("detailHome")
-            addr.setStyleSheet("color:#7a8ea3;font-size:11px;")
-            addr.setToolTip(f"{official}\n点击用系统浏览器打开官方网站；"
-                            f"组件本体请用卡片上的「安装 / 下载」按钮。")
-            v.addWidget(addr)
-
-        body = QTextEdit(self)
-        body.setObjectName("detailBody")
-        body.setReadOnly(True)              # 只读但可选：用户要能复制里面的命令与变量名
-        body.setMinimumHeight(300)
-        body.setHtml(self._to_html(sections))
-        body.setStyleSheet(
-            "background:#fbfcfe;border:1px solid #e3e8ef;border-radius:8px;"
-            "padding:12px;color:#2b3640;font-size:13px;")
-        v.addWidget(body, stretch=1)
-
-        close = QPushButton("知道了")
-        close.setObjectName("secondaryBtn")
-        close.clicked.connect(self.accept)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(close)
-        v.addLayout(row)
-
-        # 点击外部关闭：挂到应用级过滤器，收到外部按下就收
-        self._app = QApplication.instance()
-        if self._app is not None:
-            self._app.installEventFilter(self)
-
-    def eventFilter(self, obj, ev) -> bool:
-        if ev.type() == QEvent.MouseButtonPress:
-            # 模态下点击其它窗口，事件仍会过应用级过滤器；用全局坐标判位置。
-            pos = _event_global_pos(ev)
-            if pos is not None and not self.frameGeometry().contains(pos):
-                # **先摘过滤器再关窗**：QDialog.accept() 不走 closeEvent
-                # （hide 才走），只靠 closeEvent 摘除会在 QApplication 上泄漏一个
-                # 活跃过滤器，之后全程序所有"窗口外"的点击都被它吞掉
-                # （合跑时实测毒死了 bt_multiversion 的 combo 弹出用例）。
-                # closeEvent 里那次 removeEventFilter 幂等保留，双保险。
-                self._detach_app_filter()
-                self.accept()
-                return True                # 事件已消费，避免再触发别处
-        return super().eventFilter(obj, ev)
-
-    def _detach_app_filter(self) -> None:
-        if self._app is not None:
-            try:
-                self._app.removeEventFilter(self)
-            except RuntimeError:
-                pass                       # app 已析构（关窗收尾竞态），无事可做
-            self._app = None
-
-    def hideEvent(self, ev) -> None:       # noqa: N802
-        # accept()/reject() 关闭模态对话框走的是 hide，不是 close —— 泄漏的
-        # 真正出口在这里兜底（摘除是幂等的，_detach_app_filter 里置了 None）。
-        self._detach_app_filter()
-        super().hideEvent(ev)
-
-    def closeEvent(self, ev) -> None:       # noqa: N802
-        self._detach_app_filter()
-        super().closeEvent(ev)
-
-    @staticmethod
-    def _to_html(sections) -> str:
-        """[(小标题, 正文)] → HTML。正文里的 Markdown 星号在这里统一处理掉。
-
-        为什么在渲染层处理而不是逐条清洗文案表：表由多个会话共同维护，写法迟早
-        会带 `**强调**`；数据里保持作者的强调意图，界面按自己的媒介渲染 ——
-        QLabel 与 QTextEdit 都不认 Markdown，露出字面星号就是脏。
-        """
-        import html as _html
-        parts = []
-        for title, text in sections:
-            t = _html.escape(str(text or ""))
-            t = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=_re.S)
-            t = t.replace("`", "")            # 反引号在本项目正文里只是标记，去掉即可
-            parts.append(f"<div style='margin-bottom:12px'>"
-                         f"<div style='color:#4a7fd0;font-weight:600;"
-                         f"margin-bottom:3px'>{_html.escape(str(title))}</div>"
-                         f"<div style='line-height:150%'>{t}</div></div>")
-        return "".join(parts) or "<div>这个组件还没有写说明。</div>"
-
-
-def _url_netloc(url: str) -> str:
-    """从 URL 里切出域名（netloc），给详情页那个链接当文字用。
-
-    入参：
-      url：完整 URL，如 "https://www.navicat.com.cn/"。
-    返回：
-      域名，如 "www.navicat.com.cn"；切不出来返回空串。
-
-    为什么单独抽一个函数：链接文字与 href 必须同源。早期写法是文字写下载域名、
-    跳转写官网地址，两份字符串各写一遍，必然会出现"写着 A 点进去是 B"。
-    现在文字里的域名是从 href 那个 URL 现切出来的，结构上不可能对不上。
-    """
-    try:
-        import urllib.parse as _up
-        return _up.urlsplit(url).netloc
-    except BEST_EFFORT_ERRORS:
-        return ""
-
-
-def _escape_html(text: str) -> str:
-    """转义要插进 QLabel 富文本的片段（组件名里可能有 & 之类）。
-
-    与 ComponentDetailDialog._to_html 用的是同一个 html.escape（那里在函数体
-    里做局部导入），这里同样局部导入而不是提到模块级 —— 保持两处写法一致，
-    免得以后有人只改一处。
-    """
-    import html as _html
-    return _html.escape(str(text or ""))
-
-
-# 2026-10-14 移除了 comp_download_host()：它从组件的**下载 URL** 里推导"官方地址"
-# 域名，而推导结果绝大多数根本不是官网（api.adoptium.net、artifacts.elastic.co、
-# aka.ms、edgedl.me.gvt1.com 这类下载服务器，以及 39 个推成 github.com 仓库页）。
-# 详情页改用 COMPONENT_OFFICIAL_URLS 这张人工核实的表之后，它再无调用者，
-# 连同它在 tests/bt_component_detail_tests.py 里的两条用例一并移除。
-
-
-def _event_global_pos(ev):
-    """取鼠标事件的全局坐标（PySide6 版本差异兜底）。"""
-    gp = getattr(ev, "globalPosition", None)
-    if gp is not None:
-        p = gp()
-        return p.toPoint() if hasattr(p, "toPoint") else p
-    g = getattr(ev, "globalPos", None)
-    return g() if g is not None else None
+# 组件详情对话框已抽出到 ui/component_detail_dialog.py（规则 R30）。
+# 旧名字保留为 re-export：main.ComponentDetailDialog / main._url_netloc 仍有测试引用。
+from ui.component_detail_dialog import (  # noqa: E402
+    ComponentDetailDialog,
+    escape_html as _escape_html,
+    event_global_pos as _event_global_pos,
+    url_netloc as _url_netloc,
+)
 
 
 class SplashScreen(QDialog):
@@ -21686,2001 +18205,13 @@ class WslDialog(QDialog):
             QMessageBox.warning(self, "打开失败", f"{exc}")
 
 
-class MainWindow(QMainWindow):
-    @staticmethod
-    def current_components() -> Dict[str, "Component"]:
-        """只读的组件表。
+# 主窗口已抽出到 ui/main_window.py（规则 R30）。
+# 业务名以 _main.<name> 晚绑定，测试 patch main.* / 替换 main.QMessageBox 仍然生效。
+from ui import main_window as _main_window  # noqa: E402
 
-        2026-10-14 起这只是 `component_registry()` 的一层薄壳：卡片不再通过
-        MainWindow 这个**类**去拿组件表（那是"子组件依赖父容器"的方向倒置），
-        而是直接问模块级单例。这里保留是为了不破坏既有调用点与打桩点。
-        """
-        return component_registry()
+_main_window.configure(sys.modules[__name__])
+from ui.main_window import MainWindow  # noqa: E402
 
-    def __init__(self, splash: Optional["SplashScreen"] = None) -> None:
-        super().__init__()
-        self.setWindowTitle(APP_NAME)
-        # 设置窗口图标（任务栏、标题栏、Alt+Tab 切换显示）
-        # 使用项目内置的 assets/byte-tools.png，缺失时不报错
-        _icon_path = Path(__file__).parent / "assets" / "byte-tools.png"
-        if _icon_path.exists():
-            self.setWindowIcon(QIcon(str(_icon_path)))
-        self.resize(1000, 680)
-        # 标题栏的宽度预算必须用**真字体**量（`tools/bt_titlebar_budget.py`）：offscreen 平台的
-        # 字体度量大 ~1.6 倍（同一句 `v1.2.0` 的 minimumSizeHint 是 92，真实渲染是 54），
-        # 拿它当依据会把最小宽抬到根本不需要的位置。2026-10-12 实测量：chip 最长文案
-        # `↓ v1.10.0 待更新`(110) + 标题 + 五个按钮 + 三个窗口控制 = 697 像素，1000 这一档余量充足。
-        self.setMinimumSize(1000, 560)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
-
-        self.components = build_components()
-        # 灌进进程级登记表。全进程只保留这一份组件对象 —— 此前 __init__ 与
-        # _adopt_running → current_components() 各建一份，卡片用的和查前置依赖
-        # 用的不是同一批，等于白构造一次 88 个 Component（含全部版本表）。
-        register_components(self.components)
-        self._drag_pos: Optional[QPoint] = None
-        self._fetch_workers: List[VersionFetchWorker] = []
-        self._fetch_pending: int = 0
-        # 关窗标志：置位后不再派发抓取，也不再把抓取结果写回界面。
-        # 同时立模块级的 _CLOSING —— 卡片过去靠 getattr(self.window(), "_closing")
-        # 沿 Qt 父指针爬回窗口读私有属性，那等于让卡片知道窗口的内部状态。
-        self._closing: bool = False
-        _CLOSING.clear()
-        # 视图模式：grid（按宽度自动分列）/ list（恒 1 列）；_load_settings 会按
-        # config.json 覆盖它，老配置没有这个键时留在 grid，即"老用户自动获得新默认"。
-        self.view_mode: str = "grid"
-        # 2026-10-13 启动优化：卡片改为分帧异步构建（splash 显示进度，用户感知"秒开"）。
-        # 这里先记录"待建"列表，真控件由 _build_cards_async() 分帧建。列表里元素是
-        # (分类名, Component, 该 Tab 的容器) 三元组；建完后 self.cards / _tab_cards
-        # 里的占位 None 会被替换成真 ComponentCard。
-        self._pending_cards: List[Tuple[str, "Component", QWidget]] = []
-        self._splash: Optional["SplashScreen"] = splash
-        # 2026-10-14：这里原先取过 _startup_mono（monotonic 时间戳），供日志浮层的
-        # "启动后 N 秒内不自动弹"静默期使用。该静默期随自动弹出一起取消，故删除。
-        # 本次会话的日志文件标识（落盘用，见 _log_file_path）。在 __init__ 里定一次，
-        # 整条运行期不变 —— 同一次运行的日志必须落在同一个文件里，否则"另存为"
-        # 和"复制"会给用户一份东一段西一段的碎片。
-        self._session_stamp: str = time.strftime("%Y%m%d-%H%M%S")
-
-        self._build_ui()
-        self._apply_qss()
-        # 2026-10-13 启动优化：没有 splash（测试 / 复用窗口）时同步建卡；
-        # 有 splash（生产 main() 路径）时不建，由调用方在 show 后调 _build_cards_async。
-        if self._splash is None:
-            self._build_cards_async(synchronous=True)
-            self._load_settings()       # 建卡后才恢复配置（需要真卡片上的 version_combo）
-
-    def _build_cards_async(self, on_done: Optional[Callable[[], None]] = None,
-                            *, synchronous: bool = False) -> None:
-        """分帧建卡片：每帧 8 张，splash 显示进度，全部建完回调 on_done。
-
-        为什么必须分帧而不是一次性建：87 张卡的 ComponentCard 构造实测 ~460ms，
-        一次性建会让 splash 卡住 0.5 秒不动，用户以为没响应。分帧后 splash 的进度
-        文字每帧都在更新，"正在加载组件 32/88…" 是活的。
-
-        synchronous=True 时同步跑完（测试用：构造 MainWindow 后立刻调用，
-        不依赖事件循环）。生产路径必须传 on_done 且 synchronous=False（默认）。
-
-        注意：self.cards / self._tab_cards 在建完前是**空列表**，现有遍历代码
-        （刷新版本 / 存配置 / 关窗 / 搜索 / 启动停止）都是 `for card in self.cards:`，
-        空列表等于无害的空循环，不用改。建完后一次性填充。
-        """
-        batch = 8
-        total = len(self._pending_cards)
-        idx = {"i": 0}
-
-        def _step():
-            start = idx["i"]
-            end = min(start + batch, total)
-            if start >= total:
-                if on_done:
-                    on_done()
-                return
-            for i in range(start, end):
-                cat_name, comp, wrap = self._pending_cards[i]
-                card = ComponentCard(comp, self._append_log)
-                # 向导型卡片（WSL）把"打开向导"做成信号：卡片不该沿父指针爬回窗口
-                # 去调私有方法（bt_install_safety_tests 的依赖方向断言钉着这条）。
-                if comp.ui_action == "wsl":
-                    card.wsl_requested.connect(self._on_wsl_clicked)
-                card.setParent(wrap)
-                # 填充到 cards 与 _tab_cards（建完前它们是空列表）
-                self.cards.append(card)
-                # _tab_cards 按分类找索引：cat_name 在第几个 Tab
-                tab_idx = next(
-                    (k for k, t in enumerate(self._tab_base_titles)
-                     if t.startswith(cat_name + "（")), None)
-                if tab_idx is not None:
-                    self._tab_cards[tab_idx].append(card)
-                if self._splash is not None:
-                    self._splash.set_progress(f"正在加载组件 {i + 1}/{total}…")
-            idx["i"] = end
-            if end < total:
-                if synchronous:
-                    _step()          # 测试环境：同步递归跑完
-                else:
-                    QTimer.singleShot(0, _step)
-            else:
-                if on_done:
-                    on_done()
-
-        _step()
-
-    # ------------------------------------------------------------------
-    def _build_ui(self) -> None:
-        central = QWidget()
-        central.setObjectName("centralRoot")
-        self.setCentralWidget(central)
-
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        # ------- 自定义标题栏 -------
-        self.title_bar = QFrame()
-        self.title_bar.setObjectName("titleBar")
-        self.title_bar.setFixedHeight(48)
-        tb = QHBoxLayout(self.title_bar)
-        tb.setContentsMargins(14, 0, 8, 0)
-        tb.setSpacing(6)
-
-        title_label = QLabel(APP_NAME)
-        title_label.setObjectName("titleText")
-        title_label.setFont(QFont("", 12, QFont.Bold))
-        # 版本号只活在标题栏这枚 chip 上（底部状态条那份 2026-10-10 去掉了，重复）。
-        # 为什么 chip 在左上角而不是右边那排按钮里：右边已经挤了六个按钮，之前加一个
-        # 就把「清理残留 PATH」裁掉过（最小宽 1000 那次教训）；挪到软件名后面，
-        # 左边只多占一个 chip 的宽度，右边反而松一格。
-        title_label.setToolTip(f"{APP_NAME} v{APP_VERSION}")
-        tb.addWidget(title_label)
-
-        # 版本号 chip：常驻显示当前版本，点一下按当前状态分派（规则 R12）。
-        # 它同时是这四种状态的唯一指示灯：没查过 / 已是最新 / 有新版可下 / 没查到。
-        self.btn_version = QPushButton(f"v{APP_VERSION}")
-        self.btn_version.setObjectName("versionChip")
-        self.btn_version.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_version.setToolTip(
-            f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
-            "（启动后一天最多自动查一次）")
-        self.btn_version.clicked.connect(self._on_version_clicked)
-        self._chip_state = "idle"
-        self._chip_latest = ""
-        self._chip_folder: Optional[Path] = None
-        self._chip_pct: Optional[int] = None
-        self._update_res: dict = {}
-        tb.addWidget(self.btn_version)
-        tb.addStretch(1)
-
-        # GitHub 图标
-        self.btn_github = QPushButton("★ GitHub")
-        self.btn_github.setObjectName("iconBtn")
-        self.btn_github.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_github.setToolTip("获取最新版本")
-        self.btn_github.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL))
-        )
-        tb.addWidget(self.btn_github)
-
-        # 刷新版本列表按钮
-        self.btn_refresh = QPushButton("⟳ 刷新版本")
-        self.btn_refresh.setObjectName("iconBtn")
-        self.btn_refresh.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_refresh.setToolTip("重新从官网抓取所有组件的可用版本列表")
-        # clicked 会带 checked=False 当第一个实参：裸 connect 到 _start_fetch_versions
-        # 就等于 force=False，用户点刷新只会读缓存 —— 必须显式包一层传 force=True。
-        self.btn_refresh.clicked.connect(
-            lambda _checked=False: self._start_fetch_versions(force=True))
-        tb.addWidget(self.btn_refresh)
-
-        # 清理残留 PATH 按钮
-        self.btn_cleanup_path = QPushButton("🧹 清理残留 PATH")
-        self.btn_cleanup_path.setObjectName("iconBtn")
-        self.btn_cleanup_path.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_cleanup_path.setToolTip(
-            "删除 PATH 中指向本工具安装目录、但目录已经不存在的死条目\n"
-            "（手工删过安装目录时用到；其他程序的 PATH 条目不会改动）"
-        )
-        self.btn_cleanup_path.clicked.connect(self._on_cleanup_path_clicked)
-        tb.addWidget(self.btn_cleanup_path)
-
-        # 2026-10-21：WSL 曾经在标题栏有一个「🐧 WSL」快捷按钮，用户要求删掉 ——
-        # 「开发环境」里已经有同名卡片（点「安装向导」），两处入口只重复占宽。
-        # `_on_wsl_clicked` 保留：卡片的 wsl_requested 信号仍然接到它。
-
-        # 2026-10-14 按用户要求移除标题栏的两个按钮：
-        #   「🖥 开验证终端」「🩺 导出诊断」
-        # 原因：标题栏只留"每天都会用"的动作。这两个都属于"出问题时才用"，
-        # 常年占着标题栏最宽的两块地方却不点（实测这一行真实字体需 802 像素，
-        # 它们占了将近三分之一）。对应的能力没有丢：
-        #   · 导出诊断 —— 日志浮层里仍可通过「另存为」产出同样内容
-        #     （_save_log_to_file 把本次会话日志写出，配合落盘的 config.json
-        #     与日志已经覆盖了诊断报告的主要部分）
-        #   · 开验证终端 —— 环境变量是否真的生效，用户用系统自己的"新开一个
-        #     PowerShell 窗口"即可验证；本工具里那条 1~2 行的自查提示
-        #     （_refresh_logs 里的复制命令）仍然保留
-        # 处理函数一并删除，避免留下无人调用的死代码。
-
-        # 标题栏按钮定宽：空间不足时宁可让窗口最小宽去兜（见上面 setMinimumSize），
-        # 也不许把按钮压扁裁字。chip 也在名单里：它的文字按状态变
-        # （`v1.2.0` → `↓ v1.2.1 待更新`），不定宽的话一旦某档宽度紧张，布局会先压它 ——
-        # 那状态字就等于没写。真实字体下这一行共需约 660 像素
-        # （tools/bt_titlebar_budget.py 实测），1000 这一档余量充足，
-        # 定宽只是兜底。**这个数字只能用真实字体量**：offscreen 没有中文回退字体，
-        # 度量虚高约 1.6 倍，拿它判断会误判成"要裁字"然后白抬窗口最小宽。
-        #
-        # ⚠ 这个循环必须放在**所有**标题栏按钮建完之后（下面 btn_donate 之后）。
-        # 它原先在 btn_donate 创建之前，于是捐赠按钮一直是唯一漏网的：空间紧张时
-        # 被压扁的比例会先落到它身上。加按钮时务必检查自己在不在这个名单里。
-        for _btn in (self.btn_version, self.btn_github, self.btn_refresh,
-                     self.btn_cleanup_path):
-            _btn.setSizePolicy(QSizePolicy.Fixed, _btn.sizePolicy().verticalPolicy())
-
-        # 捐赠图标（不在 README 中提及）
-        self.btn_donate = QPushButton("♥")
-        self.btn_donate.setObjectName("donateBtn")
-        self.btn_donate.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_donate.setToolTip("支持作者")
-        self.btn_donate.clicked.connect(self._on_donate_clicked)
-        tb.addWidget(self.btn_donate)
-        # 上面那个定宽循环因为位置关系漏了它，在这里补上（见上面那段注释）
-        self.btn_donate.setSizePolicy(QSizePolicy.Fixed,
-                                      self.btn_donate.sizePolicy().verticalPolicy())
-
-        # 窗口控制按钮
-        self.btn_min = QPushButton("—")
-        self.btn_min.setObjectName("ctrlBtn")
-        self.btn_min.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_min.clicked.connect(self.showMinimized)
-        tb.addWidget(self.btn_min)
-
-        self.btn_max = QPushButton("▢")
-        self.btn_max.setObjectName("ctrlBtn")
-        self.btn_max.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_max.clicked.connect(self._toggle_max)
-        tb.addWidget(self.btn_max)
-
-        self.btn_close = QPushButton("×")
-        self.btn_close.setObjectName("closeBtn")
-        self.btn_close.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_close.clicked.connect(self.close)
-        tb.addWidget(self.btn_close)
-
-        outer.addWidget(self.title_bar)
-
-        # ------- 组件搜索条（在 Tab 之上，切 Tab 不会丢输入框） -------
-        self.search_bar = QFrame()
-        self.search_bar.setObjectName("searchBar")
-        sb = QHBoxLayout(self.search_bar)
-        sb.setContentsMargins(18, 12, 18, 10)
-        sb.setSpacing(10)
-
-        # 胶囊外壳：放大镜与输入框同属一个白色圆角块，聚焦时整条高亮，
-        # 而不是只给输入框描一圈边（原先那种细边框小方框显得零碎）。
-        self.search_shell = QFrame()
-        self.search_shell.setObjectName("searchShell")
-        self.search_shell.setProperty("focused", "false")
-        shell = QHBoxLayout(self.search_shell)
-        shell.setContentsMargins(12, 0, 8, 0)
-        shell.setSpacing(8)
-
-        self.search_icon = QLabel()
-        self.search_icon.setObjectName("searchIcon")
-        self.search_icon.setPixmap(self._make_search_icon().pixmap(16, 16))
-        shell.addWidget(self.search_icon)
-
-        self.search_box = QLineEdit()
-        self.search_box.setObjectName("compSearch")
-        self.search_box.setPlaceholderText("搜索组件名称…")
-        # 内置清空按钮在不同平台上图标差异大、颜色偏淡，这里自绘一个统一风格的 ×
-        self.search_box.setClearButtonEnabled(False)
-        self._clear_action = self.search_box.addAction(
-            self._make_clear_icon(), QLineEdit.TrailingPosition
-        )
-        self._clear_action.setToolTip("清空搜索")
-        self._clear_action.setVisible(False)
-        self._clear_action.triggered.connect(self.search_box.clear)
-        self.search_box.textChanged.connect(self._sync_clear_action)
-        self.search_box.textChanged.connect(self._apply_search)
-        # 焦点变化要联动外壳高亮，QSS 的 :focus 影响不到父级，用事件过滤器转发
-        self.search_box.installEventFilter(self)
-        # 占位文字默认偏深，调浅一点更接近现代输入框的观感
-        _pal = self.search_box.palette()
-        _pal.setColor(QPalette.PlaceholderText, QColor("#9aabbd"))
-        self.search_box.setPalette(_pal)
-        shell.addWidget(self.search_box, 1)
-
-        sb.addWidget(self.search_shell)
-
-        self.search_hint = QLabel("")
-        self.search_hint.setObjectName("searchHint")
-        sb.addWidget(self.search_hint)
-
-        # 视图切换与日志开关放在搜索条右侧的空白处，**不放标题栏**：标题栏已有
-        # 5 个按钮 + 3 个窗口控制，实测需要 ~992px，窗口才 1000 宽，再加必然
-        # 把已有的按钮压到裁字。
-        self.btn_view_mode = QPushButton("▦ 网格")
-        self.btn_view_mode.setObjectName("toolBtn")
-        self.btn_view_mode.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_view_mode.setToolTip(
-            "网格：按窗口宽度自动分成 2 列 / 3 列；列表：恒 1 列（卡片内容不变）")
-        self.btn_view_mode.clicked.connect(self._on_view_mode_clicked)
-        sb.addWidget(self.btn_view_mode)
-
-        self.btn_log = QPushButton("📋 日志")
-        self.btn_log.setObjectName("toolBtn")
-        self.btn_log.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_log.setToolTip("展开/收起运行日志（浮层，盖在卡片上，不挤压网格）")
-        self.btn_log.clicked.connect(self._on_log_button_clicked)
-        sb.addWidget(self.btn_log)
-
-        sb.addStretch(1)
-        outer.addWidget(self.search_bar)
-
-        # ------- 主体：卡片区（吃满中部）+ 日志浮层 -------
-        # 日志原先和卡片区按 3:2 分在同一个 QSplitter 里，展开/收起都会挤压网格。
-        # 现在卡片区独占中部，日志改成浮在它上面的浮层：不占布局空间，于是
-        # 列数与行数只由窗口宽度决定，开关日志不会让格子忽大忽小。
-
-        # 卡片区域：按 COMPONENT_CATEGORIES 分四个 Tab，每个 Tab 一条独立滚动栏。
-        # self.cards 仍是全量平铺列表——刷新版本 / 存取配置 / 关窗等探测都靠它遍历。
-        self.cards: List[ComponentCard] = []
-        self._tab_cards: List[List[ComponentCard]] = []
-        # `_tab_layouts[i]` 的语义从"直接装卡片"改成"装行的外层竖向布局"：
-        # 行本身是一个 QWidget，行里的 QHBoxLayout 才装格子。
-        # 用行容器而不是 QGridLayout，是因为 _restore_browse /
-        # _build_unified / _relayout_results 全靠 QBoxLayout 的 indexOf / insertWidget
-        # / 末尾 stretch —— 结果面板的"行"要能插进指定位置，QGridLayout 做不到。
-        self._tab_layouts: list = []
-        # `_tab_rows[key]`：Tab 用 0..N-1 的序号，统一结果面板用 RESULTS_KEY。
-        # 两者存的都是"行控件"（结果面板里一行就是某个分类下的一截卡片）。
-        self._tab_rows: dict = {}
-        self._tab_wraps: List[QWidget] = []
-        # Tab 标题的"干净"形态（分类名 + 组件数）。运行标记 `●` 是叠在它上面的，
-        # 搜索/退出搜索会重设标题，所以必须留着底稿，不能靠 tabText() 反推。
-        self._tab_base_titles: List[str] = []
-        try:
-            _path_index()      # 建卡前一次性批扫 PATH（R18）
-        except Exception:
-            pass
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("compTabs")
-        self.tabs.setDocumentMode(True)
-        self.tabs.setTabPosition(QTabWidget.North)   # 顶部横向，跨平台显式锁定
-        for cat_name, comps in group_components(self.components).items():
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setObjectName("cardsScroll")
-            cards_wrap = QWidget()
-            cards_wrap.setObjectName("cardsWrap")
-            cards_layout = CardColumnLayout(cards_wrap)
-            cards_layout.setContentsMargins(18, 18, 18, 18)
-            cards_layout.setSpacing(CARD_ROW_SPACING)
-            tab_cards: List[ComponentCard] = []
-            # 2026-10-13 启动优化：不在构造期建卡片控件，只记录占位（comp 引用）。
-            # 真卡片由 _build_cards_async() 分帧在 QTimer 回调里建（每帧 8 张，
-            # splash 显示进度，用户感知"秒开"）。cards 列表与 _tab_cards 在全部建完前
-            # 是**空列表**，建完后一次性填充 —— 现有遍历代码（刷新版本 / 存配置 / 关窗）
-            # 都是 `for card in self.cards:`，空列表等于无害的空循环，不用改。
-            for comp in comps:
-                self._pending_cards.append((cat_name, comp, cards_wrap))
-            scroll.setWidget(cards_wrap)
-            base_title = f"{cat_name}（{len(comps)}）"
-            self.tabs.addTab(scroll, base_title)
-            self._tab_base_titles.append(base_title)
-            self._tab_cards.append(tab_cards)
-            self._tab_layouts.append(cards_layout)
-            self._tab_wraps.append(cards_wrap)
-            self._tab_rows[len(self._tab_cards) - 1] = []
-
-        # 统一搜索结果面板：搜索时收起四个 Tab，把所有命中的组件按分类归并到
-        # 同一个滚动列表里（带分类小标题），一眼看全、不用切页——这就是「全组件搜索」。
-        self.results_area = QScrollArea()
-        self.results_area.setObjectName("resultsArea")
-        self.results_area.setWidgetResizable(True)
-        self.results_content = QWidget()
-        self.results_content.setObjectName("resultsContent")
-        # 结果面板用与 Tab 同一个 CardColumnLayout：命中卡片也住进 cardRow 行控件，
-        # 格子宽度就跟浏览时一模一样（不再是"一张卡占满 954px"的宽条）。
-        self.results_layout = CardColumnLayout(self.results_content)
-        self.results_layout.setContentsMargins(18, 18, 18, 18)
-        self.results_layout.setSpacing(6)
-        self.results_area.setWidget(self.results_content)
-        # 结果面板的结构是「分类小标题（整行）+ 该分类的若干 cardRow 行」。登记进
-        # _tab_rows 的是**真实的行控件**，与四个 Tab 同构，"命中数 < 列数时有没有
-        # 空洞"因此有统一判据。`_result_sections` 记着「标题 → 该分类命中卡片」，
-        # 重排时靠它在各自标题下面重建行（标题本身不重建，否则会丢）。
-        self._tab_rows[RESULTS_KEY] = []
-        self._result_sections: list = []
-
-        # 浏览模式用 Tab，搜索模式用统一结果面板，二者互斥地放进一个栈
-        self.top_stack = QStackedWidget()
-        self.top_stack.setObjectName("topStack")
-        self.top_stack.addWidget(self.tabs)           # index 0：浏览
-        self.top_stack.addWidget(self.results_area)   # index 1：搜索结果
-
-        self.body = QWidget()
-        self.body.setObjectName("bodyArea")
-        body_lay = QVBoxLayout(self.body)
-        body_lay.setContentsMargins(0, 0, 0, 0)
-        body_lay.setSpacing(0)
-        body_lay.addWidget(self.top_stack)
-        outer.addWidget(self.body, stretch=1)
-
-        # 日志浮层：与卡片区同一个父级，靠 raise_() 叠在上面，几何随 resize 跟随。
-        # 它不在 body 的布局里，所以 show/hide 都不会让卡片区尺寸变化 ——
-        # 这是"展开日志不重排网格"这条承诺的实现基础。
-        self.log_overlay = QWidget(self.body)
-        self.log_overlay.setObjectName("logOverlay")
-        overlay_lay = QVBoxLayout(self.log_overlay)
-        overlay_lay.setContentsMargins(18, 8, 18, 14)
-        overlay_lay.setSpacing(6)
-        overlay_head = QHBoxLayout()
-        log_title = QLabel("运行日志")
-        log_title.setStyleSheet("color:#e6e9ef;font-weight:600;")
-        overlay_head.addWidget(log_title)
-        overlay_head.addStretch(1)
-        # 「复制日志」：用户报障时最需要的是把原文贴出来。手打上百行中文日志
-        # 不现实，截图又看不清时间戳 —— 落盘之后一键复制是闭环的最后一环。
-        self.btn_log_copy = QPushButton("复制")
-        self.btn_log_copy.setObjectName("overlayCopyBtn")
-        self.btn_log_copy.setFixedSize(52, 26)
-        self.btn_log_copy.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_log_copy.setToolTip("把本次会话的全部日志复制到剪贴板（便于粘贴到反馈里）")
-        self.btn_log_copy.clicked.connect(self._copy_log_to_clipboard)
-        overlay_head.addWidget(self.btn_log_copy)
-        # 「另存为」：落盘文件按会话切，用户想留档或直接发给别人的时候用。
-        self.btn_log_save = QPushButton("导出诊断")
-        self.btn_log_save.setObjectName("overlayCopyBtn")
-        self.btn_log_save.setFixedSize(70, 26)
-        self.btn_log_save.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_log_save.setToolTip(
-            "把「诊断报告 + 本次会话日志」另存为一个文本文件\n"
-            "（报告说明环境状态，日志说明刚才发生了什么；反馈时附上它）")
-        self.btn_log_save.clicked.connect(self._save_log_to_file)
-        overlay_head.addWidget(self.btn_log_save)
-        self.btn_log_close = QPushButton("×")
-        self.btn_log_close.setObjectName("overlayCloseBtn")
-        self.btn_log_close.setFixedSize(26, 26)
-        self.btn_log_close.setCursor(QCursor(Qt.PointingHandCursor))
-        self.btn_log_close.setToolTip("收起日志浮层")
-        self.btn_log_close.clicked.connect(self._close_log_by_user)
-        overlay_head.addWidget(self.btn_log_close)
-        overlay_lay.addLayout(overlay_head)
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setObjectName("logView")
-        overlay_lay.addWidget(self.log_view)
-        self.log_overlay.hide()
-
-        # 底部状态条：系统 / **可点的工作目录** / 组件数。
-        # 数按 `self.cards`（界面可见）算，不是 `self.components`：erlang 是 hidden
-        # 组件，只当 rabbitmq 的前置依赖，用户在四个 Tab 里都找不到它 —— 以前这里写 27、
-        # 搜索框右边写 /26，同一屏两个数字互相矛盾（2026-10-10 用户第一条质疑）。
-        # 同一轮用户又嫌句子长："26 就显示 26"，于是去向说明和版本号都从底部拿掉
-        # （版本号只剩标题栏 chip 一处，见上面；隐藏组件的去向归文档 R5.3 交代）。
-        self.status_bar = QLabel(
-            f"系统：{CURRENT_OS} ({MACHINE})   工作目录："
-            f'<a href="dir://{html_escape(Path(CONFIG_DIR).as_posix())}" '
-            f'style="color:#8fa3b8;text-decoration:underline">'
-            f"{html_escape(str(CONFIG_DIR))}</a>   "
-            f"组件：{sum(1 for c in self.components if c.key != 'erlang')}"
-        )
-        self.status_bar.setObjectName("statusBar")
-        self.status_bar.setTextFormat(Qt.RichText)
-        # 不许开 setOpenExternalLinks(True)：那会把 dir:// 丢给系统的"未知协议"处理，
-        # 用户点一下什么也不会发生。链接自己接，见 _on_status_link。
-        self.status_bar.setOpenExternalLinks(False)
-        self.status_bar.linkActivated.connect(self._on_status_link)
-        outer.addWidget(self.status_bar)
-
-        # 日志浮层的未读计数。2026-10-14 起浮层不再自动弹开/自动收起
-        # （原 _log_auto_hide 定时器与 _log_user_open 标记已删除），
-        # 只剩这一个计数：warn/error 在浮层关着时累加，显示在「📋 日志 (N)」上。
-        self._log_unread = 0
-
-        # 列数缓存：resizeEvent 只在它变化时才重建行（见 resizeEvent 里的说明）。
-        # 2026-10-13：构造期**不重排** —— 此时 QScrollArea 的 viewport 宽度还没就绪，
-        # `grid_columns_for` 会算出 1 列，排完 showEvent 又得拆掉重排（实测 87 卡 × 8 次
-        # relayout ≈ 845ms + 794ms）。只记录"当前认为的列数"（可能是错的 1 列），
-        # 让 showEvent 按"列数不同才重排"的守卫自然触发那**唯一一次**真重排。
-        # 守卫逻辑见 showEvent：构造期记的 1 列 ≠ show 期算的 3 列 ⇒ 强制重排；
-        # 若构造期侥幸算对（窗口已显示时构造），则跳过 —— 两种路径都不会漏排。
-        self._last_columns = self._card_columns()
-        self._refresh_view_button()
-        self._refresh_log_button()
-
-    # ------------------------------------------------------------------
-    # 卡片网格：分列、重排
-    # ------------------------------------------------------------------
-    def _card_columns(self) -> int:
-        """当前卡片区该排几列：列表模式恒 1 列，网格模式按可用净宽算。
-
-        宽度**不能**取"当前 Tab 的 viewport"——有竖滚动条的页（10 张卡要滚）
-        比没有的页窄十几像素，正好骑在列数边界上：切一次 Tab 列数就变，
-        再叠加"切 Tab 不触发重排"，同一页就会出现两种列数混排、末行溢出
-        （真机 2026-10-08 用户 125% 缩放截图实测）。改用 tabs 本身的宽度
-        （四个 Tab 恒相同）减去固定开销：左右边距 36 + 竖滚动条 10 预留。
-        切 Tab、滚动条出现消失都不影响列数。
-        """
-        if getattr(self, "view_mode", "grid") == "list":
-            return 1
-        tabs = getattr(self, "tabs", None)
-        if tabs is None:
-            return 1
-        return grid_columns_for(tabs.width() - 36 - 10, MIN_CARD_WIDTH_PX)
-
-    def relayout_cards(self, container_key) -> None:
-        """把一个容器里的卡片按当前列数重排成"行"。
-
-        入参 container_key: int → 第几个 Tab；RESULTS_KEY → 统一搜索结果面板。
-
-        重排只排"没被隐藏"的卡片（搜索命中的反面），所以命中数少于列数时
-        不会留下空洞；隐藏的卡片被收回到容器宿主上，不占任何格子。
-        """
-        if container_key == RESULTS_KEY:
-            self._relayout_results()
-            return
-        idx = int(container_key)
-        layout = self._tab_layouts[idx]
-        root = self._tab_wraps[idx]
-        cards = self._tab_cards[idx]
-        # 只排"此刻真的住在这个 Tab 里"的卡片：搜索时命中的卡片已搬到结果面板，
-        # 不判归属就会把它们从结果面板里拽回 Tab，搜索结果当场散架。
-        own = [c for c in cards if root.isAncestorOf(c)]
-        self._tab_rows[idx] = self._fill_rows(layout, root, own, self._card_columns())
-
-    def _relayout_results(self) -> None:
-        """统一结果面板：保留分类小标题，在各自标题下面重建卡片行。
-
-        行用 `_make_layout_rows` 造的**无宿主 QHBoxLayout**（2026-10-15，见 R2.6）——
-        网格、等宽、占位格的算法与浏览 Tab 完全一致，只是行不再是控件。
-        **列数恒取浏览列数**（2026-10-10 用户改的口径：「搜索组件时如果只有一个组件
-        也要以网格显示，现在变成列表了」）：命中 1 个也是 3 个格子里占 1 个，
-        另外两格补透明占位控件 —— 少补一格，`addWidget(card, 1)` 就会把那张卡拉成
-        整行宽，看上去就从"网格"退化成"列表"。以前这里是 `min(命中数, 浏览列数)`，
-        命中 1 个就 1 列，正是用户报的那个现象。
-        """
-        sections = getattr(self, "_result_sections", None) or []
-        cards = [c for _, group in sections for c in group]
-        if not cards:
-            self._tab_rows[RESULTS_KEY] = []
-            self.results_layout.row_widgets = []
-            return
-        columns = max(1, self._card_columns())
-        # 分块必须在搬家**之前**算完：setParent 会把卡片显式隐藏，先搬再算就排空
-        chunks_per_group = [chunk_visible(group, columns) for _, group in sections]
-        # 卡片先收回到宿主，否则下面销毁旧行会把还住在里面的卡片一起带走。
-        # ⚠ **父级已经是宿主时一个字都别动**：`setParent(当前父级)` 实测仍约
-        # 5 ms/张（Qt 照样重跑 inheritStyle → QSS polish），115 张就是 ~0.6 s。
-        # 行改成无宿主布局之后卡片本来就一直挂在宿主上，这个判断直接省掉那 0.6 s。
-        for card in cards:
-            if card.parent() is not self.results_content:
-                card.setParent(self.results_content)
-        # 只摘行、留标题：结果面板是"标题 + 行"交错的结构，全清会把标题一起删掉
-        self._drop_rows(self.results_layout, only_rows=True)
-        rows: list = []
-        for (header, _group), chunks in zip(sections, chunks_per_group):
-            pos = self.results_layout.indexOf(header)
-            if pos < 0:
-                continue
-            for k, row in enumerate(self._make_layout_rows(self.results_content, chunks,
-                                                           pad_to=columns)):
-                self.results_layout.insertLayout(pos + 1 + k, row)
-                rows.append(row)
-        self.results_layout.row_widgets = rows
-        self._tab_rows[RESULTS_KEY] = rows
-
-    def _fill_rows(self, layout, root, cards, columns) -> list:
-        """销毁旧行、按 columns 重建行，返回新建的行控件列表。
-
-        两步都不能省：先把这个容器的卡片全部收回到宿主，否则销毁行控件时
-        会把还住在里面的卡片一起带走；收回之后 addWidget 的顺序才等于
-        子控件顺序（findChildren 读出来的行内顺序才是对的）。
-        """
-        # 分块必须在搬家**之前**算完：setParent 会把控件显式隐藏（isHidden 变 True），
-        # 先搬再算就一张可见卡片都不剩，整页排空。
-        chunks = chunk_visible(cards, columns)
-        for card in cards:
-            if root.isAncestorOf(card):
-                card.setParent(root)
-        self._drop_rows(layout)
-        layout.row_widgets = []
-        # pad_to 必须给：半行不补占位的话，QHBoxLayout 的 addWidget(card, 1) 会把
-        # 末行的卡片**拉伸占满整行** —— 「其它软件」2 张各半行、「服务端组件」的 Pulsar
-        # 独占一行，跟满行格子的 309px 完全不同宽（真机 2026-10-08 用户截图实测）。
-        rows = self._make_rows(root, chunks, pad_to=columns)
-        for row in rows:
-            layout.addWidget(row)
-            layout.row_widgets.append(row)
-        layout.addStretch(1)
-        return rows
-
-    def _drop_rows(self, layout, only_rows: bool = False) -> None:
-        """摘掉 layout 里的条目并销毁（`_fill_rows` 与结果面板重排共用）。
-
-        入参 only_rows: bool  True → 只摘「行」：Tab 里是 objectName 为 "cardRow"
-             的**行控件**，统一结果面板里是**无宿主的 QHBoxLayout**（见 R2.6）。
-             分类小标题与末尾 stretch 原样留下。
-        """
-        i = 0
-        while i < layout.count():
-            item = layout.itemAt(i)
-            w = item.widget()
-            sub = item.layout()
-            is_row = (w is not None and w.objectName() == "cardRow") or sub is not None
-            if only_rows and not is_row:
-                i += 1
-                continue
-            layout.takeAt(i)
-            if sub is not None:
-                # 无宿主行布局：把里面的条目逐个摘出来再丢掉空布局。
-                # 卡片**留在宿主里不动**（父级不变正是这么省下来的），由调用方
-                # 决定是送回 Tab 还是重新排进新行；占位格是临时控件，随行一起销毁。
-                while sub.count():
-                    inner = sub.takeAt(0)
-                    filler = inner.widget()
-                    if filler is not None and not any(filler is c for c in self.cards):
-                        filler.hide()
-                        filler.deleteLater()
-                sub.deleteLater()
-                continue
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
-            else:
-                sp = item.spacerItem()
-                if sp is not None:
-                    del sp
-
-    def _make_rows(self, root, chunks, pad_to: int = 0) -> list:
-        """按 chunks（每个元素是一行的卡片序列）造出 cardRow 行控件。
-
-        入参 pad_to: int  >0 时，不足该列数的行末尾补一个等比占位控件，让卡片
-             仍然只占"一个格子"的宽度。搜索结果靠它保证「命中 5 个 → 3 列」时
-             第二行那 2 张卡跟第一行 3 张卡一样宽 —— 否则 addWidget(card, 1) 会把
-             半行的卡片拉伸到占满整行，宽度又跟浏览格子对不上了（真机实测踩中）。
-
-        只负责"造行"，**不碰外层布局** —— 行插在哪儿由调用方决定：Tab 是
-        顺序追加，结果面板要插在各自的分类小标题后面。
-        """
-        rows: list = []
-        for row_cards in chunks:
-            row = QWidget(root)
-            row.setObjectName("cardRow")
-            row_lay = QHBoxLayout(row)
-            row_lay.setContentsMargins(0, 0, 0, 0)
-            row_lay.setSpacing(CARD_ROW_SPACING)
-            for card in row_cards:
-                row_lay.addWidget(card, 1)      # 同一行的格子等分宽度
-                # setParent 会把控件**显式隐藏**（实测 isHidden 变 True），搬一次家
-                # 就把卡片弄没了，所以进格子后必须再放出来一次。
-                card.show()
-            if pad_to and len(row_cards) < pad_to:
-                # 占位控件必须**可见**才会参与布局（隐藏的控件会被布局忽略），
-                # 但它没有任何内容与背景，画出来是透明的；对鼠标也透明，不挡点击。
-                # 一格补一个（而不是一个占位控顶 n 格）：间距数才能与满行一致，
-                # 格子宽度才会跟浏览时分毫不差（313 vs 309 的偏差就是这么来的）。
-                for _ in range(pad_to - len(row_cards)):
-                    filler = QWidget(row)
-                    filler.setObjectName("cardRowFiller")
-                    filler.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    row_lay.addWidget(filler, 1)
-                    filler.show()
-            # 行控件是新建的，加到布局里不会自动显示（实测 isVisible 仍为 False），
-            # 必须显式 show 一次，否则重排之后整页卡片会"消失"；
-            # show() 会顺着子控件往下走，把行里的卡片一起带出来。
-            row.show()
-            rows.append(row)
-        return rows
-
-    def _make_layout_rows(self, host, chunks, pad_to: int = 0) -> list:
-        """统一结果面板专用：造**无宿主的 QHBoxLayout** 当行（2026-10-15，见 R2.6）。
-
-        为什么不沿用 `_make_rows` 的 `QWidget#cardRow`：`QLayout::addChildWidget`
-        是把控件 reparent 到**布局的 `parentWidget()`** —— 行是个 QWidget 时，
-        卡片的父级就变成那个新建的行，而父级一变 Qt 就得对该卡**整棵子树**重跑一遍
-        样式解析（实测约 5 ms/张，115 张就是 0.6 s）。无宿主布局的 `parentWidget()`
-        正好是外层容器本身，于是卡片**父级不变**，整条 QSS polish 路径被跳过。
-        实测同一份 115 张卡：行控件 1001 ms → 无宿主布局 **3.5 ms**。
-
-        别把 Tab 也换过来：Tab 的行是 `QWidget`，`_reveal_running_tabs` 那一族逻辑
-        与一批像素断言都按 `findChildren` / `objectName()=="cardRow"` 认行，
-        而搜索结果面板是唯一"每次按键都要整页重排"的地方 —— 收益只在这里，
-        风险也只摊在这里。
-
-        入参 host: QWidget  占位格控件的挂载点（行布局自己没有宿主，子控件得有）。
-        """
-        rows: list = []
-        for row_cards in chunks:
-            row_lay = QHBoxLayout()
-            row_lay.setContentsMargins(0, 0, 0, 0)
-            row_lay.setSpacing(CARD_ROW_SPACING)
-            for card in row_cards:
-                row_lay.addWidget(card, 1)     # 同一行的格子等分宽度
-                # 卡片从 Tab 那边搬过来时 setParent 会把它显式隐藏，进格子后放出来一次；
-                # 本来就在结果面板里的卡片（连续改搜索词）这一步是无副作用的。
-                card.show()
-            if pad_to and len(row_cards) < pad_to:
-                for _ in range(pad_to - len(row_cards)):
-                    filler = QWidget(host)
-                    filler.setObjectName("cardRowFiller")
-                    filler.setAttribute(Qt.WA_TransparentForMouseEvents)
-                    row_lay.addWidget(filler, 1)
-                    filler.show()
-            rows.append(row_lay)
-        return rows
-
-    def resizeEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
-        super().resizeEvent(e)
-        # resize 是"每变一个像素一次"的事件，每次都重建行控件会把拖动窗口卡死，
-        # 所以只在列数真的变化时才重排。
-        columns = self._card_columns()
-        if columns != self._last_columns:
-            self._last_columns = columns
-            for idx in range(len(self._tab_cards)):
-                self.relayout_cards(idx)
-            # 搜索中窗口变宽/变窄，结果面板的格子也要跟着变，否则它的卡片宽度
-            # 会跟浏览 Tab 对不上（正是"搜索结果卡更宽"那条反馈的根源）。
-            if self.top_stack.currentIndex() == 1:
-                self.relayout_cards(RESULTS_KEY)
-        self._position_log_overlay()
-
-    def showEvent(self, e) -> None:  # noqa: N802  Qt 规定的驼峰签名
-        super().showEvent(e)
-        # 首次显示时必须强制重排一次：_build_ui 末尾那次 relayout 跑在窗口 show
-        # 之前，QScrollArea 的 viewport 宽度还没就绪，grid_columns_for 会算出 1 列
-        # —— 卡片全排成"一行一张"。而窗口尺寸在构造期就已 resize 到 1000×680，
-        # show() 不改变尺寸就**不会触发 resizeEvent**，这个错排没有任何机会被纠正，
-        # 用户只有手动拖一下窗口大小才能看到网格（真机 2026-10-08 实测踩中）。
-        # resizeEvent 那套"列数变了才重排"的防抖在这里反而是障碍，所以直接重排。
-        # 2026-10-13 补一条对等防抖：列数与构造期相同就跳过 —— 相等时重排的
-        # 结果必然与已排好的行一模一样（列数唯一决定行结构），拆掉重建纯属白烧
-        # 87 次 setParent（cProfile 实测一次全量重排 ~0.4s，offscreen 下 show 期
-        # 曾连排两次 1 列 + 一次 3 列）。列数不同（构造期错算 1 列、此刻 viewport
-        # 就绪算出 3 列）则照旧强制重排，2026-10-08 那条修复不受影响。
-        if not getattr(self, "_first_show_done", False):
-            self._first_show_done = True
-            columns = self._card_columns()
-            if columns != self._last_columns:
-                self._last_columns = columns
-                for idx in range(len(self._tab_cards)):
-                    self.relayout_cards(idx)
-            self._position_log_overlay()
-
-    # ------------------------------------------------------------------
-    # 日志浮层
-    # ------------------------------------------------------------------
-    def _position_log_overlay(self) -> None:
-        """浮层贴在卡片区底部，高度取中部高度的 45%（夹在 160~300px）。"""
-        host = getattr(self, "body", None)
-        overlay = getattr(self, "log_overlay", None)
-        if host is None or overlay is None:
-            return
-        height = min(300, max(160, int(host.height() * 0.45)))
-        overlay.setGeometry(0, host.height() - height, host.width(), height)
-
-    def _start_update_check(self, auto: bool) -> None:
-        """查一次更新。auto=True 是启动后的静默检查，False 是用户点了版本号。"""
-        worker = getattr(self, "_update_worker", None)
-        if _qthread_state(worker) == "running":
-            if not auto:
-                self._append_log("info", "已经在检查更新了，稍等一下。")
-            return
-        if auto and not update_check_due(time.time(), load_update_state()):
-            return                     # 24 小时内查过：一个字都不说
-        if not auto:
-            self._append_log("info", f"检查更新中…（当前 v{APP_VERSION}）")
-            self._set_chip_state("checking")
-        self._update_worker = UpdateCheckWorker(parent=self)
-        self._update_worker.done.connect(
-            lambda res, a=auto: self._apply_update_result(res, auto=a))
-        self._update_worker.finished.connect(self._update_worker.deleteLater)
-        self._update_worker.start()
-
-    def _apply_update_result(self, res, auto: bool) -> None:
-        """把检查结果落到界面与日志。
-
-        **自动检查失败时不写日志**（用户明确要求"连不上别弹窗"），但 chip 仍要变灰带 `?`：
-        这颗控件现在兼任状态灯，"没查到"若继续显示成普通版本号，就等于说"没有新版"，
-        而它其实什么都不知道。手动点版本号时另外再回答一句，否则像按钮坏了。
-        """
-        if not isinstance(res, dict):
-            res = {}
-        if not res.get("ok"):
-            reason = str(res.get("error") or "未知原因")
-            self._set_chip_state("error", reason=reason)
-            if auto and res.get("silent"):
-                return
-            self._append_log("info",
-                      f"没检查成更新：{reason}"
-                      "（不影响软件本身使用，稍后可以再点一次版本号）")
-            return
-        latest = res.get("latest") or {}
-        version = str(latest.get("version") or "")
-        save_update_check(last_check_ts=time.time())
-        if not res.get("newer"):
-            self._update_res = {}
-            self._set_chip_state("latest")
-            if not auto:
-                self._append_log("ok", f"已经是最新版本 v{APP_VERSION}。")
-            return
-        self._update_res = res
-        self._set_chip_state("update", new_version=version)
-        # 只在这个版本**首次**告知时写一遍（下面 save_update_check 会把 notified 置位，
-        # 所以判定必须取一次存起来，不能写完通知再判第二次 —— 那样恒为 False）
-        first_time = update_notify_due(load_update_state(), version)
-        if first_time:
-            save_update_check(notified=version)
-            self._append_log("ok", f"发现新版本 v{version}（当前 v{APP_VERSION}）："
-                            f"{latest.get('page_url') or GITHUB_URL}"
-                            "（点左上角那颗 ↓ 直接下载到默认目录）")
-            # 有 release notes 就把要点写进日志。用户决定要不要升级，看的就是"改了什么"，
-            # 而不是"有个新版存在"——原先整个 body 被解析层丢掉，这里是它第一次
-            # 真正到达用户眼前。
-            notes = _release_notes_digest(str(latest.get("notes") or ""))
-            if notes:
-                self._append_log("info", "新版本更新内容：" + notes)
-        if not auto and not isinstance(res.get("asset"), dict):
-            # 没有本平台可下的产物时才弹窗；有产物的话点 chip 就下，不该多问一句。
-            self._notify_update_without_asset(res)
-
-    def _set_chip_state(self, state: str, *, new_version: str = "",
-                        pct=None, reason: str = "", dest=None) -> None:
-        """版本号 chip 的文字 / 配色 / tooltip 只有这一个出口。
-
-        以前 setText + setProperty + unpolish 三行散在结果处理里，只有"发现新版"
-        一种状态有地方表达；现在四种状态都要有确定的样子，收口到一处才改得动。
-        配色挂在**动态属性**上（objectName 不许改，改了按名字找它的代码与用例就失效）。
-        """
-        chip = getattr(self, "btn_version", None)
-        if chip is None:
-            return
-        self._chip_state = state
-        # 目录只在"要点下载之前"那次读一次（tooltip 要承诺落点），进度回调按 64 KB 一次，
-        # 每次都读 config.json 的话一个 50 MB 的包就是约 800 次磁盘往返，全在 GUI 线程上。
-        if dest is not None:
-            self._chip_folder = Path(dest)
-        elif state == "update" or not getattr(self, "_chip_folder", None):
-            self._chip_folder = load_download_dir()
-        folder = self._chip_folder
-        if isinstance(pct, int) and not isinstance(pct, bool):
-            self._chip_pct = max(0, min(int(pct), 99))
-        elif state != "downloading":
-            self._chip_pct = None        # 下载中不传 pct = 沿用上一次，别把进度打回"…"
-        if state == "update":
-            text = f"↓ v{new_version} 待更新"
-            tip = (f"发现新版本 v{new_version}（当前 v{APP_VERSION}）\n"
-                   f"点击直接下载到：{folder}\n"
-                   "下载不会改动、也不会替换正在运行的本程序")
-        elif state == "downloading":
-            # 这一态不加状态字：进度本身就是状态，而标题栏是最窄的一档（见裁字用例）
-            text = f"↓ {self._chip_pct}%" if self._chip_pct is not None else "↓ …"
-            tip = (f"正在下载 v{new_version or self._chip_latest or '新版本'}"
-                   f"（进度只写百分比，速度和字节数在日志里）\n保存到：{folder}")
-        elif state == "latest":
-            text = f"v{APP_VERSION} 最新"
-            tip = (f"当前 v{APP_VERSION} 已是最新版本\n点击可以再查一次"
-                   "（启动后一天最多自动查一次）")
-        elif state == "error":
-            text = f"? v{APP_VERSION} 未查到"
-            tip = (f"没查到新版本：{reason}\n"
-                   "不影响软件本身使用，点击可以再查一次")
-        elif state == "checking":
-            text = f"⟳ v{APP_VERSION} 检查中"
-            tip = f"正在检查更新…（当前 v{APP_VERSION}）"
-        else:                                    # idle
-            text = f"v{APP_VERSION}"
-            tip = (f"当前版本 v{APP_VERSION}\n点击检查有没有新版本"
-                   "（启动后一天最多自动查一次）")
-        if chip.text() != text:
-            chip.setText(text)
-        if chip.property("chipState") != state:
-            chip.setProperty("chipState", state)
-            chip.style().unpolish(chip)
-            chip.style().polish(chip)
-        chip.setToolTip(tip)
-
-    def _on_version_clicked(self) -> None:
-        """点 chip：有新版就直接下，正在下就别开第二路，其余情况都是"再查一次"。"""
-        state = getattr(self, "_chip_state", "idle")
-        worker = getattr(self, "_update_dl", None)
-        if state == "downloading" or _qthread_state(worker) == "running":
-            self._append_log("info", "新版本正在下载中，进度就在左上角这颗 ↓ 上。")
-            self._set_chip_state("downloading")
-            return
-        if state == "update" and self._begin_app_update_download(self._update_res):
-            return
-        self._start_update_check(auto=False)
-
-    def _begin_app_update_download(self, res) -> bool:
-        """把新包下到**记住的目录**，绝不替换正在运行的自己（规则 R12）。
-
-        为什么不弹"确定要下载吗"、也不弹目录选择框：这是标题栏上的一次点击，
-        弹一个模态文件框很突兀，而落点已经有 `download_dir` 这个偏好可用；
-        下载本身不改注册表、不碰本程序，误点的代价只是一次网络传输。
-        返回 False 表示没有可下的产物，调用方该退回"查一次"。
-        """
-        res = res if isinstance(res, dict) else {}
-        latest = res.get("latest") or {}
-        asset = res.get("asset")
-        version = str(latest.get("version") or "")
-        if not isinstance(asset, dict) or not asset.get("browser_download_url"):
-            return False
-        folder = load_download_dir()
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            self._append_log("error", f"建不出下载目录 {folder}：{exc}")
-            return False
-        dest = _unique_download_path(folder / _safe_download_name(asset.get("name")))
-        urls = update_download_urls(asset, str(latest.get("tag") or ""))
-        size = int(asset.get("size") or 0)
-        magic = _MAGIC_BY_EXT.get(dest.suffix.lstrip(".").lower(), b"")
-        self._chip_latest = version
-        self._set_chip_state("downloading", new_version=version, pct=0, dest=folder)
-        self._append_log("info", f"开始下载 v{version}：{dest}（{len(urls)} 个源依次尝试）")
-        if not size:
-            # 从 Gitee 的 releases API 拿到的清单没有 size 字段 —— 明说核不了字节数，
-            # 别等下完悄悄放行，那和"没验"不是一回事。
-            self._append_log("info", "（本次的官方清单没给字节数，完成后只核对文件头魔数）")
-        self._update_dl = DownloadWorker(urls, dest, parent=self, expect_magic=magic)
-        self._update_dl.progress.connect(self._on_update_progress)
-        self._update_dl.log.connect(lambda lvl, msg: self._append_log(lvl, f"[更新] {msg}"))
-        self._update_dl.finished_ok.connect(
-            lambda p: self._on_update_downloaded(p, size, version))
-        self._update_dl.finished_fail.connect(
-            lambda e: self._on_update_download_failed(e, version))
-        self._update_dl.start()
-        return True
-
-    def _on_update_progress(self, got: int, total: int) -> None:
-        """chip 上只写百分比：标题栏宽度紧（之前多加一个按钮就把「清理残留 PATH」裁过）。
-
-        封顶 99%：字节还没落盘就显示 100% 是撒谎，落盘与核对完成另有回调。
-        """
-        pct = 0 if total <= 0 else int(got * 100 / total)
-        self._set_chip_state("downloading", new_version=self._chip_latest,
-                             pct=min(pct, 99))
-
-    def _on_update_download_failed(self, message: str, version: str) -> None:
-        self._append_log("error", f"[更新] 下载失败：{message}")
-        self._set_chip_state("update", new_version=version)
-
-    def _notify_update_without_asset(self, res) -> None:
-        """**这个 Release 里没有本平台可下的产物**时唯一的说法。
-
-        有产物的路径不经过这里：点 chip 直接下（`_begin_app_update_download`），
-        弹一次"要下载吗"再弹一次"存到哪"，对标题栏上的一次点击是两道多余的坎。
-        """
-        res = res if isinstance(res, dict) else {}
-        latest = res.get("latest") or {}
-        page = str(latest.get("page_url") or GITHUB_URL)
-        version = str(latest.get("version") or "")
-        QMessageBox.information(
-            self, "发现新版本",
-            f"v{version} 已发布，但这个 Release 里找不到本平台可用的安装包。\n"
-            f"可以到发布页看看：{page}")
-
-    def _on_update_downloaded(self, path: str, expected_size: int, version: str) -> None:
-        """下完了先核字节数，再问要不要打开所在文件夹。"""
-        self._set_chip_state("update", new_version=version)
-        got = 0
-        try:
-            got = Path(path).stat().st_size
-        except OSError as exc:
-            self._append_log("error", f"[更新] 下载说成功了，但读不到文件 {path}：{exc}")
-            return
-        if expected_size and got != expected_size:
-            self._append_log("error", f"[更新] 字节数对不上：声明 {expected_size}，实际 {got}"
-                               "（别用这个文件，去发布页重新下）")
-            return
-        self._append_log("ok", f"[更新] v{version} 已下载到 {path}（{human_size(got)}，"
-                         + (f"字节数已核对，与官方声明的 {expected_size} 一致）"
-                            if expected_size else "未能核对字节数：官方清单没给 size）"))
-        reply = QMessageBox.question(
-            self, "下载完成",
-            f"已下载到：\n{path}\n\n要打开所在文件夹吗？"
-            "（把新的 ByteTools 放到你习惯的位置，替换旧文件前先退出本程序）",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if reply == QMessageBox.Yes and not _open_in_file_manager(str(Path(path).parent)):
-            self._append_log("warn", f"[更新] 打不开目录 {Path(path).parent}，请自己到该路径取文件")
-
-    def _on_status_link(self, link: str) -> None:
-        """状态条里的 `dir://…` → 用系统文件管理器打开那个目录（2026-10-10 用户要求）。
-
-        为什么值得给：工作目录 `~/.env-tools` 是用户排查问题第一眼要看的地方
-        （下载包、各组件版本目录、日志、takeover 备份都在里面）。以前那串路径是纯文本，
-        照着敲进资源管理器地址栏是个体力活。
-        """
-        if not link.startswith("dir://"):
-            return
-        target = link[len("dir://"):]
-        if not _open_in_file_manager(target):
-            self._log("warn", f"打不开工作目录 {target}：目录不存在，或系统不允许从本工具打开")
-
-    def _set_log_open(self, open_: bool) -> None:
-        """展开/收起日志浮层。
-
-        浮层不在卡片区的布局里，所以这里**不会**触发 relayout —— 网格的行数
-        与每行卡片数在开关前后完全一致（这是浮层相对"挤压式折叠"的关键差别）。
-        """
-        overlay = getattr(self, "log_overlay", None)
-        if overlay is None:
-            return
-        if open_:
-            self._position_log_overlay()
-            overlay.show()
-            overlay.raise_()
-        else:
-            overlay.hide()
-        self._refresh_log_button()
-
-    def _on_log_button_clicked(self) -> None:
-        """点「📋 日志」：toggle 一次；点开即视为已读，未读计数清零。"""
-        if self.log_overlay.isHidden():
-            self._log_unread = 0
-            self._set_log_open(True)
-        else:
-            self._close_log_by_user()
-
-    def _close_log_by_user(self) -> None:
-        self._set_log_open(False)
-
-    def _refresh_log_button(self) -> None:
-        btn = getattr(self, "btn_log", None)
-        if btn is None:
-            return
-        unread = getattr(self, "_log_unread", 0)
-        # 未读条数直接写在按钮文字里：不新增控件，标题栏也用不着再挤一个位置
-        btn.setText(f"📋 日志 ({unread})" if unread else "📋 日志")
-
-    def _on_view_mode_clicked(self) -> None:
-        """网格 ⇄ 列表。列表模式就是"强制 1 列"，卡片内容一模一样。"""
-        self.view_mode = "list" if self.view_mode == "grid" else "grid"
-        self._refresh_view_button()
-        for idx in range(len(self._tab_cards)):
-            self.relayout_cards(idx)
-        self._save_settings()
-
-    def _refresh_view_button(self) -> None:
-        btn = getattr(self, "btn_view_mode", None)
-        if btn is None:
-            return
-        grid = getattr(self, "view_mode", "grid") != "list"
-        btn.setText("▦ 网格" if grid else "☰ 列表")
-
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _make_search_icon(color: str = "#8ba0b6", size: int = 16) -> QIcon:
-        """
-        用 QPainter 现画一个放大镜图标，省得为一张 16px 小图额外引入资源文件。
-
-        入参 color: str   线条颜色，默认与占位文字同一灰蓝色系
-              size:  int  逻辑边长（像素）；内部按 2 倍分辨率绘制，高分屏不糊
-
-        返回: QIcon  可直接 pixmap() 给 QLabel，或 addAction() 给 QLineEdit
-        """
-        pm = QPixmap(size * 2, size * 2)
-        pm.setDevicePixelRatio(2.0)
-        pm.fill(Qt.transparent)
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        pen = QPen(QColor(color))
-        pen.setWidthF(1.6)
-        pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(pen)
-        painter.drawEllipse(2, 2, 9, 9)          # 镜片
-        painter.drawLine(11, 11, 14, 14)         # 手柄
-        painter.end()
-        return QIcon(pm)
-
-    @staticmethod
-    def _make_clear_icon(color: str = "#9aabbd", size: int = 16) -> QIcon:
-        """
-        用 QPainter 画一个统一风格的「×」，作为搜索框的清空按钮图标。
-
-        入参 color: str  线条颜色（默认与放大镜、占位文字同色系）
-              size:  int 逻辑边长（像素），同样按 2 倍分辨率绘制
-
-        返回: QIcon
-        """
-        pm = QPixmap(size * 2, size * 2)
-        pm.setDevicePixelRatio(2.0)
-        pm.fill(Qt.transparent)
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        pen = QPen(QColor(color))
-        pen.setWidthF(1.6)
-        pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(pen)
-        painter.drawLine(5, 5, 11, 11)
-        painter.drawLine(11, 5, 5, 11)
-        painter.end()
-        return QIcon(pm)
-
-    def _sync_clear_action(self, text: str) -> None:
-        """有输入才显示清空按钮，空串时藏起来，免得占着位置显得多余。"""
-        action = getattr(self, "_clear_action", None)
-        if action is not None:
-            action.setVisible(bool(text))
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802  Qt 规定的驼峰签名
-        """
-        把搜索框的焦点变化转发给外壳，做出「整条胶囊一起高亮」的效果。
-
-        说明: QSS 的 :focus 只能命中聚焦控件自身，管不到父级 QFrame，
-              所以这里手动改外壳的 focused 属性并触发重新应用样式。
-        """
-        try:
-            if obj is getattr(self, "search_box", None):
-                if event.type() == QEvent.FocusIn:
-                    self._set_search_focus(True)
-                elif event.type() == QEvent.FocusOut:
-                    self._set_search_focus(False)
-        except RuntimeError:
-            # 关窗销毁阶段子控件的 C++ 对象可能已被回收，此时忽略即可
-            pass
-        return super().eventFilter(obj, event)
-
-    def _set_search_focus(self, focused: bool) -> None:
-        """设置搜索外壳的聚焦态样式（改属性后需 unpolish/polish 才会重绘）。"""
-        shell = getattr(self, "search_shell", None)
-        if shell is None:
-            return
-        shell.setProperty("focused", "true" if focused else "false")
-        shell.style().unpolish(shell)
-        shell.style().polish(shell)
-        # 放大镜跟着边框一起变色，聚焦反馈更完整
-        icon = getattr(self, "search_icon", None)
-        if icon is not None:
-            color = "#4a7fd0" if focused else "#8ba0b6"
-            icon.setPixmap(self._make_search_icon(color).pixmap(16, 16))
-
-    def _apply_search(self, query: str) -> None:
-        """
-        全组件搜索：命中跨所有分类，结果归并到统一面板。
-
-        入参 query: str  搜索框当前内容；空串（或全空白）表示退出搜索、恢复四个 Tab。
-
-        行为:
-        - 退出搜索: 卡片全部回到各自 Tab、恢复可见，显示三个分类 Tab，Tab 标题恢复「总数」。
-        - 进入搜索: 收起 Tab，把所有命中的组件按分类归并到统一结果列表（带分类小标题），
-          一眼看全，不用切页。过滤只动卡片可见性/归属，**不动 self.cards 平铺列表**——
-          刷新版本 / 存配置 / 关窗等探测逻辑都遍历那个列表，隐藏不能让它缺项。
-        """
-        q = query.strip()
-
-        # 「先无条件复位到浏览基线」这一步 2026-10-12 去掉了：它是卡顿的全部来源。
-        # 一次复位 = 把 85 张卡逐个 setVisible(True) + 四个 Tab 各销毁重建一遍行，
-        # 而连续输入时紧接着就要把它们再搬进结果面板，等于每敲一个字白做两遍搬家。
-        # 基线并不需要一个显式复位：`_build_unified` 开头就 `_clear_results_layout()`
-        # （命中的卡回到各自 Tab 容器），随后对**每一张**卡都重设可见性与归属，
-        # 所以"重复搜索、清空再搜"拿到的已经是干净状态。
-        # 清空输入要回到浏览态时才真复位，而且只在确实处于搜索态时复位一次：
-        # 浏览态下按退格把最后一个字符删掉，不该重排 85 张卡。
-        # 重建期间关掉重绘（2026-10-15 性能修复）：一次重建要让几十上百张卡搬家、
-        # 销毁旧行、再建新行，而本函数是**同步**的 —— 回到事件循环之前根本不会重绘，
-        # 开着只让 Qt 在每个中间态白算一遍布局与绘制。实测省掉约 1/3 的总耗时。
-        # 必须 try/finally：异常时也要把重绘还回去，否则窗口从此不再刷新
-        # （那是比"慢"更难排查的故障）。
-        self.setUpdatesEnabled(False)
-        try:
-            if not q:
-                if self._in_search():
-                    self._restore_browse()
-                self.search_hint.setText("")
-                self.search_hint.setProperty("empty", "false")
-                self.search_hint.style().unpolish(self.search_hint)
-                self.search_hint.style().polish(self.search_hint)
-                return
-
-            self._build_unified(q)
-        finally:
-            self.setUpdatesEnabled(True)
-
-    def _in_search(self) -> bool:
-        """结果面板是否正盖着四个 Tab（`top_stack` 第 1 页 = 统一搜索结果）。
-
-        半构造的窗口（测试里造的半成品 MainWindow）可能还没有 `top_stack`，
-        按"不在搜索态"处理 —— 调用方据此只会少走一次复位，不会漏做该做的重排。
-        """
-        stack = getattr(self, "top_stack", None)
-        return stack is not None and stack.currentIndex() == 1
-
-    def _restore_browse(self) -> None:
-        """把全部卡片放回各自 Tab 并恢复可见，切回浏览模式，然后按列数重排。"""
-        # 从统一结果面板卸下所有卡片（卡片先回到自己 Tab 的容器，小标题才销毁）
-        self._clear_results_layout()
-        # 搜索时被隐藏的卡片要一起放出来，否则重排会因为"看不见"把它们漏掉
-        for card in self.cards:
-            card.setVisible(True)
-        self.top_stack.setCurrentIndex(0)
-        for idx in range(len(self._tab_cards)):
-            self.relayout_cards(idx)
-        # Tab 标题恢复成「分类（总数）」，并重新标出哪些页有组件在运行
-        self._mark_running_tabs()
-        self._tab_rows[RESULTS_KEY] = []
-
-    def _log_credentials_of(self, key: str, port: int) -> None:
-        """主窗侧：把某个正在运行的组件的登录凭据写进全局日志。
-
-        读不到就跳过——凭据只是便利信息，缺了不该让"认清本机运行状态"看起来失败。
-        """
-        # 走模块级组件表而不是 self 上的什么：这里在测试里可能被一个
-        # "半初始化实例"（只绑了几个方法、没跑 __init__）调用，
-        # 模块级函数对那种实例一样成立。
-        comp = component_registry().get(key)
-        if comp is None or getattr(comp, "launch", None) is None:
-            return
-        try:
-            for line in credentials_for(comp, comp.launch, port):
-                self._append_log("info", f"[{comp.display_name}] {line}")
-        except Exception:
-            pass
-
-    def _mark_running_tabs(self) -> None:
-        """Tab 标题后标 `●` 表示"这一页有组件在运行"，清空搜索/退出搜索时都要重算。
-
-        2026-10-06 用户反馈"启动了 nacos，没看到停止选项"—— 按钮一直是好的，
-        但当时三个启动组件分在两个 Tab（Nacos/ActiveMQ 在「服务端组件」、Jenkins 在「其它软件」），
-        界面默认停在「开发环境」。用户在自己的启动页上找不到刚才那个卡片。
-        （2026-10-08 起可启停组件已集中到「一键启停」Tab，这一条分散找卡的起因消了；
-        `●` 仍然保留 —— 同时跑着两三个组件时，还是要知道哪一页上有活的。）
-        标题上挂个 `●`，无论停在哪一页都能一眼看出"有东西在跑，去那页找"。
-        """
-        tabs = getattr(self, "tabs", None)
-        if tabs is None:                      # 构造期/测试用的半成品窗口：没有 Tab 就没什么可标
-            return
-        base_titles = getattr(self, "_tab_base_titles", [])
-        tab_cards = getattr(self, "_tab_cards", [])
-        for idx in range(tabs.count()):
-            base = base_titles[idx] if idx < len(base_titles) else tabs.tabText(idx)
-            cards = tab_cards[idx] if idx < len(tab_cards) else []
-            running = any(hasattr(c, "btn_start") and c._running_per_ui()
-                          for c in cards)
-            tabs.setTabText(idx, f"{base}{'  ●' if running else ''}")
-
-    def _reveal_running_tabs(self) -> None:
-        """有组件在运行时，若它不在当前 Tab，就把 Tab 切过去并说清是哪一页。
-
-        2026-10-06 用户反馈"启动了 nacos，没看到停止选项"。查下来按钮一直是好的
-        （btn_stop 可见可用、文本"停止"、label 显示"● 运行中 · 端口 8848"），
-        真正的原因是**当时三个启动组件分在两个 Tab**：
-        Jenkins 在「其它软件」，Nacos/ActiveMQ 在「服务端组件」，
-        而界面默认停在 Tab0「开发环境」。用户自然找不到自己刚启动的那个卡片。
-        （2026-10-08 起它们都在「一键启停」一页；跳页与这句说明留着，是因为
-        同时跑多个组件、或用户停在别的页上时，症状会一模一样地复发。）
-
-        这不是"找不到按钮"，是"服务跑着却看不见"——比按钮缺失更容易让人以为没启动成功。
-        所以这里主动跳页+ 点名在日志里说清，不指望用户自己 Tab 翻一遍。
-        """
-        self._mark_running_tabs()
-        tabs = getattr(self, "tabs", None)
-        layouts = getattr(self, "_tab_layouts", None)
-        tab_cards = getattr(self, "_tab_cards", None)
-        if tabs is None or not layouts or not tab_cards:
-            return
-        for card in self.cards:
-            if not hasattr(card, "btn_start"):
-                continue
-            if not card._running_per_ui():
-                continue                     # 没在运行，不用跳
-            # 按 _tab_cards 判归属，不按 layout.indexOf：改成行容器后卡片不在
-            # 外层布局里（它的父级是行控件），indexOf 恒为 -1，跳页会静默失效。
-            idx = next((n for n, cards in enumerate(tab_cards)
-                        if any(c is card for c in cards)), -1)
-            if idx >= 0 and idx != tabs.currentIndex():
-                tabs.setCurrentIndex(idx)
-                base = self._tab_base_titles[idx] if idx < len(self._tab_base_titles) \
-                    else tabs.tabText(idx)
-                self._append_log(
-                    "info",
-                    f"已切换到「{base.split('（')[0]}」页："
-                    f"{card.component.display_name} 正在运行，"
-                    f"它的「停止」按钮在这一页（端口 {card._launch_status().record.port}）。")
-                return                      # 一次只跳一个，避免连翻多页
-
-    def _build_unified(self, q: str) -> None:
-        """把命中的组件按分类归并进统一结果列表（带分类小标题）。
-
-        结构与浏览 Tab 同一套网格：**分类小标题（整行）+ 该分类的若干 cardRow 行**，
-        所以搜索结果的卡片宽度与浏览时一致。列数取 min(命中数, 浏览列数)，由
-        `_relayout_results` 统一算 —— 命中 1 个就是 1 列，命中 5 个就是 3 列。
-        """
-        # send_home=False：命中的卡片**留在结果面板宿主上**，别先送回 Tab 再搬回来。
-        # 搬两次家 = 每张卡两轮 QSS 重算，而这一次清空本来只是为了把旧行拆掉。
-        # 退出搜索（`_restore_browse`）才需要真的送回各自 Tab。
-        self._clear_results_layout(send_home=False)
-        # 先按分类归好组：列数要按**总命中数**算，而它得等这一轮扫完才知道
-        groups: list = []
-        order: dict = {}
-        hits = 0
-        for card in self.cards:
-            comp = card.component
-            if not component_matches(comp, q):
-                # 只隐藏、**不送回 Tab**（2026-10-15）：搜索期间每一次"退出命中"都搬一次家
-                # 就是每张卡一轮 QSS 重算，逐字输入时最贵（实测 'c'→'cu' 这一下要 0.7 s）。
-                # 这些卡就留在结果面板宿主上藏着，退出搜索时由
-                # `_clear_results_layout(send_home=True)` 一次扫干净（见那里）。
-                card.setVisible(False)
-                continue
-            cat = comp.category
-            if cat not in order:
-                order[cat] = len(groups)
-                groups.append([cat, []])
-            groups[order[cat]][1].append(card)
-            card.setVisible(True)
-            hits += 1
-        # self.cards 已是分类顺序，遍历一遍即可，标题与卡片的相对顺序天然正确
-        sections: list = []
-        for cat, cards in groups:
-            header = QLabel(cat)
-            header.setObjectName("resultCatHeader")
-            self.results_layout.addWidget(header)
-            for card in cards:
-                # 这里**刻意只设可见性、不设父级**（2026-10-15 性能修复）：
-                # 下面 `relayout_cards(RESULTS_KEY)` 里 `_relayout_results` 会把
-                # 这批卡收回到 `results_content` 再排进行里，在这里先 setParent
-                # 一遍等于每张卡多搬一次家。而**搬到同一个父级也不便宜** ——
-                # 实测 `card.setParent(同父)` 仍会触发 Qt 对该卡整棵子树重跑一遍
-                # QSS 解析，约 5 ms/张；115 张就是 ~0.6 s（真机实测，见
-                # DEVELOPMENT.md 的搜索性能一节）。
-                card.setVisible(True)
-            sections.append((header, cards))
-        self.results_layout.addStretch(1)
-        self._result_sections = sections
-        self.top_stack.setCurrentIndex(1)
-
-        # 四个 Tab 在搜索期间**不重排**（2026-10-12 性能修复，卡顿的另一半）。
-        # 原来这里要 relayout 四遍"把被搬走的命中卡片从旧行里摘掉"，但那四页此刻
-        # 正被 top_stack 的结果面板盖着，一个字都看不见；卡片 setParent 走时 Qt 已经
-        # 把它们从旧 QHBoxLayout 里摘了，留下的只是不可见页上的空位。退出搜索走
-        # `_restore_browse()`，它无条件把四个 Tab 各重排一遍 —— 该补的账在那儿补。
-        # 中间态的唯一读者是 resizeEvent（列数变了才重排），而 relayout_cards 自己按
-        # `root.isAncestorOf(c)` 判归属，搬走的卡片不会被它拽回 Tab，所以跳过是安全的。
-        # 省下的是**每次输入 4 次销毁重建**：连打五个字少 20 次整页重排。
-        self.relayout_cards(RESULTS_KEY)
-
-        self.search_hint.setText(f"匹配 {hits} / {len(self.cards)} 个组件")
-        # 一个都没命中时换个警示色，免得用户以为列表加载坏了
-        self.search_hint.setProperty("empty", "true" if hits == 0 else "false")
-        self.search_hint.style().unpolish(self.search_hint)
-        self.search_hint.style().polish(self.search_hint)
-
-    def _send_card_home(self, card) -> None:
-        """把卡片从它当前所在的"行"里摘下、挂回所属 Tab 的容器（不销毁）。
-
-        换父级并不会让旧布局自动放手，所以必须显式 removeWidget：否则销毁行控件
-        时 Qt 会把行内的卡片一起带走，下一轮搜索就少卡。
-        """
-        parent = card.parent()
-        lay = parent.layout() if parent is not None else None
-        if lay is not None and lay.indexOf(card) != -1:
-            lay.removeWidget(card)
-        home = self._home_wrap_of(card)
-        if home is not None:
-            card.setParent(home)      # 卡片稍后由 _restore_browse 重排归位
-
-    def _clear_results_layout(self, send_home: bool = True) -> None:
-        """清空统一结果面板里的所有条目（分类小标题、卡片行）。
-
-        卡片**不在这里销毁**：它们只是被摘出布局。去哪由 `send_home` 决定 ——
-        退出搜索时回各自 Tab 的容器；**连续搜索时原地留在宿主里**。
-        留在原地是这次性能修复的一半：下一次重排把它们放进新行时父级没变，
-        Qt 就不必重跑那棵子树的 QSS 解析（见 R2.6 与 `_make_layout_rows`）。
-
-        入参 send_home: bool  True → 卡片回所属 Tab（退出搜索）；
-                             False → 卡片留在 `results_content` 上（继续搜索）。
-        """
-        self._result_sections = []
-        self.results_layout.row_widgets = []
-        while self.results_layout.count():
-            item = self.results_layout.takeAt(0)
-            w = item.widget()
-            sub = item.layout()
-            if sub is not None:
-                # 无宿主行布局：逐个摘出条目，再丢掉空布局。
-                # 卡片按 send_home 决定去向；占位格是临时控件，随行一起销毁。
-                while sub.count():
-                    child = sub.takeAt(0).widget()
-                    if child is None:
-                        continue
-                    if any(child is card for card in self.cards):
-                        if send_home:
-                            self._send_card_home(child)
-                    else:
-                        child.hide()
-                        child.deleteLater()
-                sub.deleteLater()
-                continue
-            if w is not None:
-                if w.objectName() == "cardRow":
-                    # Tab 的行控件（结果面板已改用无宿主布局，这里保留兜底）：
-                    # 先把卡片送回各自 Tab，再销毁空行 —— 直接 deleteLater
-                    # 会把行内的卡片一起带走。
-                    lay = w.layout()
-                    if lay is not None:
-                        while lay.count():
-                            child = lay.takeAt(0).widget()
-                            if child is not None and send_home:
-                                self._send_card_home(child)
-                    w.hide()
-                    w.deleteLater()
-                    continue
-                if any(w is card for card in self.cards):
-                    if send_home:
-                        self._send_card_home(w)
-                    continue
-                # deleteLater 是**异步**的：takeAt 之后布局不再管它，但 widget 的
-                # parent 还挂在 results_content 上、几何也没变，在 deferred delete
-                # 真正执行前会以"幽灵"形态残留在原地 —— 用户连续改搜索词时，上一轮
-                # 的分类标题会和这一轮的内容叠在一起（真机 2026-10-08 实测踩中）。
-                # 先 hide 立即从屏幕上消失，删除交给事件循环。
-                w.hide()
-                w.deleteLater()           # 分类小标题等临时标签
-                continue
-            sp = item.spacerItem()
-            if sp is not None:
-                del sp
-
-        if send_home:
-            # 收尾扫一遍"不属于任何一行、但父级还是宿主"的卡片。
-            # 搜索期间它们被刻意留在宿主上（只隐藏不搬家，省掉每张一轮 QSS 重算），
-            # 于是布局里已经找不到它们 —— 上面那圈"拆行"只会走到"行里的卡"。
-            # 漏掉这一步的后果很实在：结果面板是 `top_stack` 的隐藏页，卡挂在那儿
-            # 等于浏览态下**凭空少一批卡片**（2026-10-15 自查实测到：清空后仍有 115 张
-            # 卡留在 results_content 上）。
-            for card in self.cards:
-                if card.parent() is self.results_content:
-                    self._send_card_home(card)
-
-    def _home_wrap_of(self, card):
-        """这张卡片所属 Tab 的容器（搜索结束要按它归位）。"""
-        for idx, cards in enumerate(self._tab_cards):
-            if any(c is card for c in cards):
-                return self._tab_wraps[idx]
-        return None
-
-    def _apply_qss(self) -> None:
-        """应用全局样式表。
-
-        样式表本体在 `theme.QSS`（2026-10-14 从这里抽出去）——它是一份纯声明
-        数据，没有分支也不参与计算，混在 MainWindow 里只会让改配色变成
-        "翻 20000 行找一段 CSS"。
-        """
-        from theme import QSS
-        self.setStyleSheet(QSS)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and self.title_bar.underMouse():
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-            event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._drag_pos = None
-        event.accept()
-
-    def mouseDoubleClickEvent(self, event) -> None:
-        if self.title_bar.underMouse():
-            self._toggle_max()
-
-    def _toggle_max(self) -> None:
-        if self.isMaximized():
-            self.showNormal()
-            self.btn_max.setText("▢")
-        else:
-            self.showMaximized()
-            self.btn_max.setText("❐")
-
-    # ------------------------------------------------------------------
-    def _on_wsl_clicked(self) -> None:
-        """打开 WSL 安装向导（非模态：下载/提权期间主窗口还能用）。"""
-        dlg = getattr(self, "_wsl_dialog", None)
-        if dlg is not None and dlg.isVisible():
-            dlg.raise_()
-            dlg.activateWindow()
-            return
-        self._wsl_dialog = WslDialog(self)
-        self._wsl_dialog.setModal(False)
-        self._wsl_dialog.show()
-
-    def _on_cleanup_path_clicked(self) -> None:
-        """扫描并清理 PATH 中指向本工具目录、但已不存在的残留条目。"""
-        dead = find_dead_tool_path_entries()
-        if not dead:
-            QMessageBox.information(
-                self,
-                "清理残留 PATH",
-                f"PATH 中没有发现本工具（{CONFIG_DIR}）留下的失效条目。",
-            )
-            return
-        detail = "\n".join(f"· {p}" for p in dead[:12])
-        if len(dead) > 12:
-            detail += f"\n… 等共 {len(dead)} 条"
-        reply = QMessageBox.question(
-            self,
-            "清理残留 PATH",
-            f"PATH 中有 {len(dead)} 条指向已不存在的目录：\n\n{detail}\n\n"
-            "只删除这些失效条目，其他程序的 PATH 不受影响。确认清理？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            self._append_log("info", "已取消清理残留 PATH。")
-            return
-        removed = cleanup_dead_tool_path_entries()
-        if removed:
-            self._append_log(
-                "ok", f"已清理 {len(removed)} 条残留 PATH：" + "、".join(removed)
-            )
-        else:
-            self._append_log("warn", "未删除任何条目（可能目录刚被重建）。")
-        for card in self.cards:
-            card._detect_status()
-
-    # ------------------------------------------------------------------
-    def _start_fetch_versions(self, force: bool = False) -> None:
-        """从各官网并发拉取版本列表。可反复调用（刷新）。
-
-        force=False（启动那一次）：24 小时内抓过的组件直接用磁盘缓存，不再打网络 ——
-        GitHub 匿名额度只有 60 次/小时/IP，一次启动 77 路，一小时内第二次开工具就会
-        集体失败（见 R15）。force=True（用户点「⟳ 刷新版本」）：绕过缓存全量重抓。
-        """
-        if self._closing:
-            return
-        # 若有 worker 仍在运行、或已排期但尚未启动（错峰未触发），等它跑完再触发新一轮：
-        # 未启动的线程 isRunning()=False 但也没跑完，必须一并算"忙"，否则会被下面
-        # cleanup 提前 deleteLater，定时器回调再来访问就是已释放对象。
-        # 判定走 _qthread_state 而不是裸调 isRunning()：引用可能还留着但 C++ 对象已经被
-        # 删掉了，这时裸调抛的是 RuntimeError，会把整条"刷新版本"打断。
-        busy = [w for w in self._fetch_workers if _qthread_state(w) in ("running", "idle")]
-        if busy:
-            self._append_log("warn", f"仍有 {len(busy)} 个抓取任务在进行，请稍候…")
-            return
-        # 清理已完成的 worker
-        for w in self._fetch_workers:
-            w.deleteLater()
-        self._fetch_workers.clear()
-
-        if hasattr(self, "btn_refresh"):
-            self.btn_refresh.setEnabled(False)
-            self.btn_refresh.setText("⟳ 抓取中…")
-        self._fetch_pending = 0
-
-        cache = {} if force else load_version_cache()
-        todo = []
-        cached_ok = 0
-        for card in self.cards:
-            fetcher = FETCHERS.get(card.component.key)
-            if not fetcher:
-                continue
-            if not force:
-                vs = _cached_versions_from(cache, card.component.key)
-                if vs:
-                    card.set_versions(vs)
-                    cached_ok += 1
-                    continue
-            todo.append((card, fetcher))
-
-        if cached_ok:
-            self._append_log(
-                "info", f"沿用 {VERSION_CACHE_TTL_SEC // 3600} 小时内抓到的版本清单"
-                        f"（{cached_ok} 个组件），没有再打官网；"
-                        "要拿最新版本号请点「⟳ 刷新版本」。")
-        if not todo:
-            # 全缓存命中：一个 worker 都没起，也就没人来收尾按钮和打完成日志
-            self._fetch_finished()
-            return
-        self._append_log("info", "正在从各官网获取最新版本列表…")
-        for i, (card, fetcher) in enumerate(todo):
-            w = VersionFetchWorker(card.component.key, fetcher, self)
-            w.done.connect(self._on_versions_fetched)
-            self._fetch_workers.append(w)
-            self._fetch_pending += 1
-            # 错峰启动：避免 N 路线程同时打 api.github.com 触发未认证限额（60 次/小时/IP）。
-            # 2026-10-12 修复：间隔按 N 归一（min(150, 4000//N)）而不是写死 150ms ——
-            # 组件从 26 涨到 80+ 之后，固定 150ms 让末位一路要 12 秒才启动，
-            # 刷新按钮要等全部归零才恢复，观感就是"刷新卡 12 秒"。
-            # 命中限流由 _github_api_json 立旗快速失败。
-            # 走 _launch_fetch_worker 而不是裸 w.start：关窗后残留的定时器不能再起新线程，
-            # 否则线程会在窗口析构时还在跑，直接把进程 abort 掉。
-            gap_ms = min(150, 4000 // max(len(todo), 1))
-            QTimer.singleShot(i * gap_ms, lambda w=w: self._launch_fetch_worker(w))
-
-    def _fetch_finished(self) -> None:
-        """一轮抓取的收尾：恢复按钮 + 一句完成日志（缓存全命中时也要走这里）。"""
-        # 整轮结束才落盘（原来每个组件抓成功就全量重写一次，一轮 87 次，
-        # 全部跑在主线程信号槽里）。放在"恢复按钮"之前：万一写盘慢，
-        # 按钮先恢复，用户不至于对着一个灰掉的按钮等。
-        flush_version_cache()
-        if hasattr(self, "btn_refresh"):
-            self.btn_refresh.setEnabled(True)
-            self.btn_refresh.setText("⟳ 刷新版本")
-        self._append_log("info", "版本列表获取完成。")
-
-    def _fetch_failure_reason(self, key: str) -> str:
-        worker = next((w for w in self._fetch_workers if w.key == key), None)
-        return str(getattr(worker, "error_text", "") or "")
-
-    def _launch_fetch_worker(self, worker: VersionFetchWorker) -> None:
-        """错峰定时器到点后的启动入口；关窗途中则放弃启动。"""
-        if self._closing or _qthread_state(worker) != "idle":
-            return
-        worker.start()
-
-    def _on_versions_fetched(self, key: str, versions) -> None:
-        if self._closing:
-            return
-        card = next((c for c in self.cards if c.component.key == key), None)
-        if card:
-            if versions is None:
-                name = card.component.display_name
-                reason = self._fetch_failure_reason(key)
-                if _is_rate_limit_text(reason):
-                    # 这是额度问题，不是"官网挂了"，也不是软件坏了：说清是谁的额度、
-                    # 什么时候恢复，用户才不会去重装或者反复点刷新（越点越糟）。
-                    self._append_log(
-                        "warn", f"[{name}] GitHub 匿名额度已用完（每个 IP 每小时 60 次），"
-                                f"本次用内置默认清单；一小时后再点「⟳ 刷新版本」就行。")
-                else:
-                    self._append_log("warn", f"[{name}] 官网版本获取失败"
-                                             f"（{reason or '未知原因'}），使用内置默认列表")
-            else:
-                card.set_versions(versions)
-                save_version_entry(key, versions)
-        self._fetch_pending -= 1
-        if self._fetch_pending <= 0:
-            self._fetch_finished()
-
-    # ------------------------------------------------------------------
-    def _on_donate_clicked(self) -> None:
-        DonateDialog(self).exec()
-
-    # ------------------------------------------------------------------
-    def _toast(self, text: str, msec: int = 2600) -> None:
-        """在状态栏位置闪一条短提示，不弹模态框。
-
-        入参 text: 提示文案
-        入参 msec: 停留毫秒数
-        用状态栏而不是 QMessageBox：这类提示是"顺带告诉用户一句"，
-        弹模态框会打断他正在做的事（例如刚点完复制就去点别的按钮）。
-        """
-        try:
-            bar = getattr(self, "status_bar", None)
-            if bar is None:
-                return
-            original = bar.text()
-            bar.setText(html_escape(text))
-            QTimer.singleShot(msec, lambda: bar.setText(original))
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    def _log_file_path(self) -> Path:
-        """本次会话的日志文件路径：~/.env-tools/logs/session-<时间戳>.log。
-
-        落盘是这个界面**唯一**的诊断来源出口：日志浮层只活在内存里，
-        程序一关，用户这次看到的全部信息（镜像怎么换的、哪个源失败、
-        哪条 warn/error）就永久消失了。而"导出诊断信息"与报障都依赖它。
-        """
-        return Path(CONFIG_DIR) / "logs" / f"session-{self._session_stamp}.log"
-
-    def _log_to_disk(self, level: str, msg: str) -> None:
-        """把一条日志追加到本次会话文件。**任何失败都不许影响界面**。
-
-        入参 level: 日志级别（info/ok/warn/error）
-        入参 msg:   已经过 html 转义的纯文本
-        落盘格式刻意用 `[时间] [级别] 正文` 的纯文本 —— 它要被用户复制出去贴到
-        issue 里，不该带 HTML 标签与颜色代码。
-        """
-        try:
-            path = self._log_file_path()
-            ensure_dir(path.parent)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(f"[{self._session_clock()}] [{level:<5}] {msg}\n")
-            # 顺手裁掉过老的会话文件：日志目录是长命目录，不裁会一直涨
-            self._trim_log_files()
-        except Exception:
-            # 写不了日志是"诊断能力退化"，不是"用户要知道的故障"，所以静默
-            pass
-
-    def _trim_log_files(self) -> None:
-        """只保留最近 LOG_KEEP_SESSIONS 个会话日志，按修改时间倒序删多余的。"""
-        try:
-            log_dir = Path(CONFIG_DIR) / "logs"
-            files = sorted(log_dir.glob("session-*.log"),
-                           key=lambda p: p.stat().st_mtime, reverse=True)
-            for old in files[LOG_KEEP_SESSIONS:]:
-                old.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    def _log_text_all(self) -> str:
-        """本次会话日志的纯文本全文（不含 HTML），供复制与另存。"""
-        try:
-            return self._log_file_path().read_text(encoding="utf-8")
-        except Exception:
-            # 落盘还没发生过（极少见）：从内存里的日志控件反推
-            return self.log_view.toPlainText()
-
-    def _copy_log_to_clipboard(self) -> None:
-        """把本次会话日志全文复制到剪贴板。"""
-        try:
-            from PySide6.QtGui import QGuiApplication
-            QGuiApplication.clipboard().setText(self._log_text_all())
-            self._toast("日志已复制到剪贴板")
-        except Exception as exc:
-            self._toast(f"复制失败：{exc}")
-
-    def _save_log_to_file(self) -> None:
-        """让用户挑个位置，把「诊断报告 + 本次会话日志」一起另存为文本。
-
-        2026-10-14：标题栏的「导出诊断」按钮按用户要求移除后，导出能力搬到这里
-        —— 日志浮层本来就是这些数据的所在地，「另存为」顺手就能产出可贴进
-        issue 的完整材料，不必为它单独在标题栏留一个按钮（那两个按钮常年占掉
-        标题栏近三分之一宽度却不点）。
-        """
-        try:
-            default = Path(CONFIG_DIR) / "logs" / f"diagnostics-{self._session_stamp}.txt"
-            ensure_dir(default.parent)
-            target, _ = QFileDialog.getSaveFileName(
-                self, "导出诊断信息与日志", str(default),
-                "文本文件 (*.txt);;日志文件 (*.log);;全部文件 (*)")
-            if not target:
-                return
-            # 诊断报告说明「环境是什么样」，会话日志说明「刚才发生了什么」，
-            # 两段缺一不可：只有报告看不出问题出在哪一步，只有日志看不出环境。
-            payload = build_diagnostics()
-            payload += "\n\n" + "=" * 60 + "\n本次会话日志\n" + "=" * 60 + "\n"
-            payload += self._log_text_all()
-            Path(target).write_text(payload, encoding="utf-8")
-            self._append_log("ok", f"诊断信息已导出：{target}")
-            self._toast("已导出，可直接附到反馈里")
-        except Exception as exc:
-            self._toast(f"导出失败：{exc}")
-
-    def _session_clock(self) -> str:
-        """当前时刻，格式 HH:MM:SS。会话日志只要时分秒，跨天由文件名区分。"""
-        return time.strftime("%H:%M:%S")
-
-    def _append_log(self, level: str, msg: str) -> None:
-        color = {
-            "info": "#dcdcdc",
-            "ok": "#7CFC7C",
-            "warn": "#FFB347",
-            "error": "#FF6B6B",
-        }.get(level, "#dcdcdc")
-        self.log_view.append(f'<span style="color:{color};">{msg}</span>')
-        # 同时落盘（纯文本、不带 HTML）。界面写的是转义后的 msg，直接用同一个
-        # 字符串落盘最省事，也保证"用户复制的"与"界面显示的"逐字一致。
-        self._log_to_disk(level, msg)
-        # 同步进结构化日志历史：导出诊断时按级别汇总，不依赖 HTML 文本
-        try:
-            if level == "ok":
-                logger.ok(msg)
-            elif level == "warn":
-                logger.warn(msg)
-            elif level == "error":
-                logger.error(msg)
-            else:
-                logger.info(msg)
-        except Exception:  # noqa: BLE001 - 日志本身绝不能影响界面
-            pass
-        # 2026-10-14 按用户要求：日志浮层**永远不自动弹开**。
-        # 原先这里有一段 warn/error 自动弹开 + 静默自动收起的逻辑，配一个
-        # "启动后 10 秒内不弹"的静默期。它看起来能解决"启动那一波告警盖住界面"，
-        # 实际却制造了用户抱怨的"偶尔自己弹出来"，原因是那个静默期只挡住**前 10 秒**：
-        # 一轮版本抓取要 30~40 秒，第 12 秒、第 25 秒、第 35 秒到达的告警
-        # （GitHub 限流、各组件抓取失败）全都晚于 10 秒，于是照弹不误。
-        # 表现上像随机 —— 网络快时失败来得早被挡住、看起来正常；网络慢或被限流时
-        # 失败来得晚就弹，所以用户觉得"有时候会自己打开"。
-        #
-        # 现在改成：只累计未读数并挂在「📋 日志 (N)」按钮上，绝不主动弹。
-        # 用户想看就点那个按钮 —— 未读数已经把"有事发生了"说清楚了，
-        # 没必要用浮层盖住他正在操作的那张卡。自动收起的一整套（_log_auto_hide
-        # 定时器、_on_log_auto_hide、_log_user_open）随之删除。
-        if level in ("warn", "error"):
-            overlay = getattr(self, "log_overlay", None)
-            if overlay is not None and overlay.isHidden():
-                self._log_unread += 1
-            self._refresh_log_button()
-
-
-    # ------------------------------------------------------------------
-    def _load_settings(self) -> None:
-        """加载上次选择的版本。"""
-        data = _config_read_raw()      # 读不到就是空表，下面每个键各取各的默认值
-        # 视图模式：老配置没有这个键，取新默认 grid（不报错、不回退整个加载）
-        mode = data.get("view_mode")
-        self.view_mode = mode if mode in ("grid", "list") else "grid"
-        try:
-            selections = data.get("selections", {}) if isinstance(data, dict) else {}
-            for card in self.cards:
-                v = selections.get(card.component.key)
-                if not v:
-                    continue
-                idx = card.version_combo.findText(v)
-                if idx < 0:
-                    continue
-                # 存过的版本可能已经不在下拉框里了（在线清单只留近期版本，
-                # 而离线默认清单会滞后于实际安装版本）。盲目采纳的话，
-                # 界面会停在一个既没装、也点不下来的版本上——jenkins 的
-                # 2.568.3 就是这么来的：它已从清单消失，装着的 2.580.1 反而被顶掉。
-                # 这种情况下保留 _reload_combo_items 挑的"已安装版本"更符合直觉。
-                installed = {v for v, _p in installed_versions(card.component)}
-                if v not in installed:
-                    continue
-                card.version_combo.setCurrentIndex(idx)
-        except Exception:
-            pass
-
-    def _save_settings(self) -> None:
-        """保存下拉框选中版本；active 由切换那侧维护，这里必须原样保留。
-
-        合并写：先读原文件只替换 selections 那一段。整体覆盖会把 active（生效版本
-        登记表）抹掉——那是切换功能写的数据，和用户这次选了哪个下拉项无关。
-        （负向对照：改回整体覆盖后，测试 SaveSettingsKeepsActive 即报 KeyError: 'active'。）
-
-        2026-10-14：原先这里手搓了整条"读-改-写"，与 _update_config 逐字重复。
-        重复的代价不是难读，而是**两份逻辑必须永远保持一致** —— 而这份注释
-        记着的 R3.2 事故（整体覆盖清掉 active 登记表）正是这种重复长出来的。
-        现在只保留"要改哪几个键"这一段属于本方法的业务，其余全交给统一入口。
-        """
-        try:
-            ensure_dir(CONFIG_DIR)
-
-            def _mut(data: Dict[str, object]) -> None:
-                data["selections"] = {
-                    card.component.key: card.version_combo.currentText()
-                    for card in self.cards
-                }
-                if not isinstance(data.get("active"), dict):
-                    data["active"] = {}
-                # 视图模式与 selections 一起合并写回，不整体覆盖（active 是切换那侧的数据）
-                data["view_mode"] = getattr(self, "view_mode", "grid")
-
-            _update_config(_mut)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    def _adopt_running(self) -> None:
-        """启动后一次性的"认清本机在跑什么"。只读 + 清僵尸，绝不拉起进程。"""
-        # 整段兜底：reconcile 清僵尸会回写 running.json（ensure_dir+写+os.replace），
-        # ~/.env-tools 被只读/被锁/磁盘满时异常从这儿抛出就是从生产入口抛出、工具直接打不开 ——
-        # 和读取侧"让整个界面搞崩代价不成比例"是同一个权衡，识别失败只该留下一条 warn。
-        try:
-            states = SERVICE_MANAGER.reconcile(self.current_components())
-            for key, st in states.items():
-                if st.state == "running":
-                    self._append_log("info", f"检测到 {key} 正在运行（端口 {st.record.port}）")
-                    # 把它的登录凭据一起报出来：这些服务是之前启的，
-                    # 用户重开工具时界面上没有任何地方能看到"怎么登进去"，
-                    # 逼着他去翻文件或搜官方文档。
-                    self._log_credentials_of(key, st.record.port)
-            # 访问页服务已经改成独立进程：旧登记里的 console_url 指向的可能是
-            # 上一次主进程内的老服务（已随进程退出）。没有自带控制台的组件，
-            # 把登记刷新成当前页服务的地址，卡片按钮才不会打开一个死链接。
-            try:
-                if any(st.state == "running" for st in states.values()):
-                    server = get_page_server()
-                    records = load_running_map()
-                    comps = self.current_components()
-                    changed = False
-                    if server is not None:
-                        for key, rec in records.items():
-                            comp = comps.get(key)
-                            spec = getattr(comp, "launch", None)
-                            if spec is not None and not spec.console_path:
-                                url = server.url_for(key)
-                                if url and rec.console_url != url:
-                                    rec.console_url = url
-                                    changed = True
-                    if changed:
-                        save_running_map(records)
-            except Exception as exc:      # noqa: BLE001
-                self._append_log("warn", f"刷新访问页地址失败（不影响使用）：{exc}")
-            # reconcile 可能刚把僵尸登记删掉：卡片在那之前已经画过一遍了，必须让它们重读，
-            # 否则窗口里会留一句已经没有依据的"残留登记"。
-            for card in self.cards:
-                card._refresh_launch_state()
-        except Exception as exc:
-            self._append_log("warn", f"认清本机运行状态失败（不影响使用）：{exc}")
-        # Tab 上的运行标记与自动跳页放在 try 之外：它们纯属界面便利，
-        # 失败也不该让日志里多出一条"认清本机运行状态失败"——
-        # 那句话会让用户以为状态识别出了问题，排查方向全错（2026-10-06 踩过）。
-        try:
-            self._reveal_running_tabs()
-        except Exception as exc:
-            self._append_log("warn", f"标记运行中的页面失败（不影响使用）：{exc}")
-
-    def _cancel_launch_workers(self) -> int:
-        """关窗口前让在跑的启动/停止线程体面收尾：只取消"还在等端口"，不动被管理的进程。
-        先全部 cancel 再统一 wait —— 反过来写，后一个 worker 要白等前一个的超时。"""
-        workers = self.findChildren(LaunchWorker)
-        for w in workers:
-            w.cancel()
-        for w in workers:
-            w.wait(2000)
-        return len(workers)
-
-    def _drain_background_workers(self, budget_ms: int = 6000) -> int:
-        """关窗前收掉所有还可能在跑的后台线程，返回处理掉几条。
-
-        QThread 运行时被析构 = Windows 进程级 abort（0xC0000409，退出码 127，
-        没有 traceback）—— 这仓库为同类问题已经写过 R3.14 / R14.1。要等的成员一共六类：
-        应用更新下载（`_update_dl`）、更新检查（`_update_worker`）、卡片的下载
-        （`card.worker`，含安装与"只下载"两条）、前置下载（`card.prereq_worker`）、
-        外部版本探测（`card._external_worker`）、版本探测（`card._version_worker`
-        以及**被它顶替掉的历史** `card._probe_workers`）。用户点完"下载新版本"
-        再在 49 MB 中途关窗，就是必现场景。
-
-        状态判定一律走 `_qthread_state`：这些 worker 大多连了 `finished → deleteLater`，
-        引用还挂在成员上但 C++ 对象早被删了，裸调 `isRunning()` 抛的 RuntimeError 会把
-        整个收尾打断 —— 2026-10-11 那个 127 就是这么来的（closeEvent 后半段没执行，
-        18 条抓取线程在窗口析构时还活着）。
-
-        先统一 cancel 再统一 wait：反过来的话第二个 worker 要白等第一个的超时。
-        """
-        cands: list = []
-        for attr in ("_update_dl", "_update_worker"):
-            w = getattr(self, attr, None)
-            if w is not None:
-                cands.append(w)
-        for card in getattr(self, "cards", []):
-            for attr in ("worker", "prereq_worker", "_external_worker", "_version_worker"):
-                w = getattr(card, attr, None)
-                if w is not None:
-                    cands.append(w)
-            cands.extend(getattr(card, "_probe_workers", ()))
-        running: list = []
-        seen: set = set()
-        for w in cands:                      # 当前探测线程同时挂在两个成员上，按 id 去重
-            if id(w) in seen or _qthread_state(w) != "running":
-                continue
-            seen.add(id(w))
-            running.append(w)
-        for w in running:
-            cancel = getattr(w, "cancel", None)
-            if cancel is not None:
-                cancel()
-        for w in running:
-            _qthread_wait(w, budget_ms)
-        return len(running)
-
-    def closeEvent(self, event) -> None:
-        # 关窗前先让在跑的 LaunchWorker 体面收尾（cancel+wait 的顺序理由见 _cancel_launch_workers）。
-        self._cancel_launch_workers()
-        # 先立旗：不再派发抓取、不再回写界面，并让在跑的抓取线程尽快从重试边界返回。
-        # QThread 在运行时被析构会直接 abort 进程（Windows 退出码 0xC0000409），
-        # 而版本抓取是启动即触发的，所以关窗必须等这些线程收尾。
-        self._closing = True
-        _CLOSING.set()          # 卡片通过模块级事件问"是否正在退出"
-        FETCH_ABORT.set()
-        # 下载/检查/外部探测/版本探测这几类线程统一在这里等（含被顶替的探测历史线程）
-        self._drain_background_workers()
-        self._save_settings()
-        # 抓取线程：_get / _github_api_json 已能协作取消，剩下的是一个在途请求的超时
-        # （最长 DOWNLOAD_PROBE_TIMEOUT*2 = 10s），给 FETCH_EXIT_WAIT 秒总预算，逐个等剩余时间。
-        import time as _time
-        deadline = _time.monotonic() + FETCH_EXIT_WAIT
-        for w in self._fetch_workers:
-            if _qthread_state(w) != "running":
-                continue
-            remain = max(0.0, deadline - _time.monotonic())
-            _qthread_wait(w, int(remain * 1000))
-        # 抓取线程已收尾，把这轮攒在内存里的版本条目落盘。
-        # 放在最后是有意的：关窗时正在抓的那几个组件可能刚好返回了，
-        # 它们的成果不该因为"用户关得比网络快"而白丢。
-        flush_version_cache()
-        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -23799,6 +18330,13 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     ensure_dir(CONFIG_DIR)
+
+    # 性能采样仅在显式开启时进行（BYTE_TOOLS_PROFILE=1），避免默认开销
+    from core import perf as _perf
+    _perf.maybe_start_from_env()
+    # 可选：若存在 assets/i18n/byte-tools_<lang>.qm 则加载（规则 R30）
+    from core.i18n import install_translator
+    install_translator(app)
 
     # 2026-10-13 启动优化：先显示 splash（无边框半透明、Logo + 进度文字），
     # 再分帧建卡片（每帧 8 张，splash 实时报 "正在加载组件 N/88…"），全部建完

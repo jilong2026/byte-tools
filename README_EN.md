@@ -697,15 +697,20 @@ No, and it will not pretend. On Windows Docker exists only as an installer (WSL2
 
 ```
 byte-tools/
-├── main.py                     # the application (UI + orchestration)
+├── main.py                     # entry point + orchestration
 ├── core/                       # load-bearing modules (rule R30)
 │   ├── constants.py            # timeouts / cache TTLs / mirror bases / safety limits
 │   ├── logger.py               # structured logging (four UI colors + JSON export)
 │   ├── exceptions.py           # custom exceptions + safe_rmtree (path validation)
 │   ├── versioning.py           # Version and the three comparison semantics
 │   ├── download.py             # multi-source failover download worker
+│   ├── platform.py             # platform predicates
+│   ├── perf.py                 # timers / optional memory snapshot
+│   ├── i18n.py                 # minimal translation table (Chinese source keys)
 │   └── windows_service.py      # read-only SCM queries + start/stop entry points
-├── ui/                         # extracted self-contained dialogs (DonateDialog)
+├── data/components.py          # version / artifact data models
+├── services/service_manager.py # service lifecycle management
+├── ui/                         # component card, main window, detail & donate dialogs
 ├── 一键启动项目.bat            # Windows: bootstrap environment, run GUI
 ├── 一键打包exe.bat             # Windows: bootstrap environment, build dist/ByteTools.exe
 ├── pyinstaller_no_wmi.py       # build entry that avoids WMI entirely
