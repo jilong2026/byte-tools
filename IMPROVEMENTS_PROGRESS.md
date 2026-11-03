@@ -49,11 +49,25 @@
 ## 二、验证
 ```text
 python tests/run_all_tests.py
-合计 1087 条用例 / 24 个文件 / 24 通过 / 0 失败
+合计 1089 条用例 / 24 个文件 / 24 通过 / 0 失败
 
 offscreen 冒烟：MainWindow()/show/close、DonateDialog() → SMOKE OK
+打包验证：pyinstaller_no_wmi.py --noconfirm --clean byte-tools.spec → dist/ByteTools.exe (50 MB)
+          后再以 QT_QPA_PLATFORM=offscreen 启动 15 秒，进程保持存活（事件循环正常）
 ```
-新增护栏：`tests/bt_core_tests.py`（38 条）。
+新增护栏：`tests/bt_core_tests.py`（40 条）。
+
+## 二·补：入口脚本与打包配置的同步改动（2026-11-03）
+- `ui/donate_dialog.py` / `core/i18n.py`：资产与 `.qm` 路径优先取 `sys._MEIPASS`，
+  源码运行回落仓库根（onefile 下不再依赖 `__file__` 布局）。
+- `byte-tools.spec`：`hiddenimports` 显式列出 `core/data/services/ui/theme`
+  （`_main.` 晚绑定不产生静态 import，漏收只在打包后暴露）。
+- `同步Gitee产物.sh`：默认产物目录 `./assets` → `./release-assets`，与 `.bat`
+  和文档一致，避免把图标目录当产物目录、并让"清空暂存目录"逻辑真正生效。
+- `.github/workflows/release.yml`：Gitee 同步 job 的下载目录改为 `./release-assets`。
+- `一键启动项目.bat` / `一键打包exe.bat` 无需改动：均用 `%~dp0` 定位仓库根，
+  只校验 `main.py` / `byte-tools.spec` / `requirements.txt`；新包由 PyInstaller
+  静态分析与显式 hiddenimports 收齐。
 
 ---
 

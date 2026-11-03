@@ -463,11 +463,11 @@ jobs:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
         run: |
           set -e
-          mkdir -p ./assets
+          mkdir -p ./release-assets
           echo "正在从 GitHub Release ${TAG_NAME} 下载产物..."
-          gh release download "${TAG_NAME}" --dir ./assets --clobber
+          gh release download "${TAG_NAME}" --dir ./release-assets --clobber
           echo "下载完成，产物列表："
-          ls -lh ./assets/
+          ls -lh ./release-assets/
 
       # 3. 自动发布 GitHub Release（取消草稿）
       #    能走到这里说明 3 个平台全部构建成功（sync 任务 needs: build），
@@ -512,7 +512,7 @@ jobs:
           GITEE_REPO: ${{ env.GITEE_REPO }}
           # 手动补同步时用输入的 tag_name，tag 推送时用被推送的 tag
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
-          ASSETS_DIR: ./assets
+          ASSETS_DIR: ./release-assets
           TARGET_COMMITISH: master
           # 生成正文里的 GitHub 产物直链（Gitee 用户据此下载）
           GITHUB_REPO_SLUG: ${{ github.repository }}

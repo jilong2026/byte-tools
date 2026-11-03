@@ -37,7 +37,8 @@
 #   GITEE_REPO           (必需) Gitee 仓库名
 #   TAG_NAME             (必需) 要同步的 tag，如 v1.0.1
 #   GITHUB_REPO_SLUG     (必需) GitHub 的 owner/repo，用于生成产物直链
-#   ASSETS_DIR           产物目录，默认 ./assets
+#   ASSETS_DIR           产物暂存目录，默认 ./release-assets
+#                        （不要指向仓库自带的 assets/ —— 那是图标/二维码目录）
 #   GH_ACCEL_PREFIX      自动下载产物时用的加速器前缀，默认 https://gh-proxy.com/；
 #                        直连 github.com 排在它后面（规则 R1：镜像优先、官网末位）
 #   AUTO_FETCH_ASSETS    缺产物时脚本自己去下载，默认 1；设 0 关掉（测试接缝，
@@ -68,7 +69,7 @@ if [ -z "${GITHUB_REPO_SLUG}" ]; then
   exit 1
 fi
 
-ASSETS_DIR="${ASSETS_DIR:-./assets}"
+ASSETS_DIR="${ASSETS_DIR:-./release-assets}"
 TARGET_COMMITISH="${TARGET_COMMITISH:-master}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 API_MAX_TIME="${API_MAX_TIME:-60}"
