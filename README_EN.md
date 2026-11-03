@@ -691,13 +691,19 @@ No, and it will not pretend. On Windows Docker exists only as an installer (WSL2
 
 ## Stack · Layout · Contributing
 
-**Stack**: Python 3.10 – 3.14 · [PySide6](https://doc.qt.io/qtforpython-6/) (official Qt 6 Python bindings, LGPL) · [requests](https://requests.readthedocs.io/) · standard-library `zipfile` + `tarfile` · environment via `winreg` + `WM_SETTINGCHANGE` (Windows) or marked shell-config blocks (macOS / Linux) · `QThread` for downloads and version fetching, so the UI never blocks · **single-file architecture**: `main.py` holds the UI, data classes and all business logic.
+**Stack**: Python 3.10 – 3.14 · [PySide6](https://doc.qt.io/qtforpython-6/) (official Qt 6 Python bindings, LGPL) · [requests](https://requests.readthedocs.io/) · standard-library `zipfile` + `tarfile` · environment via `winreg` + `WM_SETTINGCHANGE` (Windows) or marked shell-config blocks (macOS / Linux) · `QThread` for downloads and version fetching, so the UI never blocks · **`core/` load-bearing modules**: constants, structured logging, safe deletion, version semantics and the Windows service backend each live in their own module (see `DEVELOPMENT.md` R30); `main.py` keeps the UI and orchestration.
 
 **Repository layout**:
 
 ```
 byte-tools/
-├── main.py                     # the application (UI + all logic)
+├── main.py                     # the application (UI + orchestration)
+├── core/                       # load-bearing modules (rule R30)
+│   ├── constants.py            # timeouts / cache TTLs / mirror bases / safety limits
+│   ├── logger.py               # structured logging (four UI colors + JSON export)
+│   ├── exceptions.py           # custom exceptions + safe_rmtree (path validation)
+│   ├── versioning.py           # Version and the three comparison semantics
+│   └── windows_service.py      # read-only SCM queries + start/stop entry points
 ├── 一键启动项目.bat            # Windows: bootstrap environment, run GUI
 ├── 一键打包exe.bat             # Windows: bootstrap environment, build dist/ByteTools.exe
 ├── pyinstaller_no_wmi.py       # build entry that avoids WMI entirely
