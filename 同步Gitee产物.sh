@@ -257,6 +257,22 @@ if [ ! -d "${ASSETS_DIR}" ]; then
   }
 fi
 
+# 与 .bat 对齐：Linux/macOS 允许删除运行中的文件，但 curl -o 覆盖**正在运行的
+# 可执行文件**会 ETXTBSY。有 lsof 就先停掉占用产物目录的进程；没有 lsof 就跳过，
+# 由 curl 的报错兜底。范围严格限制在 ASSETS_DIR 内。
+stop_running_from_assets() {
+  [ -d "${ASSETS_DIR}" ] || return 0
+  command -v lsof >/dev/null 2>&1 || return 0
+  _pids=$(lsof +D "${ASSETS_DIR}" -t 2>/dev/null | sort -u || true)
+  [ -n "${_pids}" ] || return 0
+  echo "    停止占用产物目录的进程：$(printf '%s ' ${_pids})"
+  for _p in ${_pids}; do kill "${_p}" 2>/dev/null || true; done
+  sleep 1
+  for _p in ${_pids}; do kill -9 "${_p}" 2>/dev/null || true; done
+}
+
+stop_running_from_assets
+
 # 缺产物就自己去下载，而不是打几条 curl 让维护者手跑——两个一键脚本已经按这个
 # 标准改过，这里是同一条契约。只在真要往 Gitee 传二进制时才下载：CI 默认
 # UPLOAD_LIST 为空（正文只写 GitHub 直链），为那种模式拉 220MB 毫无意义。
