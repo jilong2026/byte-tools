@@ -548,6 +548,10 @@ pyinstaller byte-tools.spec --noconfirm --clean
 ```
 
 > 如果你这台机器上 PyInstaller 一启动就长时间没输出（WINMGMT 冷启动，`platform.win32_ver()` 卡住不返回），改用仓库里现成的入口，效果相同但全程不查 WMI：`python pyinstaller_no_wmi.py byte-tools.spec --noconfirm --clean`。双击那个 `.bat` 走的已经是这条路径。
+>
+> **打包前请先关闭正在运行的字节工具箱**：Windows 不允许覆盖正在运行的 exe，PyInstaller 会在最后一步才报 `PermissionError: [WinError 5]`。入口脚本现在会**开工前预检**：
+> - 上次遗留的「访问页服务」进程（命令行含 `--bt-page-server`，设计上会脱离主程序存活）会被自动停止；
+> - 仍在运行的主窗口不会被擅自杀掉，脚本会打印它的 PID 与 `taskkill` 命令，由你决定。
 
 产物：Windows `dist/ByteTools.exe`（单文件） · macOS `dist/ByteTools.app` · Linux `dist/ByteTools`。Windows 产物带项目图标（`assets/byte-tools.ico`，由 `assets/byte-tools.png` 转出 16~256 七档尺寸）；换 logo 后重新生成 ICO 的方法见 [`CODE_WIKI.md`](CODE_WIKI.md) 7.4。覆盖打包后资源管理器仍显示旧图标是 Windows 的图标缓存，改个文件名或执行 `ie4uinit.exe -show` 即可刷新。
 

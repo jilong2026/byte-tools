@@ -432,6 +432,39 @@ class ComponentDetailDialogUiTests(unittest.TestCase):
                 self.assertEqual(default_assets_dir(), Path(tmp) / "assets")
 
 
+class BuildPreflightTests(unittest.TestCase):
+    """打包前置检查：运行中的 exe 会让 PyInstaller 最后一步 WinError 5。"""
+
+    def test_distpath_parsing(self):
+        import pyinstaller_no_wmi as no_wmi
+
+        self.assertEqual(no_wmi._target_distpath([]), "dist")
+        self.assertEqual(no_wmi._target_distpath(["--distpath", "out"]), "out")
+        self.assertEqual(no_wmi._target_distpath(["--distpath=out2"]), "out2")
+
+    def test_missing_output_is_not_blocking(self):
+        import pyinstaller_no_wmi as no_wmi
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(no_wmi.check_output_lock(["--distpath", tmp]), "")
+
+    def test_writable_output_is_not_blocking(self):
+        import pyinstaller_no_wmi as no_wmi
+
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "ByteTools.exe"
+            exe.write_bytes(b"MZ")
+            self.assertEqual(no_wmi.check_output_lock(["--distpath", tmp]), "")
+
+    def test_only_page_servers_are_selected_for_auto_stop(self):
+        import pyinstaller_no_wmi as no_wmi
+
+        procs = [(111, r"dist\ByteTools.exe --bt-page-server C:\x"),
+                 (222, r"dist\ByteTools.exe"),
+                 (333, "")]
+        self.assertEqual(no_wmi.page_server_pids(procs), [111])
+
+
 class DiagnosticsIntegrationTests(unittest.TestCase):
     def test_diagnostics_contains_structured_log_section(self):
         main.logger.ok("diagnostics-marker-ok")
