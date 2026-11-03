@@ -3268,7 +3268,9 @@ Windows 官方直链"对 macOS 独占组件是假话。
 | `core/logger.py` | 结构化日志（INFO/OK/WARNING/ERROR + 颜色 + JSON 导出） | UI 写入必须同步进 logger 历史，导出诊断要能看到 |
 | `core/versioning.py` | `Version` 与三套版本口径 | 三套口径的分歧是承重的，不许"统一" |
 | `core/windows_service.py` | SCM 只读查询 + 启停写入口 | 状态识别只读；启动只走 `StartServiceW` |
+| `core/download.py` | 多源故障转移下载线程 | 必须经 `configure()` 注入依赖；session 用 lambda 解引用，保证 `main.http_session` 桩点有效 |
 | `core/exceptions.py` | 自定义异常 + `safe_rmtree` | 删除用户路径必须经 `safe_rmtree` |
+| `ui/donate_dialog.py` | 「支持作者」对话框 | 资产目录由参数注入，不写死 `__file__/assets` |
 
 ### R30.2 硬约束
 
@@ -3286,11 +3288,12 @@ Windows 官方直链"对 macOS 独占组件是假话。
 4. 新增版本比较只许用 `Version`（`core/versioning.py`）。
    `_version_parts` / `_semver_key` / `_version_key` 是兼容薄壳，不许再有第二份实现。
 5. `core/` 模块不许 import `main`（避免循环依赖）；需要运行环境信息时用参数注入
-   （例：`WindowsServiceBackend(CURRENT_OS)`）。
+   （例：`WindowsServiceBackend(CURRENT_OS)`、`core.download.configure(...)`）。
 
 ### R30.3 验收
 
-- 全量离线回归：`python tests/run_all_tests.py`（2026-11-03：24 套件 / 1071 条全绿）。
-- 新护栏：`tests/bt_core_tests.py` 覆盖越界删除、前缀伪装目录、日志不递归、
-  版本口径一致、SCM 模块在非 Windows 上保持惰性。
+- 全量离线回归：`python tests/run_all_tests.py`（2026-11-03 终态：24 套件 / 1076 条全绿）。
+- 新护栏：`tests/bt_core_tests.py`（27 条）覆盖越界删除、前缀伪装目录、日志不递归、
+  版本口径一致、SCM 模块在非 Windows 上保持惰性、下载故障转移与 `main.http_session` 桩点、
+  支持作者对话框的资产注入。
 - 关窗冒烟：offscreen 下 `MainWindow()` → `show()` → `close()` 退出码 0。

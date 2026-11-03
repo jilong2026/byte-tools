@@ -710,7 +710,9 @@ byte-tools/
 │   ├── logger.py               # 结构化日志（四级颜色 + JSON 导出）
 │   ├── exceptions.py           # 自定义异常 + safe_rmtree（路径校验）
 │   ├── versioning.py           # Version 与三套版本口径
+│   ├── download.py             # 多源故障转移下载线程
 │   └── windows_service.py      # SCM 只读查询 + 启停写入口
+├── ui/                         # 已抽出的自包含对话框（DonateDialog）
 ├── 一键启动项目.bat            # Windows：自动装环境后启动 GUI
 ├── 一键打包exe.bat             # Windows：自动装环境后产出 dist/ByteTools.exe
 ├── pyinstaller_no_wmi.py       # 打包入口：绕开 PyInstaller 对 WMI 的依赖

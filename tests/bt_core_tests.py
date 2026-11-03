@@ -176,6 +176,148 @@ class WindowsServiceModuleTests(unittest.TestCase):
         self.assertIs(main.SERVICE_NAME_RE, core_ws.SERVICE_NAME_RE)
 
 
+class DownloadWorkerCoreTests(unittest.TestCase):
+    """core/download.py：故障转移、魔数校验、以及 main.http_session 桩点仍然有效。"""
+
+    def setUp(self):
+        from core import download as core_download
+
+        self.core_download = core_download
+        self._orig_cfg = (core_download._DEP_SESSION,
+                          core_download._DEP_ENSURE_DIR,
+                          core_download._DEP_HUMAN_SIZE)
+        self.addCleanup(self._restore_cfg)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dest = Path(self._tmp.name) / "pkg.zip"
+
+    def _restore_cfg(self):
+        (self.core_download._DEP_SESSION,
+         self.core_download._DEP_ENSURE_DIR,
+         self.core_download._DEP_HUMAN_SIZE) = self._orig_cfg
+
+    class _Resp:
+        def __init__(self, body: bytes, total: int = None):
+            self._body = body
+            self.headers = {"Content-Length": str(len(body) if total is None else total)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield self._body
+
+    def _configure(self, session_factory):
+        self.core_download.configure(
+            session_factory=session_factory,
+            ensure_dir_fn=lambda p: Path(p).mkdir(parents=True, exist_ok=True),
+            human_size_fn=lambda n: f"{n}B",
+        )
+
+    def test_failover_skips_fake_200_and_finishes(self):
+        good = b"PK" + b"\0" * 5000          # 真 zip 魔数 + 足够字节
+        bad = b"<html>mirror error</html>"   # 假 200 软 404
+
+        class _Sess:
+            def __init__(self):
+                self.seen = []
+
+            def get(self, url, **kw):
+                self.seen.append(url)
+                return DownloadWorkerCoreTests._Resp(bad if url.endswith("/bad") else good)
+
+        sess = _Sess()
+        self._configure(lambda: sess)
+        worker = self.core_download.DownloadWorker(
+            ["https://x/bad", "https://x/good"], self.dest, expect_magic=b"PK")
+        logs, ok, fail = [], [], []
+        worker.log.connect(lambda lvl, msg: logs.append((lvl, msg)))
+        worker.finished_ok.connect(ok.append)
+        worker.finished_fail.connect(fail.append)
+
+        worker.run()
+
+        self.assertEqual(sess.seen, ["https://x/bad", "https://x/good"])
+        self.assertEqual(ok, [str(self.dest)])
+        self.assertEqual(fail, [])
+        self.assertEqual(self.dest.read_bytes(), good)
+        self.assertTrue(any("判定该源无效" in m for _l, m in logs))
+
+    def test_magic_mismatch_fails_all_sources_without_leaving_file(self):
+        fake = b"<!doctype html>" + b" " * 5000
+
+        class _Sess:
+            def get(self, url, **kw):
+                return DownloadWorkerCoreTests._Resp(fake)
+
+        self._configure(lambda: _Sess())
+        worker = self.core_download.DownloadWorker(
+            ["https://x/a"], self.dest, expect_magic=b"PK")
+        ok, fail = [], []
+        worker.finished_ok.connect(ok.append)
+        worker.finished_fail.connect(fail.append)
+
+        worker.run()
+
+        self.assertEqual(ok, [])
+        self.assertEqual(fail, ["所有下载源均不可用"])
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.dest.with_suffix(".zip.part").exists())
+
+    def test_main_reexport_and_http_session_stub_point(self):
+        import core.download as core_download
+
+        self.assertIs(main.DownloadWorker, core_download.DownloadWorker)
+
+        calls = []
+
+        class _Sess:
+            def get(self, url, **kw):
+                calls.append(url)
+                return DownloadWorkerCoreTests._Resp(b"MZ" + b"\0" * 5000)
+
+        old = main.http_session
+        main.http_session = lambda: _Sess()
+        self.addCleanup(setattr, main, "http_session", old)
+
+        worker = main.DownloadWorker(["https://stub/one"], self.dest, expect_magic=b"MZ")
+        worker.run()
+        self.assertEqual(calls, ["https://stub/one"], "必须走 main.http_session 这个桩点")
+        self.assertTrue(self.dest.exists())
+
+
+class DonateDialogUiTests(unittest.TestCase):
+    """ui/donate_dialog.py：资产目录可注入，缺图时给出明确占位文字。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._app = _btprelude.ensure_app()
+
+    def test_assets_dir_is_injected_and_missing_qr_explained(self):
+        from ui.donate_dialog import DonateDialog
+
+        self.assertIs(main.DonateDialog, DonateDialog)
+        with tempfile.TemporaryDirectory() as tmp:
+            dlg = DonateDialog(assets_dir=Path(tmp))
+            self.addCleanup(dlg.deleteLater)
+            text = dlg.qr_view.text()
+            self.assertIn("未找到二维码文件", text)
+            self.assertIn(str(Path(tmp) / "wechat.png"), text)
+
+    def test_bundled_assets_are_found_from_source_tree(self):
+        from ui.donate_dialog import default_assets_dir
+
+        assets = default_assets_dir()
+        self.assertTrue(assets.is_dir(), assets)
+        self.assertTrue((assets / "wechat.png").is_file())
+
+
 class DiagnosticsIntegrationTests(unittest.TestCase):
     def test_diagnostics_contains_structured_log_section(self):
         main.logger.ok("diagnostics-marker-ok")

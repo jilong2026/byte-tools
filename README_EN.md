@@ -703,7 +703,9 @@ byte-tools/
 │   ├── logger.py               # structured logging (four UI colors + JSON export)
 │   ├── exceptions.py           # custom exceptions + safe_rmtree (path validation)
 │   ├── versioning.py           # Version and the three comparison semantics
+│   ├── download.py             # multi-source failover download worker
 │   └── windows_service.py      # read-only SCM queries + start/stop entry points
+├── ui/                         # extracted self-contained dialogs (DonateDialog)
 ├── 一键启动项目.bat            # Windows: bootstrap environment, run GUI
 ├── 一键打包exe.bat             # Windows: bootstrap environment, build dist/ByteTools.exe
 ├── pyinstaller_no_wmi.py       # build entry that avoids WMI entirely

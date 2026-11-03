@@ -65,11 +65,13 @@ try:
         DOWNLOAD_PROBE_TIMEOUT,
         DOWNLOAD_CONNECT_TIMEOUT,
         DOWNLOAD_READ_TIMEOUT,
+        DOWNLOAD_MIN_VALID_BYTES,
         DEVTOOL_FETCH_TIMEOUT,
         _JAVA_MAJOR_TIMEOUT,
         TK_SUPPRESS_BG_LIMIT,
         UPDATE_CHECK_INTERVAL_SEC,
         UPDATE_HTTP_TIMEOUT,
+        HTTP_UA,
     )
     _HAS_CORE_MODULES = True
     logger = get_logger("main")
@@ -81,11 +83,13 @@ except ImportError:  # pragma: no cover - 仅当 core/ 目录缺失时走到
     DOWNLOAD_PROBE_TIMEOUT = 5
     DOWNLOAD_CONNECT_TIMEOUT = 10
     DOWNLOAD_READ_TIMEOUT = 60
+    DOWNLOAD_MIN_VALID_BYTES = 4096
     DEVTOOL_FETCH_TIMEOUT = 15
     _JAVA_MAJOR_TIMEOUT = 20
     TK_SUPPRESS_BG_LIMIT = 600
     UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
     UPDATE_HTTP_TIMEOUT = 8.0
+    HTTP_UA = {"User-Agent": "byte-tools"}
 
     def safe_rmtree(path, verify_deleted=True, allowed_root=None):
         """Fallback: 无 core 模块时退化为普通删除。"""
@@ -484,12 +488,12 @@ def build_diagnostics() -> str:
                 continue
             try:
                 installed = [v for v, _p in installed_versions(c)]
-            except Exception as exc:
+            except BEST_EFFORT_ERRORS as exc:
                 installed = [f"<读取失败 {type(exc).__name__}>"]
             comp_lines.append(
                 f"{c.key:<14}{active.get(c.key, '-') or '-':<14}"
                 f"{', '.join(installed) if installed else '-'}")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         comp_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("组件与生效版本", comp_lines)
 
@@ -514,9 +518,9 @@ def build_diagnostics() -> str:
                 env_lines.append(f"  [死条目] {e}")
             in_tool = [e for e in entries if str(Path(CONFIG_DIR)) in e]
             env_lines.append(f"指向本工具目录的条目数: {len(in_tool)}")
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             env_lines.append(f"PATH 读取失败: {type(exc).__name__}: {exc}")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         env_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("环境变量与 PATH", env_lines)
 
@@ -528,7 +532,7 @@ def build_diagnostics() -> str:
         for key, rec in running.items():
             ports = getattr(rec, "ports", None)
             run_lines.append(f"  {key}: pid={getattr(rec, 'pid', '?')} ports={ports}")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         run_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("一键启停登记（running.json）", run_lines)
 
@@ -544,7 +548,7 @@ def build_diagnostics() -> str:
         take_lines.append(f"系统级 PATH 插队记录: {len(machine_fix)} 项")
         for key in machine_fix:
             take_lines.append(f"  {key}")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         take_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("外部版本接管", take_lines)
 
@@ -570,7 +574,7 @@ def build_diagnostics() -> str:
                     f"旁边还有一个 {CONFIG_FILE.name}.bak 可用于回退。")
                 cfg_lines.append("--- 原文（供人工修复） ---")
                 cfg_lines.append(raw)
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         cfg_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("config.json 全文（生效版本 / 接管快照都在这里）", cfg_lines)
 
@@ -584,7 +588,7 @@ def build_diagnostics() -> str:
             log_lines.append(
                 f"[{entry.get('timestamp', '')}] "
                 f"[{entry.get('level', 'INFO'):<7}] {entry.get('message', '')}")
-    except Exception as exc:  # noqa: BLE001 - 少一节也不能让整份报告生成失败
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001 - 少一节也不能让整份报告生成失败
         log_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("结构化日志（最近 50 条）", log_lines)
 
@@ -989,7 +993,7 @@ def check_for_update(fetch=None, current=None, timeout: float = UPDATE_HTTP_TIME
     for url in UPDATE_SOURCES:
         try:
             status, payload = fetch(url, timeout)
-        except Exception as exc:            # noqa: BLE001  网络异常是常态，不是 bug
+        except BEST_EFFORT_ERRORS as exc:            # noqa: BLE001  网络异常是常态，不是 bug
             last_err = f"{type(exc).__name__}: {exc}"
             continue
         if int(status or 0) != 200:
@@ -1894,7 +1898,7 @@ def _probe_version(exe: str, args: List[str]) -> str:
         out = (proc.stdout or "") + (proc.stderr or "")
         line = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
         return line[:80]
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return ""
 
 
@@ -2017,16 +2021,16 @@ GH_ACCELERATORS: List[str] = [
 # X-RateLimit 头）；ghfast.top / ghproxy.net 对 API 路径回 403。版本元数据先走它。
 GH_API_PROXY = "https://gh-proxy.com/"
 
-# 故障转移参数（避免魔法数字）
-DOWNLOAD_PROBE_TIMEOUT = 5     # 单 URL 探测超时（秒）
+# 故障转移参数（唯一定义处：core/constants.py，规则 R30）
+# DOWNLOAD_PROBE_TIMEOUT / DOWNLOAD_CONNECT_TIMEOUT / DOWNLOAD_READ_TIMEOUT
+# 均从 core.constants 导入；这里不再重复定义，避免"改了一份以为生效"。
 # 下载超时用 (连接, 读取) 二元组，不能用单值。
 # 真机 2026-10-06 实测踩过：requests 的 timeout 传单值时它**同时**是连接超时和读超时，
 # 30 秒的读上限会把大包打死 —— jdk(190MB) / gradle(130MB) / postgresql(110MB) /
 # elasticsearch(600MB) 这些全都"所有下载源均不可用"，而实测那些源 curl 探测全是HTTP 200。
 # 源没问题，是读超时太短：慢速下载时两次读之间很容易超过 30 秒。
 # 读取超时给足（单次读 60 秒），连接仍保持短（10 秒，探测到不通就快速切下一个源）。
-DOWNLOAD_CONNECT_TIMEOUT = 10
-DOWNLOAD_READ_TIMEOUT = 60
+# 具体数值见 core/constants.py（DOWNLOAD_CONNECT_TIMEOUT / DOWNLOAD_READ_TIMEOUT）。
 # 原先这里有个 DOWNLOAD_RETRY_PER_URL = 2「单 URL 内重试次数」，2026-10-14 删除。
 # 它**零引用**：下载路径压根不做单 URL 内的重试，靠的是 R1 的多源故障转移
 # （这个 URL 失败就换下一个源，实测更有效），而元数据抓取（_get）另有自己
@@ -2038,7 +2042,7 @@ FETCH_EXIT_WAIT = 12
 
 # 实测（2026-09-28）：清华/北外对 requests 默认 UA 与浏览器 UA 一律回 403，
 # 只对自定义 UA 放行；列目录（_get）已带，下载（_try_download）也必须带。
-HTTP_UA = {"User-Agent": "byte-tools"}
+# 唯一定义处：core/constants.py::HTTP_UA（规则 R30）
 
 # HTTP 会话池（2026-10-14 加）。全文件原先零 Session：每个 requests.get 都新建
 # 一个隐式 Session，用完就关 —— 于是每次调用都要重新做 TCP 握手与 TLS 握手。
@@ -2075,7 +2079,7 @@ def http_session() -> "requests.Session":
 # 实测（2026-09-28 GET + 本 UA）：华为云 anaconda 对任意不存在的路径都回
 # 「301 → 200 + 一小段软 404 HTML、无 Content-Length」，会把错误页当下载成功；
 # 本工具的归档包最小的也有几 MB，故按字节数判真假。
-DOWNLOAD_MIN_VALID_BYTES = 4096
+# 数值见 core/constants.py::DOWNLOAD_MIN_VALID_BYTES。
 
 
 def _mb(*names: str) -> List[str]:
@@ -2202,7 +2206,7 @@ def _adoptium_mirror_urls(major: str, dead: Optional[set] = None,
             html = _get(dir_url, timeout=DOWNLOAD_PROBE_TIMEOUT).text
         except requests.exceptions.HTTPError:
             continue
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             if dead is not None:
                 dead.add(base)
             continue
@@ -2511,7 +2515,7 @@ def fetch_nginx_versions() -> List[ComponentVersion]:
     for idx in indexes:
         try:
             found = set(rx.findall(_get(idx, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text))
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
         if found:
             versions = found
@@ -2636,7 +2640,7 @@ def fetch_powershell_versions() -> List[ComponentVersion]:
     github_api = "https://api.github.com/repos/PowerShell/PowerShell/releases?per_page=60"
     try:
         data = _github_api_json(github_api)
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(
             f"PowerShell 版本列表抓取失败：GitHub API 不可用：{exc}"
         ) from exc
@@ -3538,7 +3542,7 @@ def _get(url: str, timeout: int = 10) -> requests.Response:
         except requests.exceptions.SSLError as e:
             last_exc = e
             # SSL 错误直接进入下一次尝试
-        except Exception as e:
+        except BEST_EFFORT_ERRORS as e:
             last_exc = e
         if attempt < 2:
             if FETCH_ABORT.wait(1 << attempt):  # 原本睡 1s、2s；取消时立刻醒
@@ -3612,7 +3616,7 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
             except RuntimeError:
                 # 限流是终局判断（这一小时别再试了），不能被下面的退避重试吞掉重跑
                 raise
-            except Exception as e:  # noqa: BLE001
+            except BEST_EFFORT_ERRORS as e:  # noqa: BLE001
                 last_exc = e
                 if direct and attempt < attempts - 1 \
                         and FETCH_ABORT.wait(5 * (attempt + 1)):
@@ -3627,7 +3631,7 @@ def _github_api_json(url: str, timeout: Optional[int] = None) -> dict:
                                        verify=False)
                 r.raise_for_status()
                 return r.json()
-            except Exception as e:  # noqa: BLE001
+            except BEST_EFFORT_ERRORS as e:  # noqa: BLE001
                 last_exc = e
     assert last_exc is not None
     raise last_exc
@@ -4600,7 +4604,7 @@ _JETBRAINS_RELEASES_URL = ("https://data.services.jetbrains.com/products/release
 # 而 requests 默认就发 Accept-Encoding: gzip，所以产品码路径天然吃到快的那条）。
 # 超时不显式收紧的话，_get 的三次退避能把最坏耗时推到一分钟左右，
 # 而六个产品各占一路并发线程，"刷新版本"看起来就像卡死。
-DEVTOOL_FETCH_TIMEOUT = 15
+# 数值见 core/constants.py::DEVTOOL_FETCH_TIMEOUT。
 
 
 def make_jetbrains_fetcher(key: str, code: str):
@@ -10651,150 +10655,15 @@ def _unique_download_path(target: Path) -> Path:
     raise RuntimeError(f"{target} 同名文件过多，无法确定保存文件名")
 
 
-class DownloadWorker(QThread):
-    """
-    多源故障转移下载线程（详见 DEVELOPMENT.md R1.4）。
+# 下载线程已抽出到 core/download.py（规则 R30）。
+# configure 收到的是 **lambda**：测试替换 main.http_session 后，下一次下载立刻生效。
+from core.download import DownloadWorker, configure as _configure_download  # noqa: E402
 
-    按 urls 列表顺序依次尝试下载，第一个成功的写入目标文件；
-    单 URL 失败自动切换到下一个，所有源失败才判定为彻底失败。
-    """
-
-    progress = Signal(int, int)  # (downloaded_bytes, total_bytes)
-    log = Signal(str, str)  # (level, message)  level in {"info","warn","error","ok"}
-    finished_ok = Signal(str)  # 保存的本地文件绝对路径
-    finished_fail = Signal(str)  # 错误信息
-
-    # 下载分片大小：64 KB，平衡内存与回调频率（避免魔法数字）
-    _CHUNK_SIZE = 64 * 1024
-
-    def __init__(self, urls: List[str], dest: Path,
-                 parent: Optional[QObject] = None,
-                 expect_magic: bytes = b"") -> None:
-        """
-        构造下载任务。
-
-        入参 urls: List[str]     按 R1 优先级排序的 URL 列表（镜像在前，官网末位）
-        入参 dest: Path         目标文件路径（先写 .part 临时文件，成功后 replace）
-        入参 parent: QObject    Qt 父对象
-        入参 expect_magic: bytes 期望的文件头魔数（如 b"PK" / b"MZ"）；**默认空 = 不校验**，
-                     保持 26 个老组件的行为逐字不变。只下载型组件必须传：实测
-                     mirrors.huaweicloud.com 的 jetbrains 目录会回 200 + 12KB HTML，
-                     那种体量轻松越过 DOWNLOAD_MIN_VALID_BYTES 这道字节数下限，
-                     用户会拿到一个后缀写着 .exe、内容却是网页的文件。
-        """
-        super().__init__(parent)
-        self.urls = list(urls)
-        self.dest = dest
-        self.expect_magic = bytes(expect_magic or b"")
-        self._cancel = False
-        self._cancelled = False          # 用户取消过（终态由 run() 统一发一次）
-        # 记录每个源的失败原因，最终汇总输出
-        self._failures: List[str] = []
-
-    def cancel(self) -> None:
-        """取消下载；run() 内每个 chunk 写入前检查 _cancel 标志。"""
-        self._cancel = True
-
-    def run(self) -> None:  # noqa: D401
-        """QThread 入口：按 urls 顺序尝试下载。
-
-        两个约定：**终态信号恰好发一次**，且**任何异常都不许逃出 run()**。
-        QThread 里抛异常在 Windows 上是进程级 abort（0xC0000409 / 退出码 127，
-        一行 traceback 都没有），而且上层收不到 finished_fail 会永远停在"下载中"。
-        """
-        try:
-            ensure_dir(self.dest.parent)
-        except OSError as exc:
-            # 父目录被同名文件挡路、只读盘、OneDrive 占位、盘满 —— 都到不了下载那一步
-            self.log.emit("error", f"建不出下载目录 {self.dest.parent}：{exc}")
-            self.finished_fail.emit(f"下载目录不可用：{exc}")
-            return
-        for idx, url in enumerate(self.urls, 1):
-            if self._cancel:
-                break
-            try:
-                self.log.emit("info",
-                    f"开始下载（第 {idx}/{len(self.urls)} 个源）：{url}")
-                if self._try_download(url):
-                    return  # 下载成功，直接返回
-            except Exception as exc:
-                # 中文日志：哪个源失败 + 错误原因 + 是否继续尝试下一个
-                self._failures.append(f"{url} -> {exc}")
-                if idx < len(self.urls):
-                    self.log.emit("warn",
-                        f"第 {idx} 个源下载失败：{exc}\n"
-                        f"即将切换到下一个源：{self.urls[idx]}")
-                else:
-                    self.log.emit("error",
-                        f"第 {idx} 个源（最后一个）下载失败：{exc}")
-        # 所有源都失败 → 汇总中文日志 + 抛错
-        if self._cancelled:
-            self._emit_cancel()          # 取消只在这里发一次，别和"源不可用"混在一起
-            return
-        summary = "所有镜像与官网地址均下载失败，已尝试：\n" + "\n".join(self._failures)
-        self.log.emit("error", summary)
-        self.finished_fail.emit("所有下载源均不可用")
-
-    def _try_download(self, url: str) -> bool:
-        """
-        尝试从单个 URL 流式下载；下载完成且校验通过返回 True，否则 False 换下一个源。
-
-        入参 url: str   待下载的 URL
-        返回: bool      是否成功；响应体小于 DOWNLOAD_MIN_VALID_BYTES
-                        或短于声明的 Content-Length 时判定该源失败，换下一个源
-        """
-        # (连接, 读取) 二元组：连接 10 秒（不通就快速换源）、读取 60 秒
-        # （大包慢速下载时两次读之间可能超过 30 秒，单值超时会把 jdk/gradle 这类打死）。
-        timeout = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT)
-        with http_session().get(url, stream=True, timeout=timeout,
-                                   allow_redirects=True) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("Content-Length", 0))
-            downloaded = 0
-            tmp = self.dest.with_suffix(self.dest.suffix + ".part")
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(chunk_size=self._CHUNK_SIZE):
-                    if self._cancel:
-                        self.log.emit("warn", "已取消下载。")
-                        f.close()
-                        tmp.unlink(missing_ok=True)
-                        # 只置标志、不发信号：终态由 run() 统一发一次，
-                        # 否则上层会先弹一次"用户取消"再弹一次"所有源均不可用"
-                        self._cancelled = True
-                        return False
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        self.progress.emit(downloaded, total)
-            # 实测：镜像站会用「200 + 空体/软 404 页」冒充存在的文件，
-            # 这种 0 字节的"成功"必须退回故障转移，否则解压阶段才炸。
-            if downloaded < DOWNLOAD_MIN_VALID_BYTES or (total and downloaded < total):
-                self.log.emit("warn",
-                    f"第 {url} 只返回 {downloaded} 字节"
-                    f"（声明 {total}），判定该源无效，换下一个源。")
-                tmp.unlink(missing_ok=True)
-                return False
-            # 魔数校验：字节数够不代表内容对（200 + 12KB HTML 的假源就够）。
-            # 放在 replace 之前、失败同样删干净 —— 半截文件留在用户目录里比没有更糟。
-            if self.expect_magic:
-                with open(tmp, "rb") as probe:
-                    head = probe.read(len(self.expect_magic))
-                if head != self.expect_magic:
-                    self.log.emit("warn",
-                        f"第 {url} 的内容开头是 {head!r}，不是预期的 {self.expect_magic!r}"
-                        "（多半是镜像站拿一个网页应付了这个文件），换下一个源。")
-                    tmp.unlink(missing_ok=True)
-                    return False
-            tmp.replace(self.dest)
-        self.log.emit("ok",
-            f"下载完成：{self.dest} ({human_size(self.dest.stat().st_size)})，"
-            f"实际使用源：{url}")
-        self.finished_ok.emit(str(self.dest))
-        return True
-
-    def _emit_cancel(self) -> None:
-        """用户取消时统一发射 finished_fail 信号（沿用约定消息，便于上层判断不弹窗）。"""
-        self.finished_fail.emit("用户取消")
+_configure_download(
+    session_factory=lambda: http_session(),
+    ensure_dir_fn=ensure_dir,
+    human_size_fn=human_size,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -11090,7 +10959,7 @@ def notify_shell_environment(user32=None, timeout_ms: int = 3000) -> bool:
                                           SMTO_ABORTIFHUNG | SMTO_NOTIMEOUTIFNOTHUNG,
                                           timeout_ms, ctypes.byref(out)):
                 acked = True
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
     return acked
 
@@ -11118,7 +10987,7 @@ def _notify_other_top_level_windows(timeout_ms: int = 1000) -> None:
         user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
                                    ctypes.cast(label, ctypes.c_void_p).value,
                                    SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(out))
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
 
 
@@ -11731,7 +11600,7 @@ def apply_active_version(comp: Component, version: str) -> List[str]:
             others = [e for e in removed_entries if not EnvManager._same_path(e, bin_dir)]
             if others:
                 steps.append("已移除同组件其他版本的条目：" + "、".join(others))
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         problems = _rollback()
         # 回滚全成时措辞与原来完全一致；只要有一步没撤干净，就不能再说"已回滚"，
         # 并紧跟一行明细告诉用户该手动检查什么（放在成功日志末行之前）。
@@ -11820,7 +11689,7 @@ def _page_server_state_path() -> Path:
 def _read_page_server_state() -> Optional[dict]:
     try:
         data = json.loads(_page_server_state_path().read_text(encoding="utf-8"))
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return None
     return data if isinstance(data, dict) else None
 
@@ -11834,7 +11703,7 @@ def _page_server_alive(port: int) -> bool:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(f"http://127.0.0.1:{int(port)}/healthz", timeout=1.0) as resp:
             return resp.status == 200 and resp.read(32).startswith(b"byte-tools-page")
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return False
 
 
@@ -11868,7 +11737,7 @@ def _live_page_keys() -> List[str]:
         try:
             if _render_component_page(key):
                 out.append(key)
-        except Exception:  # noqa: BLE001
+        except BEST_EFFORT_ERRORS:  # noqa: BLE001
             # CRITICAL: Page rendering failures must not crash the home page
             # Each component page failure is isolated; only that page should fail silently
             continue
@@ -12187,7 +12056,7 @@ def launch_page_html(comp: "Component", spec: "LaunchSpec", rec: "RunRecord",
         creds = credentials_for(comp, spec, rec.port)
         if creds:
             rows.append(("登录信息", "<br>".join(plain_text(c) for c in creds)))
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
     when = time.strftime("%Y-%m-%d %H:%M:%S",
                          time.localtime(checked_at or time.time()))
@@ -12799,7 +12668,7 @@ def occupant_of(port: int) -> Tuple[Optional[int], str]:
     """
     try:
         table = parse_netstat_listeners(_netstat_text())
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return None, ""
     pids = sorted(table.get(port, ()))
     if not pids:
@@ -13331,7 +13200,7 @@ def _http_status_with(fetch, url: str) -> bool:
     Jenkins 的 /login 在未初始化时会给 200，而根路径可能 403，401 说明服务在、只是要认证。"""
     try:
         return fetch(url) in (200, 201, 202, 204, 301, 302, 303, 307, 401)
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return False
 
 
@@ -13368,7 +13237,7 @@ def http_responds(url: str, timeout: float = 2.0) -> bool:
         return True
     except urllib.error.HTTPError:
         return True               # 有 HTTP 响应 = 服务端在应答
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return False
 
 
@@ -13642,7 +13511,7 @@ def check_prereq_for(comp: Component, spec: LaunchSpec) -> Tuple[bool, str]:
 #   java_major_of()         → 顺便补上 min_java_major 的版本门控（原来那个字段没人读）
 #   prereq_install_versions → rabbitmq 4.x/3.x 各自配套的 Erlang major
 # ---------------------------------------------------------------------------
-_JAVA_MAJOR_TIMEOUT = 20
+# _JAVA_MAJOR_TIMEOUT 见 core/constants.py（唯一定义处）。
 
 
 def java_major_of(home: Optional[str]) -> Optional[int]:
@@ -13664,7 +13533,7 @@ def java_major_of(home: Optional[str]) -> Optional[int]:
     try:
         proc = subprocess.run([str(exe), "-version"], capture_output=True, text=True,
                               timeout=_JAVA_MAJOR_TIMEOUT, check=False, **kwargs)
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return None
     text = (proc.stdout or "") + (proc.stderr or "")   # java -version 只写 stderr
     m = _re.search(r'version\s+"1\.(\d+)', text)
@@ -14924,7 +14793,7 @@ def load_service_secret(key: str) -> str:
         return ""
     try:
         plain = _dpapi(base64.b64decode(raw), unprotect=True)
-    except Exception:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS:  # noqa: BLE001
         # CRITICAL: Secret decryption failures must be silent for security reasons
         # Don't leak whether a secret exists or what went wrong with decryption
         return ""
@@ -15810,7 +15679,7 @@ def _enum_registry_values(root, subkey: str, extra_flags: int = 0) -> Dict[str, 
                 index += 1
                 if isinstance(value, str):
                     out[name] = value
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return {}
     return out
 
@@ -15876,7 +15745,7 @@ def _python_homes_from_py_launcher() -> List[str]:
         proc = subprocess.run(["py", "-0p"], capture_output=True, text=True,
                               timeout=5, check=False, stdin=STDIN_DEVNULL,
                               creationflags=CREATE_NO_WINDOW)
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return []
     homes: List[str] = []
     for line in (proc.stdout or "").splitlines():
@@ -15909,7 +15778,7 @@ def _python_homes_from_registry() -> List[str]:
                     except OSError:
                         break
                     i += 1
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
         for company in companies:
             sub = f"{base}\\{company}"
@@ -15923,7 +15792,7 @@ def _python_homes_from_registry() -> List[str]:
                         except OSError:
                             break
                         j += 1
-            except Exception:
+            except BEST_EFFORT_ERRORS:
                 continue
             for ver in versions:
                 try:
@@ -15932,7 +15801,7 @@ def _python_homes_from_registry() -> List[str]:
                         value, _t = winreg.QueryValueEx(ik, "")
                     if isinstance(value, str) and value:
                         homes.append(value)
-                except Exception:
+                except BEST_EFFORT_ERRORS:
                     continue
     return homes
 
@@ -16337,7 +16206,7 @@ def write_user_env_raw(name: str, value: str, type_name: str = "") -> None:
         winreg.SetValueEx(key, name, 0, type_id, value)
     try:
         EnvManager._broadcast_env_change()
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
 
 
@@ -16360,7 +16229,7 @@ def delete_user_env_raw(name: str) -> None:
         pass
     try:
         EnvManager._broadcast_env_change()
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
 
 
@@ -16450,7 +16319,7 @@ def _machine_restore(before: Dict[str, dict], backend) -> List[str]:
                 backend.write(name, item["raw"], str(item.get("type") or "REG_SZ"))
             else:
                 backend.delete(name)
-        except Exception as exc:  # noqa: BLE001
+        except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
             problems.append(f"{name} 没能还原：{exc}")
     return problems
 
@@ -16508,7 +16377,7 @@ def elevate_helper_apply(request: Dict[str, object], backend) -> Dict[str, objec
         for name in names:
             raw, type_name = backend.read(name)
             before[name] = {"raw": raw, "type": type_name, "existed": raw is not None}
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         result["error"] = f"读系统变量失败，未做任何改动：{exc}"
         return result
     result["before"] = before
@@ -16549,7 +16418,7 @@ def elevate_helper_apply(request: Dict[str, object], backend) -> Dict[str, objec
         # 因为写 REG_SZ 会把原值里的 %SystemRoot% 之类固化成死路径（R-保真）。
         path_type = str(path_before_info.get("type") or "REG_EXPAND_SZ")
         backend.write("Path", new_path, path_type)
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         rollback = _machine_restore(before, backend)
         result["stage"] = "rollback"
         result["error"] = f"写入系统变量失败：{exc}"
@@ -16571,7 +16440,7 @@ def elevate_helper_apply(request: Dict[str, object], backend) -> Dict[str, objec
             got = str(after.get(env_var, {}).get("raw") or "")
             if got != home:
                 problems.append(f"{env_var} 写回去的值不是 {home}（实际 {got or '未设置'}）")
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         problems.append(f"写完复核时读不回来：{exc}")
     result["after"] = after
 
@@ -16611,7 +16480,7 @@ def elevate_helper_restore(request: Dict[str, object], backend) -> Dict[str, obj
             raw, type_name = backend.read(name)
             result["before"][name] = {"raw": raw, "type": type_name,
                                       "existed": raw is not None}
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         result["error"] = f"读系统变量失败，未做任何改动：{exc}"
         return result
 
@@ -16627,7 +16496,7 @@ def elevate_helper_restore(request: Dict[str, object], backend) -> Dict[str, obj
                 backend.write(name, raw, str(item.get("type") or "REG_SZ"))
             else:
                 backend.delete(name)
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         result["stage"] = "rollback"
         result["error"] = f"还原时写入失败：{exc}"
         if problems:
@@ -16648,7 +16517,7 @@ def elevate_helper_restore(request: Dict[str, object], backend) -> Dict[str, obj
         for needle in _MACHINE_KEY_SUBSTRINGS:
             if needle in low_want and needle not in low_got:
                 problems.append(f"关键条目丢失：含 {needle!r} 的那一条不见了")
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         problems.append(f"还原后复核失败：{exc}")
 
     if problems:
@@ -16682,7 +16551,7 @@ def elevate_helper_main(request_path: str) -> int:
             result = elevate_helper_restore(request, backend)
         else:
             result = elevate_helper_apply(request, backend)
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         result = {"ok": False, "stage": "read",
                   "error": f"助手内部错误：{exc}"}
     finally:
@@ -16749,7 +16618,7 @@ def _run_elevated_helper(request: Dict[str, object],
     try:
         ret = ctypes.windll.shell32.ShellExecuteW(
             None, "runas", str(sys.executable), params, str(Path.cwd()), 1)
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         _remove_quietly(req_path, res_path)
         return {"ok": False, "stage": "launch", "error": f"无法请求管理员权限：{exc}"}
 
@@ -16815,7 +16684,7 @@ def apply_external_version_user(comp: Component, dv: "DiscoveredVersion",
             write_user_env_raw(comp.env_var, str(home))
             steps.append(f"已把 {comp.env_var} 设为 {home}（用户级）")
             _log("info", steps[-1])
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         steps.append(f"写用户环境变量失败：{exc}")
         _log("error", steps[-1])
         return result
@@ -17319,7 +17188,7 @@ def revert_external_version(comp: Component,
             drop_user_path_entry(str(extra))
         steps.append("用户环境变量已按接管前的原文还原")
         _log("ok", steps[-1])
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         result["error"] = (f"还原用户环境变量失败：{exc}"
                            "；接管登记仍保留，可稍后重试")
         steps.append(result["error"])
@@ -17328,7 +17197,7 @@ def revert_external_version(comp: Component,
 
     try:
         EnvManager._broadcast_env_change()
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
     drop_takeover_entry(comp.key)
     result["ok"] = True
@@ -18042,7 +17911,7 @@ def list_shell_processes() -> List[Tuple[int, str, float, bool]]:
         finally:
             kernel32.CloseHandle(snap)
         return out
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return []
 
 
@@ -18106,7 +17975,7 @@ LOG_KEEP_SESSIONS = 10
 # 剩下的交给常驻后台线程（上限 30s）。
 TK_SUPPRESS_POLL_SEC = 0.05     # 每次轮询的间隔
 TK_SUPPRESS_SYNC_ROUNDS = 6     # 主线程同步轮询次数（6 × 50ms = 0.3s）
-TK_SUPPRESS_BG_LIMIT = 600      # 后台线程轮询上限（600 × 50ms = 30s，防失控）
+# 后台轮询上限见 core/constants.py::TK_SUPPRESS_BG_LIMIT（600 × 50ms = 30s）
 
 
 def grid_columns_for(available_px, min_card_px) -> int:
@@ -18473,7 +18342,7 @@ def wsl_install_runtime(msi: Path, log: Optional[Callable[[str], None]] = None) 
                          + str(outcome.get("error") or "")}
     try:
         data = json.loads(result_file.read_text(encoding="utf-8-sig"))
-    except Exception as exc:  # noqa: BLE001
+    except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
         return {"ok": False, "cancelled": False, "error": f"结果文件读不出来：{exc}"}
     codes = {k: int(data.get(k, -1)) for k in ("dism_wsl", "dism_vmp", "msi")}
     bad = {k: v for k, v in codes.items() if v not in (0, 3010)}
@@ -21368,7 +21237,7 @@ def _url_netloc(url: str) -> str:
     try:
         import urllib.parse as _up
         return _up.urlsplit(url).netloc
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return ""
 
 
@@ -21470,113 +21339,8 @@ class SplashScreen(QDialog):
         QApplication.processEvents()   # 让进度文字立刻重绘
 
 
-class DonateDialog(QDialog):
-    """支持作者：微信 / 支付宝 / QQ，各渠道展示对应二维码。"""
-
-    # 每个渠道对应的品牌色、二维码文件名
-    CHANNELS = [
-        ("微信", "#07C160", "wechat.png"),
-        ("支付宝", "#1677FF", "alipay.png"),
-        # ("QQ", "#EB1923", "qq.png"),
-    ]
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("支持作者")
-        self.setMinimumSize(460, 460)
-        self.setObjectName("donateDialog")
-        self._assets_dir = Path(__file__).parent / "assets"
-        self._build_ui()
-        # 默认展示第一个渠道
-        self._show_qr(*self.CHANNELS[0])
-
-    def _build_ui(self) -> None:
-        v = QVBoxLayout(self)
-        v.setContentsMargins(20, 20, 20, 20)
-        v.setSpacing(14)
-
-        tip = QLabel("如果本工具对你有所帮助，欢迎请作者一杯咖啡 ☕")
-        tip.setAlignment(Qt.AlignCenter)
-        tip.setStyleSheet("font-size:14px;color:#444;")
-        v.addWidget(tip)
-
-        # 渠道切换按钮行
-        row = QHBoxLayout()
-        row.setSpacing(14)
-        self._buttons: List[QPushButton] = []
-        for name, color, filename in self.CHANNELS:
-            btn = QPushButton(name)
-            btn.setCursor(QCursor(Qt.PointingHandCursor))
-            btn.setCheckable(True)
-            btn.setStyleSheet(
-                f"QPushButton{{background:{color};color:white;border:none;border-radius:8px;padding:10px 20px;font-weight:600;}}"
-                f"QPushButton:checked{{background:{color};border:2px solid #333;}}"
-                f"QPushButton:hover{{background:{color};}}"
-            )
-            btn.clicked.connect(lambda _=False, n=name, c=color, f=filename: self._show_qr(n, c, f))
-            row.addWidget(btn)
-            self._buttons.append(btn)
-        v.addLayout(row)
-
-        # 当前渠道标签
-        self._channel_label = QLabel("")
-        self._channel_label.setAlignment(Qt.AlignCenter)
-        self._channel_label.setStyleSheet("font-size:15px;font-weight:600;color:#333;")
-        v.addWidget(self._channel_label)
-
-        # 二维码展示区
-        self.qr_view = QLabel("请选择下方渠道")
-        self.qr_view.setAlignment(Qt.AlignCenter)
-        self.qr_view.setMinimumHeight(260)
-        self.qr_view.setStyleSheet(
-            "background:#fafafa;border:1px solid #e0e0e0;border-radius:10px;color:#888;padding:10px;"
-        )
-        v.addWidget(self.qr_view, stretch=1)
-
-        # 底部备注
-        note = QLabel("扫码打赏，感谢您的支持！")
-        note.setAlignment(Qt.AlignCenter)
-        note.setStyleSheet("font-size:12px;color:#999;")
-        v.addWidget(note)
-
-    def _show_qr(self, channel: str, color: str = "", filename: str = "") -> None:
-        # 更新按钮 checked 状态
-        for btn in self._buttons:
-            btn.setChecked(btn.text() == channel)
-
-        self._channel_label.setText(f"【{channel}】收款码")
-        if color:
-            self._channel_label.setStyleSheet(
-                f"font-size:15px;font-weight:600;color:{color};"
-            )
-
-        if not filename:
-            # 兼容旧调用：仅传 channel 时按 CHANNELS 查
-            for n, c, f in self.CHANNELS:
-                if n == channel:
-                    filename = f
-                    break
-
-        # 尝试加载二维码图片
-        qr_path = self._assets_dir / filename
-        if qr_path.exists():
-            pixmap = QPixmap(str(qr_path))
-            if not pixmap.isNull():
-                # 按 view 宽度等比缩放
-                scaled = pixmap.scaled(
-                    self.qr_view.width() - 20,
-                    self.qr_view.height() - 20,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                self.qr_view.setPixmap(scaled)
-                return
-
-        # 加载失败：显示占位文字
-        self.qr_view.clear()
-        self.qr_view.setText(
-            f"未找到二维码文件：\n\n{qr_path}\n\n请将 {filename} 放入 assets 目录后重启。"
-        )
+# 「支持作者」对话框已抽出到 ui/donate_dialog.py（规则 R30）。
+from ui.donate_dialog import DonateDialog  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
