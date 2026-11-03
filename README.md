@@ -698,13 +698,19 @@ Windows：默认写的就是**用户级**变量，通常不需要管理员权限
 
 ## 技术栈 · 仓库结构 · 参与
 
-**技术栈**：Python 3.10 – 3.14 · [PySide6](https://doc.qt.io/qtforpython-6/)（Qt 6 官方 Python 绑定，LGPL 授权）· [requests](https://requests.readthedocs.io/) · 标准库 `zipfile` + `tarfile` 解压 · 环境变量走 `winreg` + `WM_SETTINGCHANGE`（Windows）或带标记的 shell 配置块（macOS / Linux）· `QThread` 后台下载与版本抓取，UI 不阻塞 · **单文件架构**：`main.py` 内含 UI、数据类与全部业务逻辑。
+**技术栈**：Python 3.10 – 3.14 · [PySide6](https://doc.qt.io/qtforpython-6/)（Qt 6 官方 Python 绑定，LGPL 授权）· [requests](https://requests.readthedocs.io/) · 标准库 `zipfile` + `tarfile` 解压 · 环境变量走 `winreg` + `WM_SETTINGCHANGE`（Windows）或带标记的 shell 配置块（macOS / Linux）· `QThread` 后台下载与版本抓取，UI 不阻塞 · **`core/` 承重模块**：常量、结构化日志、安全删除、版本口径、Windows 服务后端各有独立模块（见 `DEVELOPMENT.md` R30），`main.py` 保留 UI 与业务编排。
 
 **仓库结构**：
 
 ```
 byte-tools/
-├── main.py                     # 主程序（UI + 全部逻辑）
+├── main.py                     # 主程序（UI + 业务编排）
+├── core/                       # 承重模块（规则 R30）
+│   ├── constants.py            # 超时 / 缓存 / 镜像基址 / 安全阈值
+│   ├── logger.py               # 结构化日志（四级颜色 + JSON 导出）
+│   ├── exceptions.py           # 自定义异常 + safe_rmtree（路径校验）
+│   ├── versioning.py           # Version 与三套版本口径
+│   └── windows_service.py      # SCM 只读查询 + 启停写入口
 ├── 一键启动项目.bat            # Windows：自动装环境后启动 GUI
 ├── 一键打包exe.bat             # Windows：自动装环境后产出 dist/ByteTools.exe
 ├── pyinstaller_no_wmi.py       # 打包入口：绕开 PyInstaller 对 WMI 的依赖

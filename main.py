@@ -36,6 +36,66 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+
+
+class _NullLogger:
+    """core 模块缺失时的空日志器，保证调用点无需到处判空。"""
+
+    def ok(self, *args, **kwargs):
+        pass
+
+    def info(self, *args, **kwargs):
+        pass
+
+    def warn(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def error(self, *args, **kwargs):
+        pass
+
+
+# Import secure utilities from core modules (try, fallback to legacy)
+try:
+    from core.logger import get_logger
+    from core.exceptions import BEST_EFFORT_ERRORS, safe_rmtree, UnsafePathError
+    from core.constants import (
+        DOWNLOAD_PROBE_TIMEOUT,
+        DOWNLOAD_CONNECT_TIMEOUT,
+        DOWNLOAD_READ_TIMEOUT,
+        DEVTOOL_FETCH_TIMEOUT,
+        _JAVA_MAJOR_TIMEOUT,
+        TK_SUPPRESS_BG_LIMIT,
+        UPDATE_CHECK_INTERVAL_SEC,
+        UPDATE_HTTP_TIMEOUT,
+    )
+    _HAS_CORE_MODULES = True
+    logger = get_logger("main")
+except ImportError:  # pragma: no cover - 仅当 core/ 目录缺失时走到
+    _HAS_CORE_MODULES = False
+    logger = _NullLogger()
+    BEST_EFFORT_ERRORS = (OSError, ValueError, KeyError, TypeError,
+                          AttributeError, RuntimeError)
+    DOWNLOAD_PROBE_TIMEOUT = 5
+    DOWNLOAD_CONNECT_TIMEOUT = 10
+    DOWNLOAD_READ_TIMEOUT = 60
+    DEVTOOL_FETCH_TIMEOUT = 15
+    _JAVA_MAJOR_TIMEOUT = 20
+    TK_SUPPRESS_BG_LIMIT = 600
+    UPDATE_CHECK_INTERVAL_SEC = 24 * 3600
+    UPDATE_HTTP_TIMEOUT = 8.0
+
+    def safe_rmtree(path, verify_deleted=True, allowed_root=None):
+        """Fallback: 无 core 模块时退化为普通删除。"""
+        import shutil as _shutil
+        _shutil.rmtree(path, ignore_errors=not verify_deleted)
+
+    class UnsafePathError(Exception):
+        pass
+
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -124,6 +184,16 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 RUNNING_FILE = CONFIG_DIR / "running.json"      # 本机进程事实，与用户偏好分开（设计 §3）
 
 
+def _safe_rmtree(path, verify_deleted: bool = True) -> None:
+    """删除目录并限制在当前工作目录内。
+
+    以 ``CONFIG_DIR`` 为允许根（而不是写死 ~/.env-tools），这样测试把
+    ``main.CONFIG_DIR`` 指向临时沙箱时，删除校验也自动跟随。
+    """
+    safe_rmtree(path, verify_deleted=verify_deleted, allowed_root=CONFIG_DIR)
+
+
+
 def _open_in_file_manager(path: str) -> bool:
     """用系统自带的文件管理器打开一个目录（状态条上那个工作目录链接）。
 
@@ -142,7 +212,7 @@ def _open_in_file_manager(path: str) -> bool:
         else:
             subprocess.Popen(["xdg-open", target])
         return True
-    except Exception:                     # noqa: BLE001
+    except (OSError, FileNotFoundError):
         return False
 
 
@@ -198,179 +268,13 @@ GITEE_RELEASES_API = f"https://gitee.com/api/v5/repos/{GITEE_OWNER}/{GITEE_REPO}
 # Gitee 的 assets 只有 name + browser_download_url，拿它当第一源会让"字节数对不对"变成未知。
 UPDATE_SOURCES = [UPDATE_API_URL, "https://gh-proxy.com/" + UPDATE_API_URL,
                   GITEE_RELEASES_API]
-UPDATE_CHECK_INTERVAL_SEC = 24 * 3600      # 自动检查的频控：一天最多一次
-UPDATE_HTTP_TIMEOUT = 8.0                  # 后台线程也要有硬超时，不许挂在那儿
+# Note: UPDATE_CHECK_INTERVAL_SEC and UPDATE_HTTP_TIMEOUT moved to core.constants
 
 
-class Version:
-    """版本号值对象：把"一段版本文字怎么变成可比较的数字"收在一处。
-
-    2026-10-14 新增。此前 `main.py` 里有**三套**互不相同的版本语义，
-    各自被用在不同地方，于是"版本号怎么比"这件事没有唯一答案：
-
-      · `_version_parts`  宽松抽取 + 严格识别（`jdk-21.0.5` → None）
-      · `_semver_key`      纯 int 语义，任一段不纯就整档作废 → (0,)
-      · `_version_key`     目录名口径（先剥 `jdk-` 前缀，非数字段补 0）
-
-    这三套**不能抹平成一种**，它们的分歧是承重的（详见 bt_version_tests.py
-    的模块 docstring 与 `KnownDivergences`）。所以这里不"统一口径"，
-    而是把这三种口径做成**具名的方法**，让每个老函数变成薄壳 ——
-    收敛的是"实现只有一份"，不是"语义只有一种"。
-
-    另有第四种职责刻意**不**并进来：`_extract_version_text` 是从命令输出里
-    **抽取**版本号（解析），与比较无关，它产出的字符串再交给本类。
-
-    可哈希（实现了 __hash__/__eq__），能进 set 与 dict 键。
-    """
-
-    __slots__ = ("text", "parts", "prerelease", "_strict", "_dir")
-
-    def __init__(self, text: str, parts: Tuple[int, ...], prerelease: bool) -> None:
-        self.text = text
-        self.parts = parts
-        self.prerelease = prerelease
-        self._strict: Optional[Tuple[int, ...]] = None
-        self._dir: Optional[Tuple[int, ...]] = None
-
-    # -- 构造 --------------------------------------------------------
-    @classmethod
-    def parse(cls, text: object) -> Optional["Version"]:
-        """按**宽松抽取 + 严格识别**口径解析一个版本号。
-
-        入参 text: 版本号文字，可带 v/V 前缀（GitHub tag 就是 v1.2.3）
-        返回:      Version 实例；读不出数字段时返回 None
-
-        规则：剥掉开头的 v/V → 按 "." 切段 → 每段取**开头连续数字**，
-        某段一个数字都没有就整个作废（返回 None）。数字之后若还有字符
-        （`-beta`、`rc1` 这类后缀），记为 prerelease=True 但**不影响 parts** ——
-        这正是 `_version_parts("21.0.4-beta") == (21, 0, 4)` 的由来。
-        """
-        s = str(text or "").strip().lstrip("vV")
-        if not s:
-            return None
-        parts: List[int] = []
-        prerelease = False
-        for chunk in s.split("."):
-            digits = ""
-            rest = ""
-            for i, ch in enumerate(chunk):
-                if ch.isdigit():
-                    digits += ch
-                else:
-                    rest = chunk[i:]
-                    break
-            if not digits:
-                return None                      # 这一段不是版本号的形状
-            parts.append(int(digits))
-            if rest:
-                prerelease = True
-        return cls(str(text or ""), tuple(parts), prerelease)
-
-    @classmethod
-    def from_install_dir(cls, dir_name: object) -> "Version":
-        """按**安装目录名**口径解析（`jdk-21.0.5` → 21.0.5）。
-
-        入参 dir_name: 安装目录名，如 "jdk-21.0.5"、"maven-3.10.0"
-        返回:          Version 实例；剥不出数字段时 parts 为空元组
-
-        与 parse 的两处不同，都是被目录命名逼出来的：
-          · 先剥掉第一个 "-" 之前的部分 —— 那是组件 key，不是版本
-          · 非数字段**补 0** 而不是判废 —— `3.12.1rc1` 这种目录仍要能参与排序
-        """
-        s = str(dir_name or "")
-        tail = s.split("-", 1)[1] if "-" in s else s
-        out: List[int] = []
-        for chunk in tail.split("."):
-            out.append(int(chunk) if chunk.isdigit() else 0)
-        return cls(s, tuple(out), False)
-
-    # -- 三种口径 ----------------------------------------------------
-    @property
-    def strict_key(self) -> Tuple[int, ...]:
-        """严格档：逐段 `int()`，任一段不纯就整档作废 → `(0,)`。
-
-        这是 `_semver_key` 的原语义，**别当成 bug 改掉**：它让
-        `21.0.4-beta` / `3.12.1rc1` / `v1.10.2` 统统变成 `(0,)`，
-        于是在降序排序里一律沉底 —— "预发布版不该被当成更新"就靠它实现。
-        改成宽松档的话，用户会看到"检测到新版本 21.0.4-beta"。
-
-        注意 `int("0_1") == 1`：带下划线的段（如 `1.0.0_1`）在这一档会被
-        完整接受，而宽松档只取到 0。这个分歧是纯 Python 巧合，先钉住。
-        """
-        if self._strict is None:
-            try:
-                self._strict = tuple(int(x) for x in self.text.split("."))
-            except (ValueError, AttributeError, TypeError):
-                self._strict = (0,)
-        return self._strict
-
-    @property
-    def dir_key(self) -> Tuple[int, ...]:
-        """目录名档：`from_install_dir` 算出的数字段（非数字补 0）。"""
-        if self._dir is None:
-            self._dir = tuple(int(c) if c.isdigit() else 0
-                              for c in self._text_tail().split("."))
-        return self._dir
-
-    def _text_tail(self) -> str:
-        s = self.text
-        return s.split("-", 1)[1] if "-" in s else s
-
-    # -- 比较 --------------------------------------------------------
-    def is_newer_than(self, other: object) -> bool:
-        """self 是否比 other 新。任一边读不出数字段一律 False（宁可不提示也不猜）。
-
-        入参 other: 另一个 Version，或可被 parse 的版本文字
-        """
-        if isinstance(other, Version):
-            b = Version.parse(other.text)
-        else:
-            b = Version.parse(other)
-        a = Version.parse(self.text)
-        if a is None or b is None:
-            return False
-        return _pad_compare(a.parts, b.parts) > 0
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Version):
-            return NotImplemented
-        return self.parts == other.parts and self.text == other.text
-
-    def __hash__(self) -> int:
-        return hash((self.text, self.parts))
-
-    def __repr__(self) -> str:
-        return f"Version({self.text!r}, parts={self.parts}, pre={self.prerelease})"
-
-    # -- 老函数的薄壳 ------------------------------------------------
-    @staticmethod
-    def legacy_parts(text: object) -> Optional[Tuple[int, ...]]:
-        """`_version_parts` 的等价物。"""
-        v = Version.parse(text)
-        return v.parts if v is not None else None
-
-    @staticmethod
-    def legacy_semver_key(text: object) -> Tuple[int, ...]:
-        """`_semver_key` 的等价物（含 None 输入的 (0,) 退化）。"""
-        v = Version.parse(text)
-        return v.strict_key if v is not None else (0,)
-
-    @staticmethod
-    def legacy_version_key(dir_name: object) -> Tuple[int, ...]:
-        """`_version_key` 的等价物。"""
-        return Version.from_install_dir(dir_name).dir_key
-
-
-def _pad_compare(a: Tuple[int, ...], b: Tuple[int, ...]) -> int:
-    """按数值分段比两个版本元组：短的一边补 0。
-
-    补 0 而不是补"最小值"：`_version_parts` 的原实现就是把不同长度按
-    尾部补 0 比的（见 `version_is_newer` 里的 `a + (0,) * (...)`）。
-    """
-    n = max(len(a), len(b))
-    pa = a + (0,) * (n - len(a))
-    pb = b + (0,) * (n - len(b))
-    return (pa > pb) - (pa < pb)
+# Version 值对象与 _pad_compare 已抽出到 core/versioning.py。
+# 三套版本口径（parse / strict_key / dir_key）与历史行为逐字一致，
+# 这里只保留导入，调用点（main.Version）全部照旧可用。
+from core.versioning import Version, version_is_newer as _core_version_is_newer  # noqa: E402
 
 
 def component_registry() -> Dict[str, "Component"]:
@@ -444,19 +348,12 @@ def _version_parts(text: object):
 
 
 def version_is_newer(current: str, latest: str) -> bool:
-    """按**数值分段**比较版本号。
+    """按**数值分段**比较版本号（实现见 core.versioning，保留壳以便打桩与老调用点）。
 
-    字符串比会得出 `1.9 > 1.10`（`_version_key` 那条注释里钉过同一个坑），
-    后果是用户永远收不到升级提示 —— 而这恰恰是这条功能存在的唯一理由。
+    字符串比会得出 `1.9 > 1.10`，后果是用户永远收不到升级提示 ——
     任何一边读不出来都返回 False：拿不到结论时不许打扰用户。
     """
-    a, b = _version_parts(current), _version_parts(latest)
-    if a is None or b is None:
-        return False
-    width = max(len(a), len(b))
-    a = a + (0,) * (width - len(a))
-    b = b + (0,) * (width - len(b))
-    return b > a
+    return _core_version_is_newer(current, latest)
 
 
 def parse_latest_release(payload: object):
@@ -676,6 +573,20 @@ def build_diagnostics() -> str:
     except Exception as exc:
         cfg_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
     out += _diag_section("config.json 全文（生效版本 / 接管快照都在这里）", cfg_lines)
+
+    # ---- 结构化日志（最近 50 条）----
+    log_lines = []
+    try:
+        entries = logger.recent(50) if hasattr(logger, "recent") else []
+        if not entries:
+            log_lines.append("（本次会话还没有结构化日志）")
+        for entry in entries:
+            log_lines.append(
+                f"[{entry.get('timestamp', '')}] "
+                f"[{entry.get('level', 'INFO'):<7}] {entry.get('message', '')}")
+    except Exception as exc:  # noqa: BLE001 - 少一节也不能让整份报告生成失败
+        log_lines.append(f"读取失败: {type(exc).__name__}: {exc}")
+    out += _diag_section("结构化日志（最近 50 条）", log_lines)
 
     return "\n".join(out)
 
@@ -1711,8 +1622,13 @@ class Component:
             summary_parts.append("安装器模式，跳过安装目录删除（如需彻底清理请用对应卸载工具）")
         elif install_path is not None:
             try:
-                shutil.rmtree(install_path)
+                _safe_rmtree(install_path, verify_deleted=True)
                 summary_parts.append(f"已删除安装目录：{install_path}")
+            except UnsafePathError as exc:
+                # 安全护栏：目录不在本工具工作目录内时拒绝删除，但**不中断**后续清理
+                logger.error(f"Security violation during uninstallation: {exc}")
+                summary_parts.append(
+                    f"安装目录不在本工具工作目录内，已跳过删除：{install_path}")
             except Exception as exc:
                 # 目录删不掉多半是有进程占着它（真机 2026-10-07 rabbitmq：内容全删光、
                 # 顶层目录删不掉，而当时还在跑的只有 epmd.exe）。这里必须把三件事说清：
@@ -2051,7 +1967,12 @@ class ExternalDiscoveryWorker(QThread):
         try:
             cands = discover_version_candidates(self.component)
             self.done.emit(probe_discovered_versions(self.component, cands))
-        except Exception:      # noqa: BLE001  发现失败不该把界面拖垮
+        except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
+            logger.warning("Version probe failed for %s: %s", self.component.key, exc)
+            self.done.emit([])
+        except Exception:  # noqa: BLE001
+            # CRITICAL: This CANNOT raise exceptions - version discovery MUST NOT crash UI
+            # Allowing exceptions here would break the entire application experience
             self.done.emit([])
 
 
@@ -3800,7 +3721,8 @@ def github_releases_no_api(repo: str, max_tags: int = 12) -> List[dict]:
                 "https://github.com/{}/releases/expanded_assets/{}".format(
                     repo, urllib.parse.quote(tag, safe="")),
                 timeout=DEVTOOL_FETCH_TIMEOUT).text
-        except Exception:  # noqa: BLE001
+        except (requests.RequestException, OSError, RuntimeError):
+            # 单个 tag 的资产页抓不到就跳过它，不影响其余 tag
             continue
         assets = _gh_parse_asset_page(page or "", repo, tag)
         if assets:
@@ -3845,7 +3767,7 @@ def fetch_tomcat_versions() -> List[ComponentVersion]:
         try:
             html = _get(f"https://archive.apache.org/dist/tomcat/tomcat-{major}/").text
             versions.extend(_re.findall(rf'href="v({major}\.\d+\.\d+)/"', html))
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
     if not versions:
         raise RuntimeError("Tomcat 版本列表为空")
@@ -3909,7 +3831,7 @@ def _mysql_zip_exists(v: str) -> Optional[bool]:
     for url in (cdn, mirror):
         try:
             r = http_session().head(url, timeout=8, allow_redirects=True)
-        except Exception:  # noqa: BLE001
+        except (requests.RequestException, OSError):
             continue
         if r.status_code in (200, 206):
             return True
@@ -3930,9 +3852,9 @@ def fetch_mysql_versions() -> List[ComponentVersion]:
                 html = _get(f"https://downloads.mysql.com/archives/community/?tpl=version&os=src&version={prefix}",
                             timeout=6).text
                 versions.extend(_re.findall(rf'({prefix}\.\d+)', html))
-            except Exception:
+            except BEST_EFFORT_ERRORS:
                 continue
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
     if not versions:
         # 保底：一份手工维护的近期列表（只放确认能在官方 CDN 下到 winx64.zip 的版本；
@@ -4017,7 +3939,7 @@ def fetch_go_versions() -> List[ComponentVersion]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     # 第二阶段：镜像都失败 → 回退 go.dev 官方 JSON API
@@ -4031,7 +3953,7 @@ def fetch_go_versions() -> List[ComponentVersion]:
                 v = rel.get("version", "").lstrip("go")
                 if v:
                     versions.append(v)
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Go 版本列表抓取失败：所有国内镜像与官网均不可用：{exc}"
             ) from exc
@@ -4077,7 +3999,7 @@ def fetch_gradle_versions() -> List[ComponentVersion]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     # 第二阶段：镜像都失败 → 回退官网索引页
@@ -4085,7 +4007,7 @@ def fetch_gradle_versions() -> List[ComponentVersion]:
         try:
             html = _get(official_index, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text
             versions = list(set(pattern.findall(html)))
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Gradle 版本列表抓取失败：所有国内镜像与官网均不可用：{exc}"
             ) from exc
@@ -4123,7 +4045,7 @@ def fetch_bun_versions() -> List[ComponentVersion]:
         vs = _re.findall(r'bun-v?(\d+\.\d+\.\d+)', text)
         if vs:
             versions = list(set(vs))
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
 
     # 第二阶段：镜像失败 → 回退 GitHub Releases API（JSON）
@@ -4135,7 +4057,7 @@ def fetch_bun_versions() -> List[ComponentVersion]:
                 # Bun tag 格式为 bun-v<version>；canary 版本含 -canary 后缀，剔除
                 if tag.startswith("bun-v") and "canary" not in tag and "-" not in tag[len("bun-v"):]:
                     versions.append(tag[len("bun-v"):])
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Bun 版本列表抓取失败：npmmirror 与 GitHub API 均不可用：{exc}"
             ) from exc
@@ -4176,14 +4098,14 @@ def fetch_docker_versions() -> List[ComponentVersion]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     if not versions:
         try:
             html = _get(official_index, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text
             versions = list(set(pattern.findall(html)))
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Docker 版本列表抓取失败：所有国内镜像与官网均不可用：{exc}"
             ) from exc
@@ -4227,7 +4149,7 @@ def fetch_mongodb_versions() -> List[ComponentVersion]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     if not versions:
@@ -4241,7 +4163,7 @@ def fetch_mongodb_versions() -> List[ComponentVersion]:
                     v = name[1:]
                     if _re.match(r'^\d+\.\d+\.\d+$', v):
                         versions.append(v)
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"MongoDB 版本列表抓取失败：镜像与 GitHub API 均不可用：{exc}"
             ) from exc
@@ -4284,7 +4206,7 @@ def fetch_postgresql_versions() -> List[ComponentVersion]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     if not versions:
@@ -4296,7 +4218,7 @@ def fetch_postgresql_versions() -> List[ComponentVersion]:
                 m = _re.match(r'^REL_(\d+)_(\d+)_(\d+)$', name)
                 if m:
                     versions.append(f"{m.group(1)}.{m.group(2)}.{m.group(3)}")
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"PostgreSQL 版本列表抓取失败：镜像与 GitHub API 均不可用：{exc}"
             ) from exc
@@ -4330,7 +4252,7 @@ def fetch_kubectl_versions() -> List[ComponentVersion]:
     try:
         html = _get(mirror_index, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text
         versions = list(set(pattern.findall(html)))
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
 
     if not versions:
@@ -4342,7 +4264,7 @@ def fetch_kubectl_versions() -> List[ComponentVersion]:
                     v = name[1:]
                     if _re.match(r'^\d+\.\d+\.\d+$', v):
                         versions.append(v)
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"kubectl 版本列表抓取失败：镜像与 GitHub API 均不可用：{exc}"
             ) from exc
@@ -4369,14 +4291,14 @@ def fetch_jenkins_versions() -> List[ComponentVersion]:
     try:
         html = _get(mirror_index, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text
         versions = list(set(pattern.findall(html)))
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
 
     if not versions:
         try:
             html = _get(official_index, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text
             versions = list(set(pattern.findall(html)))
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Jenkins 版本列表抓取失败：镜像与官网均不可用：{exc}"
             ) from exc
@@ -4403,7 +4325,7 @@ def fetch_rabbitmq_versions() -> List[ComponentVersion]:
 
     try:
         data = _github_api_json(github_api)
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(
             f"RabbitMQ 版本列表抓取失败：GitHub API 不可用：{exc}"
         ) from exc
@@ -4452,14 +4374,14 @@ def _fetch_apache_versions(key: str) -> List[str]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     if not versions:
         try:
             html = _get(official_index, timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text
             versions = list(set(pattern.findall(html)))
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Apache {key} 版本列表抓取失败：镜像与官网均不可用：{exc}"
             ) from exc
@@ -4550,7 +4472,7 @@ def _fetch_github_releases_versions(repo: str, prefix: str = "v") -> List[str]:
 
     try:
         data = _github_api_json(api)
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(
             f"GitHub releases 抓取失败（{repo}）：{exc}"
         ) from exc
@@ -4600,7 +4522,7 @@ def fetch_seata_versions() -> List[ComponentVersion]:
         ]
         if stable:
             return [_seata_cv(v) for v in stable[:20]]
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         pass
     # 第二阶段：镜像都失败 → 回退 GitHub API（末位官网）
     versions = _fetch_github_releases_versions("apache/incubator-seata", prefix="v")
@@ -4635,7 +4557,7 @@ def fetch_elasticsearch_versions() -> List[ComponentVersion]:
             if vs:
                 versions = list(set(vs))
                 break
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             continue
 
     if not versions:
@@ -4647,7 +4569,7 @@ def fetch_elasticsearch_versions() -> List[ComponentVersion]:
                     v = name[1:]
                     if _re.match(r'^\d+\.\d+\.\d+$', v):
                         versions.append(v)
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"Elasticsearch 版本列表抓取失败：镜像与 GitHub API 均不可用：{exc}"
             ) from exc
@@ -4693,7 +4615,7 @@ def make_jetbrains_fetcher(key: str, code: str):
         try:
             payload = _get(_JETBRAINS_RELEASES_URL.format(code),
                            timeout=DEVTOOL_FETCH_TIMEOUT).json()
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             raise RuntimeError(
                 f"{key} 版本列表抓取失败：JetBrains 接口不可用：{exc}") from exc
         links: Dict[str, List[DownloadArtifact]] = {}
@@ -4745,7 +4667,7 @@ def fetch_vscode_versions() -> List[ComponentVersion]:
     """
     try:
         raw = _get(_VSCODE_RELEASES_URL, timeout=DEVTOOL_FETCH_TIMEOUT).json()
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"VS Code 版本列表抓取失败：{exc}") from exc
     versions = [v for v in (raw if isinstance(raw, list) else [])
                 if isinstance(v, str) and _version_parts(v) is not None]
@@ -4792,13 +4714,13 @@ def make_github_asset_fetcher(key: str, repo: str, asset_hints: tuple,
         try:
             data = _github_api_json(
                 f"https://api.github.com/repos/{repo}/releases?per_page=30")
-        except Exception as exc:  # noqa: BLE001
+        except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
             # API 被限流/不可达时切到「网页通道」：releases.atom + expanded_assets，
             # 不占 60 次/小时的 API 额度（2026-10-21 新增，见 github_releases_no_api）。
             api_exc = exc
             try:
                 data = github_releases_no_api(repo)
-            except Exception as web_exc:  # noqa: BLE001
+            except BEST_EFFORT_ERRORS as web_exc:  # noqa: BLE001
                 raise RuntimeError(
                     f"{key} 版本列表抓取失败：GitHub API 不可用（{api_exc}）；"
                     f"网页兜底也失败（{web_exc}）") from api_exc
@@ -4871,7 +4793,7 @@ def fetch_hbuilderx_versions() -> List[ComponentVersion]:
     """
     try:
         data = _get(_HBX_RELEASE_JSON, timeout=DEVTOOL_FETCH_TIMEOUT).json()
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"HBuilderX 版本列表抓取失败：release.json 不可用：{exc}") from exc
     ver = str((data or {}).get("version") or "").strip()
     win = ""
@@ -4906,7 +4828,7 @@ def fetch_apipost_versions() -> List[ComponentVersion]:
     """
     try:
         page = _get(_APIPOST_DOWNLOAD_PAGE, timeout=DEVTOOL_FETCH_TIMEOUT).text
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"Apipost 版本列表抓取失败：下载页不可用：{exc}") from exc
     hit = _APIPOST_DL_RE.search(str(page or "").replace("&amp;", "&"))
     if not hit:
@@ -4930,7 +4852,7 @@ def fetch_apifox_versions() -> List[ComponentVersion]:
     """
     try:
         body = str(_get(_APIFOX_LATEST_YML, timeout=DEVTOOL_FETCH_TIMEOUT).text or "")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"Apifox 版本列表抓取失败：latest.yml 不可用：{exc}") from exc
     ver = _re.search(r"(?m)^version:\s*([0-9][0-9.]*)", body)
     link = _re.search(r"url:\s*(\S+?\.exe)", body)
@@ -4977,7 +4899,7 @@ def fetch_android_studio_versions() -> List[ComponentVersion]:
         if not yml:
             raise RuntimeError(f"winget 的 {ordered[0]} 目录里没有 installer.yaml")
         body = str(_get(yml, timeout=DEVTOOL_FETCH_TIMEOUT).text or "")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(
             f"Android Studio 版本列表抓取失败：winget 清单不可用：{exc}") from exc
     hit = _re.search(r"InstallerUrl:\s*(\S+)", body)
@@ -5031,7 +4953,7 @@ def _github_release_assets(repo: str, key: str):
     """
     try:
         data = _github_api_json(f"https://api.github.com/repos/{repo}/releases?per_page=30")
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"{key} 版本列表抓取失败：GitHub API 不可用：{exc}") from exc
     out = []
     for rel in (data if isinstance(data, list) else []):
@@ -5206,14 +5128,14 @@ def fetch_rust_versions() -> List[ComponentVersion]:
     try:
         ver, date = _rust_channel_info("stable")
         out.append(_rust_cv(ver, date))
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"Rust 版本列表抓取失败：官方清单不可用：{exc}") from exc
     parts = _version_parts(ver) or ()
     if parts and len(parts) >= 2 and parts[1] > 0:
         try:
             p_ver, p_date = _rust_channel_info(f"1.{parts[1] - 1}.0")
             out.append(_rust_cv(p_ver, p_date))
-        except Exception:
+        except BEST_EFFORT_ERRORS:
             pass      # 上一版拿不到不算失败：下拉框少一项而已
     return out[:20]
 
@@ -5365,7 +5287,7 @@ def fetch_dart_versions() -> List[ComponentVersion]:
                                "/VERSION"),
                       timeout=DEVTOOL_FETCH_TIMEOUT).json()
         latest_v = str((latest or {}).get("version") or "").strip()
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"Dart 版本列表抓取失败：官方 VERSION 不可用：{exc}") from exc
     if not latest_v or _version_parts(latest_v) is None:
         raise RuntimeError("Dart 官方 VERSION 里读不出可用版本号")
@@ -5376,7 +5298,7 @@ def fetch_dart_versions() -> List[ComponentVersion]:
             "https://storage.googleapis.com/storage/v1/b/dart-archive/o?"
             "prefix=channels/stable/release/&delimiter=/&maxResults=1000",
             timeout=DEVTOOL_FETCH_TIMEOUT).json()
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         return _flatten_newest(found)     # 列目录失败就只给最新版，不把清单砍空
     prefixes = (listing or {}).get("prefixes") or []
     for p in prefixes:
@@ -5453,7 +5375,7 @@ def fetch_flutter_versions() -> List[ComponentVersion]:
         try:
             data = _get(u, timeout=DEVTOOL_FETCH_TIMEOUT).json()
             break
-        except Exception as exc:  # noqa: BLE001
+        except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
             last_exc = exc
     if not isinstance(data, dict):
         raise RuntimeError(f"Flutter 版本列表抓取失败：releases_windows.json 不可用：{last_exc}")
@@ -5504,7 +5426,7 @@ def fetch_android_cmdline_versions() -> List[ComponentVersion]:
         try:
             data = _get(u, timeout=DEVTOOL_FETCH_TIMEOUT).text
             break
-        except Exception as exc:  # noqa: BLE001
+        except BEST_EFFORT_ERRORS as exc:  # noqa: BLE001
             last_exc = exc
     if not data:
         raise RuntimeError(f"Android SDK 版本列表抓取失败：repository2-3.xml 不可用：{last_exc}")
@@ -5806,7 +5728,7 @@ def fetch_zookeeper_versions() -> List[ComponentVersion]:
     try:
         text = _get("https://dlcdn.apache.org/zookeeper/",
                     timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"ZooKeeper 版本列表抓取失败：Apache 目录不可用：{exc}") from exc
     vers = sorted({m for m in _re.findall(r'href="zookeeper-(\d+\.\d+\.\d+)/"', text)
                    if _version_parts(m)}, key=_semver_key, reverse=True)
@@ -5834,7 +5756,7 @@ def fetch_consul_versions() -> List[ComponentVersion]:
     """
     try:
         text = _get(_CONSUL_BASE + "/", timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"consul 版本列表抓取失败：官方 releases 站不可用：{exc}") from exc
     vers = sorted({m for m in _re.findall(r'href="/consul/(\d+\.\d+\.\d+)/"', text)
                    if _version_parts(m)}, key=_semver_key, reverse=True)
@@ -5859,7 +5781,7 @@ def fetch_pgadmin4_versions() -> List[ComponentVersion]:
     """
     try:
         text = _get(_PGADMIN_DIR_INDEX, timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"pgAdmin 4 版本列表抓取失败：官方 FTP 目录不可用：{exc}") from exc
     vers = sorted({m for m in _re.findall(r'href="v(\d+\.\d+)/"', text)
                    if _version_parts(m)}, key=_semver_key, reverse=True)
@@ -5896,7 +5818,7 @@ def fetch_postman_versions() -> List[ComponentVersion]:
         try:
             text = _get(_POSTMAN_RELEASES.format(start=cur),
                         timeout=DOWNLOAD_PROBE_TIMEOUT * 4).text.strip()
-        except Exception as exc:
+        except BEST_EFFORT_ERRORS as exc:
             if not found:
                 raise RuntimeError(
                     f"Postman 版本列表抓取失败：RELEASES 不可用：{exc}") from exc
@@ -6244,7 +6166,7 @@ def fetch_helm_versions() -> List[ComponentVersion]:
     try:
         text = _get("https://get.helm.sh/helm-latest-version",
                     timeout=DOWNLOAD_PROBE_TIMEOUT * 2).text.strip()
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"Helm 版本列表抓取失败：get.helm.sh 不可用：{exc}") from exc
     ver = text.lstrip("vV")
     if _version_parts(ver) is None:
@@ -6282,7 +6204,7 @@ def fetch_dotnet_sdk_versions() -> List[ComponentVersion]:
         data = _get("https://dotnetcli.azureedge.net/dotnet/release-metadata/"
                     f"{major}/releases.json",
                     timeout=DOWNLOAD_PROBE_TIMEOUT * 4).json()
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f".NET SDK 版本列表抓取失败：官方 release-metadata 不可用："
                            f"{exc}") from exc
     out: List[ComponentVersion] = []
@@ -6319,7 +6241,7 @@ def fetch_qodercli_versions() -> List[ComponentVersion]:
     try:
         data = _get(f"{_QODERCLI_BASE}/channels/manifest.json",
                     timeout=DOWNLOAD_PROBE_TIMEOUT * 4).json()
-    except Exception as exc:
+    except BEST_EFFORT_ERRORS as exc:
         raise RuntimeError(f"Qoder CLI 版本列表抓取失败：manifest 不可用：{exc}") from exc
     latest = str(data.get("latest") or "")
     if _version_parts(latest) is None:
@@ -6338,7 +6260,7 @@ def fetch_qodercli_versions() -> List[ComponentVersion]:
     try:
         head = http_session().head(url, timeout=DOWNLOAD_PROBE_TIMEOUT * 2)
         size = int(head.headers.get("Content-Length") or 0)
-    except Exception:          # 拿不到体积不影响下载，只是菜单里不显示大小
+    except BEST_EFFORT_ERRORS:          # 拿不到体积不影响下载，只是菜单里不显示大小
         pass
     cv = _cv(latest, {"Windows": [url]}, {"Windows": "cli"})
     cv.artifacts = [DownloadArtifact("cli", ARTIFACT_LABELS["cli"], [url], size)]
@@ -6504,8 +6426,8 @@ class VersionFetchWorker(QThread):
                 vs = self.fetcher()
             except FetchAborted:
                 self.done.emit(self.key, None)  # 关窗取消：静默收尾，不打失败日志
-            except Exception as exc:  # pragma: no cover
-                # 抓取器内部普遍用 except Exception 兜底重抛 RuntimeError，
+            except BEST_EFFORT_ERRORS as exc:  # pragma: no cover
+                # 抓取器内部普遍用 except BEST_EFFORT_ERRORS 兜底重抛 RuntimeError，
                 # 取消异常可能被包装成普通失败；已在退出中就保持安静，别刷 26 行噪声。
                 self.error_text = str(exc)[:220]
                 if not FETCH_ABORT.is_set():
@@ -7328,7 +7250,7 @@ def _render_icon_file(path: Optional[Path], px: int) -> Optional["QPixmap"]:
         out = src.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         out.setDevicePixelRatio(float(ICON_RENDER_SCALE))
         return out
-    except Exception:
+    except BEST_EFFORT_ERRORS:
         # 图标是纯装饰：渲染不了就回色块，绝不能让它把主窗口带崩
         return None
 
@@ -10912,7 +10834,7 @@ def install_downloaded(comp: Component, version: str, archive: Path,
     if comp.installer_mode:
         emit("info", "开始运行安装器（静默安装）…")
         if final.exists():
-            shutil.rmtree(final, ignore_errors=True)
+            _safe_rmtree(final, verify_deleted=True)
         _run_installer_for(comp, archive, final, emit)
         emit("ok", f"安装完成：{final}")
         return final
@@ -10920,7 +10842,10 @@ def install_downloaded(comp: Component, version: str, archive: Path,
     emit("info", "开始解压…")
     tmp_dir = target_root / f".extract-{version}"
     if tmp_dir.exists():
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        try:
+            _safe_rmtree(tmp_dir, verify_deleted=False)
+        except OSError as exc:
+            emit("warn", f"临时目录清理未完成（继续解压）：{exc}")
     ensure_dir(tmp_dir)
     root = extract_archive(archive, tmp_dir)
 
@@ -10965,9 +10890,12 @@ def install_downloaded(comp: Component, version: str, archive: Path,
                     break
 
     if final.exists():
-        shutil.rmtree(final, ignore_errors=True)
+        _safe_rmtree(final, verify_deleted=True)
     shutil.move(str(root), str(final))
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        _safe_rmtree(tmp_dir, verify_deleted=False)
+    except OSError as exc:
+        emit("warn", f"临时目录清理未完成（不影响安装结果）：{exc}")
     emit("ok", f"解压完成：{final}")
     return final
 
@@ -11940,7 +11868,9 @@ def _live_page_keys() -> List[str]:
         try:
             if _render_component_page(key):
                 out.append(key)
-        except Exception:      # noqa: BLE001  首页不许被一个坏页面带崩
+        except Exception:  # noqa: BLE001
+            # CRITICAL: Page rendering failures must not crash the home page
+            # Each component page failure is isolated; only that page should fail silently
             continue
     return sorted(out)
 
@@ -12520,6 +12450,10 @@ def netstat_listener_pids(ports: Sequence[int]) -> Dict[int, int]:
     return _pick_unique_pids(parse_netstat_listeners(done.stdout or ""), ports)
 
 
+_TASKLIST_NAME_RE = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+"""tasklist /FI 允许的映像名形状：拒绝引号、空格、& 等会改变筛选语义的字符。"""
+
+
 def running_process_images(image_names: Sequence[str]) -> List[str]:
     """这些映像名里，哪些此刻正在本机跑着（返回命中的名字，顺序同入参）。
 
@@ -12533,6 +12467,10 @@ def running_process_images(image_names: Sequence[str]) -> List[str]:
     """
     hits: List[str] = []
     for name in image_names or ():
+        # 校验映像名再进命令行：tasklist 的 /FI 是**单参数筛选项**，名字里混入
+        # 引号/空格/& 会改变筛选语义（历史上只是伪造，这里从源头拒绝）。
+        if not _TASKLIST_NAME_RE.match(name or ""):
+            continue
         try:
             kw = dict(capture_output=True, timeout=10,
                       text=True, encoding="utf-8", errors="replace")
@@ -12882,7 +12820,11 @@ def _netstat_text() -> str:
 
 
 def _process_name(pid: int) -> str:
-    """进程名（可执行文件名）。查不到就回空串，不影响主流程。"""
+    """进程名（可执行文件名）。查不到就回空串；pid 非整数一律拒绝。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
     try:
         if CURRENT_OS == "Windows":
             out = subprocess.run(
@@ -14662,249 +14604,31 @@ SERVICE_MANAGER = ServiceManager()
 # 写操作才走一次 UAC 的固定脚本。测试把 SERVICE_BACKEND 换成内存假实现即可离线跑。
 # ---------------------------------------------------------------------------
 
-SERVICE_NAME_RE = _re.compile(r"^ByteTools-(?:MySQL|Redis)-[0-9A-Za-z][0-9A-Za-z._-]*$")
-
-SERVICE_MISSING = "not_installed"
-SERVICE_STOPPED = "stopped"
-SERVICE_RUNNING = "running"
-SERVICE_PENDING = "pending"       # 起停过渡态；error=1060 时表示"标记为删除中"
-SERVICE_BROKEN = "broken"         # 服务还在，但它指的可执行文件已经不在了
-
-# SCM 的 dwCurrentState → 我们对外的四态。暂停按运行中算：它确实还在占着资源，
-# 再点一次「启动」只会被 SCM 拒绝（1056 服务已在运行）。
-_SCM_STATE_NAMES = {
-    1: SERVICE_STOPPED, 2: SERVICE_PENDING, 3: SERVICE_PENDING, 4: SERVICE_RUNNING,
-    5: SERVICE_PENDING, 6: SERVICE_PENDING, 7: SERVICE_RUNNING,
-}
-
-ERROR_SERVICE_DOES_NOT_EXIST = 1060
-ERROR_SERVICE_MARKED_FOR_DELETE = 1072
-ERROR_ACCESS_DENIED = 5
-ERROR_SERVICE_ALREADY_RUNNING = 1056
-
-SERVICE_CONTROL_STOP = 0x00000001
-SERVICE_CONTROL_CONTINUE = 0x00000003
-
-
-@dataclass
-class ServiceInfo:
-    """一次 SCM 查询的结论（只读，不含任何动作）。"""
-
-    name: str = ""
-    exists: bool = False
-    state: str = SERVICE_MISSING
-    image_path: str = ""
-    start_type: str = ""          # auto / demand / disabled
-    error: int = 0
-
-    @property
-    def running(self) -> bool:
-        return self.state == SERVICE_RUNNING
-
-
-def _image_exe_path(image: str) -> str:
-    """从服务的 ImagePath 里取出可执行文件路径。
-
-    写法有两种：`"C:\\a b\\x.exe" --flag` 与 `C:\\a\\x.exe --flag`。
-    取不出来就返回空串（调用方据此跳过"exe 还在不在"的检查，而不是误判损坏）。
-    """
-    text = (image or "").strip()
-    if not text:
-        return ""
-    if text.startswith('"'):
-        end = text.find('"', 1)
-        return text[1:end] if end > 0 else text[1:]
-    low = text.lower()
-    for marker in (" --", " /"):
-        pos = low.find(marker)
-        if pos > 0:
-            return text[:pos]
-    return text
-
-
-def _scm_api():
-    """打开 advapi32 并配好 argtypes。
-
-    **argtypes 不能省**：HANDLE 在 64 位上是指针宽度，不声明时 ctypes 会按 C int
-    传，句柄被截断成 32 位，OpenService 于是随机失败。
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    class _Status(ctypes.Structure):
-        _fields_ = [("dwServiceType", wintypes.DWORD),
-                    ("dwCurrentState", wintypes.DWORD),
-                    ("dwControlsAccepted", wintypes.DWORD),
-                    ("dwWin32ExitCode", wintypes.DWORD),
-                    ("dwServiceSpecificExitCode", wintypes.DWORD),
-                    ("dwCheckPoint", wintypes.DWORD),
-                    ("dwWaitHint", wintypes.DWORD),
-                    ("dwProcessId", wintypes.DWORD),
-                    ("dwServiceFlags", wintypes.DWORD)]
-
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    advapi32.OpenSCManagerW.restype = wintypes.HANDLE
-    advapi32.OpenSCManagerW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
-    advapi32.OpenServiceW.restype = wintypes.HANDLE
-    advapi32.OpenServiceW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD]
-    advapi32.CloseServiceHandle.argtypes = [wintypes.HANDLE]
-    advapi32.CloseServiceHandle.restype = wintypes.BOOL
-    advapi32.QueryServiceStatusEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
-                                              ctypes.c_void_p, wintypes.DWORD,
-                                              ctypes.POINTER(wintypes.DWORD)]
-    advapi32.QueryServiceStatusEx.restype = wintypes.BOOL
-    advapi32.ControlService.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p]
-    advapi32.ControlService.restype = wintypes.BOOL
-    # 启动**不能**走 ControlService：SERVICE_START(0x10) 不是控制码，
-    # 传进去 SCM 直接回 87(ERROR_INVALID_PARAMETER) —— 2026-10-29 真机踩到过。
-    advapi32.StartServiceW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
-                                       ctypes.POINTER(wintypes.LPCWSTR)]
-    advapi32.StartServiceW.restype = wintypes.BOOL
-    return advapi32, _Status, ctypes, wintypes
-
-
-class WindowsServiceBackend:
-    """SCM 只读查询 + 提权写操作。整个对象可被测试替换成内存实现。"""
-
-    def supported(self) -> bool:
-        return CURRENT_OS == "Windows"
-
-    @staticmethod
-    def _validate(name: str) -> None:
-        if not SERVICE_NAME_RE.match(name or ""):
-            raise ValueError(f"非法的服务名：{name!r}")
-
-    def query(self, name: str) -> ServiceInfo:
-        info = ServiceInfo(name=name)
-        if not self.supported():
-            return info
-        self._validate(name)
-        image, start_type = self._read_config(name)
-        if image is None and start_type is None:
-            return info
-        info.exists = True
-        info.image_path = image or ""
-        info.start_type = start_type or ""
-        exe = os.path.expandvars(_image_exe_path(image or ""))
-        if exe and not Path(exe).exists():
-            info.state = SERVICE_BROKEN
-            return info
-        state, err = self._scm_state(name)
-        info.error = err
-        # 1060：注册表键还在、SCM 已经不认它了 —— 正是"标记为删除"的样子。
-        info.state = (SERVICE_PENDING if err in (ERROR_SERVICE_DOES_NOT_EXIST,
-                                                 ERROR_SERVICE_MARKED_FOR_DELETE)
-                      else _SCM_STATE_NAMES.get(state, SERVICE_PENDING))
-        return info
-
-    def registry_key_exists(self, name: str) -> bool:
-        image, start_type = self._read_config(name)
-        return image is not None or start_type is not None
-
-    def start(self, name: str) -> int:
-        """启动服务，返回 win32 错误码（0 = 成功）。"""
-        if not self.supported():
-            return ERROR_ACCESS_DENIED
-        self._validate(name)
-        advapi32, _Status, ctypes, wintypes = _scm_api()
-        scm = advapi32.OpenSCManagerW(None, None, 0x0001)      # SC_MANAGER_CONNECT
-        if not scm:
-            return ctypes.get_last_error()
-        try:
-            svc = advapi32.OpenServiceW(scm, name, 0x0010 | 0x0004)   # START | QUERY_STATUS
-            if not svc:
-                return ctypes.get_last_error()
-            try:
-                if not advapi32.StartServiceW(svc, 0, None):
-                    return ctypes.get_last_error()
-                return 0
-            finally:
-                advapi32.CloseServiceHandle(svc)
-        finally:
-            advapi32.CloseServiceHandle(scm)
-
-    def control(self, name: str, code: int) -> int:
-        """向 SCM 发**控制码**（停/暂停/继续），返回 win32 错误码（0 = 成功）。
-
-        只接受控制码；`SERVICE_START` 这类启动请求必须走 start()（见上面注释）。
-        """
-        if not self.supported():
-            return ERROR_ACCESS_DENIED
-        self._validate(name)
-        if code == 0x0010:
-            raise ValueError("启动服务请调用 start()，ControlService 不接受 SERVICE_START")
-        advapi32, _Status, ctypes, wintypes = _scm_api()
-        scm = advapi32.OpenSCManagerW(None, None, 0x0001)      # SC_MANAGER_CONNECT
-        if not scm:
-            return ctypes.get_last_error()
-        try:
-            access = 0x0020 | 0x0004 | 0x0001                  # START | QUERY_STATUS | STOP
-            svc = advapi32.OpenServiceW(scm, name, access)
-            if not svc:
-                return ctypes.get_last_error()
-            try:
-                status = _Status()
-                if not advapi32.ControlService(svc, code, ctypes.byref(status)):
-                    return ctypes.get_last_error()
-                return 0
-            finally:
-                advapi32.CloseServiceHandle(svc)
-        finally:
-            advapi32.CloseServiceHandle(scm)
-
-    # --- 只读底层 -------------------------------------------------------
-    @staticmethod
-    def _read_config(name: str) -> Tuple[Optional[str], object]:
-        import winreg
-
-        path = rf"SYSTEM\CurrentControlSet\Services\{name}"
-        try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0,
-                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
-                image = _reg_scalar(key, "ImagePath")
-                start = _reg_scalar(key, "Start")
-                start_type = {2: "auto", 3: "demand", 4: "disabled"}.get(start, "")
-                return image, start_type
-        except OSError:
-            return None, None
-
-    @staticmethod
-    def _scm_state(name: str) -> Tuple[int, int]:
-        if CURRENT_OS != "Windows":
-            return -1, ERROR_ACCESS_DENIED
-        advapi32, _Status, ctypes, wintypes = _scm_api()
-        scm = advapi32.OpenSCManagerW(None, None, 0x0001)
-        if not scm:
-            return -1, ctypes.get_last_error()
-        try:
-            svc = advapi32.OpenServiceW(scm, name, 0x0004)     # SERVICE_QUERY_STATUS
-            if not svc:
-                return -1, ctypes.get_last_error()
-            try:
-                buf = _Status()
-                needed = wintypes.DWORD(0)
-                if not advapi32.QueryServiceStatusEx(
-                        svc, 0, ctypes.byref(buf), ctypes.sizeof(buf), ctypes.byref(needed)):
-                    return -1, ctypes.get_last_error()
-                return int(buf.dwCurrentState), 0
-            finally:
-                advapi32.CloseServiceHandle(svc)
-        finally:
-            advapi32.CloseServiceHandle(scm)
-
-
-def _reg_scalar(key, name: str):
-    import winreg
-
-    try:
-        value, _kind = winreg.QueryValueEx(key, name)
-    except OSError:
-        return None
-    return value if isinstance(value, int) else str(value)
+# Windows 服务（SCM）后端已抽出到 core/windows_service.py。
+# 这里只做 re-export：测试与老调用点仍通过 main.ServiceInfo / main.SERVICE_BACKEND 访问。
+from core.windows_service import (  # noqa: E402
+    ERROR_ACCESS_DENIED,
+    ERROR_SERVICE_ALREADY_RUNNING,
+    ERROR_SERVICE_DOES_NOT_EXIST,
+    ERROR_SERVICE_MARKED_FOR_DELETE,
+    SERVICE_BROKEN,
+    SERVICE_CONTROL_CONTINUE,
+    SERVICE_CONTROL_STOP,
+    SERVICE_MISSING,
+    SERVICE_NAME_RE,
+    SERVICE_PENDING,
+    SERVICE_RUNNING,
+    SERVICE_STOPPED,
+    ServiceInfo,
+    WindowsServiceBackend,
+    _image_exe_path,
+    _reg_scalar,
+    _scm_api,
+)
 
 
 # 唯一实例。测试替换它（fixture 里 `main.SERVICE_BACKEND = FakeServiceBackend()`）。
-SERVICE_BACKEND = WindowsServiceBackend()
+SERVICE_BACKEND = WindowsServiceBackend(CURRENT_OS)
 
 
 @dataclass
@@ -15201,6 +14925,8 @@ def load_service_secret(key: str) -> str:
     try:
         plain = _dpapi(base64.b64decode(raw), unprotect=True)
     except Exception:  # noqa: BLE001
+        # CRITICAL: Secret decryption failures must be silent for security reasons
+        # Don't leak whether a secret exists or what went wrong with decryption
         return ""
     return plain.decode("utf-8", "replace") if plain else ""
 
@@ -16418,7 +16144,8 @@ def shadow_location(shadow: Optional[str]) -> str:
             return "machine"
     try:
         user_entries = EnvManager.read_user_path_entries()
-    except Exception:  # noqa: BLE001
+    except (OSError, IOError):
+        # Path read failure - treat as outside
         user_entries = []
     for entry in user_entries or []:
         if entry and EnvManager._same_path(entry, shadow):
@@ -16862,7 +16589,7 @@ def elevate_helper_apply(request: Dict[str, object], backend) -> Dict[str, objec
         composed = EnvManager.composed_env()
         result["verdict"] = helper_verify_hit(composed.get("PATH") or "",
                                               exec_names, verify_dir)[0]
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError, IndexError):
         result["verdict"] = "unknown"
 
     result["ok"] = True
@@ -17041,8 +16768,9 @@ def _run_elevated_helper(request: Dict[str, object],
         if res_path.exists():
             try:
                 data = json.loads(res_path.read_text(encoding="utf-8"))
-            except Exception:               # noqa: BLE001
-                data = None                 # 助手正写到一半，下一轮再读
+            except (ValueError, UnicodeDecodeError):
+                # Helper is still writing the file, read again next iteration
+                pass
             if isinstance(data, dict):
                 _remove_quietly(req_path, res_path)
                 data.setdefault("stage", "ok" if data.get("ok") else "denied")
@@ -17164,8 +16892,8 @@ def _announce_env_change() -> None:
     """
     try:
         EnvManager._broadcast_env_change()
-    except Exception:  # noqa: BLE001
-        pass
+    except (OSError, WindowsError):
+        pass  # Notification failure doesn't affect registry changes
 
 
 def apply_external_version_machine(comp: Component, dv: "DiscoveredVersion",
@@ -23969,6 +23697,18 @@ class MainWindow(QMainWindow):
         # 同时落盘（纯文本、不带 HTML）。界面写的是转义后的 msg，直接用同一个
         # 字符串落盘最省事，也保证"用户复制的"与"界面显示的"逐字一致。
         self._log_to_disk(level, msg)
+        # 同步进结构化日志历史：导出诊断时按级别汇总，不依赖 HTML 文本
+        try:
+            if level == "ok":
+                logger.ok(msg)
+            elif level == "warn":
+                logger.warn(msg)
+            elif level == "error":
+                logger.error(msg)
+            else:
+                logger.info(msg)
+        except Exception:  # noqa: BLE001 - 日志本身绝不能影响界面
+            pass
         # 2026-10-14 按用户要求：日志浮层**永远不自动弹开**。
         # 原先这里有一段 warn/error 自动弹开 + 静默自动收起的逻辑，配一个
         # "启动后 10 秒内不弹"的静默期。它看起来能解决"启动那一波告警盖住界面"，

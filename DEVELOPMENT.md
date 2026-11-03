@@ -46,6 +46,7 @@
 - [规则 R27：Xcode / Xcode SDK](#规则-r27xcode--xcode-sdk2026-10-21)
 - [规则 R28：第二道测试护栏 —— 真实用户环境变量](#规则-r28第二道测试护栏--真实用户环境变量2026-10-21)
 - [规则 R29：可装配组件必须是官方**完整发行版**，不许用 embeddable / Mini 精简包](#规则-r29可装配组件必须是官方完整发行版不许用-embeddable--mini-精简包2026-10-28)
+- [规则 R30：`core/` 是承重模块，删除/日志/版本/服务后端只许走它](#规则-r30core-是承重模块删除日志版本服务后端只许走它2026-11-03)
 
 <!-- 后续新增规则在此追加索引 -->
 
@@ -3250,3 +3251,46 @@ Windows 官方直链"对 macOS 独占组件是假话。
 - `bt_multiversion_tests.PythonPathDirHoldsTheInterpreter`
 - `bt_install_safety_tests.ArchiveTraversalGuard.test_7z_sfx_is_extracted_not_copied_as_a_binary`
 
+
+---
+
+## 规则 R30：`core/` 是承重模块，删除/日志/版本/服务后端只许走它（2026-11-03）
+
+### R30.1 规则描述
+
+`main.py` 曾是一个 2.4 万行的单文件。2026-11-03 起，四类"跨组件共用、
+且出错代价高"的能力已抽成 `core/` 下的独立模块。**新增代码只许调用这些模块，
+不许在 `main.py` 里再写一份**：
+
+| 模块 | 职责 | 硬约束 |
+|------|------|--------|
+| `core/constants.py` | 超时 / 缓存 TTL / 镜像基址 / 安全阈值 | 新常量的唯一定义处；`main.py` 只做导入 |
+| `core/logger.py` | 结构化日志（INFO/OK/WARNING/ERROR + 颜色 + JSON 导出） | UI 写入必须同步进 logger 历史，导出诊断要能看到 |
+| `core/versioning.py` | `Version` 与三套版本口径 | 三套口径的分歧是承重的，不许"统一" |
+| `core/windows_service.py` | SCM 只读查询 + 启停写入口 | 状态识别只读；启动只走 `StartServiceW` |
+| `core/exceptions.py` | 自定义异常 + `safe_rmtree` | 删除用户路径必须经 `safe_rmtree` |
+
+### R30.2 硬约束
+
+1. **删除目录只许走 `safe_rmtree`**：`shutil.rmtree` 在 `main.py` 里只允许出现在
+   `core/` 缺失时的 fallback 分支。目标路径必须落在允许根内，
+   否则抛 `UnsafePathError`；**不许用 `ignore_errors=True` 吞掉用户路径的删除失败**。
+2. `main.CONFIG_DIR` 是可被测试改写的沙箱根。因此 `main` 内的删除一律走
+   `_safe_rmtree()`（它把 `allowed_root=CONFIG_DIR` 传下去），**不许**直接调
+   `safe_rmtree(path)` 用默认 `~/.env-tools`。
+3. 异常捕获按"来源"收窄：网络→`requests.RequestException`，文件→`OSError`，
+   JSON→`(ValueError, UnicodeDecodeError)`，注册表→`(OSError, WindowsError)`。
+   "失败也不影响主流程"的版本抓取统一用 `core.exceptions.BEST_EFFORT_ERRORS`
+   （2026-11-03 已收窄 52 处）。只有 **UI 线程的最后一道兜底**（QThread.run 的二次 catch、
+   页面渲染循环、凭据解密）允许 `except Exception`，且必须写明"为什么不能外抛"。
+4. 新增版本比较只许用 `Version`（`core/versioning.py`）。
+   `_version_parts` / `_semver_key` / `_version_key` 是兼容薄壳，不许再有第二份实现。
+5. `core/` 模块不许 import `main`（避免循环依赖）；需要运行环境信息时用参数注入
+   （例：`WindowsServiceBackend(CURRENT_OS)`）。
+
+### R30.3 验收
+
+- 全量离线回归：`python tests/run_all_tests.py`（2026-11-03：24 套件 / 1071 条全绿）。
+- 新护栏：`tests/bt_core_tests.py` 覆盖越界删除、前缀伪装目录、日志不递归、
+  版本口径一致、SCM 模块在非 Windows 上保持惰性。
+- 关窗冒烟：offscreen 下 `MainWindow()` → `show()` → `close()` 退出码 0。
