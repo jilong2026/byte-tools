@@ -80,6 +80,13 @@ DEVTOOL_FETCH_TIMEOUT = 15
 _JAVA_MAJOR_TIMEOUT = 20
 TK_SUPPRESS_BG_LIMIT = 600      # Background thread poll upper limit (600 × 50ms = 30s, prevents runaway)
 
+# 网络请求分档（只收 HTTP 侧；子进程/服务启停的超时属于各组件的运行参数，留在原处）
+FETCH_TIMEOUT_QUICK = 4         # 更新检查等"失败也无所谓"的快速请求
+FETCH_TIMEOUT_WEB = 6           # GitHub 资产页等轻量网页
+FETCH_TIMEOUT_HEAD = 8          # HEAD 探测（镜像是否存在）
+FETCH_TIMEOUT_API = 20          # 大列表类 API（如 Erlang releases）
+EXEC_PROBE_TIMEOUT = 4          # 执行命令取版本号的预算（超出即判"探测不到"）
+
 # =============================================================================
 # FILE OPERATIONS & SECURITY
 # =============================================================================

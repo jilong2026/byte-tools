@@ -318,6 +318,102 @@ class DonateDialogUiTests(unittest.TestCase):
         self.assertTrue((assets / "wechat.png").is_file())
 
 
+class PerfSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        from core import perf
+        self.perf = perf
+        perf.reset()
+        self.addCleanup(perf.reset)
+
+    def test_timed_accumulates_count_total_and_max(self):
+        for _ in range(3):
+            with self.perf.timed("unit_op"):
+                pass
+        snap = self.perf.snapshot()
+        slot = snap["timers"]["unit_op"]
+        self.assertEqual(slot["count"], 3)
+        self.assertGreaterEqual(slot["total_ms"], 0.0)
+        self.assertGreaterEqual(slot["max_ms"], 0.0)
+
+    def test_timed_records_even_when_body_raises(self):
+        with self.assertRaises(RuntimeError):
+            with self.perf.timed("boom_op"):
+                raise RuntimeError("x")
+        self.assertEqual(self.perf.snapshot()["timers"]["boom_op"]["count"], 1)
+
+    def test_format_section_lists_timers(self):
+        with self.perf.timed("listed_op"):
+            pass
+        text = "\n".join(self.perf.format_section())
+        self.assertIn("listed_op", text)
+        self.assertIn("进程运行时长", text)
+
+    def test_memory_off_by_default_until_enabled(self):
+        self.assertIsNone(self.perf.snapshot()["memory"])
+        self.perf.start_memory_tracking()
+        self.assertIsNotNone(self.perf.snapshot()["memory"])
+
+    def test_diagnostics_contains_perf_section(self):
+        with self.perf.timed("diag_op"):
+            pass
+        text = main.build_diagnostics()
+        self.assertIn("性能快照", text)
+        self.assertIn("diag_op", text)
+
+
+class I18nTests(unittest.TestCase):
+    def setUp(self):
+        from core import i18n
+        self.i18n = i18n
+        self._old = i18n.current_language()
+        self.addCleanup(i18n.set_language, self._old)
+
+    def test_default_chinese_returns_source(self):
+        self.i18n.set_language("zh")
+        self.assertEqual(self.i18n.tr("支持作者"), "支持作者")
+
+    def test_english_lookup_and_placeholder(self):
+        self.i18n.set_language("en")
+        self.assertEqual(self.i18n.tr("支持作者"), "Support the author")
+        self.assertEqual(self.i18n.tr("【{channel}】收款码", channel="WeChat"),
+                         "WeChat payment QR code")
+
+    def test_unknown_string_falls_back_to_source(self):
+        self.i18n.set_language("en")
+        self.assertEqual(self.i18n.tr("没有翻译的句子"), "没有翻译的句子")
+
+
+class ComponentDetailDialogUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._app = _btprelude.ensure_app()
+
+    class _Comp:
+        display_name = "JDK (Temurin)"
+        official_url = "https://adoptium.net/"
+
+    def test_renders_sections_and_official_link(self):
+        from ui.component_detail_dialog import ComponentDetailDialog
+
+        self.assertIs(main.ComponentDetailDialog, ComponentDetailDialog)
+        dlg = ComponentDetailDialog(self._Comp(), [("说明", "**加粗**正文")])
+        self.addCleanup(dlg.deleteLater)
+        self.assertIn("JDK (Temurin)", dlg.windowTitle())
+        self.assertIn('<b>加粗</b>', dlg._to_html([("说明", "**加粗**正文")]))
+        self.assertIsNotNone(dlg._app, "必须挂上应用级过滤器以便点击外部关闭")
+
+    def test_close_detaches_app_filter(self):
+        from ui.component_detail_dialog import ComponentDetailDialog
+
+        dlg = ComponentDetailDialog(self._Comp(), [("说明", "x")])
+        dlg.close()
+        self.assertIsNone(dlg._app)
+
+    def test_url_netloc_reexport_and_behavior(self):
+        self.assertEqual(main._url_netloc("https://www.navicat.com.cn/x"), "www.navicat.com.cn")
+        self.assertEqual(main._url_netloc("not a url"), "")
+
+
 class DiagnosticsIntegrationTests(unittest.TestCase):
     def test_diagnostics_contains_structured_log_section(self):
         main.logger.ok("diagnostics-marker-ok")

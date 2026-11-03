@@ -1,70 +1,65 @@
 # 代码改进进度（单一事实来源）
 
-**状态**：全部既定任务已完成；全量离线回归 **24 套件 / 1076 条 / 0 失败**
+**状态**：计划内项目全部完成；全量离线回归 **24 套件 / 1087 条 / 0 失败**
 **日期**：2026-11-03
 **约束文档**：[`DEVELOPMENT.md`](DEVELOPMENT.md) 规则 R30
 
 ---
 
-## 一、已完成
+## 一、已完成（按计划顺序）
 
-### 1. 安全删除（路径遍历防护）
-- `core/exceptions.py::safe_rmtree(path, verify_deleted=True, allowed_root=...)`：
-  `Path.relative_to` 判界（`.env-tools-evil` 前缀伪装不放行）、不吞删除失败、路径不存在幂等。
-- `main.py` 5 处删除统一走 `_safe_rmtree()`（`allowed_root=CONFIG_DIR`，测试沙箱自动跟随）。
-- 卸载遇到工作目录外路径：拒绝删除、写摘要、继续清理，不中断。
-- 命令注入面：`tasklist /FI IMAGENAME` 先校验映像名；`_process_name(pid)` 先 `int()`。
+### 1. `data/` 数据模型
+- `data/components.py`：`ComponentVersion`、`DownloadArtifact`、`ARTIFACT_LABELS`。
+- 通过 `configure(os_provider, human_size_fn)` 注入，`main.CURRENT_OS` 被测试改写后派生结果同步变化。
 
-### 2. 结构化日志
-- `core/logger.py`：OK/INFO/WARNING/ERROR 四级 + 颜色 + 500 条环形历史 + `export_json()`；
-  修复初版无限递归。
-- 界面 `_append_log()` 同步写入 logger 历史；「导出诊断」新增
-  `结构化日志（最近 50 条）` 一节。
+### 2. `services/` 服务层
+- `services/service_manager.py`（约 700 行）整体搬出，`ServiceManager` 的行为逐字未改。
+- 依赖统一以 `_main.<name>` **晚绑定**，因此 `mock.patch.object(main, "save_running_map")` 等桩点全部继续生效。
+- main.py 保留 `SERVICE_MANAGER` / `SERVICE_BACKEND` 的实例化与 re-export。
 
-### 3. 异常收窄
-- 版本抓取区 52 处 + 模块级尽力而为路径 50 处 → `BEST_EFFORT_ERRORS`。
-- 关键路径改为具体类型（requests / OSError+WindowsError / ValueError+UnicodeDecodeError 等）。
-- 全仓 `except Exception`：161 → **58**，且全部位于类方法（UI/线程最后兜底），
-  符合 R30 的允许范围。
+### 3. 平台差异收拢
+- 新增 `core/platform.py`：`is_windows / is_macos / is_linux / current_os / machine / on_arm`。
+- main.py 内 78 处 `CURRENT_OS ==/!= "..."` 比较替换为判定函数；剩余 24 处是字典键/展示/ provider，属正常用法。
+- provider 仍指向 `main.CURRENT_OS`，测试改写立即生效。
 
-### 4. 配置集中（去重完成）
-- 唯一定义处：`core/constants.py`。
-- 已删除 main.py 内的重复定义：`HTTP_UA`、`DOWNLOAD_MIN_VALID_BYTES`、
-  `DOWNLOAD_PROBE/CONNECT/READ_TIMEOUT`、`DEVTOOL_FETCH_TIMEOUT`、
-  `_JAVA_MAJOR_TIMEOUT`、`TK_SUPPRESS_BG_LIMIT`、`UPDATE_CHECK_INTERVAL_SEC`、
-  `UPDATE_HTTP_TIMEOUT`（缺失 core 时仍有 fallback）。
+### 4. 剩余超时常量
+- `core/constants.py` 新增 `FETCH_TIMEOUT_QUICK/WEB/HEAD/API` 与 `EXEC_PROBE_TIMEOUT`，替换 4 处调用点。
+- 组件级 `startup_timeout` 属各服务运行参数，保留在 LaunchSpec（不是"魔法数字"）。
 
-### 5. 模块化拆分
-| 模块 | 内容 |
-|------|------|
-| `core/constants.py` | 全部配置常量 |
-| `core/logger.py` | 结构化日志 |
-| `core/exceptions.py` | 异常层级 + `safe_rmtree` + `BEST_EFFORT_ERRORS` |
-| `core/versioning.py` | `Version`、三套口径、`version_is_newer` |
-| `core/windows_service.py` | SCM 后端与 `ServiceInfo` |
-| `core/download.py` | `DownloadWorker`（`configure()` 注入；lambda 解引用保住 `main.http_session` 桩点） |
-| `ui/donate_dialog.py` | `DonateDialog`（资产目录参数注入） |
+### 5. UI 拆包（含主窗口与卡片）
+- `ui/component_detail_dialog.py`、`ui/donate_dialog.py`、`ui/component_card.py`（约 2.6k 行）、`ui/main_window.py`（约 2k 行）。
+- 规则：**只本地导入基类与 `Signal`**，其余 Qt / 业务名走 `_main.<name>`。
+  这样 `main.QMessageBox = <桩>` 这类替换名字的写法仍生效（真实对话框会让测试挂死，已踩过）。
+- main.py 从约 23.2k 行降到 **18.4k 行**。
 
-main.py 由约 24.3k 行降到约 22.4k 行；所有老调用点与测试通过 re-export / 薄壳保持不变。
+### 6. 性能监控 / i18n
+- `core/perf.py`：`timed()` 计时、`snapshot()`、可选 tracemalloc（`BYTE_TOOLS_PROFILE=1`）；
+  「导出诊断」新增「性能快照」一节。
+- `core/i18n.py`：中文原文为键的最小翻译表、`BYTE_TOOLS_LANG` 切换、可选加载 `.qm`；
+  已迁移支持作者对话框（zh 默认回落，en 有对照）。
+
+### 7. 此前各轮（摘要）
+- `safe_rmtree` 路径校验；5 处删除收口；`tasklist` 映像名/pid 校验。
+- 结构化日志接入 UI 与诊断导出。
+- 泛化 `except Exception` 161 → 58（现分布：main 27、卡片 15、窗口 14、服务 2），全部为类方法兜底，符合 R30。
+- 常量唯一定义处；重复定义已删。
 
 ---
 
 ## 二、验证
 ```text
 python tests/run_all_tests.py
-合计 1076 条用例 / 24 个文件 / 24 通过 / 0 失败
+合计 1087 条用例 / 24 个文件 / 24 通过 / 0 失败
 
-offscreen: MainWindow()->show()->close()  → SMOKE OK
-offscreen: DonateDialog()                 → SMOKE OK
+offscreen 冒烟：MainWindow()/show/close、DonateDialog() → SMOKE OK
 ```
-新增护栏：`tests/bt_core_tests.py`（27 条）。
+新增护栏：`tests/bt_core_tests.py`（38 条）。
 
 ---
 
-## 三、有意保留 & 后续建议
-1. **58 处 `except Exception`**：均为类方法内的 UI/线程最后兜底（Qt 槽、渲染循环、
-   凭据解密、启停线程）。R30 要求保留时必须写明不能外抛的原因。
-2. **MainWindow / ComponentCard 未拆包**：与 Qt 信号和窗口状态深度耦合，
-   需单独分支 + 真机演练（Windows 服务启停、多版本切换、关窗不变量）。
-3. **插件化 / DI 框架**：属于新架构方向，不在本次审计建议范围内；
-   当前 `core.download.configure()` 已示范依赖注入的落地方式。
+## 三、明确不做 / 仍缺的
+1. **插件架构 / DI 框架**：属新产品方向，非本次审计建议；当前以 `configure()` + `_main` 晚绑定
+   提供了够用的注入手段。
+2. **pytest 默认发现**：`bt_*_tests.py` + 自研 runner 有意保留（改命名会牵动 24 套件）。
+3. **极端网络 / 多组件并行安装专项用例**：仍未补。磁盘满已有模拟；
+   限速/丢包、多组件同时安装的互不影响尚无专测，建议后续单独补。

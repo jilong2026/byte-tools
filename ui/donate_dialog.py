@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor, QPixmap
+from core.i18n import tr
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -32,7 +33,7 @@ class DonateDialog(QDialog):
 
     def __init__(self, parent=None, assets_dir: Path = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("支持作者")
+        self.setWindowTitle(tr("支持作者"))
         self.setMinimumSize(460, 460)
         self.setObjectName("donateDialog")
         self._assets_dir = Path(assets_dir) if assets_dir else default_assets_dir()
@@ -44,7 +45,7 @@ class DonateDialog(QDialog):
         v.setContentsMargins(20, 20, 20, 20)
         v.setSpacing(14)
 
-        tip = QLabel("如果本工具对你有所帮助，欢迎请作者一杯咖啡 ☕")
+        tip = QLabel(tr("如果本工具对你有所帮助，欢迎请作者一杯咖啡 ☕"))
         tip.setAlignment(Qt.AlignCenter)
         tip.setStyleSheet("font-size:14px;color:#444;")
         v.addWidget(tip)
@@ -53,7 +54,7 @@ class DonateDialog(QDialog):
         row.setSpacing(14)
         self._buttons = []  # type: list[QPushButton]
         for name, color, filename in self.CHANNELS:
-            btn = QPushButton(name)
+            btn = QPushButton(tr(name))
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.setCheckable(True)
             btn.setStyleSheet(
@@ -72,7 +73,7 @@ class DonateDialog(QDialog):
         self._channel_label.setStyleSheet("font-size:15px;font-weight:600;color:#333;")
         v.addWidget(self._channel_label)
 
-        self.qr_view = QLabel("请选择下方渠道")
+        self.qr_view = QLabel(tr("请选择下方渠道"))
         self.qr_view.setAlignment(Qt.AlignCenter)
         self.qr_view.setMinimumHeight(260)
         self.qr_view.setStyleSheet(
@@ -80,15 +81,15 @@ class DonateDialog(QDialog):
         )
         v.addWidget(self.qr_view, stretch=1)
 
-        note = QLabel("扫码打赏，感谢您的支持！")
+        note = QLabel(tr("扫码打赏，感谢您的支持！"))
         note.setAlignment(Qt.AlignCenter)
         note.setStyleSheet("font-size:12px;color:#999;")
         v.addWidget(note)
 
     def _show_qr(self, channel: str, color: str = "", filename: str = "") -> None:
         for btn in self._buttons:
-            btn.setChecked(btn.text() == channel)
-        self._channel_label.setText(f"【{channel}】收款码")
+            btn.setChecked(btn.text() == tr(channel))
+        self._channel_label.setText(tr("【{channel}】收款码", channel=tr(channel)))
         if color:
             self._channel_label.setStyleSheet(
                 f"font-size:15px;font-weight:600;color:{color};")
