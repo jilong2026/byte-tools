@@ -68,6 +68,12 @@ offscreen 冒烟：MainWindow()/show/close、DonateDialog() → SMOKE OK
 - `一键启动项目.bat` / `一键打包exe.bat` 无需改动：均用 `%~dp0` 定位仓库根，
   只校验 `main.py` / `byte-tools.spec` / `requirements.txt`；新包由 PyInstaller
   静态分析与显式 hiddenimports 收齐。
+- `pyinstaller_no_wmi.py` 增加**打包前预检**（2026-11-03 用户实测报
+  `PermissionError: [WinError 5] dist\ByteTools.exe`）：
+  · 目标 exe 不可写时，先自动停止遗留的「访问页服务」进程（命令行含 `--bt-page-server`，
+    它们是设计上脱离主程序存活的独立进程）；
+  · 主窗口仍在运行时**不擅自结束**，打印 PID 与 `taskkill` 命令；
+  · 用 `--distpath` 独立目录完整构建并以 offscreen 启动 12 秒验证。
 
 ---
 

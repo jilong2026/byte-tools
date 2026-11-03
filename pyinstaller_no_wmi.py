@@ -21,10 +21,116 @@ PyInstaller 一 `import` 就读 `platform.win32_ver()[0]` 来定 `is_win_10 / is
 用法：python pyinstaller_no_wmi.py --noconfirm byte-tools.spec
 """
 
+import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
+
+
+APP_EXE = "ByteTools.exe"
+PAGE_SERVER_FLAG = "--bt-page-server"
+
+
+def _target_distpath(argv) -> str:
+    """从参数里取 --distpath（默认 dist），预检要看真正要写的那份产物。"""
+    for i, arg in enumerate(argv):
+        if arg == "--distpath" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--distpath="):
+            return arg.split("=", 1)[1]
+    return "dist"
+
+
+def _list_processes(exe_name: str) -> list:
+    """[(pid, cmdline)]；取不到就返回空表（非 Windows / 无 PowerShell 都不阻断打包）。"""
+    if os.name != "nt":
+        return []
+    script = (
+        f"Get-CimInstance Win32_Process -Filter \"Name='{exe_name}'\" | "
+        "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20)
+        raw = (out.stdout or "").strip()
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = [data]
+        return [(int(item.get("ProcessId") or 0), str(item.get("CommandLine") or ""))
+                for item in data if isinstance(item, dict)]
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        return []
+
+
+def page_server_pids(procs) -> list:
+    """只挑出「访问页服务」进程（命令行含 --bt-page-server）。
+
+    它们是主程序按设计留下的独立进程（关窗后访问页仍可打开），重建产物时
+    必须先停；而**用户正在用的主窗口没有这个参数，绝不能顺手杀掉**。
+    """
+    return [pid for pid, cmd in procs
+            if pid and PAGE_SERVER_FLAG in (cmd or "")]
+
+
+def _try_unlock(exe: str) -> bool:
+    """能不能覆盖写这个 exe（运行中的 exe 不可写，但可以改名 —— 不能只看改名）。"""
+    try:
+        with open(exe, "r+b"):
+            return True
+    except OSError:
+        return False
+
+
+def check_output_lock(argv) -> str:
+    """打包前预检：目标 exe 是否被正在运行的程序锁住。返回提示文本，空串 = 可继续。
+
+    处理顺序：
+      1. 产物不存在 / 可写 → 直接开工；
+      2. 被占用 → 先停掉**遗留的页服务**（命令行含 --bt-page-server，是我们自己
+         的独立进程），再复查；
+      3. 仍被占用 → 说明主窗口还开着，打印 PID 与 taskkill 命令，由人决定。
+
+    不自动结束主窗口：那可能是用户正在操作的程序（2026-11-03 实测 WinError 5
+    就是 dist/ByteTools.exe 被运行中的进程占用）。
+    """
+    exe = os.path.join(_target_distpath(argv), APP_EXE)
+    if not os.path.isfile(exe) or _try_unlock(exe):
+        return ""
+
+    procs = _list_processes(APP_EXE)
+    pids = page_server_pids(procs)
+    if pids:
+        print("[预检] 检测到上次运行留下的访问页服务，先停止它们："
+              + ", ".join(f"PID {p}" for p in pids))
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if _try_unlock(exe):
+            print("[预检] 已释放产物文件，继续打包。")
+            return ""
+
+    lines = [f"[预检] 目标产物被占用：{exe}"]
+    main_pids = [p for p, _c in procs
+                 if p and p not in pids]
+    if main_pids:
+        lines.append("        正在运行的主程序："
+                     + ", ".join(f"PID {p}" for p in main_pids))
+        lines.append("        请先关闭字节工具箱窗口后重试；"
+                     "或在确认无误后执行：")
+        lines.append(f"        taskkill /PID {main_pids[0]} /T /F")
+    else:
+        lines.append("        未查到同名进程，可能是杀软/资源管理器短暂占用，"
+                     "稍等几秒或重启资源管理器后重试。")
+    return "\n".join(lines)
 
 
 def disable_wmi_lookup() -> bool:
@@ -95,6 +201,10 @@ def install_child_bootstrap(extra_dirs=()) -> str:
 
 
 def main(argv) -> int:
+    blocker = check_output_lock(argv)
+    if blocker:
+        print(blocker)
+        return 2
     disable_wmi_lookup()
     bootstrap_dir = install_child_bootstrap()
     try:
